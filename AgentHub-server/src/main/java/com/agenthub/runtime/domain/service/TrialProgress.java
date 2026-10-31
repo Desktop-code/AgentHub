@@ -1,0 +1,65 @@
+package com.agenthub.runtime.domain.service;
+
+import com.agenthub.runtime.domain.model.PlanView;
+import com.agenthub.runtime.domain.model.StepView;
+
+/**
+ * 试跑过程中的增量回调。所属域：runtime。
+ * 实现方在出站前脱敏。引擎没有给出的思考不要在回调里补写。
+ *
+ * <p>plan / step 是计划执行模式专属的两类结构化的增量，用 {@code default} 空实现，
+ * 让 REACT / ROUTER 的既有包装器（如路由分块、静音助手）不必逐个补齐方法签名。
+ */
+public interface TrialProgress {
+
+    /**
+     * @param phase planning / reasoning / tool / answering
+     */
+    void phase(String phase);
+
+    /**
+     * Router 父判定结果。前端收进「思考过程」时间线，与工具步同级。
+     *
+     * @param summary 路由摘要（如「路由到 xxx，依据：…」），不含密钥
+     */
+    void route(String summary);
+
+    /**
+     * @param delta 思考片段，来自 ThinkingBlock
+     */
+    void reasoning(String delta);
+
+    /**
+     * 一次工具结束。参数和结果都还可能含密钥，展示前必须再脱敏。
+     *
+     * @param name      工具名
+     * @param arguments 入参，可能已脱敏
+     * @param result    工具结果
+     * @param success   引擎状态为成功
+     */
+    void tool(String name, String arguments, String result, boolean success);
+
+    /**
+     * @param delta 助手正文片段
+     */
+    void assistant(String delta);
+
+    /**
+     * 计划生成或状态变化。前端据此渲染结构化的步骤列表，而不是读一段纯文本。
+     * 同一 planId 的多次回调表示状态推进，应原位更新同一张计划卡。
+     *
+     * @param plan 计划快照；状态更新时 steps 可能为空表示沿用已有步骤
+     */
+    default void plan(PlanView plan) {
+        // REACT / ROUTER 不产生计划，默认忽略
+    }
+
+    /**
+     * 计划中单步的开始 / 重试 / 完成 / 失败。
+     *
+     * @param step 单步快照，含该步正文或失败原因
+     */
+    default void step(StepView step) {
+        // REACT / ROUTER 不产生计划步骤，默认忽略
+    }
+}

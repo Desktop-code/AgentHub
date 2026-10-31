@@ -1,0 +1,142 @@
+services:
+  mysql:
+    image: mysql:5.7
+    command:
+      - --character-set-server=utf8mb4
+      - --collation-server=utf8mb4_unicode_ci
+      - --character-set-client-handshake=FALSE
+    environment:
+      MYSQL_DATABASE: agenthub
+      MYSQL_USER: agenthub
+      MYSQL_PASSWORD: ${MYSQL_PASSWORD}
+      MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD}
+    volumes:
+      - ./sql/agenthub.sql:/docker-entrypoint-initdb.d/01-agenthub.sql:ro
+      - ./sql/data-init.sql:/docker-entrypoint-initdb.d/02-data-init.sql:ro
+      - mysql_data:/var/lib/mysql
+    # 默认不对外暴露 3306；本机需要连库时再取消注释
+    # ports: ["3307:3306"]
+    healthcheck:
+      test: ["CMD","mysqladmin","ping","-h","127.0.0.1","-uroot","-p${MYSQL_ROOT_PASSWORD}"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+
+  redis:
+    image: redis:7-alpine
+    ports: ["6380:6379"]
+
+  # ========== Milvus standalone（RAG 向量库）==========
+  # 依赖链：etcd（元数据）+ minio（对象存储）+ milvus（引擎），三者缺一不可。
+  # 仅 RAG 需要；Milvus 未就绪时应用仍能启动，只在建库/重建/检索时报 KB_UNAVAILABLE。
+  etcd:
+    image: quay.io/coreos/etcd:v3.5.18
+    environment:
+      # 单节点集群：自身既当 initial cluster 也当 advertise，无需外部服务发现
+      ETCD_AUTO_COMPACTION_MODE: revision
+      ETCD_AUTO_COMPACTION_RETENTION: "1000"
+      ETCD_QUOTA_BACKEND_BYTES: "4294967296"
+      ETCD_SNAPSHOT_COUNT: "50000"
+    # etcdctl 走 v3 API（镜像内默认已是 v3，显式声明避免旧版回落）
+    command: etcd -advertise-client-urls=http://etcd:2379 -listen-client-urls http://0.0.0.0:2379 --data-dir /etcd
+    volumes:
+      - etcd_data:/etcd
+    healthcheck:
+      test: ["CMD", "etcdctl", "endpoint", "health"]
+      interval: 30s
+      timeout: 20s
+      retries: 3
+
+  minio:
+    image: minio/minio:RELEASE.2023-03-20T20-16-18Z
+    environment:
+      # MinIO 自己的 AK/SK，与业务无关；默认值为官方示例口令，仅供本机开发。
+      # 生产必须用环境变量注入，禁止把真实口令写进本文件。
+      MINIO_ROOT_USER: ${MINIO_ACCESS_KEY:-minioadmin}
+      MINIO_ROOT_PASSWORD: ${MINIO_SECRET_KEY:-minioadmin}
+    command: minio server /minio_data --console-address ":9001"
+    volumes:
+      - minio_data:/minio_data
+    # 默认不对外暴露 9000/9001；需要看 MinIO 控制台时再取消注释
+    # ports: ["9000:9000", "9001:9001"]
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:9000/minio/health/live"]
+      interval: 30s
+      timeout: 20s
+      retries: 3
+
+  milvus:
+    image: milvusdb/milvus:v2.5.27
+    # standalone 模式：单进程内含 proxy/query/index 等角色，适合本机与单机部署
+    command: ["milvus", "run", "standalone"]
+    security_opt:
+      # Milvus 官方要求放开 seccomp，否则部分内核下 mmap 受限导致启动失败
+      - seccomp:unconfined
+    environment:
+      ETCD_ENDPOINTS: etcd:2379
+      MINIO_ADDRESS: minio:9000
+      # 与上面 MinIO 的 AK/SK 保持同名变量，避免两处改动不同步
+      MINIO_ACCESS_KEY_ID: ${MINIO_ACCESS_KEY:-minioadmin}
+      MINIO_SECRET_ACCESS_KEY: ${MINIO_SECRET_KEY:-minioadmin}
+    volumes:
+      # 集合数据、WAL 与索引全部落这里；删卷等于清空所有知识库向量
+      - milvus_data:/var/lib/milvus
+    ports:
+      # 19530：gRPC/SDK 端口，与 application.yml 的 agenthub.rag.milvus.uri 默认值
+      # （http://127.0.0.1:19530）一致；宿主直跑 jar 时改连这里
+      - "19530:19530"
+      # 9091：healthz 与 metrics（Prometheus 可抓）
+      - "9091:9091"
+    depends_on:
+      etcd: { condition: service_healthy }
+      minio: { condition: service_healthy }
+    healthcheck:
+      # 走 9091/healthz 而不是 19530，gRPC 端口不便用 curl 探活
+      test: ["CMD", "curl", "-f", "http://localhost:9091/healthz"]
+      interval: 30s
+      # 首次启动要建 collection 元数据与加载，给足预热时间，否则健康检查会先失败
+      start_period: 90s
+      timeout: 20s
+      retries: 3
+
+  server:
+    build: ./AgentHub-server
+    depends_on:
+      mysql: { condition: service_healthy }
+      redis: { condition: service_started }
+    environment:
+      # 只放非敏感项。主密钥与库密码用只读文件挂载，避免出现在 docker inspect / 进程环境变量里。
+      SPRING_DATASOURCE_URL: jdbc:mysql://mysql:3306/agenthub?useUnicode=true&characterEncoding=utf8&serverTimezone=Asia/Shanghai
+      SPRING_DATASOURCE_USERNAME: agenthub
+      SPRING_DATA_REDIS_HOST: redis
+      # 容器内按服务名连 Milvus（覆盖 application.yml 的 127.0.0.1 默认值）。
+      # 故意不写进 depends_on：Milvus 未就绪时后端仍应能启动，只让 RAG 相关接口报不可用。
+      AGENTHUB_MILVUS_URI: http://milvus:19530
+      AGENTHUB_RESET_PASSWORD: ${AGENTHUB_RESET_PASSWORD:-admin123}
+    volumes:
+      # 外部配置目录优先级高于 jar 内配置；文件在宿主机上，不进镜像。
+      # 参考 AgentHub-server/src/main/resources/application-local.yml.example 准备本文件。
+      - ./secrets/application-local.yml:/app/config/application-local.yml:ro
+      # RAG 原文落盘（agenthub.rag.storage.dir 相对工作目录 ./data/rag → /app/data/rag）。
+      # 不挂卷则容器重建即丢原文，导致切片无法回溯；卷名见文末 volumes。
+      - rag_storage:/app/data/rag
+    ports: ["8081:8080"]
+
+  web:
+    build: ./AgentHub-web
+    depends_on: [server]
+    ports:
+      - "8088:80"
+      - "8443:443"
+    volumes:
+      # 证书与私钥放宿主机的 secrets/certs（已 gitignore），只读挂载，不进镜像
+      - ./secrets/certs:/etc/nginx/certs:ro
+
+volumes:
+  mysql_data:
+  # Milvus 依赖链的持久化卷。删除即清空知识库向量与 MinIO 中的集合文件
+  etcd_data:
+  minio_data:
+  milvus_data:
+  # RAG 原文（/app/data/rag）。与向量库分开：向量在 milvus_data，原文在这里
+  rag_storage:

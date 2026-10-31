@@ -1,0 +1,276 @@
+server:
+  port: 8080
+  servlet:
+    encoding:
+      charset: UTF-8
+      enabled: true
+      force: true
+
+spring:
+  application:
+    name: agenthub
+  profiles:
+    # 默认 local 便于本机开发；生产用环境变量 SPRING_PROFILES_ACTIVE 覆盖。
+    # 注意：application-local.yml 已从 src/main/resources 移出，放仓库外 AgentHub-server/config/，
+    # 这样主密钥与库密码不会随 jar / 镜像分发。
+    active: ${SPRING_PROFILES_ACTIVE:local}
+  jackson:
+    time-zone: Asia/Shanghai
+    date-format: yyyy-MM-dd HH:mm:ss.SSS
+    serialization:
+      write-dates-as-timestamps: false
+  datasource:
+    # 生产建议 useSSL=true 并配 truststore；库与后端同机/同网时可按需关闭。
+    # 容器编排里库不对外暴露端口，链路不经公网。
+    url: ${AGENTHUB_DB_URL:jdbc:mysql://127.0.0.1:3306/agenthub?useUnicode=true&characterEncoding=utf8&serverTimezone=Asia/Shanghai&useSSL=false&allowPublicKeyRetrieval=true}
+    username: ${AGENTHUB_DB_USER:root}
+    # 密码走环境变量 AGENTHUB_DB_PASSWORD 或仓库外的 config/application-local.yml，禁止写进本文件
+    password: ${AGENTHUB_DB_PASSWORD:}
+    driver-class-name: com.mysql.cj.jdbc.Driver
+  data:
+    redis:
+      host: 127.0.0.1
+      port: 6379
+      timeout: 2s
+
+mybatis-plus:
+  configuration:
+    map-underscore-to-camel-case: true
+    log-impl: org.apache.ibatis.logging.slf4j.Slf4jImpl
+  global-config:
+    db-config:
+      logic-delete-field: deleted
+      logic-delete-value: 1
+      logic-not-delete-value: 0
+      id-type: auto
+  mapper-locations: classpath*:com/agenthub/**/mapper/*.xml
+
+# Sa-Token 仍是单机会话。上面的 Redis 只给记忆和上下文窗口，不切 Token 存储
+sa-token:
+  token-name: Authorization
+  token-prefix: Bearer
+  # timeout：绝对有效期（秒）。鉴权通过后由 SaTokenConfigurer 调用 renewTimeout 做滑动续期
+  timeout: 1200
+  # active-timeout：无操作失效（秒）。有鉴权请求时框架 autoRenew（默认 true）刷新活跃时间（滑动续期）
+  active-timeout: 1200
+  is-concurrent: true
+  is-share: false
+  is-read-header: true
+  is-read-cookie: false
+  is-log: false
+
+springdoc:
+  swagger-ui:
+    path: /swagger-ui.html
+
+agenthub:
+  crypto:
+    # 当前主密钥：32 字节，只从环境变量或仓库外 config/ 注入；为空启动即失败，禁止写真实密钥。
+    # 新写入一律用它加密，密文带 v2 前缀与密钥指纹。
+    secret-key: ${AGENTHUB_SECRET_KEY:}
+    # 轮换过渡期的历史主密钥，逗号分隔；只用于解密旧密文。
+    # 启动后 Credential/ToolSourceReencryptRunner 会自动重写旧密文，迁移完成后即可移除。
+    previous-keys: ${AGENTHUB_PREVIOUS_SECRET_KEYS:}
+  model:
+    http:
+      connect-timeout-ms: 3000
+      read-timeout-ms: 15000
+  tool:
+    mcp:
+      # tools/list 的连接与读取上限，避免同步占住控制台请求
+      connect-timeout-ms: 3000
+      read-timeout-ms: 15000
+  runtime:
+    # 平台硬顶 + 默认。Agent 列可空覆盖；空=跟 default；保存必须 ≤ max；生效 min(覆盖或default, max)
+    limits:
+      timeout-ms:
+        default: 120000
+        max: 300000
+      max-rounds:
+        default: 8
+        max: 32
+      tool-timeout-ms:
+        default: 30000
+        max: 120000
+      tool-max-retries:
+        default: 0
+        max: 3
+      max-tool-calls:
+        default: 32
+        max: 64
+      llm-timeout-ms:
+        default: 60000
+        max: 120000
+      max-llm-calls:
+        default: 32
+        max: 64
+      consecutive-fail-abort:
+        default: 3
+        max: 10
+      tool-result-max-chars:
+        default: 8000
+        max: 32000
+    trial:
+      # content_text 单条上限（字符）。超出截断并注明已截断
+      content-limit-chars: 32768
+      # 历史会话条数。接口再按当前用户 + agentId 裁剪，按 started_at 倒序
+      history-limit: 20
+    # 工具必填参数闸门：缺必填不得脑补。补参只看本轮提问、本会话上下文、本轮已注入长期记忆
+    tool-args:
+      # 默认硬拦。仅排障时临时关闭，关闭后回到「只靠提示词」的旧行为
+      enabled: true
+      # 这些参数有值但三档来源都无依据时按编造拦下；留空用内置默认（city/place/location/address/timezone 等）
+      entity-param-names: []
+      # 这些事实键对应的必填参数同样做依据校验；留空用内置默认（residence_city/timezone）
+      entity-fact-keys: []
+  agent:
+    # 平台安全前缀来自 classpath 资源，运行时拼到用户段前面，不写入 agent_def.system_prompt
+    prompt-prefix-enabled: true
+    prompt-prefix-path: classpath:prompt/platform-prefix-zh.txt
+    prompt-router-extra-path: classpath:prompt/platform-prefix-router-zh.txt
+    # 用户业务段上限，按 Java char（UTF-16 码元）。绝对上限与 AgentChecks.PROMPT_MAX 一致
+    prompt-max-chars: 12000
+    # 覆盖系统规则、外连诱导默认只告警仍可保存；改为 true 则一并拒绝
+    prompt-warn-as-error: false
+  prompt:
+    # 绑定个数硬顶。保存时超出直接拒绝
+    max-tools-per-agent: 16
+    max-skills-per-agent: 8
+    # ROUTER 父节点超过该数仍可保存，但响应里带警告
+    router-warn-tools: 2
+    router-warn-skills: 2
+    # 运行时注入预算。大于 cap 的配置在生效时会被压到 cap
+    tools-schema-max-chars: 8000
+    tools-schema-max-chars-cap: 16000
+    skills-inject-max-chars: 8000
+    skills-inject-max-chars-cap: 16000
+    system-prompt-max-chars: 12000
+    system-prompt-max-chars-cap: 24000
+    # 提示词组装门面（L1 → L2 → L3 → 一次性变量替换）
+    assembler:
+      # 关闭后不再拼接 L1 平台约束。仅排障用：关闭等于失去平台红线，生产必须为 true。
+      # 开启时「无生效 L1」会阻断出站，不允许退回 classpath 文案。
+      constraint-enabled: true
+      # 请求未指定语言时的回落；L1/L2 都按它取生效版
+      default-locale: zh-CN
+      # 组装正文上限（char）。超出时只截尾部（L3 / 历史业务段优先被裁）
+      max-chars: 24000
+    # L1/L2 缓存：Caffeine（进程内）→ Redis → DB；发布后显式失效
+    cache:
+      # 进程内条目上限。配置态数据量小，512 足够
+      local-max-size: 512
+      # 进程内 TTL（秒）。发布时会主动失效，这里只是兜底
+      local-ttl-sec: 60
+      # Redis TTL（秒）。多实例共享
+      redis-ttl-sec: 600
+      # 「确认不存在」的负缓存（秒）。很短，避免配置缺失打穿 DB 又能快速自愈
+      miss-ttl-sec: 10
+  memory:
+    # 策略未填或没有策略行时的默认；保存值必须 ≤ 对应 max
+    short-default-ttl-sec: 86400
+    short-default-ttl-max-sec: 604800
+    ctx-max-turns: 20
+    ctx-max-turns-cap: 50
+    ctx-max-chars: 32000
+    ctx-max-chars-cap: 64000
+    ctx-idle-ttl-sec: 7200
+    ctx-idle-ttl-max-sec: 86400
+    # 注入进提示词的记忆正文上限，和窗口字符分开计
+    recall-max-chars: 4000
+    # 策略、绑定、平台 SUMMARY 都空时才用。空字符串表示不兜底
+    summary-fallback-instance-id: ${AGENTHUB_SUMMARY_MODEL_ID:}
+    # MEMORY 抽取环境兜底；与 SUMMARY 分离，不共用
+    memory-fallback-instance-id: ${AGENTHUB_MEMORY_MODEL_ID:}
+    cleanup-delay-ms: 3600000
+    # 空闲批抽定时扫描间隔；首次推迟见 session-close-initial-delay-ms（默认 1h，本地/测试可改短）
+    session-close-delay-ms: 60000
+    session-close-initial-delay-ms: 3600000
+    # 批抽出站总闸（session_end / summary）。false=一键关死出站批抽；explicit「记住」不受影响
+    long-extract-batch-enabled: false
+    # 单次 CloseJob 最多收口+批抽的空闲会话数（串行）
+    session-close-batch-limit: 5
+    # 会话级批抽最短正文；更短则 skip 不调模型
+    long-extract-min-chars: 32
+    # 两次批抽间隔毫秒；0=不额外 sleep
+    long-extract-interval-ms: 200
+    # LONG fact_key 同义扩展（别名 → 规范键）；内置已含居住/城市等，此处可覆盖追加
+    fact-key-aliases: {}
+  rag:
+    # 一期①只做知识库建库与 Collection 初始化；②入库 ③检索 ④Agent 绑定后排
+    milvus:
+      # 本机 Milvus（Lite / standalone 同一 gRPC 端口）。未启动不影响应用启动，
+      # 只在建库/重建或检索时连接失败：管理员侧记地址便于排障，对话侧由工具边界换成用户话术
+      uri: ${AGENTHUB_MILVUS_URI:http://127.0.0.1:19530}
+      # 鉴权 token（user:password 或 API Key）；本机 Lite 留空。禁止把真实凭证写进本文件
+      token: ${AGENTHUB_MILVUS_TOKEN:}
+      # 默认 database；空表示 default
+      database: ${AGENTHUB_MILVUS_DATABASE:}
+      connect-timeout-ms: 5000
+      # 建集后同步加载集合的上限。SDK 单位是毫秒，误传秒会立刻 Load timeout
+      load-timeout-ms: 15000
+      # 是否尝试建 dense+BM25 集合。Milvus Lite 不支持 sparse 会自动降级为纯向量，
+      # 降级结果写入 rag_knowledge_base.store_capability=DENSE_ONLY
+      bm25-enabled: ${AGENTHUB_RAG_BM25_ENABLED:true}
+    # 原文落盘根目录。相对路径按进程工作目录解析，默认 ./data/rag（项目内），不新建盘符目录。
+    # 按 kbId/docId 分子目录，文件名只保留扩展名，因此不存在路径穿越。
+    storage:
+      dir: ${AGENTHUB_RAG_STORAGE_DIR:./data/rag}
+    embedding:
+      # 向量化出站读超时。比 chat 慢：批量 16 条可能秒级到十秒级
+      read-timeout-ms: ${AGENTHUB_RAG_EMBEDDING_TIMEOUT_MS:30000}
+    rerank:
+      # 文本排序出站读超时（DASHSCOPE text-rerank）
+      read-timeout-ms: ${AGENTHUB_RAG_RERANK_TIMEOUT_MS:30000}
+    # 文档解析：默认本地；MinerU/Vision 可选，无 Key 跳过不炸
+    parse:
+      engine: ${AGENTHUB_RAG_PARSE_ENGINE:local}
+      mineru:
+        enabled: ${AGENTHUB_RAG_MINERU_ENABLED:false}
+        fallback-local: true
+        api-key: ${AGENTHUB_MINERU_API_KEY:}
+        types: pdf,docx,png,jpg,jpeg,gif,webp
+      vision:
+        enabled: ${AGENTHUB_RAG_VISION_ENABLED:false}
+        api-key: ${AGENTHUB_VISION_API_KEY:}
+        pdf-sparse-chars-per-page: 40
+        pdf-max-ocr-pages: 15
+    ingest:
+      # 领域噪声过滤（含历史茶饮规则）；默认关，避免硬编码语料
+      domain-noise-filter: false
+  security:
+    # local | oauth2 | passthrough；后两者本期只保留枚举，不接企业身份
+    mode: local
+    # 新建用户与重置密码使用的明文，仅开发默认值；生产用环境变量覆盖
+    reset-password: ${AGENTHUB_RESET_PASSWORD:admin123}
+  cors:
+    # 与 Vite 端口一致；5173 被别的前端占用时，本机用 5175。生产改为白名单，不要用 *
+    # 生产部署走 nginx 同源反代，跨域白名单通常可以留空
+    allowed-origins:
+      - https://localhost:5173
+      - https://127.0.0.1:5173
+      - https://localhost:5175
+      - https://127.0.0.1:5175
+      # 本地开发仍允许 http，便于 vite dev 不起证书
+      - http://localhost:5173
+      - http://127.0.0.1:5173
+      - http://localhost:5175
+      - http://127.0.0.1:5175
+      - http://localhost:8088
+      - https://localhost:8443
+      - https://127.0.0.1:8443
+
+logging:
+  # 相对进程工作目录；logback-spring.xml 按天滚动归档
+  file:
+    name: logs/agenthub.log
+  logback:
+    rollingpolicy:
+      # 归档保留天数（与 logback-spring.xml springProperty 对齐）
+      max-history: 30
+      # 单文件上限；同日超出再按 %i 切分
+      max-file-size: 100MB
+      # 归档总上限
+      total-size-cap: 3GB
+  level:
+    com.agenthub: info
+

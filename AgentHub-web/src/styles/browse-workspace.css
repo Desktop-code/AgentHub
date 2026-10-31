@@ -1,0 +1,480 @@
+/**
+ * 网格↔主从飞卡壳样式（Agent / Skill / 工具 / 模型共用）。
+ * 页面根节点加 class `browse-page`；双层工作区用 `browse-workspace`。
+ */
+
+.browse-page {
+  width: 100%;
+  max-width: none;
+}
+
+.browse-page.is-flip-busy {
+  /* 飞卡中禁止误触滚动抖动；具体 pointer 由层控制 */
+}
+
+.browse-workspace {
+  position: relative;
+  width: 100%;
+  min-height: 0;
+}
+
+.browse-workspace .layer {
+  width: 100%;
+}
+
+/* 非当前层：绝对定位藏起，但保留布局可被 query 量到；勿用 display:none */
+.browse-workspace .layer:not(.is-active) {
+  position: absolute;
+  top: 0;
+  left: 0;
+  right: 0;
+  z-index: 0;
+  visibility: hidden;
+  pointer-events: none;
+}
+
+.browse-workspace .layer.is-active {
+  position: relative;
+  z-index: 1;
+  visibility: visible;
+  pointer-events: auto;
+}
+
+/* 飞卡遮罩只用 JS visibility，禁止 !important，否则交接无法同帧露真卡 */
+.browse-workspace .card.is-flying,
+.browse-workspace .rail-card.is-flying {
+  pointer-events: none;
+}
+
+/*
+ * 众卡淡出已移除：切主从同一帧整个网格层就变 visibility:hidden（见 .layer:not(.is-active)），
+ * 原来的 opacity 过渡在不可见层上空跑，只增加样式计算，无任何视觉收益。
+ */
+
+.browse-filters {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  width: 100%;
+  gap: 12px;
+  margin-bottom: 16px;
+  padding: 12px 16px;
+  background: var(--ah-surface);
+  border: 1px solid var(--ah-border);
+  border-radius: var(--ah-radius-lg);
+  box-shadow: var(--ah-shadow);
+  min-height: 56px;
+  box-sizing: border-box;
+}
+
+/* 与系统管理-用户管理筛选条一致：标签 + 输入 220 / 下拉 160 */
+.browse-filters .filter-form {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 12px;
+  flex: 1;
+  min-width: 0;
+  margin: 0;
+}
+
+.browse-filters .el-form-item {
+  margin-right: 0;
+  margin-bottom: 0;
+}
+
+.browse-filters .el-form-item__content {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  line-height: 32px;
+}
+
+.browse-filters .el-form-item__label {
+  height: 32px;
+  line-height: 32px;
+  padding: 0 8px 0 0;
+}
+
+.browse-filters .filter-input {
+  width: 220px;
+}
+
+.browse-filters .filter-select {
+  width: 160px;
+}
+
+.browse-filters .el-button {
+  height: 32px;
+  min-width: 88px;
+  padding: 0 14px;
+}
+
+.browse-filters-create {
+  margin-left: auto;
+}
+
+.view-toggle {
+  display: inline-flex;
+  flex: none;
+  align-items: center;
+  padding: 2px;
+  background: #f3f4f6;
+  border: 1px solid var(--ah-border);
+  border-radius: 8px;
+}
+
+.view-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 30px;
+  height: 28px;
+  padding: 0;
+  border: 0;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--ah-text-secondary);
+  cursor: pointer;
+}
+
+.view-btn:hover:not(:disabled) {
+  color: var(--ah-text);
+  background: #fff;
+}
+
+.view-btn.is-active {
+  color: #3b82f6;
+  background: #fff;
+  box-shadow: 0 1px 2px rgba(15, 23, 42, 0.08);
+}
+
+.view-btn:disabled {
+  cursor: not-allowed;
+  opacity: 0.45;
+}
+
+.browse-workspace .grid-wrap {
+  min-height: 160px;
+}
+
+.browse-workspace .grid {
+  display: grid;
+  width: 100%;
+  grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
+  gap: 16px;
+}
+
+.browse-workspace .pager {
+  display: flex;
+  justify-content: flex-end;
+  margin-top: 16px;
+}
+
+.browse-workspace .master {
+  display: flex;
+  align-items: flex-start;
+  gap: 16px;
+  min-height: 0;
+}
+
+.browse-workspace .rail {
+  display: flex;
+  flex: none;
+  flex-direction: column;
+  gap: 10px;
+  width: 186px;
+  max-height: calc(100vh - 220px);
+  min-height: 0;
+}
+
+.browse-workspace .rail-toolbar {
+  display: flex;
+  flex: none;
+  align-items: center;
+  gap: 8px;
+}
+
+.browse-workspace .rail-search {
+  flex: 1;
+  min-width: 0;
+}
+
+.browse-workspace .rail-list {
+  display: flex;
+  flex: 1;
+  flex-direction: column;
+  gap: 10px;
+  min-height: 0;
+  overflow: auto;
+  padding: 2px;
+}
+
+.browse-workspace .rail-card {
+  display: flex;
+  flex: none;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 4px;
+  width: 100%;
+  padding: 12px;
+  border: 1px solid var(--ah-border);
+  border-radius: 12px;
+  background: #fff;
+  box-shadow: var(--ah-shadow);
+  color: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+
+.browse-workspace .rail-card:hover:not(:disabled) {
+  border-color: #93c5fd;
+}
+
+.browse-workspace .rail-card.is-current {
+  background: #eff6ff;
+  border-color: #3b82f6;
+  box-shadow: 0 0 0 1px #3b82f6;
+}
+
+.browse-workspace .rail-card:disabled {
+  cursor: not-allowed;
+  opacity: 0.55;
+}
+
+.browse-workspace .rail-name {
+  width: 100%;
+  overflow: hidden;
+  font-size: 14px;
+  font-weight: 650;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.browse-workspace .rail-code {
+  width: 100%;
+  overflow: hidden;
+  color: var(--ah-text-secondary);
+  font-family: ui-monospace, Consolas, monospace;
+  font-size: 12px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.browse-workspace .rail-badges {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.browse-workspace .detail-pane {
+  flex: 1;
+  min-width: 0;
+}
+
+.browse-workspace .detail-pane.is-enter {
+  animation: browse-detail-enter 280ms cubic-bezier(0.25, 0.8, 0.25, 1) both;
+}
+
+.browse-workspace .detail-pane.is-leave {
+  animation: browse-detail-leave 200ms ease both;
+}
+
+@keyframes browse-detail-enter {
+  from {
+    opacity: 0;
+    transform: translateX(12px);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+
+@keyframes browse-detail-leave {
+  from {
+    opacity: 1;
+  }
+  to {
+    opacity: 0;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .browse-workspace .detail-pane.is-enter,
+  .browse-workspace .detail-pane.is-leave {
+    animation: none !important;
+    transform: none !important;
+  }
+}
+
+/* —— 幽灵卡（Teleport 到 body，非 scoped） —— */
+.flip-ghost {
+  position: fixed;
+  z-index: 4000;
+  display: flex;
+  flex-direction: column;
+  box-sizing: border-box;
+  overflow: hidden;
+  pointer-events: none;
+  backface-visibility: hidden;
+}
+
+.flip-ghost.is-rail-selected {
+  gap: 4px;
+  padding: 12px;
+  background: #eff6ff;
+  border: 1px solid #3b82f6;
+  border-radius: 12px;
+  box-shadow: 0 0 0 1px #3b82f6;
+}
+
+.flip-ghost.is-rail-selected h3 {
+  margin: 0;
+  overflow: hidden;
+  font-size: 14px;
+  font-weight: 650;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.flip-ghost.is-grid-card {
+  gap: 8px;
+  padding: 16px;
+  padding-right: 56px;
+  background: #fff;
+  border: 1px solid var(--ah-border, #e5e7eb);
+  border-radius: 12px;
+  box-shadow: var(--ah-shadow, 0 1px 2px rgba(15, 23, 42, 0.06));
+}
+
+.flip-ghost.is-grid-card h3 {
+  margin: 0;
+  overflow: hidden;
+  font-size: 16px;
+  font-weight: 650;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.flip-ghost .code {
+  margin: 0;
+  overflow: hidden;
+  color: var(--ah-text-secondary, #6b7280);
+  font-family: ui-monospace, Consolas, monospace;
+  font-size: 12px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.flip-ghost .badges {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.flip-ghost .ghost-tag {
+  display: inline-flex;
+  align-items: center;
+  padding: 0 6px;
+  border: 1px solid #e5e7eb;
+  border-radius: 4px;
+  font-size: 12px;
+  line-height: 20px;
+  white-space: nowrap;
+}
+
+.flip-ghost .ghost-tag.is-react {
+  color: #635bff;
+  border-color: #c4c1ff;
+  background: #f4f3ff;
+}
+
+.flip-ghost .ghost-tag.is-router {
+  color: #b45309;
+  border-color: #fcd34d;
+  background: #fffbeb;
+}
+
+.flip-ghost .ghost-tag.is-on {
+  color: #10b981;
+  border-color: #a7f3d0;
+  background: #ecfdf5;
+}
+
+.flip-ghost .ghost-tag.is-off {
+  color: #6b7280;
+  border-color: #e5e7eb;
+  background: #f3f4f6;
+}
+
+.flip-ghost .ghost-tag.is-warn {
+  color: #b45309;
+  border-color: #fcd34d;
+  background: #fffbeb;
+}
+
+.flip-ghost .ghost-tag.is-plain {
+  color: #4b5563;
+  border-color: #e5e7eb;
+  background: #f9fafb;
+}
+
+/**
+ * Agent 运行模式：三枚独立「标签」按钮（有间距、各自完整边框）。
+ * 未选中灰；选中对齐列表 el-tag plain：ReAct=primary / Plan=success / Router=warning。
+ */
+.run-mode-group.el-radio-group {
+  display: inline-flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+}
+
+.run-mode-group .el-radio-button {
+  margin: 0 !important;
+}
+
+.run-mode-group .el-radio-button__inner {
+  padding: 0 11px;
+  height: 24px;
+  line-height: 22px;
+  font-size: 12px;
+  font-weight: 500;
+  border-radius: 4px !important;
+  border: 1px solid #e5e7eb !important;
+  color: #6b7280;
+  background: #f3f4f6;
+  box-shadow: none !important;
+}
+
+.run-mode-group .el-radio-button.is-react.is-active .el-radio-button__inner {
+  color: var(--el-color-primary);
+  background: var(--el-color-primary-light-9);
+  border-color: var(--el-color-primary-light-5) !important;
+}
+
+.run-mode-group .el-radio-button.is-plan.is-active .el-radio-button__inner {
+  color: var(--el-color-success);
+  background: var(--el-color-success-light-9);
+  border-color: var(--el-color-success-light-5) !important;
+}
+
+.run-mode-group .el-radio-button.is-router.is-active .el-radio-button__inner {
+  color: var(--el-color-warning);
+  background: var(--el-color-warning-light-9);
+  border-color: var(--el-color-warning-light-5) !important;
+}
+
+.run-mode-group .el-radio-button.is-disabled .el-radio-button__inner {
+  color: var(--el-text-color-placeholder);
+  background: var(--el-fill-color-light);
+  border-color: #e5e7eb !important;
+  cursor: not-allowed;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .flip-ghost {
+    display: none !important;
+  }
+}

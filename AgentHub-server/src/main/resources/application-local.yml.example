@@ -1,0 +1,19 @@
+# 本机 / 部署环境配置模板。所属域：运维配置，不是业务代码。
+#
+# 用法：复制为 AgentHub-server/config/application-local.yml（该目录不入库、也不打进 jar），
+# 或在部署环境用环境变量注入，二选一。
+#
+# 为什么不在 src/main/resources：那份目录会整体打进 jar 与 Docker 镜像，
+# 一旦把主密钥和库密码写进去，等于随制品一起分发。
+spring:
+  datasource:
+    username: root
+    password: 请替换为本地密码
+
+agenthub:
+  crypto:
+    # openssl rand -hex 32 的结果。这是主密钥，不是厂商 sk。
+    secret-key: 请替换为 64 位 hex
+    # 主密钥轮换过渡期使用：旧密钥填这里，只解密不加密。
+    # 启动后迁移任务会把旧密文重写成新密钥，完成后清空此项即可。
+    # previous-keys: 旧密钥1,旧密钥2

@@ -1,0 +1,380 @@
+/**
+ * 控制台视觉令牌与扁平化覆盖。所属域：前端壳。
+ * 只覆盖 Element Plus 的 CSS 变量与关键组件边框/阴影，不引入另一套主题包。主色为紫。
+ * 目标：弱化线条与阴影、去掉廉价厚边框，页头不包白卡。
+ */
+@import './browse-workspace.css';
+:root {
+  --ah-primary: #635bff;
+  --ah-primary-hover: #5146f5;
+  --ah-primary-active: #4338ca;
+  --ah-bg: #f5f6fa;
+  --ah-surface: #ffffff;
+  --ah-text: #1f2937;
+  --ah-text-secondary: #6b7280;
+  --ah-text-muted: #9ca3af;
+  --ah-border: #ebeef5;
+  --ah-border-soft: #f2f6fc;
+  --ah-divider: #e4e7ed;
+  --ah-input-fill: #f5f7fa;
+  --ah-radius-lg: 8px;
+  --ah-radius-md: 6px;
+  --ah-shadow: 0 2px 12px 0 rgba(0, 0, 0, 0.04);
+  --ah-sidebar: 240px;
+  --ah-sidebar-collapsed: 64px;
+
+  --el-color-primary: #635bff;
+  --el-color-primary-light-3: #8a84ff;
+  --el-color-primary-light-5: #b1adff;
+  --el-color-primary-light-7: #d5d3ff;
+  --el-color-primary-light-8: #e4e2ff;
+  --el-color-primary-light-9: #f4f3ff;
+  --el-color-primary-dark-2: #5146f5;
+  --el-text-color-primary: #1f2937;
+  --el-text-color-regular: #374151;
+  --el-text-color-secondary: #6b7280;
+  --el-border-color: #ebeef5;
+  --el-border-color-light: #f2f6fc;
+  --el-border-color-lighter: #f2f6fc;
+  --el-border-color-extra-light: #fafafa;
+  --el-border-radius-base: 8px;
+  --el-border-radius-small: 6px;
+  --el-bg-color-page: #f5f6fa;
+  --el-box-shadow-light: 0 2px 12px 0 rgba(0, 0, 0, 0.04);
+}
+
+html,
+body,
+#app {
+  margin: 0;
+  height: 100%;
+  font-family: "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif;
+  color: var(--ah-text);
+  background: var(--ah-bg);
+}
+
+/* 主滚动容器有条时预留槽位，减轻宽度跳动（布局 .main 亦设 scrollbar-gutter） */
+html {
+  scrollbar-gutter: stable;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+/**
+ * 全站原生滚动条：一处覆盖侧栏/主区/抽屉/表格等一切原生条。
+ * 极细 + 轨道透明；默认藏，容器悬停才显半透明滑块，避免挤占布局。
+ * Firefox 用 scrollbar-width/color；Chromium/Safari 用 ::-webkit-scrollbar。
+ * 滑块色跟 --el-text-color-secondary，暗底亮底都能见。
+ */
+* {
+  scrollbar-width: thin;
+  scrollbar-color: transparent transparent;
+}
+
+*:hover {
+  scrollbar-color: color-mix(in srgb, var(--el-text-color-secondary) 35%, transparent) transparent;
+}
+
+*::-webkit-scrollbar {
+  width: 5px;
+  height: 5px;
+}
+
+*::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+*::-webkit-scrollbar-thumb {
+  border-radius: 999px;
+  background: transparent;
+}
+
+*:hover::-webkit-scrollbar-thumb {
+  background: color-mix(in srgb, var(--el-text-color-secondary) 35%, transparent);
+}
+
+*:hover::-webkit-scrollbar-thumb:hover {
+  background: color-mix(in srgb, var(--el-text-color-secondary) 45%, transparent);
+}
+
+/**
+ * 控制台滚动发生在布局 .main，body 本身没有滚动条。
+ * Element Plus 弹窗/MessageBox 锁屏仍会给 body 加 padding-right，顶栏（含右上角退出）会整页左移。
+ * 去掉这笔补偿，并在打开时锁住主区滚动，避免遮罩后背景仍可滚。
+ */
+body.el-popup-parent--hidden {
+  padding-right: 0 !important;
+  width: auto !important;
+}
+
+body.el-popup-parent--hidden .main {
+  overflow: hidden;
+}
+
+/* 主按钮悬浮略深，避免沿用变量里偏浅的 light-3 */
+.el-button--primary {
+  --el-button-hover-bg-color: var(--ah-primary-hover);
+  --el-button-hover-border-color: var(--ah-primary-hover);
+  --el-button-active-bg-color: var(--ah-primary-active);
+  --el-button-active-border-color: var(--ah-primary-active);
+}
+
+/* 页面根容器：禁止横向撑破主区 */
+.page {
+  min-width: 0;
+  max-width: 100%;
+}
+
+/* ========== 筛选条：筛选与操作按钮同一行左起排布（主操作已上移到页头） ========== */
+.filter-bar {
+  display: flex;
+  align-items: center;
+  justify-content: flex-start;
+  gap: 12px;
+  margin-bottom: 16px;
+  padding: 12px 16px;
+  background: var(--ah-surface);
+  border: 1px solid var(--ah-border);
+  border-radius: var(--ah-radius-lg);
+  box-shadow: var(--ah-shadow);
+  min-height: 56px;
+  box-sizing: border-box;
+}
+
+.filter-bar .filter-form {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 12px;
+  flex: 1;
+  min-width: 0;
+  margin: 0;
+}
+
+.filter-bar .el-form-item {
+  margin-right: 0;
+  margin-bottom: 0;
+}
+
+.filter-bar .el-form-item__content {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  line-height: 32px;
+}
+
+.filter-bar .el-form-item__label {
+  height: 32px;
+  line-height: 32px;
+  padding: 0 8px 0 0;
+}
+
+/* 查询栏控件统一高度；输入宽 220、下拉宽 160 */
+.filter-bar .el-input,
+.filter-bar .el-select {
+  height: 32px;
+  vertical-align: middle;
+}
+
+.filter-bar .filter-input {
+  width: 220px;
+}
+
+.filter-bar .filter-select {
+  width: 160px;
+}
+
+.filter-bar .filter-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex: none;
+  margin-left: auto;
+}
+
+.filter-bar .el-button {
+  height: 32px;
+  min-width: 88px;
+  padding: 0 14px;
+}
+
+/* 筛选操作按钮：查询淡蓝 / 重置白底描边 / 新建 primary，三者同尺寸 */
+.btn-icon {
+  margin-right: 4px;
+}
+
+.btn-query {
+  --el-button-bg-color: #ecf5ff;
+  --el-button-text-color: #409eff;
+  --el-button-border-color: #b3d8ff;
+  --el-button-hover-bg-color: #d9ecff;
+  --el-button-hover-text-color: #337ecc;
+  --el-button-hover-border-color: #8cc5ff;
+  --el-button-active-bg-color: #c6e2ff;
+  --el-button-active-text-color: #337ecc;
+  --el-button-active-border-color: #8cc5ff;
+}
+
+.btn-reset {
+  --el-button-bg-color: #ffffff;
+  --el-button-text-color: var(--ah-text);
+  --el-button-border-color: var(--ah-border);
+  --el-button-hover-bg-color: #f5f7fa;
+  --el-button-hover-text-color: var(--ah-text);
+  --el-button-hover-border-color: #c0c4cc;
+  --el-button-active-bg-color: #ebeef5;
+  --el-button-active-text-color: var(--ah-text);
+  --el-button-active-border-color: #c0c4cc;
+}
+
+.browse-filters .el-button {
+  min-width: 88px;
+  padding: 0 14px;
+}
+
+/* ========== 业务大卡片 el-card ========== */
+.el-card {
+  --el-card-border-color: var(--ah-border);
+  border: 1px solid var(--ah-border);
+  border-radius: 8px;
+  box-shadow: 0 2px 12px 0 rgba(0, 0, 0, 0.04);
+}
+
+.el-card.is-never-shadow {
+  box-shadow: 0 2px 12px 0 rgba(0, 0, 0, 0.04);
+}
+
+.el-card__header {
+  border-bottom: 1px solid var(--ah-border-soft);
+  padding: 14px 16px;
+}
+
+.table-card {
+  border: 1px solid var(--ah-border);
+  border-radius: 8px;
+  box-shadow: 0 2px 12px 0 rgba(0, 0, 0, 0.04);
+  max-width: 100%;
+}
+
+.table-card .el-card__body {
+  padding: 4px 8px 12px;
+}
+
+/* ========== 表格：去竖线，极细横线 ========== */
+.el-table {
+  --el-table-border-color: var(--ah-border-soft);
+  --el-table-header-bg-color: #fafafa;
+  --el-table-header-text-color: #909399;
+  --el-table-row-hover-bg-color: #fafafa;
+  background: transparent;
+}
+
+.el-table::before,
+.el-table::after,
+.el-table__inner-wrapper::before {
+  display: none;
+}
+
+.el-table .el-table__cell {
+  border-right: none !important;
+}
+
+.el-table th.el-table__cell {
+  background: #fafafa;
+  color: #909399;
+  font-weight: 600;
+  border-bottom: 1px solid var(--ah-border) !important;
+}
+
+.el-table td.el-table__cell {
+  border-bottom: 1px solid var(--ah-border-soft) !important;
+}
+
+.el-table--border,
+.el-table--group {
+  border: none;
+}
+
+.el-table--border .el-table__cell,
+.el-table--border th.el-table__cell.is-leaf {
+  border-right: none !important;
+}
+
+.el-table--border::after,
+.el-table--group::after,
+.el-table__border-left-patch {
+  display: none;
+}
+
+.el-table__fixed-right::before,
+.el-table__fixed::before {
+  background-color: var(--ah-border-soft);
+}
+
+.pager {
+  display: flex;
+  justify-content: flex-end;
+  margin-top: 12px;
+}
+
+/* ========== 输入 / 下拉：浅底无描边，聚焦主色微光 ========== */
+.el-input__wrapper,
+.el-textarea__inner,
+.el-select__wrapper {
+  background-color: var(--ah-input-fill) !important;
+  box-shadow: none !important;
+  border: 1px solid transparent;
+}
+
+.el-textarea__inner {
+  box-shadow: none !important;
+}
+
+.el-input__wrapper:hover,
+.el-select__wrapper:hover {
+  background-color: var(--ah-input-fill) !important;
+  box-shadow: none !important;
+}
+
+.el-input__wrapper.is-focus,
+.el-select__wrapper.is-focused,
+.el-textarea__inner:focus {
+  background-color: #fff !important;
+  border-color: var(--ah-primary) !important;
+  box-shadow: 0 0 0 2px rgba(99, 91, 255, 0.2) !important;
+}
+
+/* ========== 业务区块 panel（多区块页共用弱边框） ========== */
+.panel {
+  margin-bottom: 16px;
+  padding: 16px;
+  background: var(--ah-surface);
+  border: 1px solid var(--ah-border);
+  border-radius: 8px;
+  box-shadow: 0 2px 12px 0 rgba(0, 0, 0, 0.04);
+}
+
+.panel:last-of-type {
+  margin-bottom: 0;
+}
+
+/* ========== 供应商 / 工具源一类小卡片 ========== */
+.ah-tile,
+.page .grid > .card {
+  border: 1px solid var(--ah-border);
+  border-radius: 6px;
+  box-shadow: none;
+  transition: border-color 0.15s ease, background-color 0.15s ease;
+}
+
+.page .grid > .card:hover {
+  border-color: var(--ah-primary);
+}
+
+.page .grid > .card.is-selected {
+  border-color: var(--ah-primary);
+  background: #f4f3ff;
+  box-shadow: none;
+}

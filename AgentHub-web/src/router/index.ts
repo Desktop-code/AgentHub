@@ -1,0 +1,182 @@
+/**
+ * 路由与登录守卫。所属域：前端导航。
+ * 页面是静态注册的；侧栏数据来自 /me，路径必须和这里一致。
+ * 旧地址 /agent/trial 不再进独立页，改写到 /agent/list?agentId=&trial=1，由壳层打开抽屉。
+ */
+import { createRouter, createWebHistory } from 'vue-router'
+import type { LocationQueryValue } from 'vue-router'
+import { useUserStore } from '@/stores/user'
+
+/** 把 query 收成单个字符串。数组取第一项。 */
+function queryText(raw: LocationQueryValue | LocationQueryValue[] | undefined) {
+  const value = Array.isArray(raw) ? raw[0] : raw
+  return typeof value === 'string' ? value : ''
+}
+
+/** 列表和详情共用这一份，筛选条件在点进卡片后还在。 */
+const agentManage = () => import('@/views/agent/list/index.vue')
+
+/*
+ * meta 约定（多页签 + KeepAlive 依赖，勿随意删改）：
+ * - title：页签标题；有它就不再回查菜单树。
+ * - cacheName：必须与页面组件 defineOptions({ name }) 完全一致，
+ *   因为 KeepAlive 的 include 比对的是组件名而不是路由名。
+ *   Agent 列表与详情共用同一个 cacheName：它们是同一页的两种内部状态，
+ *   共用后只出一个页签、且切 URL 不重挂组件（翻卡动画依赖这一点）。
+ */
+const router = createRouter({
+  history: createWebHistory(),
+  routes: [
+    { path: '/login', component: () => import('@/views/login/index.vue'), meta: { public: true } },
+    {
+      path: '/',
+      component: () => import('@/views/layout/AdminLayout.vue'),
+      children: [
+        { path: '', redirect: '/workspace' },
+        {
+          path: 'workspace',
+          component: () => import('@/views/workspace/index.vue'),
+          meta: { title: '工作台', cacheName: 'Workspace' }
+        },
+        {
+          path: 'system/user',
+          component: () => import('@/views/system/user/index.vue'),
+          meta: { title: '用户管理', cacheName: 'SystemUser' }
+        },
+        {
+          path: 'system/role',
+          component: () => import('@/views/system/role/index.vue'),
+          meta: { title: '角色管理', cacheName: 'SystemRole' }
+        },
+        {
+          path: 'system/menu',
+          component: () => import('@/views/system/menu/index.vue'),
+          meta: { title: '菜单管理', cacheName: 'SystemMenu' }
+        },
+        {
+          path: 'system/dept',
+          component: () => import('@/views/system/dept/index.vue'),
+          meta: { title: '部门管理', cacheName: 'SystemDept' }
+        },
+        {
+          path: 'system/app',
+          component: () => import('@/views/system/app/index.vue'),
+          meta: { title: '应用管理', cacheName: 'SystemApp' }
+        },
+        {
+          path: 'system/login-log',
+          component: () => import('@/views/system/login-log/index.vue'),
+          meta: { title: '登录日志', cacheName: 'SystemLoginLog' }
+        },
+        {
+          path: 'system/oper-log',
+          component: () => import('@/views/system/oper-log/index.vue'),
+          meta: { title: '操作日志', cacheName: 'SystemOperLog' }
+        },
+        {
+          path: 'access/models',
+          component: () => import('@/views/model/index.vue'),
+          meta: { title: '模型管理', cacheName: 'ModelManage' }
+        },
+        {
+          path: 'access/tools',
+          component: () => import('@/views/tool/index.vue'),
+          meta: { title: '工具管理', cacheName: 'ToolManage' }
+        },
+        {
+          path: 'access/skills',
+          component: () => import('@/views/skill/index.vue'),
+          meta: { title: 'Skill 管理', cacheName: 'SkillManage' }
+        },
+        {
+          path: 'access/prompt-center',
+          component: () => import('@/views/prompt/center/index.vue'),
+          meta: { title: '提示词模板库', cacheName: 'PromptCenter' }
+        },
+        /*
+         * 旧入口兼容：L1/L2 曾各占一个页面与菜单，现已合成一页。
+         * 保留旧 path 做重定向，历史收藏/外部链接进来仍能落到合成页；
+         * 侧栏不再渲染这两项（菜单已合并为「提示词模板库」一项）。
+         */
+        { path: 'access/prompt-constraint', redirect: '/access/prompt-center' },
+        { path: 'access/prompt-templates', redirect: '/access/prompt-center' },
+        {
+          path: 'access/kb',
+          component: () => import('@/views/rag/kb/index.vue'),
+          meta: { title: '知识库', cacheName: 'RagKbManage' }
+        },
+        /*
+         * 知识库下的文档管理二级页。路径独立挂在 /rag/kb/:id/docs（不进侧栏），
+         * 侧栏高亮仍归「知识库」菜单，见 AdminLayout.isCurrent 的前缀特判。
+         * cacheName 固定：同一组件按 :id 参数切换知识库，靠页面内 watch 重新拉数据，
+         * 不重挂组件（与 Agent 列表/详情同一套路），页签也只保留一个。
+         */
+        {
+          path: 'rag/kb/:id/docs',
+          component: () => import('@/views/rag/docs/index.vue'),
+          meta: { title: '文档管理', cacheName: 'RagKbDocs' }
+        },
+        {
+          path: 'ops/billing',
+          component: () => import('@/views/billing/index.vue'),
+          meta: { title: 'Token 用量', cacheName: 'BillingUsage' }
+        },
+        {
+          path: 'ops/traces',
+          component: () => import('@/views/obs/trace/index.vue'),
+          meta: { title: '调用追踪', cacheName: 'CallTrace' }
+        },
+        {
+          path: 'agent/memory',
+          component: () => import('@/views/memory/index.vue'),
+          meta: { title: '记忆管理', cacheName: 'MemoryManage' }
+        },
+        // 列表 → 详情只换 URL，页面内部自行 watch 参数；cacheName 相同即同一个页签
+        {
+          path: 'agent/list',
+          component: agentManage,
+          meta: { title: 'Agent 管理', cacheName: 'AgentManage' }
+        },
+        {
+          path: 'agent/list/:id',
+          component: agentManage,
+          meta: { title: 'Agent 管理', cacheName: 'AgentManage' }
+        }
+      ]
+    }
+  ]
+})
+
+router.beforeEach(async (to) => {
+  const user = useUserStore()
+  if (to.meta.public) {
+    if (user.token && to.path === '/login') {
+      return '/'
+    }
+    return true
+  }
+  if (!user.token) {
+    return '/login'
+  }
+  // 刷新后 Pinia 是空的，先补一次 /me，侧栏和按钮才有权限
+  if (!user.loaded) {
+    try {
+      await user.loadMe()
+    } catch {
+      await user.logout()
+      return '/login'
+    }
+  }
+  // 独立试跑页不再作为入口。有 Agent 时落到列表 query，由壳层打开抽屉。
+  if (to.path === '/agent/trial') {
+    const fromQuery = Number(queryText(to.query.agentId))
+    const queryId = Number.isFinite(fromQuery) && fromQuery > 0 ? fromQuery : undefined
+    if (queryId) {
+      return { path: '/agent/list', query: { agentId: String(queryId), trial: '1' } }
+    }
+    return { path: '/agent/list' }
+  }
+  return true
+})
+
+export default router

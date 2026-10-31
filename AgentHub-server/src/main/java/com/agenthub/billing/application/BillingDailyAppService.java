@@ -1,0 +1,86 @@
+package com.agenthub.billing.application;
+
+import com.agenthub.billing.api.dto.DailyRebuildReq;
+import com.agenthub.billing.domain.model.DailyTotals;
+import com.agenthub.billing.domain.model.TokenDaily;
+import com.agenthub.billing.domain.repository.TokenDailyRepository;
+import com.agenthub.billing.domain.repository.TokenLedgerRepository;
+import com.agenthub.billing.domain.service.DailyRollup;
+import com.agenthub.common.error.BizException;
+import com.agenthub.common.error.ErrorCode;
+import com.agenthub.common.web.OperatorContext;
+import org.springframework.stereotype.Service;
+import org.springframework.transaction.annotation.Transactional;
+
+import java.util.HashSet;
+import java.util.List;
+import java.util.Objects;
+import java.util.Set;
+
+/**
+ * 按业务日重算日汇总。所属域：billing。
+ * 同一维覆盖已有行；区间内不再有正常流水的旧行清零。幂等。
+ */
+@Service
+public class BillingDailyAppService {
+
+    private final TokenLedgerRepository ledgers;
+    private final TokenDailyRepository daily;
+    private final OperatorContext operatorContext;
+
+    /**
+     * @param ledgers         正常流水
+     * @param daily           日汇总
+     * @param operatorContext 操作人
+     */
+    public BillingDailyAppService(TokenLedgerRepository ledgers, TokenDailyRepository daily,
+                                  OperatorContext operatorContext) {
+        this.ledgers = ledgers;
+        this.daily = daily;
+        this.operatorContext = operatorContext;
+    }
+
+    /**
+     * @param req 闭区间业务日
+     * @return 本次有用量的维度数
+     */
+    @Transactional
+    public int rebuild(DailyRebuildReq req) {
+        if (req.getDateFrom() == null || req.getDateTo() == null) {
+            throw new BizException(ErrorCode.BAD_REQUEST, "请选择重算日期");
+        }
+        if (req.getDateFrom().isAfter(req.getDateTo())) {
+            throw new BizException(ErrorCode.BAD_REQUEST, "开始日期不能晚于结束日期");
+        }
+        long operatorId = operatorContext.requireUserId();
+        List<DailyTotals> buckets = DailyRollup.aggregate(ledgers.listNormal(req.getDateFrom(), req.getDateTo()));
+        List<TokenDaily> existing = daily.listRange(req.getDateFrom(), req.getDateTo());
+        Set<Long> touched = new HashSet<>();
+        for (DailyTotals totals : buckets) {
+            List<TokenDaily> matches = existing.stream().filter(row -> same(row, totals)).toList();
+            if (matches.isEmpty()) {
+                daily.insert(totals, operatorId);
+                continue;
+            }
+            for (TokenDaily row : matches) {
+                daily.updateTotals(row.getId(), totals, operatorId);
+                touched.add(row.getId());
+            }
+        }
+        // 区间里旧维度已经没有正常流水，清零而不是留着上次的数
+        for (TokenDaily row : existing) {
+            if (!touched.contains(row.getId())) {
+                daily.clearTotals(row.getId(), operatorId);
+            }
+        }
+        return buckets.size();
+    }
+
+    private boolean same(TokenDaily row, DailyTotals totals) {
+        return Objects.equals(row.getBizDate(), totals.getBizDate())
+                && Objects.equals(row.getAgentId(), totals.getAgentId())
+                && Objects.equals(row.getModelInstanceId(), totals.getModelInstanceId())
+                && Objects.equals(row.getAppId(), totals.getAppId())
+                && Objects.equals(row.getChannel(), totals.getChannel());
+    }
+}

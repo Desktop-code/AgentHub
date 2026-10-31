@@ -1,0 +1,41 @@
+# 前端镜像构建上下文排除清单。所属域：构建/运维配置，不是业务代码。
+#
+# 为什么需要：Dockerfile 用 `COPY . .` 把整个目录送进镜像层再 npm run build；
+# 若不排除 node_modules 与 dist，会覆盖容器内 npm ci 的依赖并显著拖慢构建。
+# 注意：src / public / index.html / vite.config.ts / tsconfig* / nginx.conf 必须保留。
+
+# 依赖与构建产物（容器内重新安装与构建）
+node_modules/
+dist/
+
+# 测试与覆盖率报告
+coverage/
+playwright-report/
+test-results/
+*.tsbuildinfo
+
+# 日志与本地缓存
+*.log
+logs/
+.vite/
+
+# 本机环境文件：只保留 .env.development（仅 baseURL），其余带真实地址/口令的一律不进镜像
+.env
+.env.local
+.env.*.local
+.env.production
+
+# IDE 与本机私货
+.idea/
+.vscode/
+
+# 版本库与工具目录
+.git/
+.gitignore
+.code-review-graph/
+.cursor/
+
+# 操作系统垃圾
+.DS_Store
+Thumbs.db
+desktop.ini

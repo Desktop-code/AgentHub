@@ -1,0 +1,41 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE mapper PUBLIC "-//mybatis.org//DTD Mapper 3.0//EN" "https://mybatis.org/dtd/mybatis-3-mapper.dtd">
+<!-- 已删除记忆分页：显式 deleted=1，绕过 TableLogic 默认过滤。所属域：memory。 -->
+<mapper namespace="com.agenthub.memory.infra.persistence.mapper.MemoryItemMapper">
+
+    <sql id="deletedWhere">
+        deleted = 1
+        <if test="q.agentId != null">
+            AND agent_id = #{q.agentId}
+        </if>
+        <if test="q.scope != null and q.scope != ''">
+            AND scope = #{q.scope}
+        </if>
+        <if test="q.sessionId != null">
+            AND session_id = #{q.sessionId}
+        </if>
+        <if test="q.userId != null">
+            AND user_id = #{q.userId}
+        </if>
+        <if test="q.createTimeFrom != null">
+            AND create_time &gt;= #{q.createTimeFrom}
+        </if>
+        <if test="q.createTimeTo != null">
+            AND create_time &lt;= #{q.createTimeTo}
+        </if>
+    </sql>
+
+    <select id="countDeleted" resultType="long">
+        SELECT COUNT(1) FROM memory_item
+        WHERE
+        <include refid="deletedWhere"/>
+    </select>
+
+    <select id="pageDeleted" resultType="com.agenthub.memory.infra.persistence.entity.MemoryItemEntity">
+        SELECT * FROM memory_item
+        WHERE
+        <include refid="deletedWhere"/>
+        ORDER BY id DESC
+        LIMIT #{offset}, #{size}
+    </select>
+</mapper>

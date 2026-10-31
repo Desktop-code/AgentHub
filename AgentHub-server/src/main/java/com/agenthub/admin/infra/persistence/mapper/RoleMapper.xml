@@ -1,0 +1,18 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE mapper PUBLIC "-//mybatis.org//DTD Mapper 3.0//EN" "https://mybatis.org/dtd/mybatis-3-mapper.dtd">
+<mapper namespace="com.agenthub.admin.infra.persistence.mapper.RoleMapper">
+
+    <select id="countByCode" resultType="long">
+        SELECT COUNT(1) FROM sys_role WHERE code = #{code}
+    </select>
+
+    <!-- 名称查重只看未删除行：名称没有唯一索引，软删后允许复用 -->
+    <select id="countByName" resultType="long">
+        SELECT COUNT(1) FROM sys_role
+        WHERE name = #{name}
+          AND deleted = 0
+        <if test="excludeId != null">
+            AND id &lt;&gt; #{excludeId}
+        </if>
+    </select>
+</mapper>

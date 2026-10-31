@@ -1,0 +1,38 @@
+# 后端镜像构建上下文排除清单。所属域：构建/运维配置，不是业务代码。
+#
+# 为什么需要：docker build ./AgentHub-server 会把整个目录（含 target/、data/rag 原文、
+# logs/、本机 config/ 里的主密钥）作为构建上下文传给 daemon。Dockerfile 虽只 COPY
+# pom.xml 与 src，但上下文体积大、且 data/ 与 config/ 有外泄风险，故在此显式排除。
+
+# 构建产物与依赖
+target/
+
+# RAG 原文落盘（agenthub.rag.storage.dir 默认 ./data/rag）
+data/
+
+# 运行日志
+logs/
+*.log
+*.log.err
+*.pid
+
+# 本机密钥与库密码：镜像内一律用挂载或环境变量，禁止进构建上下文
+config/
+**/application-local.yml
+!**/application-local.yml.example
+
+# IDE 与本机私货
+.idea/
+*.iml
+.vscode/
+
+# 版本库与工具目录
+.git/
+.gitignore
+.code-review-graph/
+.cursor/
+
+# 操作系统垃圾
+.DS_Store
+Thumbs.db
+desktop.ini

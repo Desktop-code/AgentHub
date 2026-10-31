@@ -1,0 +1,265 @@
+/**
+ * 试跑接口。所属域：runtime。
+ * 前端超时只做 UX；硬拦在后端 agenthub.runtime.limits.timeout-ms。
+ */
+import request, { TOKEN_KEY } from '@/utils/request'
+import type { PageResult, Result } from '@/types'
+import type {
+  TrialAgent,
+  TrialEvent,
+  TrialMessageResult,
+  TrialPlanView,
+  TrialSession
+} from '@/types/runtime'
+
+/** 启用中的 Agent，给下拉用。 */
+export function listTrialAgents() {
+  return request.get<Result<TrialAgent[]>>('/api/runtime/trial/agents')
+}
+
+/** 历史会话。服务端只返回当前用户在该 Agent 下的记录。 */
+export function pageTrialSessions(params: { current: number; size: number; agentId: number }) {
+  return request.get<Result<PageResult<TrialSession>>>('/api/runtime/trial/sessions', { params })
+}
+
+/** 会话元数据。 */
+export function getTrialSession(id: number) {
+  return request.get<Result<TrialSession>>(`/api/runtime/trial/sessions/${id}`)
+}
+
+/** 事件时间线。 */
+export function listTrialEvents(id: number) {
+  return request.get<Result<TrialEvent[]>>(`/api/runtime/trial/sessions/${id}/events`)
+}
+
+/**
+ * 进行中一轮的实时快照。
+ * 刷新页面后前端已失去 SSE，events 又要等整轮落库；这条接口从服务端内存读增量，
+ * 用于恢复「边跑边看」。没有在跑的一轮时返回空数组，调用方应回退到 events。
+ */
+export function listTrialLiveEvents(id: number) {
+  return request.get<Result<TrialEvent[]>>(`/api/runtime/trial/sessions/${id}/live-events`)
+}
+
+/** 按当前 Agent 新建会话。 */
+export function createTrialSession(agentId: number) {
+  return request.post<Result<TrialSession>>('/api/runtime/trial/sessions', { agentId })
+}
+
+/** 同步跑一轮。超时略大于平台墙钟硬顶（300s）。页面发送走 SSE，这条留给需要整包结果的调用。 */
+export function sendTrialMessage(id: number, content: string) {
+  return request.post<Result<TrialMessageResult>>(`/api/runtime/trial/sessions/${id}/messages`, { content }, {
+    timeout: 310000
+  })
+}
+
+/** 改左栏标题。服务端写入 last_msg_preview。 */
+export function renameTrialSession(id: number, title: string) {
+  return request.post<Result<TrialSession>>(`/api/runtime/trial/sessions/${id}/title`, { title })
+}
+
+/**
+ * 清空当前会话已落库事件，保留会话和标题。
+ * 不用 cancel：cancel 会把会话标成不可再发。
+ */
+export function clearTrialSession(id: number) {
+  return request.post<Result<TrialSession>>(`/api/runtime/trial/sessions/${id}/clear`)
+}
+
+/** 逻辑删除。列表不再返回。 */
+export function deleteTrialSession(id: number) {
+  return request.delete<Result<void>>(`/api/runtime/trial/sessions/${id}`)
+}
+
+export interface TrialToolChunk {
+  line: string
+  result?: string
+  success?: boolean
+}
+
+export interface TrialDoneChunk {
+  status?: string
+  sessionId?: number
+  errorSummary?: string
+  /** 计划执行模式：本轮停在待批准，没有助手正文 */
+  planPending?: boolean
+}
+
+/**
+ * 计划执行模式的 SSE 帧。plan 与 step 的 data 都是对象，
+ * 形状与 PLAN / STEP 事件正文一致，前端复用同一套解析。
+ */
+export interface TrialPlanChunk {
+  planId: string
+  state: string
+  summary?: string
+  steps?: { seq: number; title: string; detail: string }[]
+}
+
+export interface TrialStepChunk {
+  seq: number
+  title: string
+  state: string
+  text?: string
+  line?: string
+}
+
+/** SSE 回调。正文按事件追加，不在这里编造思考。 */
+export interface TrialStreamHandlers {
+  onPhase?: (phase: string) => void
+  /** Router 判定摘要；进思考过程时间线 */
+  onRoute?: (summary: string) => void
+  onReasoning?: (text: string) => void
+  onTool?: (tool: TrialToolChunk) => void
+  onAssistant?: (text: string) => void
+  /** 计划生成或状态推进（结构化） */
+  onPlan?: (plan: TrialPlanChunk) => void
+  /** 计划单步进度 */
+  onStep?: (step: TrialStepChunk) => void
+  onDone?: (payload: TrialDoneChunk) => void
+  onError?: (message: string) => void
+}
+
+/**
+ * 边跑边收 SSE。前端超时只 UX；硬拦在后端 limits.timeout-ms。
+ * @param id 会话
+ * @param content 用户输入
+ * @param handlers 增量
+ * @param signal 关闭抽屉时可中止读取
+ */
+export async function streamTrialMessage(
+  id: number,
+  content: string,
+  handlers: TrialStreamHandlers,
+  signal?: AbortSignal
+) {
+  const token = localStorage.getItem(TOKEN_KEY)
+  const base = import.meta.env.VITE_API_BASE || ''
+  const response = await fetch(`${base}/api/runtime/trial/sessions/${id}/messages/stream`, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      Accept: 'text/event-stream',
+      ...(token ? { Authorization: `Bearer ${token}` } : {})
+    },
+    body: JSON.stringify({ content }),
+    signal
+  })
+  if (response.status === 401) {
+    localStorage.removeItem(TOKEN_KEY)
+    if (!location.pathname.endsWith('/login')) {
+      location.href = '/login'
+    }
+    throw new Error('未登录')
+  }
+  if (!response.ok || !response.body) {
+    let message = '发送失败'
+    try {
+      const body = (await response.json()) as { msg?: string }
+      if (body?.msg) {
+        message = body.msg
+      }
+    } catch {
+      // 非 JSON 时用默认文案
+    }
+    throw new Error(message)
+  }
+  const reader = response.body.getReader()
+  const decoder = new TextDecoder()
+  let buffer = ''
+  while (true) {
+    const { done, value } = await reader.read()
+    if (done) {
+      break
+    }
+    buffer += decoder.decode(value, { stream: true })
+    buffer = takeFrames(buffer, handlers)
+  }
+  if (buffer.trim()) {
+    takeFrames(`${buffer}\n\n`, handlers)
+  }
+}
+
+/** 拆完整的 SSE 帧，最后一段可能还没结束。 */
+function takeFrames(buffer: string, handlers: TrialStreamHandlers) {
+  const parts = buffer.split('\n\n')
+  const rest = parts.pop() ?? ''
+  for (const frame of parts) {
+    dispatchFrame(frame, handlers)
+  }
+  return rest
+}
+
+function dispatchFrame(frame: string, handlers: TrialStreamHandlers) {
+  let event = 'message'
+  const dataLines: string[] = []
+  for (const line of frame.split('\n')) {
+    if (line.startsWith('event:')) {
+      event = line.slice(6).trim()
+    } else if (line.startsWith('data:')) {
+      dataLines.push(line.slice(5).trim())
+    }
+  }
+  if (!dataLines.length) {
+    return
+  }
+  const raw = dataLines.join('\n')
+  let data: unknown = raw
+  try {
+    data = JSON.parse(raw)
+  } catch {
+    data = raw
+  }
+  if (event === 'phase' && typeof data === 'string') {
+    handlers.onPhase?.(data)
+  } else if (event === 'route' && typeof data === 'string') {
+    handlers.onRoute?.(data)
+  } else if (event === 'reasoning' && typeof data === 'string') {
+    handlers.onReasoning?.(data)
+  } else if (event === 'assistant' && typeof data === 'string') {
+    handlers.onAssistant?.(data)
+  } else if (event === 'tool' && data && typeof data === 'object') {
+    const row = data as TrialToolChunk
+    handlers.onTool?.(row)
+  } else if (event === 'plan' && data && typeof data === 'object') {
+    handlers.onPlan?.(data as TrialPlanChunk)
+  } else if (event === 'step' && data && typeof data === 'object') {
+    handlers.onStep?.(data as TrialStepChunk)
+  } else if (event === 'done' && data && typeof data === 'object') {
+    handlers.onDone?.(data as TrialDoneChunk)
+  } else if (event === 'error') {
+    handlers.onError?.(typeof data === 'string' ? data : '试跑失败')
+  }
+}
+
+/**
+ * 批准待执行计划。后端接着跑剩余步骤并返回本轮事件；
+ * 没有待批准计划（已批准、已取消或已过期）时返回业务错误。
+ * @param id 会话
+ */
+export function approveTrialPlan(id: number) {
+  return request.post<Result<TrialMessageResult>>(`/api/runtime/trial/sessions/${id}/plan/approve`, {}, {
+    timeout: 310000
+  })
+}
+
+/**
+ * 取消待执行计划。不执行任何步骤，只落一条「计划已取消」。
+ * @param id 会话
+ */
+export function rejectTrialPlan(id: number) {
+  return request.post<Result<TrialMessageResult>>(`/api/runtime/trial/sessions/${id}/plan/reject`)
+}
+
+/**
+ * 待批准计划。刷新页面后用它恢复「批准 / 取消」按钮；没有时 data 为 null。
+ * @param id 会话
+ */
+export function getPendingTrialPlan(id: number) {
+  return request.get<Result<TrialPlanView | null>>(`/api/runtime/trial/sessions/${id}/plan/pending`)
+}
+
+/** 取消尚未完成的会话。执行中的一轮不会被打断。 */
+export function cancelTrialSession(id: number) {
+  return request.post<Result<TrialSession>>(`/api/runtime/trial/sessions/${id}/cancel`)
+}
