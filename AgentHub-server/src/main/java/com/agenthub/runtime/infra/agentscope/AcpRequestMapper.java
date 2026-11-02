@@ -5,13 +5,18 @@ import com.agenthub.runtime.model.acl.UnifiedMessage;
 import com.agenthub.runtime.model.acl.UnifiedToolCall;
 import com.agenthub.runtime.model.acl.UnifiedToolDef;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import io.agentscope.core.message.Base64Source;
 import io.agentscope.core.message.ContentBlock;
+import io.agentscope.core.message.DataBlock;
+import io.agentscope.core.message.ImageBlock;
 import io.agentscope.core.message.Msg;
 import io.agentscope.core.message.MsgRole;
+import io.agentscope.core.message.Source;
 import io.agentscope.core.message.TextBlock;
 import io.agentscope.core.message.ThinkingBlock;
 import io.agentscope.core.message.ToolResultBlock;
 import io.agentscope.core.message.ToolUseBlock;
+import io.agentscope.core.message.URLSource;
 import io.agentscope.core.model.GenerateOptions;
 import io.agentscope.core.model.ToolSchema;
 
@@ -28,6 +33,9 @@ import java.util.Map;
  * 线程：无状态可复用。
  */
 final class AcpRequestMapper {
+
+    /** base64 图片源缺少 media_type 时的兜底 MIME */
+    private static final String DEFAULT_IMAGE_MIME = "image/png";
 
     private final ObjectMapper json;
 
@@ -85,8 +93,61 @@ final class AcpRequestMapper {
                 // 统一层只认小写角色名（system / user / assistant）
                 .role(message.getRole().name().toLowerCase())
                 .content(textAndThinking(message))
+                // 图片只在入参里出现：出参永远是纯文本，因此这里只从引擎消息上取图
+                .imageUrls(imageUrlsOf(message))
                 .toolCalls(assistant ? toToolCalls(message) : List.of())
                 .build());
+    }
+
+    /**
+     * 取消息里的图片，统一成「URL 或 data URI」字符串交给 ACL。
+     * 为什么在这里拍平而不是让 Adapter 认识 AgentScope 类型：防腐层的意义就是
+     * 厂商与引擎结构都不外溢——Adapter 只该看到 {@code List<String>}。
+     * 支持的形态：
+     * <ul>
+     *   <li>{@link URLSource}：http(s) 地址原样透传（本地 file:// 也照传，由上游决定是否可读）；</li>
+     *   <li>{@link Base64Source}：还原成 {@code data:{mime};base64,{data}}，各厂商都认这种写法；</li>
+     *   <li>{@link DataBlock}：按 source 走上面两条（新代码推荐的通用多媒体容器）。</li>
+     * </ul>
+     *
+     * @param message 引擎消息
+     * @return 图片列表；没有图片时返回空列表（不返回 null，调用方不必判空）
+     */
+    private List<String> imageUrlsOf(Msg message) {
+        List<ContentBlock> blocks = message.getContent();
+        if (blocks == null || blocks.isEmpty()) {
+            return List.of();
+        }
+        List<String> urls = new ArrayList<>();
+        for (ContentBlock block : blocks) {
+            if (block instanceof ImageBlock image) {
+                appendSource(urls, image.getSource());
+            } else if (block instanceof DataBlock data) {
+                appendSource(urls, data.getSource());
+            }
+        }
+        return urls;
+    }
+
+    /**
+     * 把一个媒体 source 拍平成 URL 字符串。无法识别的 source 直接跳过：
+     * 宁可少一张图，也不要让整轮对话因为一张坏图失败。
+     *
+     * @param out    输出列表
+     * @param source 图片源，可空
+     */
+    private void appendSource(List<String> out, Source source) {
+        if (source instanceof URLSource url && url.getUrl() != null && !url.getUrl().isBlank()) {
+            out.add(url.getUrl().trim());
+            return;
+        }
+        if (source instanceof Base64Source base64
+                && base64.getData() != null && !base64.getData().isBlank()) {
+            // media_type 缺失时退化成 png：多数厂商只按内容解码，声明错也只是宽容度问题
+            String mime = base64.getMediaType() == null || base64.getMediaType().isBlank()
+                    ? DEFAULT_IMAGE_MIME : base64.getMediaType().trim();
+            out.add("data:" + mime + ";base64," + base64.getData().trim());
+        }
     }
 
     /**
