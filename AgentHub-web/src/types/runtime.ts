@@ -6,6 +6,8 @@ export interface TrialAgent {
   name: string
   code: string
   runMode: string
+  /** 是否已绑定可用的 VISION 模型。false 时上传图片按钮置灰 */
+  visionEnabled?: boolean
 }
 
 export interface TrialSession {
@@ -18,6 +20,11 @@ export interface TrialSession {
   startTime?: string
   endTime?: string
   messageCount?: number
+  /** 会话标题：自动生成（≤10 汉字）或用户手改。空表示尚未生成 */
+  sessionTitle?: string
+  /** 标题来源：AUTO 自动生成 / MANUAL 用户手改 */
+  titleSource?: string
+  /** 首轮提问的短预览，作为副标题；不参与标题覆盖 */
   lastMsgPreview?: string
   errorSummary?: string
   /** 最近变更。左栏相对时间优先用它 */
@@ -47,7 +54,17 @@ export interface TrialMessageResult {
 
 /** 助手卡片里的一块。没有引擎中间步时不会出现 reasoning。 */
 export interface AssistantBlock {
-  kind: 'reasoning' | 'tool' | 'assistant' | 'route' | 'plan' | 'step' | 'system' | 'error'
+  kind:
+    | 'reasoning'
+    | 'tool'
+    | 'assistant'
+    | 'route'
+    | 'plan'
+    | 'step'
+    | 'system'
+    | 'error'
+    | 'vision'
+    | 'file'
   text: string
   /** 工具结果。和调用行相同或为空时不展示 */
   detail?: string
@@ -55,6 +72,20 @@ export interface AssistantBlock {
   plan?: TrialPlanView
   /** step 块的单步视图 */
   step?: TrialStepView
+  /** file 块的产物视图；下载卡片据此渲染 */
+  file?: TrialFileView
+}
+
+/**
+ * Agent 产出的可下载文件。
+ * fileName 是相对工作区根的名字（可带子目录），与后端 GeneratedFileMarker 的字段一致。
+ */
+export interface TrialFileView {
+  fileName: string
+  /** 字节数；< 0 表示服务端取不到体积，展示为「大小未知」 */
+  size: number
+  /** 下载地址。后端拼好，前端不再自己编码文件名 */
+  downloadUrl: string
 }
 
 /** 计划中的一步。seq 即执行顺序。 */

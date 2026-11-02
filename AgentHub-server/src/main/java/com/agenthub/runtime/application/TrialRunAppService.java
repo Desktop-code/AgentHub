@@ -16,6 +16,8 @@ import com.agenthub.obs.domain.model.SpanClose;
 import com.agenthub.obs.domain.model.SpanType;
 import com.agenthub.obs.domain.service.ObsAttrs;
 import com.agenthub.runtime.domain.model.EventType;
+import com.agenthub.runtime.domain.model.GeneratedFile;
+import com.agenthub.runtime.domain.model.MeterScope;
 import com.agenthub.runtime.domain.model.PendingPlan;
 import com.agenthub.runtime.domain.model.PlanState;
 import com.agenthub.runtime.domain.model.PlanView;
@@ -28,14 +30,17 @@ import com.agenthub.runtime.domain.model.TrialTurn;
 import com.agenthub.runtime.domain.repository.RunEventRepository;
 import com.agenthub.runtime.domain.repository.RunSessionRepository;
 import com.agenthub.runtime.domain.service.PlanJson;
+import com.agenthub.runtime.domain.service.GeneratedFileMarker;
 import com.agenthub.runtime.domain.service.PromptInjectionHolder;
 import com.agenthub.runtime.domain.service.TrialFailure;
 import com.agenthub.runtime.domain.service.TrialSendGate;
 import com.agenthub.runtime.domain.service.TrialTurnOutcome;
 import com.agenthub.runtime.domain.service.TrialProgress;
 import com.agenthub.runtime.domain.service.TrialTexts;
+import com.agenthub.runtime.domain.service.VisionOcrTexts;
 import com.agenthub.runtime.infra.agentscope.ReActTrialExecutor;
 import com.agenthub.runtime.infra.agentscope.ToolResultClipper;
+import com.agenthub.runtime.infra.agentscope.VisionOcrExecutor;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.stereotype.Service;
@@ -70,6 +75,8 @@ public class TrialRunAppService {
     private final TrialObsHooks obs;
     private final TrialMemoryCoordinator memory;
     private final TrialLiveBuffer live;
+    private final VisionOcrExecutor vision;
+    private final SessionTitleGeneratorAppService titleGenerator;
 
     /**
      * @param sessions        会话
@@ -88,13 +95,16 @@ public class TrialRunAppService {
      * @param obs             调用追踪。失败不影响本轮试跑
      * @param memory          窗口、记忆注入和显式记住
      * @param live            进行中一轮的内存快照，供刷新后的只读轮询
+     * @param vision          图片文字提取；无图时完全不参与
+     * @param titleGenerator  首轮结束后异步生成会话标题；失败不影响本轮
      */
     public TrialRunAppService(RunSessionRepository sessions, RunEventRepository events, AgentDefRepository agents,
                               TrialAccess access, TrialBindingLoader loader, ReActTrialExecutor react,
                               RouterTrialExecutor router, PlanTrialExecutor planRunner,
                               PlanPendingRegistry pendingPlans, TrialEventWriter writer, TrialFlight flight,
                               OperatorContext operatorContext, OperLogWriter operLogWriter, TrialObsHooks obs,
-                              TrialMemoryCoordinator memory, TrialLiveBuffer live) {
+                              TrialMemoryCoordinator memory, TrialLiveBuffer live, VisionOcrExecutor vision,
+                              SessionTitleGeneratorAppService titleGenerator) {
         this.sessions = sessions;
         this.events = events;
         this.agents = agents;
@@ -111,6 +121,8 @@ public class TrialRunAppService {
         this.obs = obs;
         this.memory = memory;
         this.live = live;
+        this.vision = vision;
+        this.titleGenerator = titleGenerator;
     }
 
     /**
@@ -122,7 +134,20 @@ public class TrialRunAppService {
      * @throws BizException 会话已取消，或上一轮还没结束。历史 SUCCESS 不挡。
      */
     public MessageResp send(Long sessionId, String content) {
-        return executeTurn(sessionId, content, null);
+        return executeTurn(sessionId, content, null, null);
+    }
+
+    /**
+     * 同步跑完一轮（可带图片）。
+     *
+     * @param sessionId 会话
+     * @param content   用户输入
+     * @param images    图片 data URI 或 http(s) 地址，可空
+     * @return 本轮新事件和助手预览
+     * @throws BizException 会话已取消、上一轮未结束，或图片缺少视觉模型
+     */
+    public MessageResp send(Long sessionId, String content, List<String> images) {
+        return executeTurn(sessionId, content, images, null);
     }
 
     /**
@@ -134,9 +159,23 @@ public class TrialRunAppService {
      * @param end       结束出口，不可空
      */
     public void stream(Long sessionId, String content, TrialProgress progress, TrialStreamEnd end) {
+        stream(sessionId, content, null, progress, end);
+    }
+
+    /**
+     * 边跑边推增量（可带图片）。
+     *
+     * @param sessionId 会话
+     * @param content   用户输入
+     * @param images    图片 data URI 或 http(s) 地址，可空
+     * @param progress  增量出口，不可空
+     * @param end       结束出口，不可空
+     */
+    public void stream(Long sessionId, String content, List<String> images,
+                       TrialProgress progress, TrialStreamEnd end) {
         try {
             progress.phase("planning");
-            end.done(executeTurn(sessionId, content, progress));
+            end.done(executeTurn(sessionId, content, images, progress));
         } catch (BizException ex) {
             end.fail(ex.getMessage());
         } catch (RuntimeException ex) {
@@ -241,13 +280,15 @@ public class TrialRunAppService {
                 .map(item -> new PlanView(item.planId(), PlanState.PENDING, item.steps()));
     }
 
-    private MessageResp executeTurn(Long sessionId, String content, TrialProgress progress) {
+    private MessageResp executeTurn(Long sessionId, String content, List<String> images, TrialProgress progress) {
         RunSession session = access.require(sessionId);
         // 仅取消（及已删除由 access 挡）不可再发。历史 SUCCESS 不挡；空闲不再写成 SUCCESS。
         TrialSendGate.assertSendable(session);
         if (!flight.tryStart(sessionId)) {
             throw new BizException(ErrorCode.BAD_REQUEST, "该会话正在执行");
         }
+        // 图片边界校验放在最外层：超量/超大属于请求本身不合法，应在建 trace、写事件之前就拒掉
+        List<String> accepted = VisionOcrTexts.normalize(images);
         List<RunEvent> written = new ArrayList<>();
         ObsTraceScope trace = null;
         try {
@@ -260,17 +301,40 @@ public class TrialRunAppService {
             if (agent.getStatus() == null || agent.getStatus() != AgentStatus.ENABLED) {
                 throw new TrialFailure("Agent 未启用");
             }
+            // 前置拦截：带图却没有 VISION 槽时，必须在写任何事件之前就用明确文案拒绝，
+            // 否则用户会看到一条莫名其妙的「模型调用失败」
+            String visionNote = null;
+            if (!accepted.isEmpty()) {
+                if (progress != null) {
+                    // OCR 是整轮里最慢的一段（视觉模型首字延迟高）：先推一个阶段，
+                    // 否则用户会盯着「任务规划中」不知道后端在做什么
+                    progress.phase("vision");
+                }
+                visionNote = ocrNote(agent, accepted, session);
+                if (progress != null) {
+                    // 识别结果立刻推给前端：用户能先确认「这张图提对了没有」，再看主模型怎么答
+                    progress.vision(visionNote);
+                }
+            }
             int seq = events.nextSeq(sessionId);
+            int userSeq = seq;
             written.add(writer.append(sessionId, seq++, EventType.USER, content, null, null));
+            // OCR 作为独立事件下发：时间线上要能看出「这张图提了哪些字」，
+            // 否则用户只看到模型答了些什么，无法判断是识别错了还是模型答错了
+            if (visionNote != null && !visionNote.isBlank()) {
+                written.add(writer.append(sessionId, seq++, EventType.VISION, visionNote, null, null));
+            }
             // 同一批增量同时镜像到内存快照：刷新页面后前端靠它继续看「边跑边写」，不必等整轮落库。
             // 只在有真实出站时镜像：progress 为 null 是同步 send 路径，collector 会走「结束时一次性补发」
             // 的分支，塞一个非空 progress 进去会改变那条路径的行为，属于不必要的副作用。
             TrialProgress mirrored = progress;
             if (progress != null) {
-                live.begin(sessionId, seq - 1, content);
+                // 快照从用户事件那一序号起，并把识别结果一并带上：
+                // 刷新后 SSE 已断，快照是唯一能看到「本轮依据的图片文字」的来源
+                live.begin(sessionId, userSeq, content, visionNote);
                 mirrored = TrialLiveBuffer.tee(progress, live.recorder(sessionId));
             }
-            TrialTurn turn = run(agent, content, session, written, seq, mirrored);
+            TrialTurn turn = run(agent, content, visionNote, session, written, seq, mirrored);
             obs.finishOk(trace);
             return succeed(session, turn, written, content);
         } catch (TrialFailure ex) {
@@ -289,13 +353,46 @@ public class TrialRunAppService {
         }
     }
 
-    private TrialTurn run(AgentDef agent, String content, RunSession session, List<RunEvent> written, int seq,
-                           TrialProgress progress) {
+    /**
+     * 多模态预处理：把图片交给 VISION 槽模型提文字，返回可插进用户侧的识别结果。
+     *
+     * <p>为什么在进入 ReAct 之前做：主链路（ReAct / Router / 计划执行）只认纯文本，
+     * OCR 收口在这里，三套编排都不必各自处理图片。
+     *
+     * <p>失败策略：VISION 槽缺失 → 抛业务异常直接拒绝（前端已置灰上传，这里是最后一道闸）；
+     * 识别本身失败 → 抛 {@link TrialFailure}，不带着空图继续让主模型盲答。
+     *
+     * @param agent   已启用的 Agent 定义
+     * @param images  已校验的图片列表
+     * @param session 当前会话
+     * @return 汇总后的 OCR 文本，永不为 null
+     * @throws TrialFailure 未绑定 VISION 槽，或识别失败
+     */
+    private String ocrNote(AgentDef agent, List<String> images, RunSession session) {
+        Long visionInstanceId = loader.requireVisionModel(agent.getId());
+        MeterScope scope = MeterScope.console(agent.getId(), visionInstanceId,
+                session.getId(), operatorContext.requireUserId());
+        // 视觉请求是阻塞的，本方法在请求线程上跑：整个试跑本来就是同步语义，这里不必再切线程
+        String text = vision.extract(images, visionInstanceId, scope);
+        if (text == null || text.isBlank()) {
+            throw new TrialFailure("未能从图片中提取到文字，请换一张更清晰的图片重试");
+        }
+        return text;
+    }
+
+    private TrialTurn run(AgentDef agent, String content, String ocrText, RunSession session, List<RunEvent> written,
+                          int seq, TrialProgress progress) {
         long userId = session.getUserId();
-        // 用户事件已经入库。这里追加窗口并在触顶时滚动摘要，再把摘要和短期记忆拼进本轮
+        // 用户事件已经入库。这里追加窗口并在触顶时滚动摘要，再把摘要和短期记忆拼进本轮。
+        // 注意：窗口里存的是用户原文 content，不是 OCR 结果——OCR 只在「本轮」有效，
+        // 存进窗口会让后续每轮都把上次的图片文字再喂一遍，既浪费 token 也容易串味。
         String modelUser = memory.prepareUser(session, content);
+        // 多模态：识别结果只拼到「送给模型的那一版」，用户事件与标题仍保持原文
+        String query = VisionOcrTexts.composeQuery(ocrText, content);
+        modelUser = VisionOcrTexts.applyToModelUser(modelUser, ocrText, content);
         if (AgentRunMode.ROUTER.name().equals(agent.getRunMode())) {
-            RouterTrialExecutor.RoutedTurn routed = router.execute(agent, content, modelUser, userId, session.getId(), progress);
+            // 路由判定也要看得到图片里的文字，否则「这张发票什么时候到期」会判不出意图
+            RouterTrialExecutor.RoutedTurn routed = router.execute(agent, query, modelUser, userId, session.getId(), progress);
             // 按子分段落库：决策块 + 每子「路由到」+ 该子 traces，禁止拼成单条时间线
             seq = appendRouterSegments(session.getId(), seq, routed, written);
             seq = appendNotices(session.getId(), seq, routed.notices(), written);
@@ -304,9 +401,9 @@ public class TrialRunAppService {
             return routed.turn();
         }
         if (AgentRunMode.PLAN_AND_EXECUTE.name().equals(agent.getRunMode())) {
-            return runPlan(agent, content, modelUser, session, written, seq, progress);
+            return runPlan(agent, query, modelUser, session, written, seq, progress);
         }
-        TrialPlan plan = loader.loadReact(agent, content);
+        TrialPlan plan = loader.loadReact(agent, query);
         // 记忆段与「本轮已注入的长期记忆」一次取回，工具补参与提示词用同一份依据
         TrialMemoryCoordinator.Augmented augmented = memory.augmentSystemWithFacts(session, plan.getSystemPrompt());
         plan.setSystemPrompt(augmented.systemPrompt());
@@ -516,6 +613,38 @@ public class TrialRunAppService {
                 written.add(writer.append(sessionId, seq++, EventType.TOOL, line, body, null, null));
             }
         }
+        seq = appendFiles(sessionId, seq, turn, written);
+        return seq;
+    }
+
+    /**
+     * 把本轮生成的文件落成 FILE 事件。
+     *
+     * <p>为什么必须落库：产物卡片靠 SSE 实时出现，但事件一旦不落库，
+     * 刷新页面或换设备后这张卡片就消失了——用户在历史会话里找不到自己刚生成的文件。
+     * 正文用结构化 JSON，与 SSE 帧、内存快照共用同一字段形状，前端一套解析即可。
+     *
+     * <p>去重口径与前端一致：同名文件只保留最后一次生成的那条，
+     * 避免同一轮反复写同一路径时时间线上刷出一排重复卡片。
+     *
+     * @param sessionId 会话主键
+     * @param seq       下一条事件序号
+     * @param turn      本轮结果
+     * @param written   本轮已写事件
+     * @return 推进后的下一条序号
+     */
+    private int appendFiles(Long sessionId, int seq, TrialTurn turn, List<RunEvent> written) {
+        if (turn.getFiles() == null || turn.getFiles().isEmpty()) {
+            return seq;
+        }
+        for (GeneratedFile file : turn.getFiles()) {
+            if (file == null || file.fileName() == null || file.fileName().isBlank()) {
+                continue;
+            }
+            String summary = file.fileName() + "（" + file.humanSize() + "）";
+            written.add(writer.append(sessionId, seq++, EventType.FILE, summary,
+                    GeneratedFileMarker.payload(file.fileName(), file.size()), null, null));
+        }
         return seq;
     }
 
@@ -538,6 +667,8 @@ public class TrialRunAppService {
         recordTurn(session, userText, "", advance);
         operLogWriter.write("runtime", "run", "agent_run_session", String.valueOf(session.getId()),
                 "试跑会话 " + session.getId() + " 本轮完成");
+        // 首轮问答都已落库，交给后台按问答内容起个短标题；成功与否都不影响本轮响应
+        maybeGenerateTitle(session, userText, turn);
         // 待批准：本轮没有助手正文，预览给一句可读说明，不把空串写进左栏
         String preview = turn.isAssistantSuppressed()
                 ? TrialTexts.preview("已生成计划，等待批准后执行")
@@ -546,6 +677,43 @@ public class TrialRunAppService {
         resp.setStatus(RunStatus.SUCCESS.name());
         resp.setPlanPending(turn.isAssistantSuppressed());
         return resp;
+    }
+
+    /**
+     * 首轮结束后触发异步标题生成。
+     *
+     * <p>为什么只在 message_count == 1 时触发：标题概括的是会话主题，首轮就定了；
+     * 后续轮次再调模型纯属浪费 token。批准计划那条路径的 advance=false、轮次仍是 1，
+     * 因此首轮「计划待批准 → 批准执行完」也能补上标题。
+     *
+     * <p>为什么这里不判标题是否已存在：判定要在异步线程读最新库值才准，
+     * 由 {@link SessionTitleGeneratorAppService} 自己做；这里只做「是否首轮」这一层最省事的过滤。
+     *
+     * @param session  本轮会话（轮次已累加）
+     * @param userText 用户这一轮原文
+     * @param turn     本轮结果；助手正文为空（待批准）时不触发
+     */
+    private void maybeGenerateTitle(RunSession session, String userText, TrialTurn turn) {
+        if (turn == null || turn.isAssistantSuppressed()) {
+            return;
+        }
+        String answer = turn.getAssistantText();
+        if (answer == null || answer.isBlank()) {
+            return;
+        }
+        if (safeCount(session) != 1) {
+            return;
+        }
+        if (session.getAgentId() == null) {
+            return;
+        }
+        try {
+            titleGenerator.asyncGenerateTitle(session.getId(), session.getAgentId(), userText, answer);
+        } catch (RuntimeException ex) {
+            // 线程池拒绝等提交期异常：标题可以没有，本轮响应必须正常返回
+            log.warn("提交会话标题生成任务失败 sessionId={} type={}",
+                    session.getId(), ex.getClass().getSimpleName());
+        }
     }
 
     private MessageResp fail(RunSession session, List<RunEvent> written, String reason, String userText) {
@@ -596,7 +764,14 @@ public class TrialRunAppService {
     }
 
     /**
-     * 标题只在还没有预览时用用户原文生成。之后发送不再覆盖，方便左栏改名。
+     * 只在还没有预览时用用户原文生成 last_msg_preview。
+     *
+     * <p>严禁在这里写 session_title：首轮开始时系统只落一条副标题预览，
+     * 真正的主标题由 {@link SessionTitleGeneratorAppService} 在本轮结束后异步生成，
+     * 或由用户手动改名产生。若这里顺手写了标题，异步任务会因为「已有值」而永远跳过。
+     *
+     * @param session  会话
+     * @param userText 用户原文
      */
     private void ensureTitle(RunSession session, String userText) {
         if (session.getLastMsgPreview() == null || session.getLastMsgPreview().isBlank()) {

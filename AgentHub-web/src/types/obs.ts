@@ -10,6 +10,8 @@ export interface ObsSession {
   /** 会话表仍是 started_at，左栏保持旧字段名 */
   startTime: string | null
   endTime: string | null
+  /** 会话标题（自动生成或手改）。为空时左栏退回展示 lastMsgPreview */
+  sessionTitle: string | null
   lastMsgPreview: string | null
 }
 

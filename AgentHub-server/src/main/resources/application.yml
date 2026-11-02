@@ -64,6 +64,12 @@ springdoc:
     path: /swagger-ui.html
 
 agenthub:
+  workspace:
+    # 会话级文件工具（workspaceWriteFile / ReadFile / ListFiles）的落盘根目录，每个会话在其下建一级子目录。
+    # 默认 ./workspace-test：相对路径按进程工作目录解析（项目内），本地开发可直接查看落盘文件，该目录已 gitignore。
+    # 显式留空（AGENTHUB_WORKSPACE_ROOT_PATH=）则回落到系统临时目录下的 agenthub_workspace，随系统清理。
+    # 容器/生产用 AGENTHUB_WORKSPACE_ROOT_PATH 指向挂载的数据卷（见 docker-compose.yml），并留足配额。
+    root-path: ${AGENTHUB_WORKSPACE_ROOT_PATH:./workspace-test}
   crypto:
     # 当前主密钥：32 字节，只从环境变量或仓库外 config/ 注入；为空启动即失败，禁止写真实密钥。
     # 新写入一律用它加密，密文带 v2 前缀与密钥指纹。
@@ -115,6 +121,9 @@ agenthub:
       content-limit-chars: 32768
       # 历史会话条数。接口再按当前用户 + agentId 裁剪，按 started_at 倒序
       history-limit: 20
+      # 首轮对话结束后是否异步生成会话标题（≤10 汉字）。关掉则左栏只显示首问预览；
+      # 生成任务跑在 common 的 lightTaskExecutor 上，失败只记日志，不影响试跑。
+      auto-title-enabled: ${AGENTHUB_AUTO_TITLE_ENABLED:true}
     # 工具必填参数闸门：缺必填不得脑补。补参只看本轮提问、本会话上下文、本轮已注入长期记忆
     tool-args:
       # 默认硬拦。仅排障时临时关闭，关闭后回到「只靠提示词」的旧行为

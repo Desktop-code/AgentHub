@@ -166,6 +166,7 @@ public class TraceQueryAppService {
         // 库列已是 start_time；域/左栏 JSON 仍保持 startTime
         resp.setStartTime(session.getStartTime());
         resp.setEndTime(session.getEndTime());
+        resp.setSessionTitle(session.getSessionTitle());
         resp.setLastMsgPreview(session.getLastMsgPreview());
         return resp;
     }

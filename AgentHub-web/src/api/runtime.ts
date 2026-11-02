@@ -12,9 +12,17 @@ import type {
   TrialSession
 } from '@/types/runtime'
 
-/** 启用中的 Agent，给下拉用。 */
+/** 启用中的 Agent，给下拉用。带 visionEnabled 供上传按钮联动。 */
 export function listTrialAgents() {
   return request.get<Result<TrialAgent[]>>('/api/runtime/trial/agents')
+}
+
+/**
+ * 单个 Agent 的试跑能力。抽屉按 agentId 直接打开时用它判断上传按钮是否可用。
+ * @param agentId Agent 主键
+ */
+export function getTrialCapability(agentId: number) {
+  return request.get<Result<TrialAgent>>(`/api/runtime/trial/agents/${agentId}/capability`)
 }
 
 /** 历史会话。服务端只返回当前用户在该 Agent 下的记录。 */
@@ -47,13 +55,13 @@ export function createTrialSession(agentId: number) {
 }
 
 /** 同步跑一轮。超时略大于平台墙钟硬顶（300s）。页面发送走 SSE，这条留给需要整包结果的调用。 */
-export function sendTrialMessage(id: number, content: string) {
-  return request.post<Result<TrialMessageResult>>(`/api/runtime/trial/sessions/${id}/messages`, { content }, {
+export function sendTrialMessage(id: number, content: string, images?: string[]) {
+  return request.post<Result<TrialMessageResult>>(`/api/runtime/trial/sessions/${id}/messages`, { content, images }, {
     timeout: 310000
   })
 }
 
-/** 改左栏标题。服务端写入 last_msg_preview。 */
+/** 改左栏标题。服务端写入 session_title 并把来源标为 MANUAL（此后自动生成不再覆盖）。 */
 export function renameTrialSession(id: number, title: string) {
   return request.post<Result<TrialSession>>(`/api/runtime/trial/sessions/${id}/title`, { title })
 }
@@ -104,6 +112,17 @@ export interface TrialStepChunk {
   line?: string
 }
 
+/**
+ * 文件生成 SSE 帧。
+ * fileName 含子目录时形如 notes/report.md；downloadUrl 由后端拼好（已编码）。
+ */
+export interface TrialFileChunk {
+  fileName: string
+  /** 字节数；< 0 表示体积未知 */
+  size: number
+  downloadUrl: string
+}
+
 /** SSE 回调。正文按事件追加，不在这里编造思考。 */
 export interface TrialStreamHandlers {
   onPhase?: (phase: string) => void
@@ -112,10 +131,14 @@ export interface TrialStreamHandlers {
   onReasoning?: (text: string) => void
   onTool?: (tool: TrialToolChunk) => void
   onAssistant?: (text: string) => void
+  /** 图片文字提取结果，整段下发一次；进时间线的「图片文字」块 */
+  onVision?: (text: string) => void
   /** 计划生成或状态推进（结构化） */
   onPlan?: (plan: TrialPlanChunk) => void
   /** 计划单步进度 */
   onStep?: (step: TrialStepChunk) => void
+  /** Agent 在工作区生成了文件，可下载 */
+  onFileGenerated?: (file: TrialFileChunk) => void
   onDone?: (payload: TrialDoneChunk) => void
   onError?: (message: string) => void
 }
@@ -126,12 +149,14 @@ export interface TrialStreamHandlers {
  * @param content 用户输入
  * @param handlers 增量
  * @param signal 关闭抽屉时可中止读取
+ * @param images 图片 data URI 数组，可空。与 content 一起提交；后端先做 OCR 再喂主模型
  */
 export async function streamTrialMessage(
   id: number,
   content: string,
   handlers: TrialStreamHandlers,
-  signal?: AbortSignal
+  signal?: AbortSignal,
+  images?: string[]
 ) {
   const token = localStorage.getItem(TOKEN_KEY)
   const base = import.meta.env.VITE_API_BASE || ''
@@ -142,7 +167,8 @@ export async function streamTrialMessage(
       Accept: 'text/event-stream',
       ...(token ? { Authorization: `Bearer ${token}` } : {})
     },
-    body: JSON.stringify({ content }),
+    // images 不传时不带这个键：后端据此完全不走 OCR 分支
+    body: JSON.stringify(images && images.length ? { content, images } : { content }),
     signal
   })
   if (response.status === 401) {
@@ -218,6 +244,9 @@ function dispatchFrame(frame: string, handlers: TrialStreamHandlers) {
     handlers.onReasoning?.(data)
   } else if (event === 'assistant' && typeof data === 'string') {
     handlers.onAssistant?.(data)
+  } else if (event === 'vision' && typeof data === 'string') {
+    // 识别结果是整段文本（非增量）：由调用方整块插入时间线
+    handlers.onVision?.(data)
   } else if (event === 'tool' && data && typeof data === 'object') {
     const row = data as TrialToolChunk
     handlers.onTool?.(row)
@@ -225,6 +254,9 @@ function dispatchFrame(frame: string, handlers: TrialStreamHandlers) {
     handlers.onPlan?.(data as TrialPlanChunk)
   } else if (event === 'step' && data && typeof data === 'object') {
     handlers.onStep?.(data as TrialStepChunk)
+  } else if (event === 'file_generated' && data && typeof data === 'object') {
+    // 产物卡片：fileName / size / downloadUrl 都由后端给齐，前端不再拼地址
+    handlers.onFileGenerated?.(data as TrialFileChunk)
   } else if (event === 'done' && data && typeof data === 'object') {
     handlers.onDone?.(data as TrialDoneChunk)
   } else if (event === 'error') {
@@ -262,4 +294,107 @@ export function getPendingTrialPlan(id: number) {
 /** 取消尚未完成的会话。执行中的一轮不会被打断。 */
 export function cancelTrialSession(id: number) {
   return request.post<Result<TrialSession>>(`/api/runtime/trial/sessions/${id}/cancel`)
+}
+
+/**
+ * 下载 Agent 产出的工作区文件。
+ *
+ * <p>为什么不用 `window.open(downloadUrl)`：本项目 Sa-Token 配置是
+ * `is-read-header: true` / `is-read-cookie: false`，下载接口只认 `Authorization` 头。
+ * `window.open` 与新开标签的导航都不会带这个头，必然被拦成 401。
+ * 因此这里用 fetch 带上 Bearer，取回 blob 后再用临时 `<a download>` 触发保存。
+ *
+ * <p>文件名优先用服务端 Content-Disposition 里给出的，取不到时退回调用方传入的名字，
+ * 保证中文文件名不会退化成一段百分号编码。
+ *
+ * @param downloadUrl 后端在 file_generated 帧里给出的地址（已含编码后的 fileName）
+ * @param fallbackName 兜底文件名，通常是卡片上展示的 fileName
+ * @throws Error 未登录、无权限、文件不存在或网络异常
+ */
+export async function downloadWorkspaceFile(downloadUrl: string, fallbackName?: string) {
+  const token = localStorage.getItem(TOKEN_KEY)
+  const base = import.meta.env.VITE_API_BASE || ''
+  // 后端给的是以 /api 开头的绝对路径，拼上 baseURL 才能命中 Vite 代理或生产网关
+  const url = /^https?:\/\//i.test(downloadUrl) ? downloadUrl : `${base}${downloadUrl}`
+  const response = await fetch(url, {
+    method: 'GET',
+    headers: token ? { Authorization: `Bearer ${token}` } : {},
+    // 下载可能跨域代理，带上凭据与后端 CORS 白名单保持一致
+    credentials: 'include'
+  })
+  if (response.status === 401) {
+    localStorage.removeItem(TOKEN_KEY)
+    if (!location.pathname.endsWith('/login')) {
+      location.href = '/login'
+    }
+    throw new Error('未登录')
+  }
+  if (!response.ok) {
+    let message = '下载失败'
+    try {
+      // 失败时后端返回的是标准 Result JSON，取出 msg 比抛裸状态码有用
+      const body = (await response.json()) as { msg?: string }
+      if (body?.msg) {
+        message = body.msg
+      }
+    } catch {
+      // 非 JSON（如网关直接返回 HTML）：保留默认文案
+    }
+    throw new Error(message)
+  }
+  const blob = await response.blob()
+  // 服务端 Content-Disposition 里的文件名更权威（已按 RFC 5987 编码，需 unquote）
+  const name = fileNameFromDisposition(response.headers.get('Content-Disposition')) || fallbackName || 'download'
+  saveBlob(blob, name)
+}
+
+/**
+ * 从 Content-Disposition 解析文件名。
+ * 优先 `filename*=UTF-8''...`（RFC 5987，中文靠它），其次 `filename="..."`。
+ *
+ * @param header 响应头值，可空
+ * @return 解码后的文件名；解析不到时返回空串
+ */
+function fileNameFromDisposition(header: string | null): string {
+  if (!header) {
+    return ''
+  }
+  const extended = /filename\*=UTF-8''([^;]+)/i.exec(header)
+  if (extended?.[1]) {
+    try {
+      return decodeURIComponent(extended[1].trim())
+    } catch {
+      // 编码异常时退回普通 filename
+    }
+  }
+  const plain = /filename="?([^";]+)"?/i.exec(header)
+  if (plain?.[1]) {
+    const raw = plain[1].trim()
+    try {
+      return decodeURIComponent(raw)
+    } catch {
+      return raw
+    }
+  }
+  return ''
+}
+
+/**
+ * 用临时 `<a download>` 保存 blob。
+ * 必须 append 到文档再点击：Firefox 对游离节点不触发下载。
+ *
+ * @param blob 文件内容
+ * @param fileName 保存用的文件名
+ */
+function saveBlob(blob: Blob, fileName: string) {
+  const href = URL.createObjectURL(blob)
+  const anchor = document.createElement('a')
+  anchor.href = href
+  anchor.download = fileName
+  anchor.style.display = 'none'
+  document.body.appendChild(anchor)
+  anchor.click()
+  document.body.removeChild(anchor)
+  // 立即 revoke 会让部分浏览器的下载被取消，留一拍再释放
+  window.setTimeout(() => URL.revokeObjectURL(href), 1000)
 }

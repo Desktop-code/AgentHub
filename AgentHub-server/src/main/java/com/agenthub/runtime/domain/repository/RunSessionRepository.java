@@ -50,13 +50,29 @@ public interface RunSessionRepository {
     void updateOutcome(RunSession session, Long operatorId);
 
     /**
-     * 只改会话标题。标题存在 last_msg_preview，不另加列。
+     * 只改左栏标题列（session_title）。用户手动改名走这里，并把 title_source 置 MANUAL。
      *
      * @param id         会话主键
      * @param title      已截断的标题
+     * @param titleSource {@link TitleSource} 名称，AUTO / MANUAL
      * @param operatorId 更新人
      */
-    void updateTitle(Long id, String title, Long operatorId);
+    void updateTitle(Long id, String title, String titleSource, Long operatorId);
+
+    /**
+     * 写入异步生成的标题，并返回是否真的写入成功。
+     *
+     * <p>为什么带条件更新而不是先查后写：标题生成在异步线程里，从「查库判定为空」到
+     * 「写回标题」之间用户可能已经手改，也可能并发跑了两条生成任务。用一条带
+     * {@code title_source <> 'MANUAL'} 与 {@code session_title 为空} 条件的 UPDATE 收口，
+     * 数据库层面就能保证「MANUAL 不被覆盖」「同一行只写一次」。
+     *
+     * @param id      会话主键
+     * @param title   已清洗并截断的标题
+     * @param operatorId 更新人；异步任务用会话所属用户，避免写成 null
+     * @return true 表示成功写入；false 表示已有标题或已被手改，本次放弃
+     */
+    boolean updateAutoTitleIfAbsent(Long id, String title, Long operatorId);
 
     /**
      * 清空消息后的会话：状态回到 RUNNING，轮次和错误摘要清掉，结束时间置空。标题保留。
