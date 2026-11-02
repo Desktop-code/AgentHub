@@ -199,6 +199,11 @@ public class TraceRecorderAppService implements TraceRecorder {
     /**
      * ROUTE 可为根；AGENT 在纯 ReAct 时也可为根；其余类型必须有父。
      */
+    /**
+     * ROUTE / AGENT / VISION 可为根；其余类型必须有父。
+     * VISION（图片文字提取）发生在任何 Agent 步骤之前，天然挂在 trace 根下，
+     * 因此不强制父级，否则每轮带图试跑都会刷一条「span parent 缺失」告警。
+     */
     private boolean needsParent(SpanType type) {
         return type == SpanType.LLM || type == SpanType.TOOL || type == SpanType.RETRIEVE;
     }
@@ -227,6 +232,11 @@ public class TraceRecorderAppService implements TraceRecorder {
                 if (primaryName == null && span.getModelName() != null && !span.getModelName().isBlank()) {
                     primaryName = span.getModelName();
                 }
+            } else if (span.getSpanType() == SpanType.VISION) {
+                // 视觉预处理也是真实出站：token 计入本提问合计，但不进 llm 步数，
+                // 否则「轮数」会把开场那次 OCR 也算成一轮模型对话
+                prompt += nonNeg(span.getTokenPrompt());
+                completion += nonNeg(span.getTokenCompletion());
             } else if (span.getSpanType() == SpanType.TOOL) {
                 tool++;
             } else if (span.getSpanType() == SpanType.RETRIEVE) {

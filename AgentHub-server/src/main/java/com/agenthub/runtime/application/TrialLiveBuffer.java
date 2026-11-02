@@ -2,8 +2,10 @@ package com.agenthub.runtime.application;
 
 import com.agenthub.runtime.api.dto.EventResp;
 import com.agenthub.runtime.domain.model.EventType;
+import com.agenthub.runtime.domain.model.GeneratedFile;
 import com.agenthub.runtime.domain.model.PlanView;
 import com.agenthub.runtime.domain.model.StepView;
+import com.agenthub.runtime.domain.service.GeneratedFileMarker;
 import com.agenthub.runtime.domain.service.PlanJson;
 import com.agenthub.runtime.domain.service.TrialProgress;
 import com.agenthub.runtime.domain.service.TrialTexts;
@@ -46,8 +48,28 @@ public class TrialLiveBuffer {
      * @param userText  用户输入
      */
     public void begin(Long sessionId, int seq, String userText) {
+        begin(sessionId, seq, userText, null);
+    }
+
+    /**
+     * 开始一轮：登记会话、写入用户事件，并可选追加一条图片文字提取结果。
+     *
+     * <p>为什么识别结果要进快照：SSE 已在整轮开始前就把它推出去了，
+     * 若快照里没有这一条，刷新页面后同一轮会「少一段」——用户看到主模型答了些什么，
+     * 却看不到它依据的图片文字。
+     *
+     * @param sessionId 会话主键
+     * @param seq       本轮用户事件的序号
+     * @param userText  用户输入
+     * @param visionNote 图片文字提取结果，可空
+     */
+    public void begin(Long sessionId, int seq, String userText, String visionNote) {
         LiveTurn turn = new LiveTurn(sessionId);
+        turn.nextSeq = seq;
         turn.append(EventType.USER, TrialTexts.content(userText, LIVE_TEXT_LIMIT), seq);
+        if (visionNote != null && !visionNote.isBlank()) {
+            turn.append(EventType.VISION, TrialTexts.content(visionNote, LIVE_TEXT_LIMIT), null);
+        }
         turns.put(sessionId, turn);
     }
 
@@ -155,6 +177,12 @@ public class TrialLiveBuffer {
             }
 
             @Override
+            public void vision(String text) {
+                recorder.vision(text);
+                delegate.vision(text);
+            }
+
+            @Override
             public void plan(PlanView plan) {
                 recorder.plan(plan);
                 delegate.plan(plan);
@@ -164,6 +192,12 @@ public class TrialLiveBuffer {
             public void step(StepView step) {
                 recorder.step(step);
                 delegate.step(step);
+            }
+
+            @Override
+            public void file(GeneratedFile file) {
+                recorder.file(file);
+                delegate.file(file);
             }
         };
     }
@@ -284,6 +318,12 @@ public class TrialLiveBuffer {
             turn.appendDelta(EventType.ASSISTANT, delta);
         }
 
+        @Override
+        public void vision(String text) {
+            // 识别结果是整段素材而不是增量：直接追加一条完整事件，避免与相邻的 reasoning 续写混在一起
+            turn.append(EventType.VISION, TrialTexts.content(text, LIVE_TEXT_LIMIT), null);
+        }
+
         /**
          * 计划与步骤的正文是 JSON、摘要是人话，故走「摘要与正文分开」的那条追加路径，
          * 否则 JSON 会被当成摘要截成 500 字。
@@ -305,6 +345,21 @@ public class TrialLiveBuffer {
             }
             turn.append(EventType.STEP, TrialTexts.summary(step.displayLine()),
                     TrialTexts.content(PlanJson.stepPayload(step), LIVE_TEXT_LIMIT), null);
+        }
+
+        /**
+         * 文件产物。正文与 SSE 帧、落库事件共用 {@link GeneratedFileMarker#payload} 的字段形状，
+         * 前端一套解析即可覆盖「实时推送 / 内存快照 / 落库回放」三条来源。
+         */
+        @Override
+        public void file(GeneratedFile file) {
+            if (file == null || file.fileName() == null || file.fileName().isBlank()) {
+                return;
+            }
+            // 摘要用「文件名 + 可读体积」：左栏/时间线折叠时也能看出生成了哪个文件
+            String summary = file.fileName() + "（" + file.humanSize() + "）";
+            turn.append(EventType.FILE, TrialTexts.summary(summary),
+                    GeneratedFileMarker.payload(file.fileName(), file.size()), null);
         }
     }
 }

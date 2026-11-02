@@ -1,5 +1,6 @@
 package com.agenthub.runtime.domain.service;
 
+import com.agenthub.runtime.domain.model.GeneratedFile;
 import com.agenthub.runtime.domain.model.PlanView;
 import com.agenthub.runtime.domain.model.StepView;
 
@@ -45,6 +46,18 @@ public interface TrialProgress {
     void assistant(String delta);
 
     /**
+     * 图片文字提取结果。在主模型开跑之前下发一次，整段文本而非增量。
+     *
+     * <p>为什么要单独一个事件而不是塞进 reasoning：识别结果不是模型的思考，
+     * 它是本轮的事实素材；混进思考块会让用户误以为是主模型自己「读」出来的。
+     *
+     * @param text 逐图汇总的识别文本，已脱敏
+     */
+    default void vision(String text) {
+        // 不启用图片能力的实现可以不关心
+    }
+
+    /**
      * 计划生成或状态变化。前端据此渲染结构化的步骤列表，而不是读一段纯文本。
      * 同一 planId 的多次回调表示状态推进，应原位更新同一张计划卡。
      *
@@ -61,5 +74,18 @@ public interface TrialProgress {
      */
     default void step(StepView step) {
         // REACT / ROUTER 不产生计划步骤，默认忽略
+    }
+
+    /**
+     * 本轮有文件落进工作区，可以下载了。
+     *
+     * <p>为什么要单独一个回调而不是靠 {@link #tool(String, String, String, boolean)} 的正文：
+     * 工具正文在出站前会被脱敏与截断，产物元数据必须原样到达前端；
+     * 而且它要落成独立事件，刷新后才能回放出下载卡片。
+     *
+     * @param file 产物名与体积；同名文件重复生成时由前端按文件名去重覆盖
+     */
+    default void file(GeneratedFile file) {
+        // 不产生文件的实现（大多数工具）默认忽略
     }
 }

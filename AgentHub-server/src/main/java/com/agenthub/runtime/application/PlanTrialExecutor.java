@@ -11,6 +11,7 @@ import com.agenthub.obs.domain.model.SpanClose;
 import com.agenthub.obs.domain.model.SpanType;
 import com.agenthub.obs.domain.service.ObsAttrs;
 import com.agenthub.runtime.domain.model.EffectiveLimits;
+import com.agenthub.runtime.domain.model.GeneratedFile;
 import com.agenthub.runtime.domain.model.MeterScope;
 import com.agenthub.runtime.domain.model.PendingPlan;
 import com.agenthub.runtime.domain.model.PlanState;
@@ -388,8 +389,9 @@ public class PlanTrialExecutor {
         }
         merged.setPromptTokens(sum(merged.getPromptTokens(), one.getPromptTokens()));
         merged.setCompletionTokens(sum(merged.getCompletionTokens(), one.getCompletionTokens()));
-        merged.setToolResultMaxChars(Math.max(merged.getToolResultMaxChars(), one.getToolResultMaxChars()));
-        if (one.getTraces() != null) {
+            merged.setToolResultMaxChars(Math.max(merged.getToolResultMaxChars(), one.getToolResultMaxChars()));
+            merged.mergeFiles(one.getFiles());
+            if (one.getTraces() != null) {
             for (TrialTrace trace : one.getTraces()) {
                 merged.getTraces().add(trace);
             }
@@ -461,6 +463,15 @@ public class PlanTrialExecutor {
             @Override
             public void step(StepView step) {
                 progress.step(step);
+            }
+
+            /**
+             * 产物必须透传：静音的是单步助手正文，不是文件生成。
+             * 漏掉这个覆写会让计划执行模式下的下载卡片凭空消失（默认实现是空操作）。
+             */
+            @Override
+            public void file(GeneratedFile file) {
+                progress.file(file);
             }
         };
     }

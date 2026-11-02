@@ -10,6 +10,7 @@ import com.fasterxml.jackson.databind.node.ArrayNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 
 import java.util.List;
+import java.util.Locale;
 
 /**
  * Anthropic Messages 请求体映射器。所属域：runtime（模型出站 ACL 的实现细节）。
@@ -24,6 +25,12 @@ final class AnthropicRequestMapper {
      * 取 1024 是为了「够用且不会因余额不足被拒」，业务传了就以业务为准。
      */
     private static final int DEFAULT_MAX_TOKENS = 1024;
+
+    /** base64 图片 data URI 的前缀，用于区分「内联图」与「URL 图」 */
+    private static final String BASE64_DATA_URI_PREFIX = "data:";
+
+    /** data URI 里 base64 段的分隔标记 */
+    private static final String BASE64_MARKER = ";base64,";
 
     private final ObjectMapper json;
 
@@ -143,28 +150,83 @@ final class AnthropicRequestMapper {
         }
 
         boolean hasToolCalls = message.getToolCalls() != null && !message.getToolCalls().isEmpty();
-        if (!hasToolCalls) {
+        if (!hasToolCalls && !message.hasImages()) {
             // 纯文本消息：content 直接用字符串，比单元素 block 数组更省 token
             node.put("content", message.getContent() == null ? "" : message.getContent());
             return node;
         }
 
-        // 有工具调用的 assistant 消息：content 必须是 block 数组（text + tool_use）
+        // 有工具调用或带图片的 assistant/user 消息：content 必须是 block 数组
         ArrayNode blocks = node.putArray("content");
+        // 图片块排在文字之前：Anthropic 对「先图后文」的问答效果更稳，且与官方示例一致
+        appendImageBlocks(blocks, message);
         if (message.getContent() != null && !message.getContent().isBlank()) {
             ObjectNode textBlock = blocks.addObject();
             textBlock.put("type", "text");
             textBlock.put("text", message.getContent());
         }
-        for (UnifiedToolCall call : message.getToolCalls()) {
-            ObjectNode toolBlock = blocks.addObject();
-            toolBlock.put("type", "tool_use");
-            toolBlock.put("id", call.getId());
-            toolBlock.put("name", call.getName());
-            // tool_use 的 input 必须是对象而不是字符串：这里把统一层的原始 JSON 字符串解析回对象
-            toolBlock.set("input", readArguments(call.getArguments()));
+        if (message.getToolCalls() != null) {
+            for (UnifiedToolCall call : message.getToolCalls()) {
+                ObjectNode toolBlock = blocks.addObject();
+                toolBlock.put("type", "tool_use");
+                toolBlock.put("id", call.getId());
+                toolBlock.put("name", call.getName());
+                // tool_use 的 input 必须是对象而不是字符串：这里把统一层的原始 JSON 字符串解析回对象
+                toolBlock.set("input", readArguments(call.getArguments()));
+            }
+        }
+        // 带图但整条消息没有任何 block（无正文、无工具）时补一段空文本，Anthropic 不接受空 content 数组
+        if (blocks.isEmpty()) {
+            ObjectNode empty = blocks.addObject();
+            empty.put("type", "text");
+            empty.put("text", "");
         }
         return node;
+    }
+
+    /**
+     * 把统一层的图片列表写成 Anthropic image block。两族的差别在于 source 结构：
+     * <ul>
+     *   <li>{@code data:image/png;base64,xxx} → {@code {"type":"base64","media_type":"image/png","data":"xxx"}}</li>
+     *   <li>http(s) 地址 → {@code {"type":"url","url":"https://…"}}</li>
+     * </ul>
+     * 无法识别的形态直接跳过：宁可少一张图，也不要让整条消息因一张坏图被上游 400。
+     *
+     * @param blocks  目标 block 数组
+     * @param message 统一消息
+     */
+    private void appendImageBlocks(ArrayNode blocks, UnifiedMessage message) {
+        if (!message.hasImages()) {
+            return;
+        }
+        for (String imageUrl : message.getImageUrls()) {
+            if (imageUrl == null || imageUrl.isBlank()) {
+                continue;
+            }
+            String value = imageUrl.trim();
+            String lower = value.toLowerCase(Locale.ROOT);
+            ObjectNode imageBlock = blocks.addObject();
+            imageBlock.put("type", "image");
+            ObjectNode source = imageBlock.putObject("source");
+            if (lower.startsWith(BASE64_DATA_URI_PREFIX)) {
+                // data:{mime};base64,{data}：两个分隔符缺一不可，缺了就跳过而不是发半截
+                int mediaTypeStart = BASE64_DATA_URI_PREFIX.length();
+                int separator = lower.indexOf(BASE64_MARKER, mediaTypeStart);
+                if (separator <= mediaTypeStart) {
+                    blocks.remove(blocks.size() - 1);
+                    continue;
+                }
+                source.put("type", "base64");
+                source.put("media_type", value.substring(mediaTypeStart, separator));
+                source.put("data", value.substring(separator + BASE64_MARKER.length()));
+            } else if (lower.startsWith("http://") || lower.startsWith("https://")) {
+                source.put("type", "url");
+                source.put("url", value);
+            } else {
+                // 其它形态（相对路径、裸 base64 等）Anthropic 无法读取，跳过
+                blocks.remove(blocks.size() - 1);
+            }
+        }
     }
 
     /**

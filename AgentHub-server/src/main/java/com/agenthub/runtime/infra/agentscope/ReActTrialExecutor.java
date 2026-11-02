@@ -1,8 +1,7 @@
 package com.agenthub.runtime.infra.agentscope;
 
 import com.agenthub.rag.application.RagToolContext;
-import com.agenthub.runtime.domain.model.EffectiveLimits;import com.agenthub.runtime.domain.model.MemoryFact;
-import com.agenthub.runtime.domain.model.MeterScope;
+import com.agenthub.runtime.domain.model.EffectiveLimits;import com.agenthub.runtime.domain.model.MemoryFact;import com.agenthub.runtime.domain.model.MeterScope;
 import com.agenthub.runtime.domain.model.TrialPlan;
 import com.agenthub.runtime.domain.model.TrialTurn;
 import com.agenthub.runtime.domain.service.FactKeyCanonicalizer;
@@ -153,6 +152,11 @@ public class ReActTrialExecutor {
         // 必填参数闸门：被拦下的调用不执行、不占工具配额，也不产生任何出站
         toolkit = ToolkitRequiredArgs.wrap(toolkit, evidenceOf(plan, userText), rules(), factKeys::canonical,
                 new RequiredArgBlocks(), requiredArgProperties.isEnabled());
+        // 产物标记拦截：必须在交给引擎之前、且在配额/闸门之外，
+        // 这样「哪个工具写了文件」都能被看见，标记也从模型上下文里被物理剔除。
+        // 同一个 sink 既实时推给前端，也收集起来供整轮结束后落成 FILE 事件（刷新后回放要用）。
+        GeneratedFileSink generated = new GeneratedFileSink(progress);
+        toolkit = ToolkitFileMarker.wrap(toolkit, generated);
         // 最外层重绑 RagToolContext：ToolExecutor 在 boundedElastic 上跑工具，主线程 ThreadLocal 不可见
         toolkit = ToolkitRagContext.wrap(toolkit, plan.getAgentId());
         Model model = new LimitingModel(
@@ -195,6 +199,8 @@ public class ReActTrialExecutor {
                 throw new TrialFailure("模型没有返回结果");
             }
             TrialTurn turn = collector.finish();
+            // 产物随本轮结果带走：调用方据此落 FILE 事件，刷新后仍能回放出下载卡片
+            turn.setFiles(generated.snapshot());
             budget.assertRoundsOk();
             // 文本假 tool_call 且无真工具结果：失败收束，禁止半截当成功
             TextToolCallGuard.assertNoOrphanTextToolCall(turn);

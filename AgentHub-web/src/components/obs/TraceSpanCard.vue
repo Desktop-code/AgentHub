@@ -183,6 +183,7 @@ const typeLabel = computed(() => {
   const t = props.span.spanType
   if (t === 'LLM') return '模型调用'
   if (t === 'TOOL') return '工具调用'
+  if (t === 'VISION') return '图片识别'
   if (t === 'ROUTE') return '路由'
   if (t === 'PLAN') return '规划'
   if (t === 'RETRIEVE') return '检索'
@@ -195,6 +196,7 @@ const typeTagType = computed((): 'primary' | 'success' | 'info' | 'warning' | 'd
   const t = props.span.spanType
   if (t === 'LLM') return 'primary'
   if (t === 'TOOL') return 'success'
+  if (t === 'VISION') return 'success'
   if (t === 'RETRIEVE') return 'warning'
   if (t === 'PLAN') return 'warning'
   if (t === 'ROUTE') return 'info'
@@ -326,6 +328,11 @@ function agentLabel(name: string | null | undefined, id: number | null | undefin
 
 .span-card--tool {
   border-left-color: #12b76a;
+}
+
+/* 图片识别与工具同为「外部能力调用」，用同色系但略浅，避免与工具混淆 */
+.span-card--vision {
+  border-left-color: #36b37e;
 }
 
 .span-card--route,

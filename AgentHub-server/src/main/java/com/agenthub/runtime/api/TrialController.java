@@ -69,6 +69,19 @@ public class TrialController {
     }
 
     /**
+     * 单个 Agent 的多模态能力。抽屉按 agentId 打开时用它判断上传按钮是否可用，
+     * 不必为了一个布尔值把整个下拉列表拉一遍。
+     *
+     * @param agentId Agent
+     * @return 能力视图
+     */
+    @SaCheckPermission(value = {RuntimePermissions.LIST, RuntimePermissions.RUN}, mode = SaMode.OR)
+    @GetMapping("/agents/{agentId}/capability")
+    public Result<AgentOptionResp> capability(@PathVariable Long agentId) {
+        return Result.ok(sessions.visionCapability(agentId));
+    }
+
+    /**
      * @param req 必填 agentId。只返回当前登录用户的会话
      * @return 会话页
      */
@@ -132,7 +145,7 @@ public class TrialController {
     @SaCheckPermission(RuntimePermissions.RUN)
     @PostMapping("/sessions/{id}/messages")
     public Result<MessageResp> send(@PathVariable Long id, @Valid @RequestBody MessageReq req) {
-        return Result.ok(runs.send(id, req.getContent().trim()));
+        return Result.ok(runs.send(id, req.getContent().trim(), req.getImages()));
     }
 
     /**
@@ -151,7 +164,7 @@ public class TrialController {
         TrialChunkWriter writer = new TrialChunkWriter(response, json);
         writer.bindSession(id);
         try {
-            runs.stream(id, req.getContent().trim(), writer, writer);
+            runs.stream(id, req.getContent().trim(), req.getImages(), writer, writer);
         } finally {
             // 兜底：业务侧任何路径没写结束帧（异常、线程中断、上游直接断），这里补一帧再关连接。
             // 内部有 CAS，重复调用不会产生第二帧。
