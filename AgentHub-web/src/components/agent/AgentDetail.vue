@@ -219,14 +219,25 @@
 
         <el-tab-pane v-if="showReactBindTabs" label="工具配置" name="tool">
           <div class="tab-bar">
-            <h3>已绑定工具</h3>
-            <el-button v-if="canBind" type="primary" @click="toolOpen = true">+ 添加工具</el-button>
+            <h3>
+              已绑定工具
+              <span v-if="tools.length" class="tab-count">{{ tools.length }}</span>
+            </h3>
+            <!-- 添加走双栏穿梭选择器（ToolBindDialog 内即 ResourceSelector）：分组 + 搜索 + 富信息 -->
+            <el-button v-if="canBind" type="primary" @click="toolOpen = true">
+              <el-icon class="btn-icon"><Plus /></el-icon>
+              添加工具
+            </el-button>
           </div>
           <el-table class="bind-table" :data="pagedTools" empty-text="还没有绑定工具" table-layout="fixed">
-            <el-table-column label="工具名" min-width="180" align="center" header-align="center" show-overflow-tooltip>
-              <template #default="{ row }">{{ row.name || '工具已删除' }}</template>
+            <!-- 中文名加粗 + 英文调用码灰色小字：与选择器里的展示口径保持一致 -->
+            <el-table-column label="工具" min-width="200" align="left" header-align="left">
+              <template #default="{ row }">
+                <div class="bind-name" :title="toolDisplayName(row)">{{ toolDisplayName(row) }}</div>
+                <div v-if="row.name" class="bind-code" :title="row.name">{{ row.name }}</div>
+              </template>
             </el-table-column>
-            <el-table-column label="来源" min-width="160" align="center" header-align="center" show-overflow-tooltip>
+            <el-table-column label="来源" min-width="140" align="left" header-align="left" show-overflow-tooltip>
               <template #default="{ row }">{{ row.sourceName || '—' }}</template>
             </el-table-column>
             <!-- 工具自身启停：先说清目标能不能用，再看绑定开关 -->
@@ -264,14 +275,23 @@
 
         <el-tab-pane v-if="showReactBindTabs" label="技能配置" name="skill">
           <div class="tab-bar">
-            <h3>已绑定 Skill</h3>
-            <el-button v-if="canBind" type="primary" @click="skillOpen = true">+ 添加 Skill</el-button>
+            <h3>
+              已绑定 Skill
+              <span v-if="skills.length" class="tab-count">{{ skills.length }}</span>
+            </h3>
+            <el-button v-if="canBind" type="primary" @click="skillOpen = true">
+              <el-icon class="btn-icon"><Plus /></el-icon>
+              添加 Skill
+            </el-button>
           </div>
           <el-table class="bind-table" :data="pagedSkills" empty-text="还没有绑定 Skill" table-layout="fixed">
-            <el-table-column label="name" min-width="160" align="center" header-align="center" show-overflow-tooltip>
-              <template #default="{ row }">{{ row.name || 'Skill 已删除' }}</template>
+            <!-- 标题加粗 + 英文编码灰字；表头也用中文，避免出现 name / title 这类库列名 -->
+            <el-table-column label="Skill" min-width="220" align="left" header-align="left">
+              <template #default="{ row }">
+                <div class="bind-name" :title="skillDisplayName(row)">{{ skillDisplayName(row) }}</div>
+                <div v-if="row.name" class="bind-code" :title="row.name">{{ row.name }}</div>
+              </template>
             </el-table-column>
-            <el-table-column prop="title" label="title" min-width="180" align="center" header-align="center" show-overflow-tooltip />
             <el-table-column label="Skill 状态" width="110" align="center" header-align="center">
               <template #default="{ row }">
                 <el-tag size="small" :type="targetTagType(row)" effect="plain">{{ targetTagText(row, 'Skill') }}</el-tag>
@@ -478,7 +498,7 @@
  * 启停走 Switch；删除只在网格卡。标题行「对话」只通知外层打开已有抽屉。
  */
 import { computed, onActivated, onBeforeUnmount, reactive, ref, watch } from 'vue'
-import { InfoFilled, QuestionFilled } from '@element-plus/icons-vue'
+import { InfoFilled, Plus, QuestionFilled } from '@element-plus/icons-vue'
 import { ElMessage } from 'element-plus'
 import {
   changeAgentStatus,
@@ -781,6 +801,29 @@ function targetTagText(row: { targetStatus?: number }, noun: string): string {
     return `${noun}已删除`
   }
   return row.targetStatus === 1 ? `${noun}启用` : `${noun}停用`
+}
+
+/**
+ * 工具绑定行的主展示名。
+ * <p>
+ * 库里 `title` 才是中文展示名，`name` 是英文调用码；只显示 name 会让配置人员看不懂
+ * 这一行到底调的是什么能力。目标已被删除时绑定的 name 仍可能有值，故以 name 兜底。
+ *
+ * @param row 工具绑定行
+ * @return 中文名；无中文名时退回英文码；都为空时提示已删除
+ */
+function toolDisplayName(row: { title?: string; name?: string }): string {
+  return row.title?.trim() || row.name?.trim() || '工具已删除'
+}
+
+/**
+ * Skill 绑定行的主展示名。
+ *
+ * @param row Skill 绑定行
+ * @return 标题；无标题时退回编码；都为空时提示已删除
+ */
+function skillDisplayName(row: { title?: string; name?: string }): string {
+  return row.title?.trim() || row.name?.trim() || 'Skill 已删除'
 }
 
 /**
@@ -2208,6 +2251,44 @@ async function removeRoute(row: AgentRouteRow) {
 
 .bind-table {
   width: 100%;
+}
+
+/* 绑定表首列：中文名加粗 + 英文码灰色小字，与选择的展示口径一致 */
+.bind-name {
+  overflow: hidden;
+  color: var(--ah-text-primary, #1f2937);
+  font-weight: 600;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.bind-code {
+  margin-top: 2px;
+  overflow: hidden;
+  color: var(--ah-text-muted, #9ca3af);
+  font-family: ui-monospace, Consolas, monospace;
+  font-size: 12px;
+  line-height: 1.3;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* Tab 标题后的数量徽标：弱化处理，只作提示不抢标题 */
+.tab-count {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 18px;
+  height: 18px;
+  margin-left: 6px;
+  padding: 0 5px;
+  border-radius: 9px;
+  background: #f3f4f6;
+  color: var(--ah-text-secondary, #6b7280);
+  font-size: 11px;
+  font-weight: 600;
+  line-height: 1;
+  vertical-align: middle;
 }
 
 /* 绑定表分页：右对齐，与全站列表一致 */

@@ -11,6 +11,30 @@ export function pageSkills(params: { current: number; size: number; keyword?: st
   return request.get<Result<PageResult<SkillCard>>>('/api/skill/skills', { params })
 }
 
+/**
+ * 拉取全部 Skill 卡片（含已停用），供 Agent「Skill 绑定」选择器分组展示。
+ * <p>
+ * size 上限 100，超过时按页累加；最多 20 页防御异常 total。
+ * 卡片接口不返回正文，绑定时只需要标题/简介/关键词。
+ *
+ * @return 全量 Skill 卡片
+ */
+export async function listAllSkills(): Promise<SkillCard[]> {
+  const size = 100
+  const maxPages = 20
+  const rows: SkillCard[] = []
+  for (let page = 1; page <= maxPages; page += 1) {
+    const { data } = await pageSkills({ current: page, size })
+    const result = data.data
+    const records = result?.records || []
+    rows.push(...records)
+    if (records.length < size || rows.length >= (result?.total ?? 0)) {
+      break
+    }
+  }
+  return rows
+}
+
 /** 详情，含 Markdown 正文。 */
 export function getSkill(id: number) {
   return request.get<Result<SkillDetail>>(`/api/skill/skills/${id}`)
