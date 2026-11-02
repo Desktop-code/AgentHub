@@ -113,6 +113,8 @@ services:
       # 故意不写进 depends_on：Milvus 未就绪时后端仍应能启动，只让 RAG 相关接口报不可用。
       AGENTHUB_MILVUS_URI: http://milvus:19530
       AGENTHUB_RESET_PASSWORD: ${AGENTHUB_RESET_PASSWORD:-admin123}
+      # 会话级文件工具的落盘根目录。容器内必须指向挂载卷，否则容器重建就把试跑产物清空。
+      AGENTHUB_WORKSPACE_ROOT_PATH: /app/workspace
     volumes:
       # 外部配置目录优先级高于 jar 内配置；文件在宿主机上，不进镜像。
       # 参考 AgentHub-server/src/main/resources/application-local.yml.example 准备本文件。
@@ -120,6 +122,9 @@ services:
       # RAG 原文落盘（agenthub.rag.storage.dir 相对工作目录 ./data/rag → /app/data/rag）。
       # 不挂卷则容器重建即丢原文，导致切片无法回溯；卷名见文末 volumes。
       - rag_storage:/app/data/rag
+      # 试跑会话工作区（agenthub.workspace.root-path → /app/workspace）。
+      # 不挂卷则容器重建即丢，Agent 上一轮落盘的文件下一轮读不到。
+      - workspace_storage:/app/workspace
     ports: ["8081:8080"]
 
   web:
@@ -140,3 +145,5 @@ volumes:
   milvus_data:
   # RAG 原文（/app/data/rag）。与向量库分开：向量在 milvus_data，原文在这里
   rag_storage:
+  # 试跑会话工作区（/app/workspace）。纯临时产物，不需要备份；删卷等于清空所有会话文件
+  workspace_storage:

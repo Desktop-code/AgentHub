@@ -6,6 +6,7 @@ import type {
   AssistantBlock,
   ChatTurn,
   TrialEvent,
+  TrialFileView,
   TrialPlanView,
   TrialStepView
 } from '@/types/runtime'
@@ -125,6 +126,10 @@ function phaseOfTail(type?: string) {
   if (type === 'tool') {
     return 'tool'
   }
+  if (type === 'vision') {
+    // 图片文字已提取、主模型还没开始：状态条应显示「识别图片文字」而不是「规划中」
+    return 'vision'
+  }
   if (type === 'reasoning' || type === 'route') {
     return 'reasoning'
   }
@@ -211,6 +216,25 @@ export function appendText(turn: ChatTurn, kind: 'reasoning' | 'assistant', text
   turn.blocks.push({ kind, text })
 }
 
+/**
+ * 图片文字提取结果。每轮只有一条，整段插入；重复到达时以最新为准（避免刷新后续订重复堆叠）。
+ * @param turn 目标助手轮
+ * @param text 识别文本
+ */
+export function appendVision(turn: ChatTurn, text: string) {
+  const body = (text || '').trim()
+  if (!body) {
+    return
+  }
+  const existing = turn.blocks.find((block) => block.kind === 'vision')
+  if (existing) {
+    existing.text = body
+    return
+  }
+  // 识别结果排在所有块之前：它是本轮的事实素材，读起来应当在思考与终答之前
+  turn.blocks.unshift({ kind: 'vision', text: body })
+}
+
 /** 工具按一次调用一块。参数行和结果分开。 */
 export function appendTool(turn: ChatTurn, line: string, result?: string) {
   const text = (line || '').trim()
@@ -223,6 +247,65 @@ export function appendTool(turn: ChatTurn, line: string, result?: string) {
     text: text || detail,
     detail: detail && detail !== text ? detail : undefined
   })
+}
+
+/**
+ * 产物块：按 fileName 去重，同名只保留最新一条。
+ *
+ * <p>为什么要去重：Agent 常分多次写同一个文件（先写骨架再追加正文），
+ * 每次都会推一条 file_generated。若逐条追加，聊天区会刷出一排指向同一文件的卡片，
+ * 用户既看不出区别、也点不到「正确」的那个。
+ * 覆盖更新还能同步刷新体积——最终卡片展示的必然是最后一次写入后的大小。
+ *
+ * @param turn 目标助手轮
+ * @param file 产物视图（含后端拼好的 downloadUrl）
+ */
+export function appendFile(turn: ChatTurn, file: TrialFileView) {
+  const name = (file.fileName || '').trim()
+  if (!name) {
+    return
+  }
+  const next: TrialFileView = { fileName: name, size: file.size, downloadUrl: file.downloadUrl }
+  const existing = turn.blocks.find((block) => block.kind === 'file' && block.file?.fileName === name)
+  if (existing) {
+    // 原位覆盖：位置不变，用户已看到的卡片不会跳到别处
+    existing.file = next
+    existing.text = fileNameOf(next.fileName)
+    return
+  }
+  turn.blocks.push({ kind: 'file', text: fileNameOf(name), file: next })
+}
+
+/**
+ * 卡片标题用的文件名：只取末段，避免子目录把卡片撑宽。
+ *
+ * @param fileName 相对工作区根的路径
+ * @return 末段文件名
+ */
+export function fileNameOf(fileName: string) {
+  const normalized = (fileName || '').replace(/\\/g, '/')
+  const slash = normalized.lastIndexOf('/')
+  return slash >= 0 ? normalized.slice(slash + 1) : normalized
+}
+
+/**
+ * 体积展示。与服务端 GeneratedFile#humanSize 口径一致，避免前后端两套数字。
+ *
+ * @param size 字节数；< 0 表示未知
+ * @return 如 {@code 2.0 KB} / {@code 大小未知}
+ */
+export function formatFileSize(size: number) {
+  if (!Number.isFinite(size) || size < 0) {
+    return '大小未知'
+  }
+  if (size < 1024) {
+    return `${size} B`
+  }
+  const kb = size / 1024
+  if (kb < 1024) {
+    return `${kb.toFixed(1)} KB`
+  }
+  return `${(kb / 1024).toFixed(1)} MB`
 }
 
 /**
@@ -512,6 +595,8 @@ export interface TurnSections {
   execution: PlanStepSection[]
   /** 终答正文；可能为空（待批准或失败） */
   answer: string
+  /** 本轮生成的可下载文件。渲染在终答之后，是「产物」而不是「过程」 */
+  files: TrialFileView[]
   /** 装配说明等非错误提示，排在终答之后 */
   notes: string[]
   /** 失败说明，排在最后 */
@@ -544,6 +629,7 @@ export function turnSections(blocks: AssistantBlock[]): TurnSections {
   const buckets: { seq: number; title: string; state: string; text: string; line?: string; blocks: AssistantBlock[] }[] = []
   const notes: string[] = []
   const errors: string[] = []
+  const files: TrialFileView[] = []
   let plan: TrialPlanView | undefined
   let current: (typeof buckets)[number] | undefined
   let answer = ''
@@ -582,6 +668,23 @@ export function turnSections(blocks: AssistantBlock[]): TurnSections {
       errors.push(block.text)
       continue
     }
+    if (block.kind === 'vision') {
+      // 识别结果是本轮素材，不属于任何执行步；由模板在卡片顶部单独渲染，这里直接跳过桶分配
+      continue
+    }
+    if (block.kind === 'file') {
+      // 产物不属于某一步的思考过程：由模板在卡片下方统一渲染下载卡片，这里不进任何桶
+      if (block.file) {
+        // 同一文件多次生成时按文件名去重，与 appendFile 的口径一致
+        const index = files.findIndex((item) => item.fileName === block.file?.fileName)
+        if (index >= 0) {
+          files[index] = block.file
+        } else {
+          files.push(block.file)
+        }
+      }
+      continue
+    }
     if (block.kind === 'route' || block.kind === 'reasoning' || block.kind === 'tool') {
       if (current) {
         current.blocks.push(block)
@@ -605,6 +708,7 @@ export function turnSections(blocks: AssistantBlock[]): TurnSections {
         steps: simpleProcessSteps(bucket.blocks)
       })),
     answer: answer.trim(),
+    files,
     notes,
     errors
   }
@@ -734,6 +838,11 @@ function pushBlock(turn: ChatTurn, block: AssistantBlock) {
     upsertStep(turn, block.step)
     return
   }
+  // 产物也走去重：同一文件多次生成只保留最新一条卡片
+  if (block.kind === 'file' && block.file) {
+    appendFile(turn, block.file)
+    return
+  }
   turn.blocks.push(block)
 }
 
@@ -762,6 +871,10 @@ function blockFromEvent(item: TrialEvent): AssistantBlock | undefined {
     const text = displayText(item)
     return text ? { kind: 'assistant', text } : undefined
   }
+  if (item.eventType === 'vision') {
+    const text = displayText(item)
+    return text ? { kind: 'vision', text } : undefined
+  }
   if (item.eventType === 'route') {
     const text = displayText(item)
     return text ? { kind: 'route', text } : undefined
@@ -787,6 +900,15 @@ function blockFromEvent(item: TrialEvent): AssistantBlock | undefined {
     const text = displayText(item)
     return text ? { kind: 'system', text } : undefined
   }
+  if (item.eventType === 'file') {
+    // 正文是 {"fileName","size"}；downloadUrl 落库时不存（会话主键在路径里），故按当前会话现拼
+    const file = parseFile(item.contentText, item.sessionId)
+    if (!file) {
+      const fallback = (item.summary || '').trim()
+      return fallback ? { kind: 'system', text: fallback } : undefined
+    }
+    return { kind: 'file', text: fileNameOf(file.fileName), file }
+  }
   if (item.eventType === 'error') {
     const text = displayText(item)
     return text ? { kind: 'error', text } : undefined
@@ -801,6 +923,51 @@ function displayText(item: TrialEvent): string {
     return full
   }
   return (item.summary || '').trim()
+}
+
+/**
+ * 解析 FILE 事件正文，并现场拼出下载地址。
+ *
+ * <p>为什么落库只存 fileName + size：会话主键在下载路径里，
+ * 存进正文会随会话复制/迁移而失效；地址是「派生值」，回放时按当前会话现拼更稳。
+ *
+ * @param raw       事件正文 JSON
+ * @param sessionId 事件所属会话；缺失时 downloadUrl 为空串，卡片仍可展示但置灰
+ * @return 产物视图；解析失败时为 undefined
+ */
+export function parseFile(raw: string | undefined, sessionId?: number): TrialFileView | undefined {
+  const text = (raw || '').trim()
+  if (!text) {
+    return undefined
+  }
+  try {
+    const data = JSON.parse(text) as { fileName?: unknown; size?: unknown }
+    const fileName = String(data?.fileName || '').trim()
+    if (!fileName) {
+      return undefined
+    }
+    const size = Number(data?.size)
+    return {
+      fileName,
+      size: Number.isFinite(size) ? size : -1,
+      // 会话主键缺失（异常快照）时不编造地址，交给卡片按「不可下载」渲染
+      downloadUrl: sessionId ? buildDownloadUrl(sessionId, fileName) : ''
+    }
+  } catch {
+    return undefined
+  }
+}
+
+/**
+ * 拼下载地址。编码规则与后端 TrialChunkWriter 的 downloadUrl 保持一致，
+ * 保证「实时推送的卡片」与「刷新后回放的卡片」点下去打开的是同一个地址。
+ *
+ * @param sessionId 会话主键
+ * @param fileName  相对工作区根的文件名
+ * @return 以 /api 开头的下载路径
+ */
+export function buildDownloadUrl(sessionId: number, fileName: string) {
+  return `/api/runtime/workspace/download?sessionId=${sessionId}&fileName=${encodeURIComponent(fileName)}`
 }
 
 /**

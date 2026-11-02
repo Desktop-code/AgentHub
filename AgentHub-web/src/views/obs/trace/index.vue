@@ -62,7 +62,7 @@
             :class="{ active: row.id === selectedSessionId }"
             @click="pickSession(row)"
           >
-            <span class="item-title">{{ row.lastMsgPreview || '未命名会话' }}</span>
+            <span class="item-title">{{ row.sessionTitle || row.lastMsgPreview || '未命名会话' }}</span>
             <span class="item-meta">{{ agentLabel(row.agentName, row.agentId) }} · {{ row.startTime || '—' }}</span>
           </button>
           <p v-if="!sessionLoading && sessions.length === 0" class="empty">没有会话</p>

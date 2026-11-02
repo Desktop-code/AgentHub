@@ -17,6 +17,7 @@ import com.agenthub.runtime.domain.model.RunEvent;
 import com.agenthub.runtime.domain.model.RunSession;
 import com.agenthub.runtime.domain.model.RunStatus;
 import com.agenthub.runtime.domain.model.SessionQuery;
+import com.agenthub.runtime.domain.model.TitleSource;
 import com.agenthub.runtime.domain.repository.RunEventRepository;
 import com.agenthub.runtime.domain.repository.RunSessionRepository;
 import com.agenthub.runtime.domain.service.TrialTexts;
@@ -48,6 +49,7 @@ public class TrialSessionAppService {
     private final TrialSessionCloser closer;
     private final TrialLiveBuffer live;
     private final PlanPendingRegistry pendingPlans;
+    private final TrialBindingLoader loader;
 
     /**
      * @param sessions        会话
@@ -63,12 +65,13 @@ public class TrialSessionAppService {
      * @param closer          取消结案、删除前批抽、空闲定时批抽
      * @param live            进行中一轮的内存快照，供刷新后的只读轮询
      * @param pendingPlans    待批准计划；清空/取消/删除时一并丢弃，避免批准到已废弃上下文
+     * @param loader          只读模型槽解析，用于判定是否配了 VISION
      */
     public TrialSessionAppService(RunSessionRepository sessions, RunEventRepository events, AgentDefRepository agents,
                                   TrialAccess access, OperatorContext operatorContext, OperLogWriter operLogWriter,
                                   TrialFlight flight, TrialProperties properties, ReActTrialExecutor react,
                                   TrialMemoryCoordinator memory, TrialSessionCloser closer, TrialLiveBuffer live,
-                                  PlanPendingRegistry pendingPlans) {
+                                  PlanPendingRegistry pendingPlans, TrialBindingLoader loader) {
         this.sessions = sessions;
         this.events = events;
         this.agents = agents;
@@ -82,10 +85,15 @@ public class TrialSessionAppService {
         this.closer = closer;
         this.live = live;
         this.pendingPlans = pendingPlans;
+        this.loader = loader;
     }
 
     /**
      * 试跑页下拉。只返回启用中的 Agent，避免再要求 agent:list。
+     *
+     * <p>顺带带出「是否已绑定可用 VISION 模型」：前端据此置灰上传按钮。
+     * 逐个 Agent 判定的成本是一次绑定表查询 + 少量实例查询，100 条上限下可以接受；
+     * 比起让用户传完图再被拒，这点开销值得。
      *
      * @return 最多 100 条
      */
@@ -100,8 +108,29 @@ public class TrialSessionAppService {
             resp.setName(agent.getName());
             resp.setCode(agent.getCode());
             resp.setRunMode(agent.getRunMode());
+            resp.setVisionEnabled(loader.findVisionModel(agent.getId()).isPresent());
             return resp;
         }).toList();
+    }
+
+    /**
+     * 单个 Agent 的多模态能力。抽屉直接按 agentId 打开时用它，
+     * 不必为了一个布尔值把整个下拉列表拉一遍。
+     *
+     * @param agentId Agent
+     * @return 能力视图
+     * @throws BizException Agent 不存在
+     */
+    public AgentOptionResp visionCapability(Long agentId) {
+        AgentDef agent = agents.findById(agentId)
+                .orElseThrow(() -> new BizException(ErrorCode.NOT_FOUND, "Agent 不存在"));
+        AgentOptionResp resp = new AgentOptionResp();
+        resp.setId(agent.getId());
+        resp.setName(agent.getName());
+        resp.setCode(agent.getCode());
+        resp.setRunMode(agent.getRunMode());
+        resp.setVisionEnabled(loader.findVisionModel(agent.getId()).isPresent());
+        return resp;
     }
 
     /**
@@ -209,7 +238,10 @@ public class TrialSessionAppService {
     }
 
     /**
-     * 改左栏标题。只写 last_msg_preview，不新增列。
+     * 改左栏标题。写 session_title 并把 title_source 置 MANUAL，此后异步自动生成不再覆盖。
+     *
+     * <p>为什么不再写 last_msg_preview：那是「首轮提问的短预览」，
+     * 标题一旦复用同一列，自动生成与用户手改就会互相踩；两列分开后各管各的。
      *
      * @param id    会话主键
      * @param title 用户输入的标题
@@ -218,12 +250,13 @@ public class TrialSessionAppService {
     @Transactional
     public SessionResp rename(Long id, String title) {
         access.require(id);
-        String preview = TrialTexts.preview(title);
-        if (preview.isEmpty()) {
+        // 手改标题按 session_title 列宽与左栏显示宽度截断；预览列不动
+        String cleanTitle = TrialTexts.clip(title, TrialTexts.TITLE_LIMIT);
+        if (cleanTitle.isEmpty()) {
             throw new BizException(ErrorCode.BAD_REQUEST, "标题不能为空");
         }
         long userId = operatorContext.requireUserId();
-        sessions.updateTitle(id, preview, userId);
+        sessions.updateTitle(id, cleanTitle, TitleSource.MANUAL.name(), userId);
         operLogWriter.write("runtime", "rename", "agent_run_session", String.valueOf(id), "重命名试跑会话 " + id);
         return toResp(sessions.findById(id).orElseThrow());
     }
@@ -287,6 +320,8 @@ public class TrialSessionAppService {
         resp.setStartTime(session.getStartTime());
         resp.setEndTime(session.getEndTime());
         resp.setMessageCount(session.getMessageCount());
+        resp.setSessionTitle(session.getSessionTitle());
+        resp.setTitleSource(session.getTitleSource());
         resp.setLastMsgPreview(session.getLastMsgPreview());
         resp.setErrorSummary(session.getErrorSummary());
         resp.setUpdateTime(session.getUpdateTime());

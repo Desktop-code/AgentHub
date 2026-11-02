@@ -4,6 +4,7 @@ import com.agenthub.common.api.PageResult;
 import com.agenthub.runtime.domain.model.RunSession;
 import com.agenthub.runtime.domain.model.RunStatus;
 import com.agenthub.runtime.domain.model.SessionQuery;
+import com.agenthub.runtime.domain.model.TitleSource;
 import com.agenthub.runtime.domain.repository.RunSessionRepository;
 import com.agenthub.runtime.infra.persistence.entity.RunSessionEntity;
 import com.agenthub.runtime.infra.persistence.mapper.RunSessionMapper;
@@ -47,14 +48,18 @@ public class RunSessionRepositoryImpl implements RunSessionRepository {
         if (query.getAgentId() != null) {
             wrapper.eq(RunSessionEntity::getAgentId, query.getAgentId());
         }
-        // 调用追踪左栏：预览模糊，纯数字同时能点中会话 id。试跑不传 keyword
+        // 调用追踪左栏：标题与预览都参与模糊匹配，纯数字同时能点中会话 id。试跑不传 keyword
         if (query.getKeyword() != null && !query.getKeyword().isBlank()) {
             String keyword = query.getKeyword().trim();
             Long matchedId = sessionId(keyword);
             if (matchedId == null) {
-                wrapper.like(RunSessionEntity::getLastMsgPreview, keyword);
+                wrapper.and(nested -> nested.like(RunSessionEntity::getSessionTitle, keyword)
+                        .or()
+                        .like(RunSessionEntity::getLastMsgPreview, keyword));
             } else {
-                wrapper.and(nested -> nested.like(RunSessionEntity::getLastMsgPreview, keyword)
+                wrapper.and(nested -> nested.like(RunSessionEntity::getSessionTitle, keyword)
+                        .or()
+                        .like(RunSessionEntity::getLastMsgPreview, keyword)
                         .or()
                         .eq(RunSessionEntity::getId, matchedId));
             }
@@ -98,6 +103,10 @@ public class RunSessionRepositoryImpl implements RunSessionRepository {
         entity.setStartTime(session.getStartTime() == null ? now : session.getStartTime());
         entity.setEndTime(session.getEndTime());
         entity.setMessageCount(session.getMessageCount() == null ? 0 : session.getMessageCount());
+        entity.setSessionTitle(session.getSessionTitle());
+        // 新会话还没有标题：来源先落 AUTO（列默认值），而不是显式写 NULL——
+        // 插入时显式 NULL 会盖掉列默认值，后面的「非 MANUAL」判断虽兼容 NULL，但脏数据没必要
+        entity.setTitleSource(session.getTitleSource() == null ? TitleSource.AUTO.name() : session.getTitleSource());
         entity.setLastMsgPreview(session.getLastMsgPreview());
         entity.setErrorSummary(session.getErrorSummary());
         entity.setCreatedBy(operatorId);
@@ -131,12 +140,36 @@ public class RunSessionRepositoryImpl implements RunSessionRepository {
 
     /** {@inheritDoc} */
     @Override
-    public void updateTitle(Long id, String title, Long operatorId) {
+    public void updateTitle(Long id, String title, String titleSource, Long operatorId) {
         mapper.update(null, new LambdaUpdateWrapper<RunSessionEntity>()
                 .eq(RunSessionEntity::getId, id)
-                .set(RunSessionEntity::getLastMsgPreview, title)
+                .set(RunSessionEntity::getSessionTitle, title)
+                .set(RunSessionEntity::getTitleSource, titleSource)
                 .set(RunSessionEntity::getUpdatedBy, operatorId)
                 .set(RunSessionEntity::getUpdateTime, LocalDateTime.now()));
+    }
+
+    /**
+     * {@inheritDoc}
+     * 条件写在 WHERE 里而不是应用层判空：异步线程读到的「空标题」可能已经过期，
+     * 只有数据库当下的值才算数。{@code (title_source <> 'MANUAL' OR title_source IS NULL)}
+     * 兼容历史行（该列是后加的，旧行可能为 NULL）。
+     */
+    @Override
+    public boolean updateAutoTitleIfAbsent(Long id, String title, Long operatorId) {
+        int affected = mapper.update(null, new LambdaUpdateWrapper<RunSessionEntity>()
+                .eq(RunSessionEntity::getId, id)
+                .and(scope -> scope.isNull(RunSessionEntity::getSessionTitle)
+                        .or()
+                        .eq(RunSessionEntity::getSessionTitle, ""))
+                .and(source -> source.isNull(RunSessionEntity::getTitleSource)
+                        .or()
+                        .ne(RunSessionEntity::getTitleSource, TitleSource.MANUAL.name()))
+                .set(RunSessionEntity::getSessionTitle, title)
+                .set(RunSessionEntity::getTitleSource, TitleSource.AUTO.name())
+                .set(RunSessionEntity::getUpdatedBy, operatorId)
+                .set(RunSessionEntity::getUpdateTime, LocalDateTime.now()));
+        return affected > 0;
     }
 
     /** {@inheritDoc} */
@@ -184,6 +217,8 @@ public class RunSessionRepositoryImpl implements RunSessionRepository {
         session.setStartTime(entity.getStartTime());
         session.setEndTime(entity.getEndTime());
         session.setMessageCount(entity.getMessageCount());
+        session.setSessionTitle(entity.getSessionTitle());
+        session.setTitleSource(entity.getTitleSource());
         session.setLastMsgPreview(entity.getLastMsgPreview());
         session.setErrorSummary(entity.getErrorSummary());
         session.setCreatedBy(entity.getCreatedBy());

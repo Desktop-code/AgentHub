@@ -161,6 +161,8 @@ CREATE TABLE `agent_run_session`  (
   `start_time` datetime NOT NULL COMMENT '开始时间',
   `end_time` datetime NULL DEFAULT NULL COMMENT '结束时间',
   `message_count` int(11) NOT NULL DEFAULT 0 COMMENT '消息/轮次计数（可选维护）',
+  `session_title` varchar(64) CHARACTER SET utf8mb4 COLLATE utf8mb4_general_ci NULL DEFAULT NULL COMMENT '会话标题：异步生成或用户手改；NULL/空=尚未生成',
+  `title_source` varchar(16) CHARACTER SET utf8mb4 COLLATE utf8mb4_general_ci NULL DEFAULT 'AUTO' COMMENT '标题来源：AUTO 自动生成 / MANUAL 用户手改（禁止被自动覆盖）',
   `last_msg_preview` varchar(255) CHARACTER SET utf8mb4 COLLATE utf8mb4_general_ci NULL DEFAULT NULL COMMENT '最近一条消息短预览；禁止密钥',
   `error_summary` varchar(500) CHARACTER SET utf8mb4 COLLATE utf8mb4_general_ci NULL DEFAULT NULL COMMENT '失败摘要；禁止密钥/堆栈全文',
   `deleted` tinyint(4) NOT NULL DEFAULT 0 COMMENT '0未删 1已删',

@@ -16,4 +16,10 @@ public class TrialProperties {
 
     /** 历史会话条数上限。只查当前用户和指定 Agent，按 started_at 倒序 */
     private int historyLimit = 20;
+
+    /**
+     * 首轮结束后是否异步生成会话标题。默认开；
+     * 关掉只是不生成标题（左栏退回展示首问预览），不影响试跑本身。
+     */
+    private boolean autoTitleEnabled = true;
 }

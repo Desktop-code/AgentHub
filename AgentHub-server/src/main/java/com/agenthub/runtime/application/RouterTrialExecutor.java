@@ -16,6 +16,7 @@ import com.agenthub.obs.domain.model.SpanClose;
 import com.agenthub.obs.domain.model.SpanType;
 import com.agenthub.obs.domain.service.ObsAttrs;
 import com.agenthub.runtime.domain.model.EffectiveLimits;
+import com.agenthub.runtime.domain.model.GeneratedFile;
 import com.agenthub.runtime.domain.model.MeterScope;
 import com.agenthub.runtime.domain.model.RunSession;
 import com.agenthub.runtime.domain.model.TrialPlan;
@@ -32,6 +33,8 @@ import com.agenthub.runtime.domain.service.TrialProgress;
 import com.agenthub.runtime.infra.agentscope.ReActTrialExecutor;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.springframework.beans.factory.annotation.Qualifier;
+import org.springframework.scheduling.concurrent.ThreadPoolTaskExecutor;
 import org.springframework.stereotype.Component;
 
 import java.util.ArrayList;
@@ -39,10 +42,8 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
-import java.util.concurrent.CompletableFuture;
-import java.util.concurrent.CompletionException;
-import java.util.concurrent.ExecutorService;
-import java.util.concurrent.Executors;
+import java.util.concurrent.ExecutionException;
+import java.util.concurrent.Future;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
 
@@ -65,19 +66,23 @@ public class RouterTrialExecutor {
     private final SystemPromptAssembler prompts;
     private final RuntimeLimitResolver limitResolver;
     private final TrialMemoryCoordinator memory;
+    /** 并行子 Agent 的全局执行池；由 AsyncConfig 统一装配，禁止在方法内临时新建 */
+    private final ThreadPoolTaskExecutor routerTaskExecutor;
 
     /**
-     * @param routes        子路由
-     * @param agents        子 Agent 定义
-     * @param loader        ReAct 装配
-     * @param react         官方 ReAct 执行
-     * @param prompts       父 Agent 判定/汇总也要带平台前缀
-     * @param limitResolver 父墙钟与子轮次
-     * @param memory        子 Agent 补记忆段并公布注入统计
+     * @param routes             子路由
+     * @param agents             子 Agent 定义
+     * @param loader             ReAct 装配
+     * @param react              官方 ReAct 执行
+     * @param prompts            父 Agent 判定/汇总也要带平台前缀
+     * @param limitResolver      父墙钟与子轮次
+     * @param memory             子 Agent 补记忆段并公布注入统计
+     * @param routerTaskExecutor 并行子执行池（有界队列 + CallerRuns），见 AsyncConfig
      */
     public RouterTrialExecutor(AgentRouteRepository routes, AgentDefRepository agents,
                                TrialBindingLoader loader, ReActTrialExecutor react, SystemPromptAssembler prompts,
-                               RuntimeLimitResolver limitResolver, TrialMemoryCoordinator memory) {
+                               RuntimeLimitResolver limitResolver, TrialMemoryCoordinator memory,
+                               @Qualifier("routerTaskExecutor") ThreadPoolTaskExecutor routerTaskExecutor) {
         this.routes = routes;
         this.agents = agents;
         this.loader = loader;
@@ -85,6 +90,7 @@ public class RouterTrialExecutor {
         this.prompts = prompts;
         this.limitResolver = limitResolver;
         this.memory = memory;
+        this.routerTaskExecutor = routerTaskExecutor;
     }
 
     /**
@@ -203,6 +209,9 @@ public class RouterTrialExecutor {
 
     /**
      * ≥2 并行；=1 与现网一致。失败子写入 outcome.error，不打断其它子。
+     * <p>
+     * 线程来源：全局 {@code routerTaskExecutor}（有界队列 + CallerRuns），本方法<b>不</b>再新建或关闭线程池；
+     * 池满时 CallerRuns 会把子任务退回当前请求线程执行，因此本方法在极端压力下仍可能串行完成。
      *
      * @param childParent  子 AGENT 的 parent_id（判路由 LLM，或无 LLM 时的 ROUTE）
      * @param isolateChild 多意图时 true：子仅吃 sub_query
@@ -212,18 +221,17 @@ public class RouterTrialExecutor {
                                            TrialProgress progress, ObsTraceScope trace, Long childParent,
                                            boolean isolateChild) {
         if (intents.size() == 1) {
+            // 单意图内联执行，不经过线程池；submitter 传当前线程即可（清理分支本就不会走到）
             return List.of(runOneChild(parent, intents.get(0), modelUser, userText, userId, sessionId,
-                    deadlineNanos, progress, trace, childParent, false, isolateChild));
+                    deadlineNanos, progress, trace, childParent, false, isolateChild, Thread.currentThread()));
         }
-        ExecutorService pool = Executors.newFixedThreadPool(Math.min(intents.size(),
-                AgentRuntimeConfig.MAX_ROUTE_CHILDREN_CAP));
+        List<Future<ChildOutcome>> futures = new ArrayList<>(intents.size());
         try {
-            List<CompletableFuture<ChildOutcome>> futures = new ArrayList<>();
+            Thread submitter = Thread.currentThread();
             for (RoutedIntent intent : intents) {
-                futures.add(CompletableFuture.supplyAsync(
+                futures.add(routerTaskExecutor.submit(
                         () -> runOneChild(parent, intent, modelUser, userText, userId, sessionId,
-                                deadlineNanos, progress, trace, childParent, true, isolateChild),
-                        pool));
+                                deadlineNanos, progress, trace, childParent, true, isolateChild, submitter)));
             }
             List<ChildOutcome> outcomes = new ArrayList<>(intents.size());
             for (int i = 0; i < futures.size(); i++) {
@@ -235,9 +243,15 @@ public class RouterTrialExecutor {
                     // 墙钟超时：尽量打断未完成子
                     cancelPending(futures);
                     throw ex;
+                } catch (InterruptedException ex) {
+                    // 请求线程被中断：先恢复中断标记再按失败收束，避免吞掉停机/取消信号
+                    Thread.currentThread().interrupt();
+                    cancelPending(futures);
+                    outcomes.add(ChildOutcome.failed(intents.get(i), "子 Agent 执行被中断"));
                 } catch (Exception ex) {
                     cancelPending(futures);
-                    Throwable cause = ex instanceof CompletionException && ex.getCause() != null ? ex.getCause() : ex;
+                    // ExecutionException 需剥掉包装层才能拿到业务异常；中断/超时按原样处理
+                    Throwable cause = ex instanceof ExecutionException && ex.getCause() != null ? ex.getCause() : ex;
                     // 失败段正文会进终答拼接（用户可见）：统一走边界清洗，不给路径/端口/异常码
                     outcomes.add(ChildOutcome.failed(intents.get(i),
                             UserFacingText.safeMessage(cause, "子 Agent 执行失败")));
@@ -245,12 +259,13 @@ public class RouterTrialExecutor {
             }
             return outcomes;
         } finally {
-            pool.shutdownNow();
+            // 只取消本方法提交的任务，池本身归容器所有，禁止 shutdown
+            cancelPending(futures);
         }
     }
 
-    private void cancelPending(List<CompletableFuture<ChildOutcome>> futures) {
-        for (CompletableFuture<ChildOutcome> future : futures) {
+    private void cancelPending(List<Future<ChildOutcome>> futures) {
+        for (Future<ChildOutcome> future : futures) {
             if (future != null && !future.isDone()) {
                 future.cancel(true);
             }
@@ -274,10 +289,21 @@ public class RouterTrialExecutor {
         return routeSpan;
     }
 
+    /**
+     * 跑单个子 Agent。
+     * <p>
+     * 线程约定：正常情况运行在 {@code routerTaskExecutor} 的池线程上；池满触发 CallerRuns 时会
+     * <b>内联跑在提交线程</b>（试跑请求线程）。两种情形对 ThreadLocal 的处理必须不同：
+     * 池线程跑完要清干净，避免池化线程串味；内联跑时若照清不误，会连带把父请求线程自己的
+     * trace 绑定、span 栈与注入统计一起抹掉，导致随后的终答汇总丢失埋点。
+     * 因此只有「当前线程 ≠ 提交线程」时才做清理，{@code submitter} 即为此判据。
+     *
+     * @param submitter 提交任务的线程；内联执行时等于当前线程
+     */
     private ChildOutcome runOneChild(AgentDef parent, RoutedIntent intent, String modelUser, String userText,
                                      long userId, long sessionId, long deadlineNanos, TrialProgress progress,
                                      ObsTraceScope trace, Long childParent, boolean parallelWorker,
-                                     boolean isolateChild) {
+                                     boolean isolateChild, Thread submitter) {
         if (trace != null && parallelWorker) {
             // 并行子线程各自 bind trace，并拿到独立 stack（ThreadLocal.withInitial）
             ObsTraceHolder.bind(trace);
@@ -342,7 +368,8 @@ public class RouterTrialExecutor {
         } finally {
             if (trace != null) {
                 trace.bindParent(null);
-                if (parallelWorker) {
+                // 仅池线程需清理；CallerRuns 内联执行时清理会误伤父请求线程的 trace 绑定
+                if (parallelWorker && Thread.currentThread() != submitter) {
                     trace.clearThreadLocals();
                     ObsTraceHolder.clear();
                     PromptInjectionHolder.clear();
@@ -456,6 +483,15 @@ public class RouterTrialExecutor {
             public void assistant(String delta) {
                 // 多子等齐后再出终答
             }
+
+            /**
+             * 产物必须原样透传：静音的是助手正文，不是文件生成。
+             * 漏掉这个覆写会让并行 / 汇总路径下的下载卡片凭空消失（默认实现是空操作）。
+             */
+            @Override
+            public void file(GeneratedFile file) {
+                progress.file(file);
+            }
         };
     }
 
@@ -497,6 +533,15 @@ public class RouterTrialExecutor {
             @Override
             public void assistant(String delta) {
                 progress.assistant(delta);
+            }
+
+            /**
+             * 产物不受分块包装影响：文件名与体积是全局事实，
+             * 重推「路由到」对下载卡片没有意义，直接透传即可。
+             */
+            @Override
+            public void file(GeneratedFile file) {
+                progress.file(file);
             }
         };
     }
@@ -547,6 +592,7 @@ public class RouterTrialExecutor {
                 completion += outcome.turn().getCompletionTokens();
             }
             toolMax = Math.max(toolMax, outcome.turn().getToolResultMaxChars());
+            merged.mergeFiles(outcome.turn().getFiles());
             if (outcome.turn().getTraces() != null) {
                 traces.addAll(outcome.turn().getTraces());
             }

@@ -115,6 +115,10 @@
 
           <p v-for="(note, index) in row.flow.notes" :key="'n-' + index" class="note">{{ note }}</p>
           <p v-for="(err, index) in row.flow.errors" :key="'e-' + index" class="error">{{ err }}</p>
+
+          <!-- 5. 产物：Agent 写进工作区的文件。排在终答之后，是「结果」而不是「过程」 -->
+          <FileCard v-for="file in row.flow.files" :key="'f-' + file.fileName" :file="file" />
+
           <p v-if="showPlanThinking(row.turn, row.flow)" class="thinking">
             {{ row.turn.planPending ? '计划待批准' : '思考中…' }}
           </p>
@@ -194,7 +198,21 @@
           </div>
 
           <template v-for="(block, index) in row.turn.blocks" :key="'out-' + index">
-            <div v-if="block.kind === 'assistant'" class="answer-block">
+            <!-- 图片文字提取结果：本轮素材，排在思考与终答之前，可折叠 -->
+            <div v-if="block.kind === 'vision'" class="vision-block">
+              <button
+                type="button"
+                class="think-toggle"
+                :aria-expanded="isOpen(row.turn, VISION_KEY, false)"
+                :aria-label="isOpen(row.turn, VISION_KEY, false) ? '收起图片文字' : '展开图片文字'"
+                @click.stop.prevent="toggle(row.turn, VISION_KEY, false)"
+              >
+                <span class="section-label">图片文字</span>
+                <span class="chevron" :class="{ open: isOpen(row.turn, VISION_KEY, false) }" aria-hidden="true" />
+              </button>
+              <pre v-show="isOpen(row.turn, VISION_KEY, false)" class="vision-body">{{ block.text }}</pre>
+            </div>
+            <div v-else-if="block.kind === 'assistant'" class="answer-block">
               <div class="section-label answer-label">最终回答</div>
               <div class="md answer" v-html="markdown(block.text, row.turn.status === 'streaming')" />
               <span
@@ -204,6 +222,8 @@
             </div>
             <p v-else-if="block.kind === 'system'" class="note">{{ block.text }}</p>
             <p v-else-if="block.kind === 'error'" class="error">{{ block.text }}</p>
+            <!-- 产物卡片：块顺序里出现在工具步之后，读起来就是「这一步生成了这个文件」 -->
+            <FileCard v-else-if="block.kind === 'file' && block.file" :file="block.file" />
           </template>
           <p v-if="showThinking(row.turn)" class="thinking">
             {{ row.turn.planPending ? '计划待批准' : '思考中…' }}
@@ -212,6 +232,21 @@
       </div>
     </div>
     <div class="composer">
+      <!-- 已选图片缩略图：带删除角标，发送前可逐个移除 -->
+      <div v-if="attachments.length" class="thumbs">
+        <div v-for="(item, index) in attachments" :key="item.id" class="thumb">
+          <img :src="item.dataUrl" :alt="item.name" />
+          <button
+            type="button"
+            class="thumb-remove"
+            :aria-label="`移除 ${item.name}`"
+            :disabled="sending"
+            @click="removeAttachment(index)"
+          >
+            ×
+          </button>
+        </div>
+      </div>
       <el-input
         v-model="text"
         type="textarea"
@@ -222,7 +257,32 @@
         @keydown.enter.exact.prevent="submit"
       />
       <div class="composer-bar">
-        <span class="hint">{{ sessionReady ? '' : blockedHint || '请先新建会话或从左侧选择' }}</span>
+        <div class="composer-left">
+          <!-- 未绑定 VISION 模型时置灰并提示原因，避免用户传完图才在发送时被拒 -->
+          <el-tooltip :content="uploadHint" :disabled="canUpload" placement="top">
+            <span class="upload-wrap">
+              <el-button
+                class="upload-btn"
+                size="small"
+                :disabled="!canUpload || sending"
+                @click="pickImages"
+              >
+                <el-icon><Picture /></el-icon>
+                <span>图片</span>
+              </el-button>
+            </span>
+          </el-tooltip>
+          <!-- 原生 file input：支持多选，读取后转 data URI 提交给后端做 OCR -->
+          <input
+            ref="filePicker"
+            type="file"
+            accept="image/png,image/jpeg,image/webp,image/gif"
+            multiple
+            class="file-input"
+            @change="onFilesPicked"
+          />
+          <span class="hint">{{ sessionReady ? '' : blockedHint || '请先新建会话或从左侧选择' }}</span>
+        </div>
         <el-button v-if="canSend" type="primary" :loading="sending" :disabled="!sessionReady" @click="submit">
           发送
         </el-button>
@@ -244,7 +304,9 @@
  * 折叠默认展开，仅当用户点过标题才收起；终答出现也不自动收起。
  */
 import { computed, nextTick, reactive, ref, watch } from 'vue'
+import { Picture } from '@element-plus/icons-vue'
 import type { ChatTurn } from '@/types/runtime'
+import { ElMessage } from 'element-plus'
 import {
   isPlanFlow,
   planStateText,
@@ -254,6 +316,7 @@ import {
 } from '@/components/runtime/trialMessages'
 import type { TurnSections } from '@/components/runtime/trialMessages'
 import ProcessTimeline from '@/components/runtime/ProcessTimeline.vue'
+import FileCard from '@/components/runtime/FileCard.vue'
 import { renderSimpleMarkdown, renderStreamingMarkdown } from '@/utils/simpleMarkdown'
 
 const props = defineProps<{
@@ -274,20 +337,41 @@ const props = defineProps<{
   canApprove?: boolean
   /** 批准请求进行中，按钮转圈且禁止重复点 */
   approving?: boolean
+  /**
+   * 当前 Agent 是否已绑定可用的 VISION 模型。
+   * false 时上传图片按钮置灰并给出 Hover 提示——后端也会拒，但让用户先看到原因体验更好。
+   */
+  visionEnabled?: boolean
 }>()
 
 const emit = defineEmits<{
-  send: [content: string]
+  send: [content: string, images?: string[]]
   /** 批准待执行计划；携带该轮 planId 便于定位 */
   approve: [planId?: string]
   /** 取消待执行计划 */
   reject: [planId?: string]
 }>()
 
+/** 待发送的图片。id 只用于列表 key 与删除定位 */
+interface Attachment {
+  id: number
+  name: string
+  /** data:{mime};base64,…，随发送一起提交给后端 */
+  dataUrl: string
+}
+
+/** 单张图片的字节上限。与后端 VisionOcrTexts.MAX_IMAGE_CHARS 的量级对齐（约 6MB） */
+const MAX_IMAGE_BYTES = 6 * 1024 * 1024
+
+/** 单轮图片张数上限。与后端 VisionOcrTexts.MAX_IMAGES 一致，前后端不要各写一个数 */
+const MAX_IMAGES = 4
+
 /** 非计划流程里「思考过程」的折叠键后缀。 */
 const THINK_KEY = 'think'
 /** 计划阶段思考的折叠键后缀。 */
 const PHASE_KEY = 'plan-phase'
+/** 图片文字提取结果的折叠键后缀。默认收起，不抢终答的位置。 */
+const VISION_KEY = 'vision'
 
 /**
  * 点批准：把该轮的 planId 交给外层。外层负责调接口并在成功后刷新时间线。
@@ -344,6 +428,22 @@ function planTagType(state?: string): 'primary' | 'success' | 'info' | 'warning'
 
 const text = ref('')
 const scroller = ref<HTMLElement>()
+/** 原生文件选择器句柄。用 input 而非 el-upload：只需读文件转 base64，不需要上传进度与分片 */
+const filePicker = ref<HTMLInputElement>()
+/** 已选待发图片。发送成功后才清空，失败保留让用户重试 */
+const attachments = ref<Attachment[]>([])
+/** 自增 id，仅用于列表 key 与删除定位 */
+let attachmentSeq = 0
+
+/** 上传按钮是否可用：需要已绑定 VISION 模型，且未超张数上限 */
+const canUpload = computed(() => props.visionEnabled === true && attachments.value.length < MAX_IMAGES)
+
+/** 按钮禁用时的 Hover 说明。已绑定时不弹（由 el-tooltip 的 disabled 控制） */
+const uploadHint = computed(() =>
+  props.visionEnabled === true
+    ? `最多上传 ${MAX_IMAGES} 张图片`
+    : '未配置视觉模型，无法识别图片'
+)
 /** 用户点标题后的折叠覆盖；未写入时用调用方给的默认态。键为「轮 key + 区段后缀」。 */
 const foldOverride = reactive<Record<string, boolean>>({})
 /** 长工具结果是否展开。 */
@@ -389,6 +489,9 @@ function phaseLabel(phase?: string) {
   if (phase === 'planning') {
     return '任务规划中'
   }
+  if (phase === 'vision') {
+    return '识别图片文字'
+  }
   if (phase === 'reasoning') {
     return '思考中'
   }
@@ -426,9 +529,19 @@ function hasAnswer(item: ChatTurn) {
   return item.blocks.some((block) => block.kind === 'assistant' && block.text.trim())
 }
 
-/** 非计划流程：还没有任何过程/终答时才显示占位。 */
+/**
+ * 本轮是否已有可见产出。产物也算：只生成了文件、模型终答为空时，
+ * 若仍判「什么都没有」就会一直挂着「思考中…」，与实际情况矛盾。
+ *
+ * @param item 助手轮
+ */
+function hasOutput(item: ChatTurn) {
+  return hasAnswer(item) || item.blocks.some((block) => block.kind === 'file')
+}
+
+/** 非计划流程：还没有任何过程/终答/产物时才显示占位。 */
 function showThinking(item: ChatTurn) {
-  return item.status === 'streaming' && !hasProcess(item) && !hasAnswer(item)
+  return item.status === 'streaming' && !hasProcess(item) && !hasOutput(item)
 }
 
 /**
@@ -441,7 +554,8 @@ function showPlanThinking(item: ChatTurn, flow: TurnSections) {
   if (item.status !== 'streaming' || flow.answer) {
     return false
   }
-  return !flow.planPhase.length && !flow.plan && !flow.execution.length
+  // 产物同样算产出：只写了文件没有终答时不该再显示「思考中」
+  return !flow.planPhase.length && !flow.plan && !flow.execution.length && !flow.files.length
 }
 
 /** 单步思考的折叠键后缀。 */
@@ -530,8 +644,81 @@ function submit() {
   if (!content || !props.canSend || !props.sessionReady || props.sending) {
     return
   }
-  emit('send', content)
+  // 未绑定视觉模型时即便有残留图片也不提交：后端会直接拒，不如前端先兜住
+  const images = props.visionEnabled === true ? attachments.value.map((item) => item.dataUrl) : []
+  emit('send', content, images.length ? images : undefined)
   text.value = ''
+  attachments.value = []
+}
+
+/** 点「图片」：走原生文件选择器，避免 el-upload 额外引入一条上传链路 */
+function pickImages() {
+  if (!canUpload.value) {
+    return
+  }
+  filePicker.value?.click()
+}
+
+/**
+ * 选中文件后转 data URI。逐个读、边读边校验，
+ * 单张超限或超张数时立即停止并提示，不把整批都读进内存。
+ * @param event 原生 input 的 change 事件
+ */
+async function onFilesPicked(event: Event) {
+  const input = event.target as HTMLInputElement
+  const files = Array.from(input.files || [])
+  // 立刻清空 value：否则同一个文件再次选择不会触发 change
+  input.value = ''
+  if (!files.length) {
+    return
+  }
+  const room = MAX_IMAGES - attachments.value.length
+  if (room <= 0) {
+    ElMessage.warning(`一次最多上传 ${MAX_IMAGES} 张图片`)
+    return
+  }
+  const picked = files.slice(0, room)
+  for (const file of picked) {
+    if (file.size > MAX_IMAGE_BYTES) {
+      ElMessage.warning(`${file.name} 超过 6MB，请压缩后再上传`)
+      continue
+    }
+    try {
+      const dataUrl = await readAsDataUrl(file)
+      attachmentSeq += 1
+      attachments.value = [...attachments.value, { id: attachmentSeq, name: file.name, dataUrl }]
+    } catch {
+      ElMessage.warning(`${file.name} 读取失败`)
+    }
+  }
+  // 多选了仍放不下的部分明确告知，而不是静默丢弃
+  if (files.length > picked.length) {
+    ElMessage.info(`已达 ${MAX_IMAGES} 张上限，其余图片未加入`)
+  }
+}
+
+/**
+ * @param file 浏览器 File
+ * @return data:{mime};base64,… 形式的字符串
+ */
+function readAsDataUrl(file: File): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader()
+    reader.onload = () => resolve(String(reader.result || ''))
+    reader.onerror = () => reject(new Error('read failed'))
+    reader.readAsDataURL(file)
+  })
+}
+
+/**
+ * 移除一张待发图片。
+ * @param index 在 attachments 中的位置
+ */
+function removeAttachment(index: number) {
+  if (props.sending) {
+    return
+  }
+  attachments.value = attachments.value.filter((_, i) => i !== index)
 }
 </script>
 
@@ -1046,6 +1233,26 @@ function submit() {
   font-size: 12px;
 }
 
+/* 图片文字：与「思考过程」同构，默认收起，正文用等宽便于比对识别结果 */
+.vision-block {
+  margin-top: 8px;
+}
+
+.vision-body {
+  margin: 8px 0 0;
+  padding: 8px 10px;
+  border-radius: 8px;
+  border: 1px solid #e5e7eb;
+  background: #f7f8fb;
+  color: var(--ah-text-secondary, #6b7280);
+  font-size: 12px;
+  line-height: 1.5;
+  white-space: pre-wrap;
+  word-break: break-word;
+  max-height: 240px;
+  overflow: auto;
+}
+
 .error {
   margin: 8px 0 0;
   color: var(--el-color-danger);
@@ -1163,11 +1370,87 @@ function submit() {
   margin-top: 12px;
 }
 
+/* 缩略图行：紧贴在输入框上方，横向排列，超出可横向滚动 */
+.thumbs {
+  display: flex;
+  flex-wrap: nowrap;
+  gap: 8px;
+  margin-bottom: 8px;
+  padding-bottom: 2px;
+  overflow-x: auto;
+}
+
+.thumb {
+  position: relative;
+  flex: none;
+  width: 64px;
+  height: 64px;
+  border: 1px solid #e5e7eb;
+  border-radius: 8px;
+  overflow: hidden;
+  background: #f7f8fb;
+}
+
+.thumb img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  display: block;
+}
+
+/* 删除角标：右上角小圆点，hover 才明显，避免压住缩略图主体 */
+.thumb-remove {
+  position: absolute;
+  top: 2px;
+  right: 2px;
+  width: 18px;
+  height: 18px;
+  padding: 0;
+  border: 0;
+  border-radius: 50%;
+  background: rgba(0, 0, 0, 0.55);
+  color: #fff;
+  font-size: 13px;
+  line-height: 18px;
+  text-align: center;
+  cursor: pointer;
+}
+
+.thumb-remove:hover {
+  background: var(--el-color-danger, #f56c6c);
+}
+
+.thumb-remove:disabled {
+  cursor: not-allowed;
+  opacity: 0.5;
+}
+
 .composer-bar {
   display: flex;
   align-items: center;
   justify-content: space-between;
   margin-top: 8px;
+}
+
+.composer-left {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}
+
+/* 置灰时仍要能触发 tooltip：disabled 的按钮不派发鼠标事件，故用外层 span 承接 */
+.upload-wrap {
+  display: inline-flex;
+}
+
+.upload-btn {
+  gap: 4px;
+}
+
+/* 原生 file input 只做逻辑承载，不占版面 */
+.file-input {
+  display: none;
 }
 
 .hint {

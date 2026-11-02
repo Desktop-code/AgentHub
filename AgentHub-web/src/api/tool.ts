@@ -66,6 +66,32 @@ export function pageItems(params: {
   return request.get<Result<PageResult<ToolItemRow>>>('/api/tool/items', { params })
 }
 
+/**
+ * 拉取全部工具项（含已停用），供 Agent「工具绑定」选择器分组展示。
+ * <p>
+ * 后端 size 上限 100，超出时必须按页累加：只取第一页会让排在后面的工具凭空消失。
+ * 不传 status，停用项也要拿回来（由前端置灰展示，而不是装作不存在）。
+ * 最多 20 页（2000 条）防御异常 total 造成死循环。
+ *
+ * @return 全量工具项，按接口原顺序（id 倒序）
+ */
+export async function listAllItems(): Promise<ToolItemRow[]> {
+  const size = 100
+  const maxPages = 20
+  const rows: ToolItemRow[] = []
+  for (let page = 1; page <= maxPages; page += 1) {
+    const { data } = await pageItems({ current: page, size })
+    const result = data.data
+    const records = result?.records || []
+    rows.push(...records)
+    // 本页没满或已累计到总数，说明到底了
+    if (records.length < size || rows.length >= (result?.total ?? 0)) {
+      break
+    }
+  }
+  return rows
+}
+
 /** 新建工具项，后端会把状态固定为停用。 */
 export function createItem(data: Record<string, unknown>) {
   return request.post<Result<ToolItemRow>>('/api/tool/items', data)

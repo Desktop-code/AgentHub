@@ -51,7 +51,7 @@
             >
               <div class="session-main">
                 <span class="session-name">{{ sessionTitle(item) }}</span>
-                <span class="session-time">{{ formatRelativeTime(item.updateTime || item.startTime) }}</span>
+                <span class="session-time">{{ sessionSubtitle(item) }}</span>
               </div>
               <el-dropdown
                 v-if="canRun && !isTempSession(item)"
@@ -89,6 +89,7 @@
           :now="now"
           :can-approve="canRun"
           :approving="approving"
+          :vision-enabled="visionEnabled"
           @send="send"
           @approve="approvePlan"
           @reject="rejectPlan"
@@ -115,6 +116,7 @@ import {
   createTrialSession,
   deleteTrialSession,
   getPendingTrialPlan,
+  getTrialCapability,
   getTrialSession,
   listTrialAgents,
   listTrialEvents,
@@ -127,14 +129,17 @@ import {
 import ChatPanel from '@/components/runtime/ChatPanel.vue'
 import {
   advancePlanState,
+  appendFile,
   appendRoute,
   appendText,
   appendTool,
+  appendVision,
   assistantTurn,
   formatRelativeTime,
   hasOpenTurn,
   markLiveTail,
   openTurnStale,
+  parseFile,
   parsePlan,
   parseStep,
   turnsFromEvents,
@@ -201,6 +206,8 @@ let restoring = false
 let clock: number | undefined
 /** 重进续订时的轮询定时器；关窗、切会话、发送前都要停。 */
 let pollTimer: number | undefined
+/** 会话标题补拉的定时器（后端异步生成，落库晚于 SSE 结束）。 */
+let titleTimer: number | undefined
 /** 续订轮次令牌：每次开/停都自增，迟到的异步结果直接丢弃，避免串会话。 */
 let pollToken = 0
 /** 当前正在续订的会话 id。用于「续订只服务当前会话」的判断，切换会话即失效。 */
@@ -247,6 +254,12 @@ const RESUME_FRESH_MS = 10 * 60_000
 const PENDING_FIRST_EVENT_MS = 2 * 60_000
 /** 续订期间事件一直为空时的等待上限。超过就静默停止，避免这一轮其实没起来还空转满整轮上限。 */
 const RESUME_EMPTY_MS = 45_000
+/**
+ * 首轮标题补拉的延迟点（毫秒）。
+ * 标题由后端异步生成，SSE 结束那一刻通常还没写库；这里按两次延迟重拉列表，
+ * 命中即停（标题已有值），避免一直轮询。
+ */
+const TITLE_REFRESH_DELAYS = [3000, 8000] as const
 /** 打开会话的请求令牌：连点两个会话时丢弃迟到的响应，避免串台。 */
 let openToken = 0
 
@@ -264,6 +277,13 @@ const shown = computed(() => {
 const sessionReady = computed(
   () => draftReady.value || (!!session.value && session.value.status !== 'CANCELLED')
 )
+
+/**
+ * 当前 Agent 是否已绑定可用的 VISION 模型。
+ * 决定上传图片按钮是否可用：未绑定时置灰并提示，而不是让用户传完图再被后端拒。
+ * 未知（还没取到）时按 false 处理——宁可不给上传，也不要让用户白传一次。
+ */
+const visionEnabled = ref(false)
 
 /** 已取消时说明原因；历史 SUCCESS 不挡发送。 */
 const blockedHint = computed(() =>
@@ -368,11 +388,14 @@ watch(activeId, (id, prev) => {
   if (prev !== undefined) {
     resetConversation()
   }
+  // 切 Agent 必须重新判定视觉能力：上一个 Agent 绑了 VISION，不代表这个也绑了
+  void loadVisionCapability(id)
   loadHistory(true)
 })
 
 onMounted(async () => {
   await loadAgents()
+  await loadVisionCapability(activeId.value)
   await loadHistory(true)
 })
 
@@ -383,6 +406,7 @@ onBeforeUnmount(() => {
   // 组件内只收拾自己的定时器与轮询；SSE 由 trialStream 的登记项持有，直到收尾并落库接管。
   stopClock()
   stopResume()
+  stopTitleRefresh()
 })
 
 /** 下拉只含启用 Agent。抽屉不请求这份列表。 */
@@ -395,6 +419,39 @@ async function loadAgents() {
     agents.value = data.data || []
   } catch {
     pageError.value = 'Agent 列表加载失败'
+  }
+}
+
+/**
+ * 判定当前 Agent 是否配了 VISION 模型，用于置灰上传按钮。
+ *
+ * 整页模式优先复用下拉里已带回来的标记（列表接口顺带算好了）；
+ * 抽屉模式没有下拉，单独请求一次能力接口。
+ * 取不到时按「不可用」处理：宁可不给传，也不要让用户白传一次再被后端拒。
+ *
+ * @param agentId 当前 Agent；为空表示还没选
+ */
+async function loadVisionCapability(agentId?: number) {
+  if (!agentId) {
+    visionEnabled.value = false
+    return
+  }
+  if (props.variant === 'page') {
+    const found = agents.value.find((item) => item.id === agentId)
+    if (found) {
+      visionEnabled.value = found.visionEnabled === true
+      return
+    }
+  }
+  try {
+    const { data } = await getTrialCapability(agentId)
+    // 请求期间可能已切到别的 Agent，迟到的响应直接丢弃
+    if (activeId.value !== agentId) {
+      return
+    }
+    visionEnabled.value = data.data?.visionEnabled === true
+  } catch {
+    visionEnabled.value = false
   }
 }
 
@@ -474,9 +531,53 @@ async function loadHistory(selectLatest = false) {
   }
 }
 
+/**
+ * 首轮结束后补拉左栏标题。
+ *
+ * <p>为什么需要：标题由后端在整轮落库之后异步生成，SSE 的 done 帧到达时标题多半还没写库，
+ * 紧接着那次 loadHistory 只能拿到空标题。「新对话」会一直挂到用户手动刷新，
+ * 体验上像是标题功能没生效；这里按 {@link TITLE_REFRESH_DELAYS} 补两次并提前命中即停。
+ *
+ * <p>为什么只补首轮：标题只由首轮生成，后续轮次不会再变，补拉纯属浪费一次请求。
+ *
+ * @param id 会话主键
+ */
+function scheduleTitleRefresh(id: number) {
+  stopTitleRefresh()
+  const row = history.value.find((item) => item.id === id)
+  // 已有标题（或不是首轮）就不必等：后端不会再改它
+  if (row && (row.sessionTitle || '').trim()) {
+    return
+  }
+  const delays = [...TITLE_REFRESH_DELAYS]
+  const tick = () => {
+    titleTimer = window.setTimeout(async () => {
+      await loadHistory(false)
+      const fresh = history.value.find((item) => item.id === id)
+      // 标题已有值、或会话已不在列表（被删/切 Agent）时收手
+      if (!fresh || (fresh.sessionTitle || '').trim()) {
+        return
+      }
+      if (delays.length) {
+        tick()
+      }
+    }, delays.shift() ?? 0)
+  }
+  tick()
+}
+
+/** 停掉标题补拉。切会话、卸载、重新发送时都要调，避免旧会话的补拉盖掉新状态。 */
+function stopTitleRefresh() {
+  if (titleTimer) {
+    window.clearTimeout(titleTimer)
+    titleTimer = undefined
+  }
+}
+
 function resetConversation() {
   // 切 Agent / 删当前条：停掉续订并清掉右栏，避免把上一会话的进行态带过去
   stopResume()
+  stopTitleRefresh()
   session.value = undefined
   turns.value = []
   pageError.value = ''
@@ -520,6 +621,8 @@ function sessionStub(id: number, startTimeMs: number): TrialSession {
     userId: 0,
     status: 'RUNNING',
     messageCount: 0,
+    // 草稿还没有标题：左栏先显示「新对话」，首轮结束后由后端异步补上
+    sessionTitle: '',
     lastMsgPreview: '',
     startTime: stamp,
     updateTime: stamp
@@ -549,12 +652,13 @@ function formatLocalStamp(date: Date) {
   return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())} ${pad(date.getHours())}:${pad(date.getMinutes())}:${pad(date.getSeconds())}`
 }
 
-/** 从未发过消息、也没有标题的空壳（历史误点新建留下的落库行）。临时条不算。 */
+/** 从未发过消息、也没有标题/预览的空壳（历史误点新建留下的落库行）。临时条不算。 */
 function isUnaskedSession(item: TrialSession) {
   if (isTempSession(item)) {
     return false
   }
-  return (item.messageCount ?? 0) <= 0 && !(item.lastMsgPreview || '').trim()
+  // 标题也算「有内容」：用户可能先改名再提问，这种行不能被当成空壳清掉
+  return (item.messageCount ?? 0) <= 0 && !(item.lastMsgPreview || '').trim() && !(item.sessionTitle || '').trim()
 }
 
 /**
@@ -614,10 +718,31 @@ async function purgeUnaskedSessions(items: TrialSession[]) {
   }
 }
 
-/** 标题用预览列。临时/未提问显示「新对话」。 */
+/**
+ * 主标题：优先 session_title（自动生成 ≤10 汉字，或用户手改）；
+ * 尚未生成时退回 lastMsgPreview 顶替，两者都空则显示「新对话」。
+ * @param item 会话
+ */
 function sessionTitle(item: TrialSession) {
-  const title = (item.lastMsgPreview || '').trim()
-  return title || '新对话'
+  const title = (item.sessionTitle || '').trim()
+  if (title) {
+    return title
+  }
+  const preview = (item.lastMsgPreview || '').trim()
+  return preview || '新对话'
+}
+
+/**
+ * 副标题：预览与相对时间，用「 · 」连起来；预览为空（尚未提问）时只显示时间。
+ * @param item 会话
+ */
+function sessionSubtitle(item: TrialSession) {
+  const preview = (item.lastMsgPreview || '').trim()
+  const time = formatRelativeTime(item.updateTime || item.startTime)
+  if (!preview || preview === sessionTitle(item)) {
+    return time
+  }
+  return `${preview} · ${time}`
 }
 
 /**
@@ -1225,7 +1350,10 @@ function mergeSessionMeta(fresh: TrialSession, local?: TrialSession): TrialSessi
   return {
     ...fresh,
     messageCount: Math.max(fresh.messageCount ?? 0, local.messageCount ?? 0),
-    lastMsgPreview: (fresh.lastMsgPreview || '').trim() || local.lastMsgPreview
+    lastMsgPreview: (fresh.lastMsgPreview || '').trim() || local.lastMsgPreview,
+    // 标题可能已由异步任务写入：「服务端有值就覆盖，没值不要清掉本地已显示的那条」
+    sessionTitle: (fresh.sessionTitle || '').trim() || local.sessionTitle,
+    titleSource: (fresh.sessionTitle || '').trim() ? fresh.titleSource : local.titleSource
   }
 }
 
@@ -1270,8 +1398,11 @@ function stopResume() {
 /**
  * SSE 边跑边追加（route 进思考时间线；reasoning / assistant 分进思考与终答）。
  * 临时「新对话」或无 session 时：首问才 create，再用返回 id 转正左栏条目；结束后用落库事件再铺一遍。
+ *
+ * @param content 用户输入
+ * @param images  图片 data URI 数组，可空。后端先 OCR 再喂主模型
  */
-async function send(content: string) {
+async function send(content: string, images?: string[]) {
   if (sending.value || (!session.value && !draftReady.value)) {
     return
   }
@@ -1345,6 +1476,12 @@ async function send(content: string) {
         appendText(live, 'reasoning', text)
         touchSnapshot()
       },
+      onVision: (text) => {
+        // 识别结果是本轮素材：紧跟用户气泡出现，先于任何思考与终答
+        live.phase = 'vision'
+        appendVision(live, text)
+        touchSnapshot()
+      },
       onTool: (tool) => {
         live.phase = 'tool'
         appendTool(live, tool.line, tool.result)
@@ -1375,6 +1512,15 @@ async function send(content: string) {
         })
         touchSnapshot()
       },
+      onFileGenerated: (file) => {
+        // 产物是结果而不是过程：不改 phase，避免状态条从「回答生成中」退回「工具执行中」
+        appendFile(live, {
+          fileName: file.fileName,
+          size: file.size,
+          downloadUrl: file.downloadUrl
+        })
+        touchSnapshot()
+      },
       onAssistant: (text) => {
         if (live.phase !== 'done') {
           live.phase = 'answering'
@@ -1398,7 +1544,7 @@ async function send(content: string) {
         live.phase = 'error'
         pageError.value = message
       }
-    }, controller.signal)
+    }, controller.signal, images)
     // 落库成功后再用事件覆盖，避免把未入库的失败卡片刷掉。
     // done 到达时服务端已经写了轮次；先改掉创建接口带回的 0，防止紧接着的「新会话」把本条当空壳删掉
     if (persisted && session.value && session.value.id === sessionId) {
@@ -1417,6 +1563,10 @@ async function send(content: string) {
         await openHistory(sessionId, true)
       } else {
         dropLive(sessionId)
+      }
+      // 只有首轮才由后端异步生成标题：此时拉列表多半还没有，稍后补两次
+      if ((session.value?.messageCount ?? 0) <= 1) {
+        scheduleTitleRefresh(sessionId)
       }
     } else if (live.status === 'streaming') {
       live.status = 'error'
@@ -1613,6 +1763,14 @@ function mergeApproveEvents(events: TrialEvent[], planId?: string) {
     }
     if (item.eventType === 'assistant') {
       appendApproveDelta(turn, item, 'assistant', displayEventText(item))
+      continue
+    }
+    if (item.eventType === 'file') {
+      // 批准执行期间生成的文件也要出现在时间线上；按文件名覆盖，与实时推送同口径
+      const file = parseFile(item.contentText, item.sessionId)
+      if (file) {
+        appendFile(turn, file)
+      }
     }
   }
 }
@@ -1897,9 +2055,13 @@ function stopClock() {
   white-space: nowrap;
 }
 
+/* 副标题：预览 + 时间。预览可能很长，同样单行省略，不能把行高撑开 */
 .session-time {
+  overflow: hidden;
   color: var(--ah-text-muted);
   font-size: 12px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 /* 本轮执行中：贴在该行最右侧，小号转圈；行内操作按钮的显隐优先级更低 */

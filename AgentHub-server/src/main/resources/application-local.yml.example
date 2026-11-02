@@ -11,6 +11,11 @@ spring:
     password: 请替换为本地密码
 
 agenthub:
+  workspace:
+    # 会话级文件工具的落盘根目录（workspaceWriteFile 等三个工具共用），每会话在其下建一级子目录。
+    # 默认已在 application.yml 配成 ./workspace-test（已 gitignore），此处一般不写；
+    # 想换目录再覆盖，写成绝对路径可避开「相对进程工作目录」的歧义。
+    # root-path: ./workspace-test
   crypto:
     # openssl rand -hex 32 的结果。这是主密钥，不是厂商 sk。
     secret-key: 请替换为 64 位 hex

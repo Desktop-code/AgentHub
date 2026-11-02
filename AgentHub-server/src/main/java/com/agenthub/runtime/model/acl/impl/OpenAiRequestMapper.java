@@ -77,7 +77,12 @@ final class OpenAiRequestMapper {
     private ObjectNode toMessageNode(UnifiedMessage message) {
         ObjectNode node = json.createObjectNode();
         node.put("role", message.getRole());
-        if (message.getContent() != null) {
+        // 图文混排：有图时 content 必须是 [{type:text},{type:image_url}] 数组，
+        // 纯文本时仍下发字符串——部分兼容实现（Ollama / 老版 vLLM）对分段数组支持不全，
+        // 没有图片也发数组会平白多出一类 400。
+        if (message.hasImages()) {
+            node.set("content", multimodalContent(message));
+        } else if (message.getContent() != null) {
             node.put("content", message.getContent());
         }
         if (message.getToolCallId() != null && !message.getToolCallId().isBlank()) {
@@ -98,6 +103,39 @@ final class OpenAiRequestMapper {
             }
         }
         return node;
+    }
+
+    /**
+     * 组装多模态 content 数组。形状按 OpenAI 视觉消息规范：
+     * <pre>
+     * [
+     *   {"type": "text", "text": "用户的文字提问"},
+     *   {"type": "image_url", "image_url": {"url": "图片的URL或data URI"}}
+     * ]
+     * </pre>
+     * 约定：
+     * 1. 文字段恒排第一段。纯发图（content 为空）时仍补一段空文本，
+     *    部分厂商缺少 text 段会直接 400，且空数组同样非法；
+     * 2. 图片段的 url 原样透传，data URI 与 http(s) 地址都由上游自行拉取或解码；
+     * 3. 空白图片项跳过而不是发空串，避免整条消息因一张坏图被拒。
+     *
+     * @param message 统一消息，调用前已确认 {@link UnifiedMessage#hasImages()}
+     * @return 可直接内联到 messages[].content 的数组节点
+     */
+    private ArrayNode multimodalContent(UnifiedMessage message) {
+        ArrayNode parts = json.createArrayNode();
+        ObjectNode textPart = parts.addObject();
+        textPart.put("type", "text");
+        textPart.put("text", message.getContent() == null ? "" : message.getContent());
+        for (String imageUrl : message.getImageUrls()) {
+            if (imageUrl == null || imageUrl.isBlank()) {
+                continue;
+            }
+            ObjectNode imagePart = parts.addObject();
+            imagePart.put("type", "image_url");
+            imagePart.putObject("image_url").put("url", imageUrl.trim());
+        }
+        return parts;
     }
 
     /**

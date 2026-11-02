@@ -3,6 +3,7 @@ package com.agenthub.tool.infra.mcp;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ObjectNode;
+import org.springframework.scheduling.concurrent.ThreadPoolTaskExecutor;
 
 import java.io.InputStream;
 import java.net.URI;
@@ -16,6 +17,7 @@ import java.util.concurrent.BlockingQueue;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ExecutionException;
 import java.util.concurrent.LinkedBlockingQueue;
+import java.util.concurrent.RejectedExecutionException;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.TimeoutException;
 import java.util.concurrent.atomic.AtomicLong;
@@ -26,22 +28,30 @@ import java.util.concurrent.atomic.AtomicLong;
  * 同步：initialize → notifications/initialized → tools/list（可翻页）。
  * 真调：同一握手后发 tools/call。响应优先取 POST 正文，否则等 SSE 的 message 帧。
  * 异常文案不带地址和响应体，避免把查询串里的令牌写进日志。
+ * <p>
+ * 线程：SSE 读流跑在全局 {@code mcpReaderExecutor}（有界队列 + Abort + daemon），
+ * 本类不再裸 {@code new Thread}；每个 SSE 会话仍占一个池线程直到流关闭。
  */
 public class McpSseClient implements McpClient {
 
     private final HttpClient httpClient;
     private final ObjectMapper json;
     private final long readTimeoutMs;
+    /** SSE 读流线程池；由 AsyncConfig 统一装配 */
+    private final ThreadPoolTaskExecutor mcpReaderExecutor;
 
     /**
-     * @param httpClient    连接超时由调用方设置
-     * @param json          JSON-RPC
-     * @param readTimeoutMs 从建连到收完的总上限
+     * @param httpClient       连接超时由调用方设置
+     * @param json             JSON-RPC
+     * @param readTimeoutMs    从建连到收完的总上限
+     * @param mcpReaderExecutor 读流执行池（有界队列，满则拒绝）
      */
-    public McpSseClient(HttpClient httpClient, ObjectMapper json, long readTimeoutMs) {
+    public McpSseClient(HttpClient httpClient, ObjectMapper json, long readTimeoutMs,
+                        ThreadPoolTaskExecutor mcpReaderExecutor) {
         this.httpClient = httpClient;
         this.json = json;
         this.readTimeoutMs = Math.max(readTimeoutMs, 1);
+        this.mcpReaderExecutor = mcpReaderExecutor;
     }
 
     /**
@@ -91,9 +101,13 @@ public class McpSseClient implements McpClient {
         long deadline = System.nanoTime() + TimeUnit.MILLISECONDS.toNanos(readTimeoutMs);
         HttpResponse<InputStream> opened = openSse(base, authHeader, deadline);
         BlockingQueue<SseFrames.Frame> frames = new LinkedBlockingQueue<>();
-        Thread reader = new Thread(() -> SseFrames.pump(opened.body(), frames), "mcp-sse-reader");
-        reader.setDaemon(true);
-        reader.start();
+        try {
+            // 读流交给全局池：不再裸起线程。Abort 策略下池/队列满会直接拒绝，此时必须关流再抛，避免连接泄漏
+            mcpReaderExecutor.execute(() -> SseFrames.pump(opened.body(), frames));
+        } catch (RejectedExecutionException ex) {
+            closeQuietly(opened.body());
+            throw new McpCallException("MCP 读流任务繁忙，请稍后重试");
+        }
         try {
             SseFrames.Frame endpoint = awaitEvent(frames, "endpoint", deadline);
             String data = endpoint.data() == null ? "" : endpoint.data().trim();

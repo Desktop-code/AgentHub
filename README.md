@@ -48,6 +48,10 @@ Agent 中台：以「配置驱动」的方式管理模型、工具、知识库�
 
 短期记忆（Redis 热数据 + MySQL 持久化双写）、长期记忆（`fact_key` 归并去重）、Agent 工作记忆三层；上下文窗口按轮次 / 字符 / 空闲时间规划，触顶先滚动摘要再裁剪旧轮。长期记忆只在显式「记住」、会话结束、滚动摘要三处抽取，不每轮都抽。
 
+**会话标题**
+
+首轮对话落库后异步生成 ≤10 汉字的标题（`agent_run_session.session_title`），跑在独立的轻量线程池上、失败只记日志，不阻塞也不影响这一轮响应；用户手动改名会把 `title_source` 置 `MANUAL`，此后自动生成不再覆盖。左栏标题与首问预览分列，互不踩。
+
 **可观测与计量**
 
 - 调用追踪：一次提问一条 trace，每一步一条 span，自增 id + 父子关系成树（含路由并行扇出、计划模式串行步骤），按人可见范围裁剪。
@@ -148,6 +152,7 @@ cp AgentHub-server/src/main/resources/application-local.yml.example AgentHub-ser
 
 # 或不落文件，用环境变量注入：
 #   AGENTHUB_SECRET_KEY / AGENTHUB_DB_USER / AGENTHUB_DB_PASSWORD / AGENTHUB_MILVUS_URI
+#   AGENTHUB_WORKSPACE_ROOT_PATH（会话级文件工具的落盘根目录，可留空走系统临时目录）
 ```
 
 ```bash
@@ -184,6 +189,8 @@ npm run dev
 - **不进 git 的内容**：`.env` 与 `.env.*`、`secrets/`、`**/application-local.yml`、`**/application-{dev,prod}.yml`、`*.pem` / `*.key`、日志与 `data/`；只保留 `.env.example` 与 `application-local.yml.example` 模板。
 - **示例值不是凭据**：`.env.example`、`docker-compose.yml` 里的口令默认值是占位符，生产必须用真实环境变量覆盖；README 与文档不贴任何完整密钥样例。
 - **主密钥轮换**：配置 `agenthub.crypto.previous-keys` 后启动，旧密文会被自动重写为新密钥，迁移完成再移除旧密钥。
+- **试跑工作区**：会话级文件工具（`workspaceWriteFile` / `ReadFile` / `ListFiles`）的落盘根目录由 `agenthub.workspace.root-path`（环境变量 `AGENTHUB_WORKSPACE_ROOT_PATH`）决定，默认 `./workspace-test`（相对进程工作目录，已 gitignore）；留空则回落到系统临时目录的 `agenthub_workspace`。该目录只放 Agent 试跑产物，不参与备份。
+- **会话标题开关**：`agenthub.runtime.trial.auto-title-enabled`（环境变量 `AGENTHUB_AUTO_TITLE_ENABLED`，默认 `true`）。关掉只是不再异步生成标题，左栏退回展示首问预览，不影响试跑。
 - **时间与鉴权约定**：时区 `Asia/Shanghai`，Token 走 `Authorization: Bearer <token>`，权限码统一 `{域}:{资源}:{动作}` 且菜单种子 / 后端注解 / 前端按钮同码。
 
 ## 常见端口
@@ -204,7 +211,3 @@ npm run dev
 ## 文档
 
 - `docs/架构设计.md`：分层总图、试跑主链路、三种运行模式、模型防腐、提示词三层、RAG 双流水、工具闸门、记忆分层、可观测与部署拓扑（含 mermaid 图）
-- `docs/AgentHub-架构设计.md`：域包划分、分层约束与各域职责
-- `docs/架构定稿-企业级知识库RAG.md`、`docs/架构定稿-模型防腐层与统一SSE.md`：RAG 与模型出站链路的定稿口径
-- `docs/时间字段硬规范.md`：库列与接口时间字段命名约定
-- `docs/UI-布局与风格-AgentOne参考.md`：管理台布局与视觉规范

@@ -87,7 +87,11 @@ final class DashScopeRequestMapper {
     private ObjectNode toMessageNode(UnifiedMessage message) {
         ObjectNode node = json.createObjectNode();
         node.put("role", message.getRole());
-        if (message.getContent() != null) {
+        // 原生灵积的图文混排：content 是 [{text:...},{image:...}] 数组（不是 OpenAI 的 image_url 包装）。
+        // 无图时仍下发字符串，保持与旧行为一致。
+        if (message.hasImages()) {
+            node.set("content", multimodalContent(message));
+        } else if (message.getContent() != null) {
             node.put("content", message.getContent());
         }
         if (message.getName() != null && !message.getName().isBlank()) {
@@ -108,6 +112,35 @@ final class DashScopeRequestMapper {
             }
         }
         return node;
+    }
+
+    /**
+     * 组装原生灵积的多模态 content 数组。形状是多模态 generation 接口约定的：
+     * <pre>
+     * [
+     *   {"text": "用户的文字提问"},
+     *   {"image": "https://… 或 data:image/png;base64,…"}
+     * ]
+     * </pre>
+     * 与 OpenAI 兼容族的差别只有字段名（{@code text}/{@code image} 而不是 {@code type}+{@code image_url}），
+     * 因此不能复用 {@link OpenAiRequestMapper} 的组装结果。
+     * 约定：文字段恒排第一段（纯发图时为空串占位），空白图片项跳过。
+     *
+     * @param message 统一消息，调用前已确认 {@link UnifiedMessage#hasImages()}
+     * @return 可直接内联到 input.messages[].content 的数组节点
+     */
+    private ArrayNode multimodalContent(UnifiedMessage message) {
+        ArrayNode parts = json.createArrayNode();
+        ObjectNode textPart = parts.addObject();
+        textPart.put("text", message.getContent() == null ? "" : message.getContent());
+        for (String imageUrl : message.getImageUrls()) {
+            if (imageUrl == null || imageUrl.isBlank()) {
+                continue;
+            }
+            ObjectNode imagePart = parts.addObject();
+            imagePart.put("image", imageUrl.trim());
+        }
+        return parts;
     }
 
     /**

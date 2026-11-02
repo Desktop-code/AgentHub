@@ -27,10 +27,38 @@ public class UnifiedMessage {
     private String role;
 
     /**
-     * 正文。纯文本直传；多段（图片、多 modality）后续用 extensions 表达，
-     * 本期不做 content 分段模型，避免过早定死结构。
+     * 正文。纯文本直传，始终保留：单模态场景（绝大多数历史消息、工具结果）只填本字段，
+     * Adapter 看到 imageUrls 为空时一律按字符串下发 content，保持与旧行为逐字节一致。
      */
     private String content;
+
+    /**
+     * 随本条消息一起送出的图片，元素是「URL」或「data:{mime};base64,...」。
+     * 为什么用最简的字符串列表而不是分段的 ContentPart 集合：
+     * 1. 入参只有「一段文字 + N 张图」这一种形态，出参永远是纯文本，没有必要提前把结构做通用；
+     * 2. base64 图片可能达到数 MB，独立成字段便于在边界上做长度校验与日志脱敏（正文里绝不出现）；
+     * 3. 厂商差异（{@code image_url} / {@code image} / Anthropic base64 block）全部下沉到 Adapter。
+     * 约束：本字段只允许出现在 role=user 的消息上；system / tool 带图会被各 Adapter 忽略。
+     */
+    @Builder.Default
+    private List<String> imageUrls = new ArrayList<>();
+
+    /**
+     * 是否携带图片。Adapter 用它决定 content 走字符串还是分段数组。
+     *
+     * @return 至少一张非空白图片时为 true
+     */
+    public boolean hasImages() {
+        if (imageUrls == null || imageUrls.isEmpty()) {
+            return false;
+        }
+        for (String url : imageUrls) {
+            if (url != null && !url.isBlank()) {
+                return true;
+            }
+        }
+        return false;
+    }
 
     /**
      * 助手消息里模型发起的工具调用。仅有工具调用（无正文）的 assistant 消息 content 可为空。
@@ -66,6 +94,21 @@ public class UnifiedMessage {
      */
     public static UnifiedMessage user(String text) {
         return UnifiedMessage.builder().role("user").content(text).build();
+    }
+
+    /**
+     * 便捷构造：图文混排的用户消息。
+     *
+     * @param text      用户本轮文字提问，可空（只发图时 Adapter 会补一段空文本占位）
+     * @param imageUrls 图片 URL 或 base64 data URI，空元素会被 Adapter 跳过
+     * @return role=user 的消息
+     */
+    public static UnifiedMessage user(String text, List<String> imageUrls) {
+        return UnifiedMessage.builder()
+                .role("user")
+                .content(text)
+                .imageUrls(imageUrls == null ? new ArrayList<>() : new ArrayList<>(imageUrls))
+                .build();
     }
 
     /**

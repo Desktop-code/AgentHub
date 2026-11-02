@@ -80,6 +80,9 @@ docs/*
 !docs/架构设计.md
 bin/
 
+# 会话级文件工具的本地工作区（agenthub.workspace.root-path 默认 ./workspace-test）
+**/workspace-test/
+
 # 数据库文件
 sql/*
 !sql/agenthub.sql

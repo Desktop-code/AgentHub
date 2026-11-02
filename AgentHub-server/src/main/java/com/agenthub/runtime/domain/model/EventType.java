@@ -14,6 +14,12 @@ public enum EventType {
     ASSISTANT("assistant"),
     /** 工具调用。摘要是名称和脱敏参数，密钥原文不入库 */
     TOOL("tool"),
+    /**
+     * 图片文字提取结果。正文是逐图汇总的识别文本。
+     * 单独成类型而不塞进 SYSTEM：时间线上要能把「这张图提了哪些字」与装配说明区分开，
+     * 用户才能判断是识别错了还是主模型答错了。
+     */
+    VISION("vision"),
     /** Router 选中了哪个子 Agent */
     ROUTE("route"),
     /**
@@ -28,6 +34,12 @@ public enum EventType {
     STEP("step"),
     /** 装配说明，例如源不可用、超预算未暴露或被截断的 Skill */
     SYSTEM("system"),
+    /**
+     * 本轮生成的工作区文件。正文是 {@code {"fileName":"...","size":123}}（见 GeneratedFileMarker）。
+     * 单独成类型而不混进 TOOL：产物要能在聊天区渲染成下载卡片，
+     * 且刷新后回放也必须有，而 TOOL 正文会被截断。
+     */
+    FILE("file"),
     /** 失败说明，已脱敏 */
     ERROR("error");
 
