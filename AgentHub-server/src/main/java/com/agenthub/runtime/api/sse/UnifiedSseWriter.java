@@ -69,6 +69,16 @@ public final class UnifiedSseWriter {
     }
 
     /**
+     * 当前已绑定的会话主键。工具回调里拼下载地址要用它——
+     * 那时代码已经离开 Controller 的栈帧，拿不到原始请求了。
+     *
+     * @return 会话主键；尚未绑定时为 null
+     */
+    public synchronized Long boundSession() {
+        return sessionId;
+    }
+
+    /**
      * 是否已发出结束帧。调用方可用它在收尾时提前判断，避免无谓的兜底尝试。
      *
      * @return true 表示结束帧已写出
