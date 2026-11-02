@@ -1,8 +1,10 @@
 package com.agenthub.runtime.application;
 
 import com.agenthub.runtime.domain.model.EventType;
+import com.agenthub.runtime.domain.model.GeneratedFile;
 import com.agenthub.runtime.domain.model.PlanView;
 import com.agenthub.runtime.domain.model.StepView;
+import com.agenthub.runtime.domain.service.GeneratedFileMarker;
 import com.agenthub.runtime.domain.service.PlanJson;
 import com.agenthub.runtime.domain.service.TrialProgress;
 import com.agenthub.runtime.domain.service.TrialTexts;
@@ -156,6 +158,23 @@ public final class PlanProgressRecorder implements TrialProgress {
         frames.add(new Frame(EventType.STEP, step.displayLine(), PlanJson.stepPayload(step)));
         if (delegate != null) {
             delegate.step(step);
+        }
+    }
+
+    /**
+     * 文件产物：既落帧（刷新后回放出下载卡片），也转给真实出站。
+     * {@inheritDoc}
+     */
+    @Override
+    public synchronized void file(GeneratedFile file) {
+        if (file == null || file.fileName() == null || file.fileName().isBlank()) {
+            return;
+        }
+        // 摘要给「文件名 + 可读体积」，正文是结构化 JSON：前端要拿 fileName 去拼下载地址
+        frames.add(new Frame(EventType.FILE, file.fileName() + "（" + file.humanSize() + "）",
+                GeneratedFileMarker.payload(file.fileName(), file.size())));
+        if (delegate != null) {
+            delegate.file(file);
         }
     }
 

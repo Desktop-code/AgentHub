@@ -4,9 +4,11 @@ import com.agenthub.runtime.api.dto.MessageResp;
 import com.agenthub.runtime.api.sse.ServletSseFrameSink;
 import com.agenthub.runtime.api.sse.UnifiedSseWriter;
 import com.agenthub.runtime.application.TrialStreamEnd;
+import com.agenthub.runtime.domain.model.GeneratedFile;
 import com.agenthub.runtime.domain.model.PlanStep;
 import com.agenthub.runtime.domain.model.PlanView;
 import com.agenthub.runtime.domain.model.StepView;
+import com.agenthub.runtime.domain.service.GeneratedFileMarker;
 import com.agenthub.runtime.domain.service.TrialProgress;
 import com.agenthub.runtime.domain.service.TrialTexts;
 import com.agenthub.runtime.model.acl.UnifiedFinishReason;
@@ -16,6 +18,8 @@ import com.agenthub.runtime.model.acl.UnifiedUsage;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import jakarta.servlet.http.HttpServletResponse;
 
+import java.net.URLEncoder;
+import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
@@ -113,7 +117,9 @@ public final class TrialChunkWriter implements TrialProgress, TrialStreamEnd {
         Map<String, Object> payload = new LinkedHashMap<>();
         String line = TrialTexts.toolDisplay(name, arguments);
         payload.put("line", success ? line : line + " · 失败");
-        payload.put("result", TrialTexts.redact(result));
+        // 兜底清洗：正常路径上工具层已剔除标记，但 MCP 等外部实现不受我们控制。
+        // 这里再扫一遍，保证用户在聊天框里永远看不到 [FILE_GENERATED] 这串机械字符。
+        payload.put("result", TrialTexts.redact(GeneratedFileMarker.strip(result)));
         payload.put("success", success);
         // 工具执行结果没有 unified 等价事件（定稿里 tool_call.completed 是「模型要求调用」），
         // 故只走旧事件名，避免语义混淆
@@ -126,6 +132,18 @@ public final class TrialChunkWriter implements TrialProgress, TrialStreamEnd {
         String text = TrialTexts.redact(delta);
         if (!text.isEmpty()) {
             writer.messageDelta(text);
+        }
+    }
+
+    /**
+     * 图片文字提取结果。走独立事件名 vision，载荷是整段文本。
+     * 与 tool 的区别：它没有调用行与结果的拆分，前端按「素材块」渲染即可。
+     */
+    @Override
+    public void vision(String text) {
+        String body = TrialTexts.redact(text);
+        if (!body.isEmpty()) {
+            writer.emitLegacy("vision", body);
         }
     }
 
@@ -169,6 +187,42 @@ public final class TrialChunkWriter implements TrialProgress, TrialStreamEnd {
         payload.put("text", TrialTexts.redact(step.text()));
         payload.put("line", TrialTexts.redact(step.displayLine()));
         writer.emitLegacy("step", payload);
+    }
+
+    /**
+     * 文件生成。走独立事件名 {@code file_generated}，载荷含前端直接可用的下载地址。
+     *
+     * <p>为什么下载地址在后端拼：fileName 可能含中文与子目录，编码规则必须与下载接口
+     * 一一对应；散到前端拼迟早出现「卡片能显示、点了 404」。
+     *
+     * @param file 产物名与体积
+     */
+    @Override
+    public void file(GeneratedFile file) {
+        if (file == null || file.fileName() == null || file.fileName().isBlank()) {
+            return;
+        }
+        Map<String, Object> payload = new LinkedHashMap<>();
+        payload.put("fileName", file.fileName());
+        payload.put("size", file.size());
+        payload.put("downloadUrl", downloadUrl(file.fileName()));
+        writer.emitLegacy("file_generated", payload);
+    }
+
+    /**
+     * 拼下载地址。
+     *
+     * <p>会话主键取当前 SSE 已绑定的值：整轮开始时 Controller 就 {@code bindSession} 过，
+     * 因此在工具回调里必定可用。文件名按 UTF-8 百分号编码放进查询串，
+     * 前端无需再处理中文与 {@code #}、{@code &} 之类的字符。
+     *
+     * @param fileName 相对工作区根的文件名
+     * @return 形如 {@code /api/runtime/workspace/download?sessionId=12&fileName=report.md}
+     */
+    private String downloadUrl(String fileName) {
+        Long id = writer.boundSession();
+        String encoded = URLEncoder.encode(fileName, StandardCharsets.UTF_8);
+        return "/api/runtime/workspace/download?sessionId=" + (id == null ? "" : id) + "&fileName=" + encoded;
     }
 
     /** {@inheritDoc} */

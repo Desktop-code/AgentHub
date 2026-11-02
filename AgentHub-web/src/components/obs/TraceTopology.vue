@@ -398,6 +398,7 @@ function displayName(span: ObsSpan): string {
 function typeLabel(spanType: string | null | undefined): string {
   if (spanType === 'LLM') return '模型'
   if (spanType === 'TOOL') return '工具'
+  if (spanType === 'VISION') return '图片识别'
   if (spanType === 'ROUTE') return '路由'
   if (spanType === 'PLAN') return '规划'
   if (spanType === 'RETRIEVE') return '检索'

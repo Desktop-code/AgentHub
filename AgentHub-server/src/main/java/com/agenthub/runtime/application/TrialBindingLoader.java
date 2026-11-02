@@ -147,6 +147,43 @@ public class TrialBindingLoader {
     }
 
     /**
+     * 解析 VISION 槽的可用实例。只认 VISION 槽，<b>不允许降级到 CHAT</b>：
+     * 文本模型看不懂图，降级过去只会把图片当成乱码喂进去，得到一个更糟的答案。
+     *
+     * @param agentId Agent
+     * @return 可用的视觉实例 id；未绑定或凭证不全时为空
+     */
+    public Optional<Long> findVisionModel(Long agentId) {
+        return firstWiredInSlot(agentId, ModelCapability.VISION);
+    }
+
+    /**
+     * 本轮是否需要视觉预处理，以及所需实例是否就绪。集中在一处判断，
+     * 让「前置校验」与「OCR 执行」用同一套口径，避免校验放过了执行又拒。
+     *
+     * @param agentId Agent
+     * @return 视觉实例 id；无图需求时调用方不会走这里
+     * @throws TrialFailure VISION 槽未绑定可用模型（文案直接引导用户去配置）
+     */
+    public Long requireVisionModel(Long agentId) {
+        return findVisionModel(agentId).orElseThrow(() -> new TrialFailure(
+                "当前 Agent 未配置视觉识别(OCR)模型，无法处理图片。请前往「模型配置」Tab 绑定 VISION 模型。"));
+    }
+
+    /**
+     * 前置校验：对话主模型必须在。带图与否都要查——没有 CHAT 模型时任何一轮都跑不起来，
+     * 提前用明确文案拒绝，好过让后续装配抛一句「Agent 没有可用的对话模型」。
+     *
+     * @param agentId Agent
+     * @return CHAT 槽可用实例 id
+     * @throws TrialFailure CHAT 槽未绑定可用模型
+     */
+    public Long requireChatModel(Long agentId) {
+        return findChatModel(agentId).orElseThrow(() -> new TrialFailure(
+                "当前 Agent 未配置对话(CHAT)模型，无法执行。请前往「模型配置」Tab 绑定 CHAT 模型。"));
+    }
+
+    /**
      * 解析详情（含 failover_priority / degraded_purpose），供观测。
      *
      * @param agentId Agent

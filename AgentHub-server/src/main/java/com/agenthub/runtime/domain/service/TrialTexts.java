@@ -10,6 +10,8 @@ public final class TrialTexts {
 
     /** agent_run_session.last_msg_preview */
     public static final int PREVIEW_LIMIT = 255;
+    /** agent_run_session.session_title。会话标题只在左栏一行内展示，64 字节列宽内留足余量 */
+    public static final int TITLE_LIMIT = 64;
     /** agent_run_event.summary 与 error_summary */
     public static final int SUMMARY_LIMIT = 500;
     /** content_text 默认上限。配置可覆盖，超出后注明已截断 */

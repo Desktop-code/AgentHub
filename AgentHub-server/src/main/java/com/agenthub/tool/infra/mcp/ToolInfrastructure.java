@@ -1,9 +1,11 @@
 package com.agenthub.tool.infra.mcp;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
+import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.boot.context.properties.EnableConfigurationProperties;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
+import org.springframework.scheduling.concurrent.ThreadPoolTaskExecutor;
 
 import java.net.http.HttpClient;
 import java.time.Duration;
@@ -17,13 +19,16 @@ import java.time.Duration;
 public class ToolInfrastructure {
 
     /**
-     * @param properties 超时
-     * @param json       全站 ObjectMapper
+     * @param properties        超时
+     * @param json              全站 ObjectMapper
+     * @param mcpReaderExecutor SSE 读流池，见 AsyncConfig
      * @return SSE 客户端（旧 HTTP+SSE）
      */
     @Bean
-    public McpSseClient mcpSseClient(ToolMcpProperties properties, ObjectMapper json) {
-        return new McpSseClient(sharedHttp(properties), json, Math.max(properties.getReadTimeoutMs(), 1));
+    public McpSseClient mcpSseClient(ToolMcpProperties properties, ObjectMapper json,
+                                     @Qualifier("mcpReaderExecutor") ThreadPoolTaskExecutor mcpReaderExecutor) {
+        return new McpSseClient(sharedHttp(properties), json,
+                Math.max(properties.getReadTimeoutMs(), 1), mcpReaderExecutor);
     }
 
     /**

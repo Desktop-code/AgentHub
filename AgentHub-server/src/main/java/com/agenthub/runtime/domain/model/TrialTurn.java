@@ -28,4 +28,30 @@ public class TrialTurn {
      * 避免时间线里出现一条空回复、也避免窗口摘要被空内容推进。
      */
     private boolean assistantSuppressed;
+    /**
+     * 本轮写进工作区、可供下载的文件。
+     * 与 traces 分开存放：traces 是会被截断的过程记录，产物要原样保留文件名与体积。
+     * 同名文件按最后一次生成覆盖，避免同一轮重复写同一路径时刷出一排卡片。
+     */
+    private List<GeneratedFile> files = new ArrayList<>();
+
+    /**
+     * 合并另一轮结果里的产物（Router 多子 / 计划多步）。
+     * 按文件名去重，后者覆盖前者，与实时推送的去重口径保持一致。
+     *
+     * @param more 另一轮结果里的产物，可空
+     */
+    public void mergeFiles(List<GeneratedFile> more) {
+        if (more == null || more.isEmpty()) {
+            return;
+        }
+        // files 可能由 setFiles 塞进来一个不可变列表（如 sink 的只读快照）：
+        // 先复制成可变副本，避免 removeIf 抛 UnsupportedOperationException
+        List<GeneratedFile> merged = new ArrayList<>(files);
+        for (GeneratedFile one : more) {
+            merged.removeIf(existing -> existing.fileName().equals(one.fileName()));
+            merged.add(one);
+        }
+        this.files = merged;
+    }
 }
