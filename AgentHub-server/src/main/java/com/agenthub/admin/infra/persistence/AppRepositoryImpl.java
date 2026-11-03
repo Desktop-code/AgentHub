@@ -1,6 +1,7 @@
 package com.agenthub.admin.infra.persistence;
 
 import com.agenthub.admin.domain.model.App;
+import com.agenthub.admin.domain.model.AppCredential;
 import com.agenthub.admin.domain.model.AppQuery;
 import com.agenthub.admin.domain.model.DataScopeSpec;
 import com.agenthub.admin.domain.repository.AppRepository;
@@ -64,6 +65,29 @@ public class AppRepositoryImpl implements AppRepository {
         App app = toDomain(entity);
         fillAgents(List.of(app));
         return Optional.of(app);
+    }
+
+    /** {@inheritDoc} */
+    @Override
+    public Optional<AppCredential> findCredentialByAppKey(String appKey) {
+        if (appKey == null || appKey.isBlank()) {
+            return Optional.empty();
+        }
+        // @TableLogic 会自动追加 deleted = 0；这里只取一行，不给上层暴露 Entity
+        SysAppEntity entity = appMapper.selectOne(new LambdaQueryWrapper<SysAppEntity>()
+                .eq(SysAppEntity::getAppKey, appKey)
+                .last("LIMIT 1"));
+        if (entity == null) {
+            return Optional.empty();
+        }
+        AppCredential credential = new AppCredential();
+        credential.setAppId(entity.getId());
+        credential.setAppKey(entity.getAppKey());
+        credential.setName(entity.getName());
+        credential.setDeptId(entity.getDeptId());
+        credential.setStatus(entity.getStatus());
+        credential.setSecretHash(entity.getAppSecretHash());
+        return Optional.of(credential);
     }
 
     /** {@inheritDoc} */

@@ -41,6 +41,7 @@
           <template #default="{ row }">
             <el-button v-if="user.hasPerm('system:app:edit')" link type="primary" @click="openEdit(row)">编辑</el-button>
             <el-button v-if="user.hasPerm('system:app:edit')" link type="primary" @click="openGrant(row)">授权</el-button>
+            <el-button v-if="user.hasPerm('system:app:edit')" link type="primary" @click="openWorkflowGrant(row)">工作流授权</el-button>
             <el-button v-if="user.hasPerm('system:app:edit')" link type="primary" @click="onResetSecret(row)">重置密钥</el-button>
             <el-button v-if="user.hasPerm('system:app:remove')" link type="danger" @click="onDelete(row)">删除</el-button>
           </template>
@@ -89,6 +90,38 @@
         <el-button type="primary" @click="saveGrant">保存</el-button>
       </template>
     </el-dialog>
+
+    <!-- 工作流授权：只列已发布（HAS_RELEASE）的定义；保存后应用即可通过 OpenAPI 触发 -->
+    <el-dialog v-model="wfGrant.open" :title="`工作流授权 · ${wfGrant.appName}`" width="560px">
+      <p class="grant-hint">
+        授权后，该应用可用 AppId + 密钥调用 <code>POST /api/open/workflow/runs</code>
+        触发对应工作流的<strong>默认发布版本</strong>；草稿不可被应用触发。
+      </p>
+      <el-select
+        v-model="wfGrant.workflowIds"
+        v-loading="wfGrant.loading"
+        multiple
+        filterable
+        collapse-tags
+        collapse-tags-tooltip
+        placeholder="选择已发布的工作流（可多选）"
+        style="width: 100%"
+      >
+        <el-option
+          v-for="def in wfGrant.defs"
+          :key="def.workflowId"
+          :label="defLabel(def)"
+          :value="def.workflowId"
+        />
+      </el-select>
+      <p v-if="!wfGrant.loading && !wfGrant.defs.length" class="grant-empty">
+        暂无可授权的工作流：请先在「编排 → 工作流」里发布版本。
+      </p>
+      <template #footer>
+        <el-button @click="wfGrant.open = false">取消</el-button>
+        <el-button type="primary" :disabled="wfGrant.loading" @click="saveWorkflowGrant">保存</el-button>
+      </template>
+    </el-dialog>
   </div>
 </template>
 
@@ -101,14 +134,16 @@ defineOptions({ name: 'SystemApp' })
  */
 import { computed, onMounted, reactive, ref } from 'vue'
 import { Plus, RefreshRight, Search } from '@element-plus/icons-vue'
-import { ElMessageBox } from 'element-plus'
+import { ElMessage, ElMessageBox } from 'element-plus'
 import { createApp, deleteApp, grantAppAgents, pageApps, resetAppSecret, updateApp } from '@/api/app'
 import { deptTree } from '@/api/dept'
+import { listAppWorkflowGrants, listPublishedWorkflows, saveAppWorkflowGrants } from '@/api/workflow'
 import PageHeader from '@/components/PageHeader.vue'
 import TablePager from '@/components/TablePager.vue'
 import { useObjectDirty } from '@/composables/useFormDirty'
 import { useUserStore } from '@/stores/user'
 import type { AppRow, DeptRow } from '@/types'
+import type { WorkflowAppGrantItem } from '@/types/workflow'
 
 const user = useUserStore()
 const loading = ref(false)
@@ -122,6 +157,18 @@ const editor = reactive({
   form: { name: '', deptId: undefined as number | undefined, remark: '', status: 1 }
 })
 const grant = reactive({ open: false, id: 0, text: '' })
+/**
+ * 工作流授权弹窗状态。defs 只装已发布（HAS_RELEASE）的定义；
+ * workflowIds 是整体对齐的目标集合，保存后不在集合内的授权会被撤销。
+ */
+const wfGrant = reactive({
+  open: false,
+  appId: 0,
+  appName: '',
+  loading: false,
+  workflowIds: [] as number[],
+  defs: [] as WorkflowAppGrantItem[]
+})
 
 /**
  * 应用编辑弹窗的脏检查（名称 / 部门 / 备注 / 状态均为填写或选择类字段）。
@@ -200,6 +247,59 @@ async function saveGrant() {
   await load()
 }
 
+/**
+ * 打开「工作流授权」：并行拉取已发布定义与该应用现有授权。
+ * <p>已发布定义用 status=HAS_RELEASE 过滤，避免把草稿放进可授权列表。
+ *
+ * @param row 应用行
+ */
+async function openWorkflowGrant(row: AppRow) {
+  wfGrant.appId = row.id
+  wfGrant.appName = row.name
+  wfGrant.open = true
+  wfGrant.loading = true
+  wfGrant.workflowIds = []
+  wfGrant.defs = []
+  try {
+    const [defPage, grants] = await Promise.all([
+      listPublishedWorkflows(),
+      listAppWorkflowGrants(row.id)
+    ])
+    wfGrant.defs = defPage.data.data || []
+    wfGrant.workflowIds = (grants.data.data || []).map((item) => item.workflowId)
+  } catch {
+    // 失败文案已由 axios 拦截器统一提示；这里只保证弹窗不残留半套数据
+    wfGrant.defs = []
+    wfGrant.workflowIds = []
+  } finally {
+    wfGrant.loading = false
+  }
+}
+
+/**
+ * 可授权工作流的展示文案：名称 + 编码 + 默认版本，便于区分同名定义。
+ *
+ * @param def 授权行（复用发布定义字段）
+ */
+function defLabel(def: WorkflowAppGrantItem): string {
+  const base = `${def.name || '（已失效）'}（${def.code || '—'}）`
+  return def.defaultVersion ? `${base} · 默认 v${def.defaultVersion}` : base
+}
+
+/**
+ * 保存工作流授权（整体对齐）。保存后无需重登：授权在每次入站请求实时查库。
+ */
+async function saveWorkflowGrant() {
+  try {
+    await saveAppWorkflowGrants(wfGrant.appId, wfGrant.workflowIds)
+    wfGrant.open = false
+    ElMessage.success('工作流授权已保存')
+    await load()
+  } catch {
+    // 保存失败（如未发布 / 无权限）：拦截器已提示，保留弹窗让用户调整勾选
+  }
+}
+
 async function onResetSecret(row: AppRow) {
   await ElMessageBox.confirm(`重置「${row.name}」的密钥？旧密钥会立即失效。`, '重置密钥')
   const { data } = await resetAppSecret(row.id)
@@ -219,4 +319,20 @@ onMounted(async () => {
   }
 })
 </script>
+
+<style scoped>
+/* 授权说明：弱化颜色，避免抢主操作视觉；正文仍需可读 */
+.grant-hint {
+  margin: 0 0 12px;
+  color: var(--el-text-color-secondary);
+  font-size: 13px;
+  line-height: 1.6;
+}
+
+.grant-empty {
+  margin: 8px 0 0;
+  color: var(--el-color-warning);
+  font-size: 13px;
+}
+</style>
 

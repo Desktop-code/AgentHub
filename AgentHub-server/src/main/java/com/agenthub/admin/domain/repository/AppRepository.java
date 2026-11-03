@@ -1,6 +1,7 @@
 package com.agenthub.admin.domain.repository;
 
 import com.agenthub.admin.domain.model.App;
+import com.agenthub.admin.domain.model.AppCredential;
 import com.agenthub.admin.domain.model.AppQuery;
 import com.agenthub.admin.domain.model.DataScopeSpec;
 import com.agenthub.common.api.PageResult;
@@ -25,6 +26,15 @@ public interface AppRepository {
      * @return 未删除应用
      */
     Optional<App> findById(Long id);
+
+    /**
+     * 按 app_key 取「含密钥哈希」的鉴权视图。
+     * <p>只给入站鉴权用；其它查询一律走 {@link #findById(Long)} / {@link #page}，避免哈希扩散。
+     *
+     * @param appKey 对外 appId
+     * @return 未删除的应用凭据；不存在为空
+     */
+    Optional<AppCredential> findCredentialByAppKey(String appKey);
 
     /**
      * @param app           应用资料
