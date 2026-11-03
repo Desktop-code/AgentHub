@@ -171,16 +171,25 @@
             执行链路
             <span v-if="selectedTraceId" class="trace-id">({{ selectedTraceId }})</span>
           </h2>
-          <el-tooltip content="放大查看拓扑与宽屏对照" placement="top">
+          <div class="col-head-actions">
             <el-button
-              class="expand-btn"
-              text
-              :disabled="!canExpandSpans"
-              @click="spanDrawerOpen = true"
+              v-if="selectedTraceId && user.hasPerm('eval:suite:edit')"
+              size="small"
+              @click="openPromoteDialog"
             >
-              <el-icon :size="18"><FullScreen /></el-icon>
+              加入评测集
             </el-button>
-          </el-tooltip>
+            <el-tooltip content="放大查看拓扑与宽屏对照" placement="top">
+              <el-button
+                class="expand-btn"
+                text
+                :disabled="!canExpandSpans"
+                @click="spanDrawerOpen = true"
+              >
+                <el-icon :size="18"><FullScreen /></el-icon>
+              </el-button>
+            </el-tooltip>
+          </div>
         </div>
         <div v-loading="spanLoading" class="col-body col-body--scroll">
           <p v-if="!user.hasPerm('obs:span:list')" class="empty">没有步骤查询权限</p>
@@ -196,24 +205,43 @@
       </section>
     </div>
 
-    <!-- 放大：拓扑 + 宽屏入参/出参并排 -->
-    <el-drawer
+    <!-- 放大：复用执行链路右拉（观测内已持 spans，宽屏对照） -->
+    <TraceLinkDrawer
       v-model="spanDrawerOpen"
-      :title="drawerTitle"
-      direction="rtl"
+      :trace-id="selectedTraceId"
+      :spans="spans"
       size="85%"
-      append-to-body
-      class="span-drawer"
-      :modal="true"
-      modal-class="span-drawer-mask"
-    >
-      <div v-loading="spanLoading" class="span-drawer__body">
-        <p v-if="spans.length === 0" class="empty">没有步骤</p>
-        <div v-else class="span-tree span-tree--wide">
-          <TraceSpanFlow :spans="spans" :is-wide-mode="true" :show-topology="true" />
-        </div>
-      </div>
-    </el-drawer>
+    />
+
+    <!-- 最小回流：选套件 + 预填输入/终答摘要 → from-trace；无赞踩账本 -->
+    <el-dialog v-model="promoteOpen" title="加入评测集" width="520px" destroy-on-close>
+      <el-form label-width="96px">
+        <el-form-item label="目标套件" required>
+          <el-select v-model="promoteForm.suiteId" filterable placeholder="选择套件" class="promote-full">
+            <el-option
+              v-for="s in promoteSuites"
+              :key="s.id"
+              :label="`${s.name} (${s.suiteKey})`"
+              :value="s.id"
+              :disabled="!!s.readOnly"
+            />
+          </el-select>
+        </el-form-item>
+        <el-form-item label="用户输入" required>
+          <el-input v-model="promoteForm.message" type="textarea" :rows="3" placeholder="问题原文或摘要" />
+        </el-form-item>
+        <el-form-item label="终答摘要">
+          <el-input v-model="promoteForm.finalAnswer" type="textarea" :rows="3" placeholder="可粘贴终答；可空" />
+        </el-form-item>
+        <el-form-item label="备注">
+          <el-input v-model="promoteForm.note" />
+        </el-form-item>
+      </el-form>
+      <template #footer>
+        <el-button @click="promoteOpen = false">取消</el-button>
+        <el-button type="primary" :loading="promoteSaving" @click="submitPromote">写入并升版</el-button>
+      </template>
+    </el-dialog>
   </div>
 </template>
 
@@ -225,13 +253,17 @@ defineOptions({ name: 'CallTrace' })
  * 右栏瀑布流常驻；顶部拓扑仅在放大抽屉中展示。
  */
 import { computed, onMounted, reactive, ref, watch } from 'vue'
+import { ElMessage } from 'element-plus'
 import { FullScreen, RefreshRight, Search } from '@element-plus/icons-vue'
 import { pageAgents } from '@/api/agent'
+import { pageEvalSuites, promoteFromTrace } from '@/api/eval'
 import { listObsSpans, pageObsSessions, pageObsTraces } from '@/api/obs'
 import type { AgentCard } from '@/types/agent'
+import type { EvalSuiteRow } from '@/types/eval'
 import type { ObsSession, ObsSpan, ObsTrace } from '@/types/obs'
 import { useUserStore } from '@/stores/user'
 import PageHeader from '@/components/PageHeader.vue'
+import TraceLinkDrawer from '@/components/obs/TraceLinkDrawer.vue'
 import TraceSpanFlow from '@/components/obs/TraceSpanFlow.vue'
 
 const user = useUserStore()
@@ -259,14 +291,20 @@ const spanLoading = ref(false)
 /** 执行链路放大抽屉（宽屏对照入参/出参） */
 const spanDrawerOpen = ref(false)
 
+/** 加入评测集：最小弹层；无持久赞踩 */
+const promoteOpen = ref(false)
+const promoteSaving = ref(false)
+const promoteSuites = ref<EvalSuiteRow[]>([])
+const promoteForm = reactive({
+  suiteId: undefined as number | undefined,
+  message: '',
+  finalAnswer: '',
+  note: ''
+})
+
 /** 有选中问题且已有步骤时才允许放大 */
 const canExpandSpans = computed(
   () => !!selectedTraceId.value && user.hasPerm('obs:span:list') && spans.value.length > 0
-)
-
-/** 全屏抽屉标题：执行链路 + 链路 ID */
-const drawerTitle = computed(() =>
-  selectedTraceId.value ? `执行链路 (${selectedTraceId.value})` : '执行链路'
 )
 
 /** 总页数至少为 1，便于跳转输入框 max 与按钮禁用态。 */
@@ -500,6 +538,52 @@ function resetDetail() {
   spanDrawerOpen.value = false
 }
 
+/**
+ * 打开「加入评测集」：预填问题标题与末步输出摘要；缺字段由用户粘贴。
+ */
+async function openPromoteDialog() {
+  if (!selectedTraceId.value) return
+  const trace = traces.value.find((t) => t.traceId === selectedTraceId.value)
+  promoteForm.suiteId = undefined
+  promoteForm.message = (trace?.title || '').trim()
+  const lastOut = [...spans.value].reverse().find((s) => (s.outputText || '').trim())
+  promoteForm.finalAnswer = (lastOut?.outputText || '').trim().slice(0, 4000)
+  promoteForm.note = ''
+  try {
+    const { data } = await pageEvalSuites({ current: 1, size: 100 })
+    promoteSuites.value = data.data.records
+  } catch {
+    promoteSuites.value = []
+  }
+  promoteOpen.value = true
+}
+
+/** 调 from-trace 升版写入；不读 obs 表业务义，摘要由前端传入 */
+async function submitPromote() {
+  if (!promoteForm.suiteId) {
+    ElMessage.warning('请选择目标套件')
+    return
+  }
+  if (!promoteForm.message.trim()) {
+    ElMessage.warning('请填写用户输入')
+    return
+  }
+  promoteSaving.value = true
+  try {
+    const { data } = await promoteFromTrace(promoteForm.suiteId, {
+      message: promoteForm.message.trim(),
+      finalAnswer: promoteForm.finalAnswer.trim() || undefined,
+      note: promoteForm.note.trim() || undefined,
+      sessionId: selectedSessionId.value != null ? String(selectedSessionId.value) : undefined,
+      traceId: selectedTraceId.value || undefined
+    })
+    ElMessage.success(`已写入评测集，新版本 v${data.data.currentVersion}`)
+    promoteOpen.value = false
+  } finally {
+    promoteSaving.value = false
+  }
+}
+
 onMounted(async () => {
   try {
     const { data } = await pageAgents({ current: 1, size: 100 })
@@ -586,6 +670,17 @@ onMounted(async () => {
   font-variant-numeric: tabular-nums;
 }
 
+.col-head-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex: none;
+}
+
+.promote-full {
+  width: 100%;
+}
+
 .expand-btn {
   margin: 0 12px 0 0;
   padding: 4px 8px;
@@ -611,14 +706,6 @@ onMounted(async () => {
 
 .span-tree {
   padding-left: 4px;
-}
-
-.span-tree--wide {
-  padding: 0 4px 24px;
-}
-
-.span-drawer__body {
-  min-height: 200px;
 }
 
 .item {
@@ -769,14 +856,3 @@ onMounted(async () => {
 }
 </style>
 
-<style>
-/* 抽屉挂到 body，需非 scoped；半透明遮罩 + 内容区可滚 */
-.span-drawer-mask {
-  background-color: rgba(15, 23, 42, 0.45) !important;
-}
-
-.span-drawer .el-drawer__body {
-  padding-top: 4px;
-  overflow: auto;
-}
-</style>

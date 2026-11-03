@@ -68,8 +68,40 @@ public class ObsSpanResp {
     private Integer toolsInjected;
     /** 本轮进入提示词的 Skill 数 */
     private Integer skillsInjected;
-    /** 系统提示、Skill、工具目录和 schema 的字符合计 */
+    /** 系统提示、Skill、工具目录、schema 与用户消息的字符合计 */
     private Integer promptChars;
+    /** 上述合计的出站前估算 token（与 usage 精确值不同，用于看占比） */
+    private Integer promptTokensEst;
+    /** 受保护前缀字符数（L1 + 平台追加句 + 锁定段），红线，永不被裁 */
+    private Integer protectedChars;
+    /** 可压区字符数（开放段 + L3 追加 + 历史业务段） */
+    private Integer softChars;
+    /** 记忆段字符数；被预算让出时为 0 */
+    private Integer memoryChars;
+    /** Skill 段字符数（强制 + 按需） */
+    private Integer skillChars;
+    /** 工具目录字符数 */
+    private Integer catalogChars;
+    /** 可调用工具 schema 字符数（走 tools 字段） */
+    private Integer schemaChars;
+    /** 本轮用户侧消息字符数 */
+    private Integer userChars;
+    /** 其中【会话摘要】段字符数 */
+    private Integer userSummaryChars;
+    /** 其中【最近对话】段字符数 */
+    private Integer userRecentChars;
+    /** 其中【短期记忆】段字符数 */
+    private Integer userShortChars;
+    /** 其中本轮用户原文段字符数 */
+    private Integer userCurrentChars;
+    /** 本轮被落盘成文件的工具结果条数 */
+    private Integer toolResultsOffloaded;
+    /** 被落盘工具结果的原始正文合计字符数 */
+    private Integer toolResultsOffloadedChars;
+    /** 被硬上限截断正文的强制 Skill 条数 */
+    private Integer forcedSkillClipped;
+    /** 分段占比人话摘要（保护区/可压区/记忆/Skill/目录/schema/用户） */
+    private String promptBreakdown;
     /** 是否按预算截断或降级 */
     private Boolean truncated;
     /** 旧正文兼容；仅当 input/output 皆空时前端可回退展示 */

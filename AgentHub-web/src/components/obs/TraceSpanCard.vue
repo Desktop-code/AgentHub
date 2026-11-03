@@ -126,7 +126,18 @@
           <li v-if="span.toolsInjected != null || span.skillsInjected != null">
             注入 tools={{ span.toolsInjected ?? 0 }} skills={{ span.skillsInjected ?? 0 }}
             chars={{ span.promptChars ?? 0 }}
+            <template v-if="span.promptTokensEst != null"> · ≈{{ span.promptTokensEst }} tok</template>
             <template v-if="span.truncated"> · truncated</template>
+          </li>
+          <!-- 分段占比：保护区 / 可压区 / 记忆 / Skill / 目录 / schema / 用户，后端已压成一行 -->
+          <li v-if="span.promptBreakdown">{{ span.promptBreakdown }}</li>
+          <li v-if="(span.forcedSkillClipped ?? 0) > 0" class="extra__warn">
+            强制 Skill 正文超上限已截断 {{ span.forcedSkillClipped }} 条
+          </li>
+          <!-- P1：长工具结果被落盘成文件，对话里只留摘要 + 路径；这里给出省下的原文字数 -->
+          <li v-if="(span.toolResultsOffloaded ?? 0) > 0">
+            工具结果已落盘 {{ span.toolResultsOffloaded }} 条
+            （原文 {{ span.toolResultsOffloadedChars ?? 0 }} 字，对话内只留摘要 + 路径）
           </li>
           <li v-if="span.startTime">开始：{{ span.startTime }}</li>
           <li v-if="span.endTime">结束：{{ span.endTime }}</li>
@@ -298,6 +309,8 @@ const hasExtra = computed(() => {
     s.toolId != null ||
     s.toolsInjected != null ||
     s.skillsInjected != null ||
+    s.promptBreakdown ||
+    (s.toolResultsOffloaded ?? 0) > 0 ||
     s.startTime ||
     s.id != null
   )
@@ -554,5 +567,10 @@ function agentLabel(name: string | null | undefined, id: number | null | undefin
   color: var(--ah-text-secondary);
   font-size: 12px;
   line-height: 1.55;
+}
+
+/* 强制 Skill 被硬上限截断：属于「规则不完整」，用警示色而非普通灰字 */
+.extra__warn {
+  color: #b54708;
 }
 </style>

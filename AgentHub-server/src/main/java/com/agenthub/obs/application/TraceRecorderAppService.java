@@ -118,6 +118,8 @@ public class TraceRecorderAppService implements TraceRecorder {
             // MP 回填 id 后登记 step_no，供子步 bind / 发号
             scope.registerStepNo(span.getId(), stepNo);
             spanOpenedTimeMs.put(span.getId(), openedTime);
+            // 手验父链：一条即可，禁刷屏（debug）
+            log.debug("span parent={} id={} type={} stepNo={}", parentId, span.getId(), draft.type(), stepNo);
             return span.getId();
         } catch (RuntimeException ex) {
             log.warn("span 写入失败 type={}", ex.getClass().getSimpleName());
@@ -156,6 +158,13 @@ public class TraceRecorderAppService implements TraceRecorder {
     /** {@inheritDoc} */
     @Override
     public void finish(ObsTraceScope scope, ObsStatus status, String errorSummary, String finishReason) {
+        finish(scope, status, errorSummary, finishReason, null);
+    }
+
+    /** {@inheritDoc} */
+    @Override
+    public void finish(ObsTraceScope scope, ObsStatus status, String errorSummary, String finishReason,
+                       String attrsJson) {
         try {
             if (scope == null || !terminal(status)) {
                 return;
@@ -169,6 +178,11 @@ public class TraceRecorderAppService implements TraceRecorder {
                 }
             }
             TraceFinishSummary summary = summarize(scope.traceId(), status, finishReason);
+            // trace 级 cause 与 span 级同口径：先打码再写，绝不把 Key / base64 带进库
+            String maskedAttrs = ObsTexts.mask(attrsJson);
+            if (maskedAttrs != null) {
+                summary.setAttrsJson(maskedAttrs);
+            }
             traces.finishIfRunning(scope.traceId(), status, ObsTexts.mask(errorSummary), ended, null, summary);
         } catch (RuntimeException ex) {
             log.warn("trace 结束失败 type={}", ex.getClass().getSimpleName());
@@ -290,10 +304,13 @@ public class TraceRecorderAppService implements TraceRecorder {
         close.setRetrieveHitCount(source.getRetrieveHitCount());
         close.setRetrieveTopK(source.getRetrieveTopK());
         close.setRetrieveKbId(source.getRetrieveKbId());
-        // brief 单独打码后再写回，避免整段 JSON 被正则误伤
+        // brief 单独打码后再写回，避免整段 JSON 被正则误伤；
+        // cause 同理单独取再合并，否则「有 brief 时整段重建」会把排障用的 cause 一起丢掉
         String brief = ObsAttrs.briefOf(source.getAttrsJson());
-        if (brief != null) {
-            close.setAttrsJson(ObsAttrs.withBrief(null, ObsTexts.mask(brief)));
+        String cause = ObsAttrs.causeOf(source.getAttrsJson());
+        if (brief != null || cause != null) {
+            String attrs = ObsAttrs.withBrief(null, brief == null ? null : ObsTexts.mask(brief));
+            close.setAttrsJson(ObsAttrs.withCause(attrs, cause == null ? null : ObsTexts.mask(cause)));
         } else {
             close.setAttrsJson(ObsTexts.mask(source.getAttrsJson()));
         }

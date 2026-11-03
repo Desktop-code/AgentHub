@@ -14,6 +14,7 @@ import java.util.concurrent.atomic.AtomicReference;
  * 一次提问的埋点范围。所属域：obs。
  * seq 用原子自增，避免模型回调和工具回调抢号。
  * 每线程独立 {@link ObsSpanStack}：Router 多子并行互不抢父；LLM/TOOL 捕获 stack 引用后换线程仍可读。
+ * 串行 LLM/TOOL/RETRIEVE：open 成功后推进当前叶，形成 AGENT→LLM→TOOL→LLM 链；并行扇出不推进。
  * step_no 由本 trace 内的 {@link StepNoAllocator} 发号并落库。
  */
 public final class ObsTraceScope {
@@ -157,7 +158,22 @@ public final class ObsTraceScope {
         if (id != null && type == SpanType.LLM) {
             lastLlmSpanId.set(id);
         }
+        // 串行业务步：开成功后把当前叶推进到本步，下一步挂本步 id，禁止钉死容器 AGENT
+        // 真并行扇出（parallelFanout）不推进，兄弟仍同挂分叉点
+        if (id != null && !parallelFanout && advancesSerialLeaf(type)) {
+            stack.bind(id, stepNoById.get(id));
+        }
         return id;
+    }
+
+    /**
+     * LLM / TOOL / RETRIEVE 参与 ReAct 串行链；容器步（AGENT/ROUTE/PLAN）仍靠显式 bindParent。
+     *
+     * @param type 步骤类型
+     * @return 是否在 open 后推进当前叶
+     */
+    private static boolean advancesSerialLeaf(SpanType type) {
+        return type == SpanType.LLM || type == SpanType.TOOL || type == SpanType.RETRIEVE;
     }
 
     /**

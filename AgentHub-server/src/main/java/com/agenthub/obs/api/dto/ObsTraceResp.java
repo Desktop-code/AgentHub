@@ -32,4 +32,11 @@ public class ObsTraceResp {
     private Integer tokenTotal;
     private String primaryModelName;
     private String finishReason;
+    /**
+     * trace 级扩展 JSON（已脱敏）。失败时含 cause 摘要，供面板第一行直接看原因；
+     * 无内容时不输出（NON_NULL）。
+     */
+    private String attrsJson;
+    /** 从 attrsJson 里解出的脱敏 cause 摘要；没有则为 null */
+    private String cause;
 }
