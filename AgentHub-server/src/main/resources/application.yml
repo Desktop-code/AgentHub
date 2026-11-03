@@ -86,6 +86,20 @@ agenthub:
       # tools/list 的连接与读取上限，避免同步占住控制台请求
       connect-timeout-ms: 3000
       read-timeout-ms: 15000
+  workflow:
+    # WF-P0 刀3 硬顶（生效值都会夹紧，写错不会变成无上限）：
+    # 单次调度的墙钟上限（毫秒）。HUMAN 等待不计入，人工卡点由节点 timeoutPolicy 兜底。
+    wall-ms: ${AGENTHUB_WORKFLOW_WALL_MS:60000}
+    # 旧键兼容（刀2）：wall-ms<=0 时回落到这里；新部署只配 wall-ms 即可。
+    trial-wall-ms: 60000
+    # HUMAN 节点未配 timeoutMs 时的兜底等待时长（毫秒），默认 24 小时。
+    human-default-timeout-ms: 86400000
+    # 单个 PARALLEL_FORK 允许的分支数（不含 ERROR 边）；超出即失败该 FORK。
+    max-parallel-branches: 3
+    # 校验 / 发布允许的单图节点数。
+    max-nodes-per-graph: 500
+    # 单次 run 允许预建的 node_run 条数。
+    max-node-runs-per-run: 500
   runtime:
     # 平台硬顶 + 默认。Agent 列可空覆盖；空=跟 default；保存必须 ≤ max；生效 min(覆盖或default, max)
     limits:
@@ -124,6 +138,11 @@ agenthub:
       # 首轮对话结束后是否异步生成会话标题（≤10 汉字）。关掉则左栏只显示首问预览；
       # 生成任务跑在 common 的 lightTaskExecutor 上，失败只记日志，不影响试跑。
       auto-title-enabled: ${AGENTHUB_AUTO_TITLE_ENABLED:true}
+      # 超长工具结果落盘阈值（字符）。超过即写入会话工作区，对话里只留「摘要 + 路径」，
+      # 模型需要细节再调 workspaceReadFile 分段读。0 或负数 = 关闭句柄化（退回纯字符截断）。
+      tool-result-offload-chars: 2000
+      # 落盘结果回灌时保留的头部摘要字符数：标题/状态/表头都在前几百字
+      tool-result-offload-preview-chars: 600
     # 工具必填参数闸门：缺必填不得脑补。补参只看本轮提问、本会话上下文、本轮已注入长期记忆
     tool-args:
       # 默认硬拦。仅排障时临时关闭，关闭后回到「只靠提示词」的旧行为
@@ -148,11 +167,25 @@ agenthub:
     # ROUTER 父节点超过该数仍可保存，但响应里带警告
     router-warn-tools: 2
     router-warn-skills: 2
-    # 运行时注入预算。大于 cap 的配置在生效时会被压到 cap
+    # ---- 运行时注入预算：**只有这一套**，统一由 PromptBudgetTrimmer 按优先级让出 ----
+    # 历史上有两把剪刀（assembler.max-chars 与本节的 system-prompt-max-chars），
+    # 现已合并：assembler.max-chars 只作为「单次组装正文的绝对安全阀」，不再承担业务预算。
+    # 各配置大于对应 cap 时按 cap 生效。
+    # 工具完整 JSON Schema 专款（走模型请求的 tools 字段，不进 system 文案）
     tools-schema-max-chars: 8000
     tools-schema-max-chars-cap: 16000
-    skills-inject-max-chars: 8000
+    # 按需 Skill 额度：标题 + 场景 + 正文
+    skills-inject-max-chars: 4000
     skills-inject-max-chars-cap: 16000
+    # 按需 Skill 是否把正文也灌进系统提示。默认 false：只给「标题 + 场景」。
+    # 这是 P0 预算收敛的主要来源——旧实现按剩余额度贪心把 8 条正文全灌进 system，
+    # 单 Skill 段能吃掉五千多字，而模型判断「该不该用」只需标题 + 场景。
+    # 仅当确认「模型必须看到正文才会正确套用」时开到 true，开启后 token 会明显回升。
+    on-demand-skill-body-enabled: false
+    # 单条强制 Skill 块硬上限；超限截断正文并打标（段头与固定前缀不裁）
+    forced-skill-max-chars: 1800
+    forced-skill-max-chars-cap: 8000
+    # 系统提示总预算。保护区（L1 + 平台追加句 + 锁定段）永不裁剪，实际可能略超
     system-prompt-max-chars: 12000
     system-prompt-max-chars-cap: 24000
     # 提示词组装门面（L1 → L2 → L3 → 一次性变量替换）
@@ -162,8 +195,11 @@ agenthub:
       constraint-enabled: true
       # 请求未指定语言时的回落；L1/L2 都按它取生效版
       default-locale: zh-CN
-      # 组装正文上限（char）。超出时只截尾部（L3 / 历史业务段优先被裁）
-      max-chars: 24000
+    # 说明：组装层不再有自己的字符预算。系统提示的唯一预算在下面 prompt 段——
+    #   system-prompt-max-chars（总量）/ skills-inject-max-chars（按需 Skill）
+    #   / forced-skill-max-chars（单条强制 Skill）/ tools-schema-max-chars（tools 字段）
+    # 由 PromptBudgetTrimmer 按「记忆 → 按需 Skill → 目录文案 → 可压区 → 强制 Skill」一次让出。
+    # 已删除的旧配置：agenthub.prompt.assembler.max-chars（曾与上面那套打架，双截断）。
     # L1/L2 缓存：Caffeine（进程内）→ Redis → DB；发布后显式失效
     cache:
       # 进程内条目上限。配置态数据量小，512 足够
@@ -178,9 +214,12 @@ agenthub:
     # 策略未填或没有策略行时的默认；保存值必须 ≤ 对应 max
     short-default-ttl-sec: 86400
     short-default-ttl-max-sec: 604800
-    ctx-max-turns: 20
+    # 近轮滑动窗：条数 + 字符双上限，先到哪个算哪个。
+    # 从 20 轮 / 32000 字收紧到 12 轮 / 16000 字：更早的内容已由滚动摘要覆盖，
+    # 而摘要与近轮已做去重（同一段不会被写两遍）。
+    ctx-max-turns: 12
     ctx-max-turns-cap: 50
-    ctx-max-chars: 32000
+    ctx-max-chars: 16000
     ctx-max-chars-cap: 64000
     ctx-idle-ttl-sec: 7200
     ctx-idle-ttl-max-sec: 86400
@@ -246,6 +285,38 @@ agenthub:
     ingest:
       # 领域噪声过滤（含历史茶饮规则）；默认关，避免硬编码语料
       domain-noise-filter: false
+  eval:
+    # 评测域。一期 sys_user 无 tenant_id，先用配置指定「当前租户」；
+    # 0 保留给平台只读样例，配成 0 会被实现兜底成 1，避免把租户数据写进只读区。
+    current-tenant-id: ${AGENTHUB_EVAL_TENANT_ID:1}
+    samples:
+      # 平台内置冒烟套件；缺失不影响启动，只在「导入样例」接口调用时报明确错误
+      location: ${AGENTHUB_EVAL_SAMPLES_LOCATION:classpath:eval/samples/platform-smoke-suite.json}
+    # 跑批：串行、保守超时
+    max-parallel: 1
+    case-timeout-ms: ${AGENTHUB_EVAL_CASE_TIMEOUT_MS:180000}
+    continue-on-case-error: true
+    channel: EVAL
+    # OpenJudge 软评分 sidecar（默认关；不进 gate_passed）
+    openjudge:
+      enabled: ${AGENTHUB_EVAL_OPENJUDGE_ENABLED:false}
+      required: false
+      base-url: ${AGENTHUB_EVAL_OPENJUDGE_BASE_URL:http://127.0.0.1:18765}
+      timeout-ms: ${AGENTHUB_EVAL_OPENJUDGE_TIMEOUT_MS:60000}
+      default-graders:
+        - RelevanceGrader
+    # 报告：机读进 DB；可选写 workspace MD
+    report:
+      write-workspace: ${AGENTHUB_EVAL_REPORT_WRITE_WORKSPACE:true}
+      markdown: true
+      workspace-dir: ${AGENTHUB_EVAL_REPORT_WORKSPACE:./workspace-test}
+    # EvalScope 可选桥（P2）：默认关；仅导出/外触发，不取代 trial、不进 gate
+    evalscope:
+      enabled: ${AGENTHUB_EVAL_EVALSCOPE_ENABLED:false}
+      base-url: ${AGENTHUB_EVAL_EVALSCOPE_BASE_URL:}
+      timeout-ms: ${AGENTHUB_EVAL_EVALSCOPE_TIMEOUT_MS:60000}
+      export-dir: ${AGENTHUB_EVAL_EVALSCOPE_EXPORT_DIR:./workspace-test}
+      note: ""
   security:
     # local | oauth2 | passthrough；后两者本期只保留枚举，不接企业身份
     mode: local
