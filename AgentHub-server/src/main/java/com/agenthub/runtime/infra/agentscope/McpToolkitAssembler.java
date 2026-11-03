@@ -2,6 +2,8 @@ package com.agenthub.runtime.infra.agentscope;
 
 import com.agenthub.admin.domain.enums.RecordStatus;
 import com.agenthub.runtime.domain.model.McpToolSpec;
+import com.agenthub.runtime.domain.service.CauseDigest;
+import com.agenthub.runtime.domain.service.LimitHitReasons;
 import com.agenthub.runtime.domain.service.ToolEnablement;
 import com.agenthub.runtime.domain.service.TrialFailure;
 import com.agenthub.spi.crypto.SecretContexts;
@@ -129,7 +131,11 @@ public class McpToolkitAssembler {
         try {
             client = clients.require(transport);
         } catch (RuntimeException ex) {
-            throw new TrialFailure("MCP 源「" + source.getName() + "」传输不可用：" + safe(ex.getMessage()));
+            // MCP 传输不可用：带栈打，才能看出是协议未注册还是客户端构造失败
+            log.warn("MCP 传输不可用 sourceId={} transport={} type={} cause={}",
+                    sourceId, transport, ex.getClass().getSimpleName(), CauseDigest.of(ex), ex);
+            throw new TrialFailure("MCP 源「" + source.getName() + "」传输不可用：" + safe(ex.getMessage()),
+                    LimitHitReasons.ERROR, ex);
         }
         String auth = null;
         if (source.getAuthHeaderCipher() != null && !source.getAuthHeaderCipher().isBlank()) {
@@ -137,8 +143,11 @@ public class McpToolkitAssembler {
                 // AAD 绑源 id，与写入侧一致
                 auth = secretStore.decrypt(source.getAuthHeaderCipher(), SecretContexts.toolSource(source.getId()));
             } catch (RuntimeException ex) {
-                log.warn("MCP 鉴权头解密失败 sourceId={}", sourceId);
-                throw new TrialFailure("MCP 源「" + source.getName() + "」鉴权头解密失败，无法注册可调用句柄");
+                // 只记类型与脱敏 cause：绝不打印密文或解密后的明文鉴权头
+                log.warn("MCP 鉴权头解密失败 sourceId={} type={} cause={}",
+                        sourceId, ex.getClass().getSimpleName(), CauseDigest.of(ex), ex);
+                throw new TrialFailure("MCP 源「" + source.getName() + "」鉴权头解密失败，无法注册可调用句柄",
+                        LimitHitReasons.ERROR, ex);
             }
         }
         return Optional.of(new SourceHandle(source.getBaseUrl().trim(), auth, client));

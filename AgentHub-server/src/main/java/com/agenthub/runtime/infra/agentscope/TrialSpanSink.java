@@ -9,6 +9,8 @@ import com.agenthub.obs.domain.model.SpanType;
 import com.agenthub.obs.domain.service.ObsAttrs;
 import com.agenthub.runtime.domain.model.TrialTrace;
 import com.agenthub.runtime.domain.service.TrialTexts;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 import java.util.Deque;
 import java.util.concurrent.ConcurrentHashMap;
@@ -20,6 +22,8 @@ import java.util.concurrent.ConcurrentLinkedDeque;
  * 没有打开 trace 时直接返回。入参/出参分列写入，只打码，不走事件摘要的长度截断。
  */
 public final class TrialSpanSink {
+
+    private static final Logger log = LoggerFactory.getLogger(TrialSpanSink.class);
 
     private final ObsTraceScope scope;
     /** 创建收集器线程上的子链 stack；并行时每子各一份 */
@@ -82,6 +86,11 @@ public final class TrialSpanSink {
         close.setOutputText(result == null || result.isBlank() ? null : TrialTexts.redact(result));
         if (!success) {
             close.setErrorSummary(close.getOutputText() != null ? close.getOutputText() : "工具调用失败");
+            // 工具失败时引擎给的是错误块而不是异常，栈在这里已经拿不到；
+            // 但仍要把「哪个工具、失败正文摘要」打出来，否则面板上只有一条 ERROR 没有原因。
+            // 正文已脱敏，再截一段上限，避免超长工具输出刷满日志
+            log.warn("工具调用失败 tool={} callId={} result={}",
+                    toolName(name), toolCallId == null ? "-" : toolCallId, clipForLog(close.getErrorSummary()));
         }
         close.setToolName(toolName(name));
         close.setToolCallId(blankToNull(toolCallId));
@@ -105,6 +114,20 @@ public final class TrialSpanSink {
 
     private String toolName(String name) {
         return name == null || name.isBlank() ? "未命名工具" : name.trim();
+    }
+
+    /**
+     * 日志用截断：工具失败正文可能很长（含远端报文），控制台只留开头一段。
+     *
+     * @param text 已脱敏的失败正文，可空
+     * @return 最多 200 字的单行文本
+     */
+    private String clipForLog(String text) {
+        if (text == null) {
+            return "-";
+        }
+        String flat = text.replace('\r', ' ').replace('\n', ' ').trim();
+        return flat.length() <= 200 ? flat : flat.substring(0, 199) + "…";
     }
 
     private String blankToNull(String raw) {

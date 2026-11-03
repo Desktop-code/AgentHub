@@ -12,6 +12,11 @@ public enum PurposeIoKind {
     EMBEDDING,
     /** 文本重排 */
     RERANK,
+    /**
+     * 视觉：与 Chat 同打 chat/completions，但消息体必须带内联图片块。
+     * 当前仅 OPENAI_COMPAT 与 DashScope 兼容模式开放；不得退化成纯文本 ping 冒充多模态可用。
+     */
+    VISION,
     /** 本期未接专用路径；连通测与出站必须明确失败，禁冒充 Chat */
     UNSUPPORTED
 }

@@ -37,8 +37,13 @@ public class PromptAssemblyResult {
     private int businessChars;
     /** L3 追加区字符数 */
     private int extraChars;
-    /** 是否按预算截断过 */
+    /** 是否按预算截断过（只可能发生在可截断 tail） */
     private boolean truncated;
+    /**
+     * 结构描述：受保护前缀长度 + 各段渲染后正文。
+     * 下游（Runtime 注入层、出站校验）据此保证「L1 与锁定段不被二次截断」「锁定段在开放段之前」。
+     */
+    private PromptLayout layout = PromptLayout.EMPTY;
     /** 组装过程中的非致命说明（如 override 里的未知段被忽略） */
     private List<String> notices = new ArrayList<>();
 }

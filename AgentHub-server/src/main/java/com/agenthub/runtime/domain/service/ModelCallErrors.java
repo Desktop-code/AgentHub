@@ -29,6 +29,8 @@ public final class ModelCallErrors {
                     && !failure.getMessage().isBlank()) {
                 return failure.getMessage().trim();
             }
+            // 上游非 2xx 的脱敏原文（含状态码与 body 摘要）只进日志与追踪（见 MeterRemarks / CauseDigest），
+            // 不在这里透出：本方法的结果会直接写进用户可见的 error_summary，必须保持固定话术。
             String message = match(cursor);
             if (message != null) {
                 return message;

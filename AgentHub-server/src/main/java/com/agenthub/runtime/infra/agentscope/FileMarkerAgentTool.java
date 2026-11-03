@@ -1,11 +1,14 @@
 package com.agenthub.runtime.infra.agentscope;
 
 import com.agenthub.runtime.domain.model.GeneratedFile;
+import com.agenthub.runtime.domain.model.PromptInjectionStats;
 import com.agenthub.runtime.domain.service.GeneratedFileMarker;
+import com.agenthub.runtime.domain.service.ToolResultHandle;
 import com.agenthub.runtime.domain.service.TrialProgress;
 import io.agentscope.core.message.ContentBlock;
 import io.agentscope.core.message.TextBlock;
 import io.agentscope.core.message.ToolResultBlock;
+import io.agentscope.core.message.ToolResultState;
 import io.agentscope.core.tool.AgentTool;
 import io.agentscope.core.tool.ToolCallParam;
 import reactor.core.publisher.Mono;
@@ -16,38 +19,71 @@ import java.util.Map;
 import java.util.function.Consumer;
 
 /**
- * 拦截工具结果里的「文件已生成」标记。所属域：runtime 的 infra。
+ * 工具结果的出口加工：剔除产物标记 + 超长结果句柄化。所属域：runtime 的 infra。
  *
- * <p><b>为什么必须在工具层拦，而不是只在 SSE 层清洗：</b>
- * AgentScope 把工具返回值原样拼进下一轮 messages 回灌给模型。
- * 若只在出站 SSE 里正则剔字，模型上下文里仍会留着
- * {@code [FILE_GENERATED]{"fileName":...}[/FILE_GENERATED]} 这串机械字符，
- * 模型会把它当成待解释的文本复述出来，反而更脏。故在这里做两件事：
+ * <p><b>为什么必须在这一层做，而不是只在 SSE 层清洗或在出站时截断：</b>
+ * AgentScope 把工具返回值原样拼进下一轮 messages 回灌给模型。两件事都必须在
+ * 「结果刚生成、上下文还没被污染」的时候完成：
  * <ol>
- *   <li>提取产物 → 交给 {@link Consumer} 推给前端（出站 {@link TrialProgress#file}）；</li>
- *   <li>把标记从正文里<b>物理剔除</b>后返回给引擎，模型只看到人话。</li>
+ *   <li><b>产物标记</b>：{@code [FILE_GENERATED]{"fileName":...}[/FILE_GENERATED]} 这串机械字符
+ *       若留在上下文里，模型会把它当待解释的文本复述出来，反而更脏。这里提取后<b>物理剔除</b>；</li>
+ *   <li><b>超长结果</b>：几万字的网页正文/日志若整段回灌，后续每一轮都要重新计费。
+ *       超过阈值就落到会话工作区，只回灌「摘要 + 虚拟路径」，模型要看细节再调
+ *       {@code workspaceReadFile}。</li>
  * </ol>
  *
  * <p>套用顺序（见 {@code ReActTrialExecutor}）：配额 → 必填闸门 → 本类 → RAG 上下文。
  * 必须包在配额与闸门<b>外层</b>，否则被闸门拦下的调用（没有真正执行、也不会有标记）
  * 仍会白跑一次解析；而套在最外层能保证「谁产生的标记都能被看见」，包括 MCP 工具。
  *
+ * <p>两类加工的顺序有讲究：<b>先去标记，再判断是否需要句柄化</b>。
+ * 标记本身有几十个字符，先剔掉再量长度，才不会因为一串机械字符把一条本该原样的结果送去落盘。
+ *
  * <p>线程：{@code ToolExecutor} 在 {@code boundedElastic} 上跑工具，
- * 标记处理是纯 CPU 局部运算，不依赖任何 ThreadLocal；产物回调由构造方保证线程安全
- * （出站写入器自身加锁，内存快照写入器也加锁）。
+ * 标记处理是纯 CPU 局部运算，不依赖任何 ThreadLocal；产物回调与落盘由构造方保证线程安全
+ * （出站写入器自身加锁，{@link ToolResultOffloadStore} 无状态且文件名按纳秒唯一）。
  */
 public final class FileMarkerAgentTool implements AgentTool {
 
     private final AgentTool delegate;
     private final Consumer<GeneratedFile> sink;
+    /** 超长结果落盘；可空表示不启用句柄化（老测试与不需要该能力的链路） */
+    private final ToolResultOffloadStore offload;
+    /** 落盘阈值（字符）；≤0 关闭 */
+    private final int offloadMaxChars;
+    /**
+     * 本轮注入统计；可空。
+     * <p>
+     * 为什么直接持有而不是从 ThreadLocal 取：工具在 {@code boundedElastic} 上执行，
+     * ThreadLocal 不会跨线程传播，取到的必然是 null。装配时就把统计传进来，才记得到账。
+     */
+    private final PromptInjectionStats stats;
 
     /**
+     * 只做标记剔除（不启用句柄化）。
+     *
      * @param delegate 原工具
      * @param sink     产物出口，可空；空则只剔除标记、不推送
      */
     public FileMarkerAgentTool(AgentTool delegate, Consumer<GeneratedFile> sink) {
+        this(delegate, sink, null, 0, null);
+    }
+
+    /**
+     * @param delegate        原工具
+     * @param sink            产物出口，可空
+     * @param offload         落盘器，可空；空则不启用句柄化
+     * @param offloadMaxChars 落盘阈值（字符）；≤0 关闭
+     * @param stats           本轮注入统计，可空；非空时记录落盘条数与原始字符数
+     */
+    public FileMarkerAgentTool(AgentTool delegate, Consumer<GeneratedFile> sink,
+                               ToolResultOffloadStore offload, int offloadMaxChars,
+                               PromptInjectionStats stats) {
         this.delegate = delegate;
         this.sink = sink;
+        this.offload = offload;
+        this.offloadMaxChars = offloadMaxChars;
+        this.stats = stats;
     }
 
     /** {@inheritDoc} */
@@ -93,18 +129,63 @@ public final class FileMarkerAgentTool implements AgentTool {
     }
 
     /**
-     * 调原工具，拿到结果后提取产物并把标记剔掉。
+     * 调原工具，拿到结果后先剔标记、再按阈值决定是否落盘。
      *
-     * @param param 引擎入参
-     * @return 已清洗的结果；没有标记时原样返回同一个对象，避免无谓重建
+     * @param param 引擎入参（含 {@code RuntimeContext}，落盘要用它的 sessionId）
+     * @return 加工后的结果；两件事都不需要时原样返回同一个对象，避免无谓重建
      */
     @Override
     public Mono<ToolResultBlock> callAsync(ToolCallParam param) {
-        return delegate.callAsync(param).map(this::scrub);
+        String sessionId = param == null || param.getRuntimeContext() == null
+                ? null : param.getRuntimeContext().getSessionId();
+        // 工具名只能从入参取：工具返回值的 id/name 在引擎里是 null（它们只作为消息 ContentBlock 时才有）
+        String toolName = toolNameOf(param);
+        return delegate.callAsync(param).map(result -> process(result, sessionId, toolName));
     }
 
     /**
-     * 清洗一条工具结果。
+     * 从引擎入参取工具调用名。
+     *
+     * <p>为什么必须这样取：{@code ToolResultBlock} 作为「工具方法返回值」时 id 与 name 都是 null，
+     * 只在作为消息块时才被填上。若直接用 {@code result.getName()}，落盘文件名会退化成
+     * {@code tool-xxx.txt}，多个工具的产物混在一个目录里分不清是谁的。
+     *
+     * @param param 引擎入参，可空
+     * @return 工具名；取不到时返回 null（落盘侧会退化成 tool）
+     */
+    private String toolNameOf(ToolCallParam param) {
+        if (param == null) {
+            return null;
+        }
+        if (param.getToolUseBlock() != null && param.getToolUseBlock().getName() != null) {
+            return param.getToolUseBlock().getName();
+        }
+        try {
+            return delegate.getName();
+        } catch (RuntimeException ex) {
+            // 委托对象取名字失败不该影响结果加工
+            return null;
+        }
+    }
+
+    /**
+     * 单条结果的完整加工：剔除产物标记 → 判断并落盘超长正文。
+     *
+     * @param result    原结果，可空
+     * @param sessionId 会话标识，可空（空时无法落盘，只做标记剔除）
+     * @param toolName  工具名，可空（用于落盘文件名与回灌摘要）
+     * @return 加工后的结果；无需改动时返回原对象
+     */
+    private ToolResultBlock process(ToolResultBlock result, String sessionId, String toolName) {
+        if (result == null) {
+            return null;
+        }
+        ToolResultBlock scrubbed = scrub(result);
+        return handleOversize(scrubbed, sessionId, toolName);
+    }
+
+    /**
+     * 剔除产物标记。
      *
      * <p>只处理 SUCCESS 与未设状态的块：失败结果里的标记不该被当成产物
      * （工具失败时不会写标记，但 MCP 等外部实现的返回值不可控，这里做防御）。
@@ -113,9 +194,6 @@ public final class FileMarkerAgentTool implements AgentTool {
      * @return 清洗后的结果；无标记或不该处理时返回原对象
      */
     private ToolResultBlock scrub(ToolResultBlock result) {
-        if (result == null) {
-            return null;
-        }
         List<ContentBlock> output = result.getOutput();
         if (output == null || output.isEmpty()) {
             return result;
@@ -147,6 +225,89 @@ public final class FileMarkerAgentTool implements AgentTool {
             return result;
         }
         return new ToolResultBlock(result.getId(), result.getName(), next, result.getMetadata(), result.getState());
+    }
+
+    /**
+     * 超长正文落盘，用「摘要 + 路径」替换原正文。
+     * <p>
+     * 只看第一段文本块：一条工具结果里出现多个文本块是极少数情况，
+     * 逐块落盘会产生一堆小文件，反而更难让模型找。超长时整条结果合成一份文件。
+     *
+     * @param result    已剔除标记的结果
+     * @param sessionId 会话标识，可空
+     * @param toolName  工具名，可空
+     * @return 替换后的结果；不需要或落盘失败时返回原对象
+     */
+    private ToolResultBlock handleOversize(ToolResultBlock result, String sessionId, String toolName) {
+        if (offload == null || offloadMaxChars <= 0) {
+            return result;
+        }
+        List<ContentBlock> output = result.getOutput();
+        if (output == null || output.isEmpty()) {
+            return result;
+        }
+        // 只跳过明确的失败：ToolResultBlock 会把未设状态的块默认成 RUNNING，
+        // 而工具方法直接返回时通常就是 RUNNING（引擎之后才改成 SUCCESS）。
+        // 若把「非 SUCCESS」当失败，正常的成功结果就永远落不了盘。
+        if (result.getState() == ToolResultState.ERROR) {
+            return result;
+        }
+        String text = firstText(output);
+        if (text == null) {
+            return result;
+        }
+        ToolResultHandle handle = offload
+                .offload(sessionId, toolName, text, true, offloadMaxChars)
+                .orElse(null);
+        if (handle == null || !handle.stored()) {
+            return result;
+        }
+        // 记账：本轮省了多少字是验收口径，必须能从上车的统计里看到
+        meterOffload(handle.totalChars());
+        // 用单块摘要替换全部文本块：原正文已在文件里，继续留着等于没落盘
+        List<ContentBlock> replaced = new ArrayList<>(output.size());
+        boolean placed = false;
+        for (ContentBlock block : output) {
+            if (block instanceof TextBlock && !placed) {
+                replaced.add(TextBlock.builder().text(handle.preview()).build());
+                placed = true;
+            } else if (!(block instanceof TextBlock)) {
+                replaced.add(block);
+            }
+        }
+        return new ToolResultBlock(result.getId(), result.getName(), replaced,
+                result.getMetadata(), result.getState());
+    }
+    /**
+     * 记一条落盘到本轮注入统计。
+     * <p>
+     * 统计对象在构造时注入；为空时静默跳过（统计是旁路信息，不该影响工具结果）。
+     * 并发安全由 {@code PromptInjectionStats} 的简单自增承担：这里只加计数，
+     * 偶发的竞态最多让条数少算一条，不会影响结论，也不值得为它加锁拖慢工具路径。
+     *
+     * @param rawChars 被落盘的原始正文长度
+     */
+    private void meterOffload(int rawChars) {
+        if (stats == null) {
+            return;
+        }
+        stats.meterOffloadedToolResult(rawChars);
+    }
+
+    /**
+     * @param output 结果块
+     * @return 第一个非空文本块的正文；没有则 null
+     */
+    private static String firstText(List<ContentBlock> output) {
+        for (ContentBlock block : output) {
+            if (block instanceof TextBlock textBlock) {
+                String text = textBlock.getText();
+                if (text != null && !text.isEmpty()) {
+                    return text;
+                }
+            }
+        }
+        return null;
     }
 
     /**

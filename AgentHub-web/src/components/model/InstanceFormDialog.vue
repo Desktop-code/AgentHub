@@ -54,6 +54,24 @@
           <p class="temp-hint">{{ temperatureHint }}</p>
         </div>
       </el-form-item>
+      <!-- 视觉输出上限：选填，写入 extraJson.max_tokens；留空即用后端默认 1024 -->
+      <el-form-item v-if="isVision" label="输出上限">
+        <div class="max-tokens-field">
+          <el-input-number
+            v-model="form.maxTokens"
+            :min="1"
+            :step="256"
+            :controls="false"
+            placeholder="留空默认 1024"
+            style="width: 160px"
+          />
+          <span class="max-tokens-unit">tokens</span>
+        </div>
+        <p class="max-tokens-hint">
+          留空时按 1024 出站。部分视觉模型的 max_tokens 上限就是 1024，填更大值会被上游拒绝并返回 400；
+          确有需要可手填更大值，保存后原样发出（平台不钳制）。
+        </p>
+      </el-form-item>
     </el-form>
     <template #footer>
       <!-- 编辑态未改任何字段时取消 / 保存都不可点；新建态恒可点 -->
@@ -71,6 +89,8 @@
  * - 不采样用途（EMBEDDING / RERANK / ASR / TTS / GUARDRAIL）：温度锁 0、滑块禁用、红字说明；
  * - 新建或切换用途且用户未手改温度时，套该用途默认值；编辑回填的已存温度不被静默覆盖，
  *   只有点「恢复建议值」才显式套默认。
+ * VISION 额外可填 max_tokens（写入 extraJson.max_tokens，留空即后端默认 1024）：
+ * 部分视觉模型输出上限就是 1024，填更大值会被上游 400；平台按填的值原样发出，不做钳制。
  * 启停不在弹窗里改。
  */
 import { computed, reactive, ref, watch } from 'vue'
@@ -108,7 +128,9 @@ const form = reactive({
   displayName: '',
   modelId: '',
   capability: 'CHAT',
-  temperature: temperatureProfileOf('CHAT').defaultTemperature
+  temperature: temperatureProfileOf('CHAT').defaultTemperature,
+  /** 视觉用途的输出上限；null 表示未配置，后端按 1024 默认出站 */
+  maxTokens: null as number | null
 })
 
 /**
@@ -125,6 +147,9 @@ const temperatureProfile = computed(() => temperatureProfileOf(form.capability))
 
 /** 不采样用途禁用控件并恒为 0 */
 const temperatureLocked = computed(() => !temperatureProfile.value.sampling)
+
+/** 是否视觉用途：输出上限说明只在 VISION 展示，避免让 CHAT 用户误以为也受 1024 限制 */
+const isVision = computed(() => normalizeCapability(form.capability) === 'VISION')
 
 /** 红字提示：锁定用途说明原因，采样用途给建议区间 */
 const temperatureHint = computed(() => {
@@ -160,6 +185,8 @@ watch(
     form.temperature = current
       ? parseTemperature(current.extraJson, form.capability)
       : temperatureProfileOf(form.capability).defaultTemperature
+    // 输出上限只对视觉用途有意义；切到其它用途时置空，避免把视觉专用值带进 CHAT 实例
+    form.maxTokens = current ? parseMaxTokens(current.extraJson) : null
     temperatureDirty.value = Boolean(current)
     if (!current) {
       pickFirstCredential()
@@ -199,6 +226,10 @@ function parseTemperature(extraJson: string | undefined, capability: string) {
  */
 function onCapabilityChange() {
   const profile = temperatureProfileOf(form.capability)
+  // 输出上限是视觉专用字段：切到其它用途时清空，避免把 VISION 的值悄悄发给 CHAT
+  if (normalizeCapability(form.capability) !== 'VISION') {
+    form.maxTokens = null
+  }
   if (!profile.sampling) {
     // 不采样用途没有「用户已选温度」可言，直接锁 0
     form.temperature = 0
@@ -222,13 +253,41 @@ function restoreSuggestedTemperature() {
 }
 
 /**
- * 写入 temperature，保留原 JSON 其它键。
+ * 从 extraJson 读视觉输出上限。
+ *
+ * <p>两种键名都认（`max_tokens` 是 OpenAI 风格、`maxTokens` 兼容手填），
+ * 只接受正整数：0、负数、非数字一律视为「未配置」，由后端走默认值。
+ *
+ * @param extraJson 库里的扩展 JSON
+ * @return 正整数或 null
+ */
+function parseMaxTokens(extraJson: string | undefined): number | null {
+  if (!extraJson?.trim()) {
+    return null
+  }
+  try {
+    const obj = JSON.parse(extraJson) as { max_tokens?: unknown; maxTokens?: unknown }
+    for (const raw of [obj.max_tokens, obj.maxTokens]) {
+      const value = typeof raw === 'number' ? raw : Number(raw)
+      if (Number.isFinite(value) && value >= 1) {
+        return Math.floor(value)
+      }
+    }
+  } catch {
+    // 忽略坏 JSON：后端同样按未配置处理
+  }
+  return null
+}
+
+/**
+ * 写入 temperature（及视觉用途的 max_tokens），保留原 JSON 其它键。
  *
  * @param temperature 滑动条值
- * @param previous 编辑前的 extraJson
+ * @param maxTokens   视觉输出上限；null 表示删除该键，后端按默认 1024 出站
+ * @param previous    编辑前的 extraJson
  * @return 可提交的 JSON 字符串
  */
-function buildExtraJson(temperature: number, previous: string) {
+function buildExtraJson(temperature: number, maxTokens: number | null, previous: string) {
   let base: Record<string, unknown> = {}
   if (previous.trim()) {
     try {
@@ -241,6 +300,13 @@ function buildExtraJson(temperature: number, previous: string) {
     }
   }
   base.temperature = temperature
+  // 两种键名统一收口到 max_tokens，避免库里同一语义出现两个字段
+  delete base.maxTokens
+  if (maxTokens == null) {
+    delete base.max_tokens
+  } else {
+    base.max_tokens = maxTokens
+  }
   return JSON.stringify(base)
 }
 
@@ -269,7 +335,7 @@ function submit() {
     displayName: form.displayName.trim(),
     modelId: form.modelId.trim(),
     capability: form.capability,
-    extraJson: buildExtraJson(temperature, previousExtraJson.value)
+    extraJson: buildExtraJson(temperature, isVision.value ? form.maxTokens : null, previousExtraJson.value)
   }
   // 编辑带上当前启停，避免后端把空 status 当成默认启用；新建不传，后端默认启用
   if (props.editing) {
@@ -319,5 +385,25 @@ function submit() {
   color: #ef4444;
   font-size: 12px;
   line-height: 18px;
+}
+
+/* 视觉输出上限说明：灰字，与红字告警区分开（这是提示而非错误） */
+.max-tokens-hint {
+  margin: 0;
+  color: #6b7280;
+  font-size: 12px;
+  line-height: 18px;
+}
+
+/* 输出上限输入行：数字框 + 单位，与温度那一行的排版节奏一致 */
+.max-tokens-field {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.max-tokens-unit {
+  color: #6b7280;
+  font-size: 12px;
 }
 </style>

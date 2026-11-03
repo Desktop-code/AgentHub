@@ -39,4 +39,21 @@ public class PromptTemplateSnapshot {
         });
         return copy;
     }
+
+    /**
+     * 组装用的两相位排序：先全部锁定段（mutable=0），再全部开放段（mutable=1）；相位内仍按 sort_no。
+     * <p>
+     * 为什么不直接用 {@link #orderedSegments()}：库里 sort_no 是人工填的数字，开放段一旦填得比
+     * 锁定段小（如 output_contract 被写成 30、role_tone 写成 10），锁定契约就会被挤到业务语气之后——
+     * 模型先读「怎么说」再读「必须怎么输出」，红线形同虚设。相位优先由代码保证，不依赖数据碰巧排对。
+     * <p>
+     * 实现说明：{@link List#sort} 是稳定排序，因此只在相位维度比较即可保留相位内的 sort_no 顺序。
+     *
+     * @return 锁定段在前、开放段在后的副本
+     */
+    public List<PromptSegmentSnapshot> orderedSegmentsByPhase() {
+        List<PromptSegmentSnapshot> copy = orderedSegments();
+        copy.sort((left, right) -> Integer.compare(left.soft() ? 1 : 0, right.soft() ? 1 : 0));
+        return copy;
+    }
 }

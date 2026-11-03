@@ -80,8 +80,7 @@ final class AcpEventMapper {
                 }
             }
             case USAGE -> frames.add(frame(List.of(), usage, null));
-            case ERROR -> throw new IllegalStateException(
-                    hasText(event.getContent()) ? event.getContent() : "模型调用失败");
+            case ERROR -> throw upstreamError(event);
             case DONE -> {
                 // done 决定本轮结束原因；即便没有内容块也要发一帧，让引擎知道该轮已收尾
                 frames.add(frame(List.of(), usage, finishReasonOf(event.getFinishReason())));
@@ -192,5 +191,41 @@ final class AcpEventMapper {
      */
     private static boolean hasText(String value) {
         return value != null && !value.isBlank();
+    }
+
+    /**
+     * error 事件的异常。
+     *
+     * <p>关键区分：<b>message 保持固定话术</b>（可能进用户可见的 error_summary），
+     * 上游原始原因（状态码 + 脱敏 body 摘要，如「图片过大 / mime 不支持」）只挂在 cause 上。
+     * 这样「不再只剩笼统 400」——日志与追踪能看到原因，而用户侧文案一个字都不变。
+     *
+     * @param event 统一 error 事件
+     * @return 待上抛的异常
+     */
+    private static RuntimeException upstreamError(UnifiedStreamEvent event) {
+        String summary = hasText(event.getContent()) ? event.getContent() : "模型调用失败";
+        Object detail = event.getExtensions() == null ? null
+                : event.getExtensions().get(UnifiedStreamEvent.EXT_UPSTREAM_DETAIL);
+        if (detail instanceof String text && hasText(text)) {
+            return new IllegalStateException(summary, new UpstreamDetailException(text));
+        }
+        return new IllegalStateException(summary);
+    }
+
+    /**
+     * 只承载上游原始原因的 cause 载体。所属域：runtime 的 infra。
+     *
+     * <p>为什么单独一个类型：日志里能一眼看出「这层不是业务异常，是上游原文摘要」；
+     * 用户可见文案的映射器也不会把它误当成该展示给用户的话术。
+     */
+    static final class UpstreamDetailException extends RuntimeException {
+
+        /**
+         * @param message 已脱敏的上游原因，形如「上游返回 HTTP 400：image too large」
+         */
+        UpstreamDetailException(String message) {
+            super(message);
+        }
     }
 }

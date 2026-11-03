@@ -1,5 +1,6 @@
 package com.agenthub.runtime.infra.agentscope;
 
+import com.agenthub.runtime.domain.service.VisionImageData;
 import com.agenthub.runtime.model.acl.UnifiedChatRequest;
 import com.agenthub.runtime.model.acl.UnifiedMessage;
 import com.agenthub.runtime.model.acl.UnifiedToolCall;
@@ -146,7 +147,13 @@ final class AcpRequestMapper {
             // media_type 缺失时退化成 png：多数厂商只按内容解码，声明错也只是宽容度问题
             String mime = base64.getMediaType() == null || base64.getMediaType().isBlank()
                     ? DEFAULT_IMAGE_MIME : base64.getMediaType().trim();
-            out.add("data:" + mime + ";base64," + base64.getData().trim());
+            // 走同一个规范化入口：image/jpg 之类别名与夹带换行的 base64 会让厂商直接 400，
+            // 而这两处（OCR 与普通多模态对话）必须产出完全一致的 data URI
+            VisionImageData.Parsed parsed = VisionImageData.parse(
+                    "data:" + mime + ";base64," + base64.getData().trim());
+            out.add(parsed == null
+                    ? "data:" + mime + ";base64," + base64.getData().trim()
+                    : parsed.toDataUri());
         }
     }
 
