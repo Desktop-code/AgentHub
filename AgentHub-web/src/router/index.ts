@@ -127,6 +127,45 @@ const router = createRouter({
           meta: { title: '调用追踪', cacheName: 'CallTrace' }
         },
         {
+          path: 'ops/eval',
+          component: () => import('@/views/eval/console/index.vue'),
+          meta: { title: 'Agent 评测', cacheName: 'EvalConsole' }
+        },
+        /*
+         * 编排 → 工作流（决议 M6：独立一级目录，不塞进 Agent run_mode）。
+         * 列表与编辑分开 cacheName：编辑页是重画布，不跟列表共用缓存；
+         * 编辑页按 :id 复用同一组件，页面内 watch 参数重新载入。
+         */
+        {
+          path: 'orchestration/workflow',
+          component: () => import('@/views/workflow/list/index.vue'),
+          meta: { title: '工作流', cacheName: 'WorkflowList' }
+        },
+        {
+          path: 'orchestration/workflow/:id',
+          component: () => import('@/views/workflow/editor/index.vue'),
+          meta: { title: '工作流编辑', cacheName: 'WorkflowEditor' }
+        },
+        /*
+         * 编排 → 人工待办（WF-P0 刀3）：独立薄页，只做「看待办 + 通过 / 驳回」，
+         * 不是外部门户，也不复用画布编辑页。
+         */
+        {
+          path: 'orchestration/human-tasks',
+          component: () => import('@/views/workflow/human-tasks/index.vue'),
+          meta: { title: '人工待办', cacheName: 'WorkflowHumanTasks' }
+        },
+        /*
+         * 编排 → 多智能体（MA-P1 刀2）：与「工作流」同级的独立列表页。
+         * 只读入口：数据是 run_mode=ROUTER 的 Agent；编辑仍回 /agent/list/:id 的「编排」Tab，
+         * 因此本页不注册详情子路由，也不复用 WorkflowEditor。
+         */
+        {
+          path: 'orchestration/multi-agent',
+          component: () => import('@/views/ma/list/index.vue'),
+          meta: { title: '多智能体', cacheName: 'MaList' }
+        },
+        {
           path: 'agent/memory',
           component: () => import('@/views/memory/index.vue'),
           meta: { title: '记忆管理', cacheName: 'MemoryManage' }
