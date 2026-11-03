@@ -109,3 +109,31 @@ dump.rdb
 *.jks
 .npmrc
 id_rsa
+
+# 本地配置补 .yaml 与 IDE 外置 config 目录（yml 已覆盖，yaml 此前漏网）
+**/application-local.yaml
+**/application-prod.yaml
+**/application-dev.yaml
+/AgentHub-server/config/
+
+# 前端/工具缓存
+**/.turbo/
+**/.vite/
+**/.cache/
+
+# 备份与补丁残留
+*.bak
+*.orig
+*.rej
+*.tmp
+
+# 证书/凭据补充（*.pem/*.p12/*.key/*.jks 已有）
+*.pfx
+*.keystore
+*.p8
+*.ppk
+.netrc
+
+# example 白名单（防 *.yaml 规则误伤模板；真实 local/prod/dev 仍被忽略）
+!**/application-*.yml.example
+!**/application-*.yaml.example
