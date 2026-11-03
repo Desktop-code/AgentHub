@@ -62,13 +62,26 @@ public class GlobalExceptionHandler {
     }
 
     /**
-     * JSON 无法解析时不把解析器内部信息原样抛出。
+     * 请求体读失败：区分「根本不是 JSON」与「字段类型不匹配」，避免一律「格式不正确」误导评测导入。
      *
      * @param ex 读体异常
      * @return HTTP 400
      */
     @ExceptionHandler(HttpMessageNotReadableException.class)
     public ResponseEntity<Result<Void>> handleUnreadable(HttpMessageNotReadableException ex) {
+        Throwable cause = ex.getMostSpecificCause();
+        String detail = cause == null || cause.getMessage() == null ? "" : cause.getMessage();
+        // 真·非法 JSON（截断、尾逗号等）
+        if (cause instanceof com.fasterxml.jackson.core.JsonParseException) {
+            return badRequest("请求体不是合法 JSON");
+        }
+        // 常见：enabled 写成布尔却未走宽松反序列化的其它 DTO
+        if (detail.contains("enabled") && detail.contains("Boolean")) {
+            return badRequest("字段 enabled 只能是 0/1 或 true/false");
+        }
+        if (cause instanceof com.fasterxml.jackson.databind.exc.MismatchedInputException) {
+            return badRequest("请求体字段类型不匹配，请核对导入 JSON 与接口契约");
+        }
         return badRequest("请求体格式不正确");
     }
 
