@@ -21,6 +21,11 @@ public class AgentDefEntity extends AgentAuditEntity {
     private String code;
     private String description;
     private String runMode;
+    /**
+     * 是否允许被编排挂为子专家。1=允许，0=禁止。
+     * <p>ROUTER 恒为 0（编排根不可作子），服务端保存时强制写 0；列非空，见 schema-delta-allow-orchestrated.sql。
+     */
+    private Integer allowOrchestrated;
     /** 用户业务段。不另加列，平台前缀不入库 */
     private String systemPrompt;
     /** CHAT 引用的 L2 模板主键；L3 挂载点，见 schema-delta-prompt.sql */

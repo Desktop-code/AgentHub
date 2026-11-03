@@ -113,6 +113,24 @@ export interface TrialStepChunk {
 }
 
 /**
+ * 编排根下的子专家计划待批准帧（事件名 ma_child_plan_pending）。
+ * 载荷与刷新恢复接口 plan/child-pending 同构：前端一套解析两处复用。
+ */
+export interface TrialChildPlanPendingChunk {
+  /** 该子在父编排里的路由键；批准/拒绝时回传 */
+  routeKey: string
+  childAgentId?: number
+  childAgentName?: string
+  planId: string
+  /** 当前只有 PENDING */
+  state: string
+  /** 根侧运行态：PAUSED_CHILD_APPROVAL */
+  runState?: string
+  summary?: string
+  steps?: { seq: number; title: string; detail: string }[]
+}
+
+/**
  * 文件生成 SSE 帧。
  * fileName 含子目录时形如 notes/report.md；downloadUrl 由后端拼好（已编码）。
  */
@@ -137,6 +155,8 @@ export interface TrialStreamHandlers {
   onPlan?: (plan: TrialPlanChunk) => void
   /** 计划单步进度 */
   onStep?: (step: TrialStepChunk) => void
+  /** 编排根下某个 P&E 子计划待批准：根侧同时仅一个，面板据此出「批准 / 拒绝」 */
+  onChildPlanPending?: (pending: TrialChildPlanPendingChunk) => void
   /** Agent 在工作区生成了文件，可下载 */
   onFileGenerated?: (file: TrialFileChunk) => void
   onDone?: (payload: TrialDoneChunk) => void
@@ -254,6 +274,9 @@ function dispatchFrame(frame: string, handlers: TrialStreamHandlers) {
     handlers.onPlan?.(data as TrialPlanChunk)
   } else if (event === 'step' && data && typeof data === 'object') {
     handlers.onStep?.(data as TrialStepChunk)
+  } else if (event === 'ma_child_plan_pending' && data && typeof data === 'object') {
+    // 子计划待批：不并进单 Agent 的 plan 卡，单独交给根试跑面板渲染批准按钮
+    handlers.onChildPlanPending?.(data as TrialChildPlanPendingChunk)
   } else if (event === 'file_generated' && data && typeof data === 'object') {
     // 产物卡片：fileName / size / downloadUrl 都由后端给齐，前端不再拼地址
     handlers.onFileGenerated?.(data as TrialFileChunk)
@@ -268,23 +291,39 @@ function dispatchFrame(frame: string, handlers: TrialStreamHandlers) {
  * 批准待执行计划。后端接着跑剩余步骤并返回本轮事件；
  * 没有待批准计划（已批准、已取消或已过期）时返回业务错误。
  * @param id 会话
+ * @param routeKey 编排根下的子路由键；传了表示批准的是「子专家计划」，不传是单 Agent 计划
  */
-export function approveTrialPlan(id: number) {
-  return request.post<Result<TrialMessageResult>>(`/api/runtime/trial/sessions/${id}/plan/approve`, {}, {
-    timeout: 310000
-  })
+export function approveTrialPlan(id: number, routeKey?: string) {
+  return request.post<Result<TrialMessageResult>>(
+    `/api/runtime/trial/sessions/${id}/plan/approve${routeKey ? `?routeKey=${encodeURIComponent(routeKey)}` : ''}`,
+    {},
+    { timeout: 310000 }
+  )
 }
 
 /**
  * 取消待执行计划。不执行任何步骤，只落一条「计划已取消」。
  * @param id 会话
+ * @param routeKey 编排根下的子路由键；传了表示拒绝的是「子专家计划」
  */
-export function rejectTrialPlan(id: number) {
-  return request.post<Result<TrialMessageResult>>(`/api/runtime/trial/sessions/${id}/plan/reject`)
+export function rejectTrialPlan(id: number, routeKey?: string) {
+  return request.post<Result<TrialMessageResult>>(
+    `/api/runtime/trial/sessions/${id}/plan/reject${routeKey ? `?routeKey=${encodeURIComponent(routeKey)}` : ''}`
+  )
 }
 
 /**
- * 待批准计划。刷新页面后用它恢复「批准 / 取消」按钮；没有时 data 为 null。
+ * 编排根下当前待批的子计划。刷新页面后用它恢复「批准 / 拒绝」按钮；没有时 data 为 null。
+ * @param id 会话
+ */
+export function getPendingChildPlan(id: number) {
+  return request.get<Result<TrialChildPlanPendingChunk | null>>(
+    `/api/runtime/trial/sessions/${id}/plan/child-pending`
+  )
+}
+
+/**
+ * 待批准计划（单 Agent P&E）。刷新页面后用它恢复「批准 / 取消」按钮；没有时 data 为 null。
  * @param id 会话
  */
 export function getPendingTrialPlan(id: number) {

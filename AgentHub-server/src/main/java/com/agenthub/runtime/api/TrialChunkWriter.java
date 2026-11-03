@@ -4,6 +4,7 @@ import com.agenthub.runtime.api.dto.MessageResp;
 import com.agenthub.runtime.api.sse.ServletSseFrameSink;
 import com.agenthub.runtime.api.sse.UnifiedSseWriter;
 import com.agenthub.runtime.application.TrialStreamEnd;
+import com.agenthub.runtime.domain.model.ChildPlanPendingView;
 import com.agenthub.runtime.domain.model.GeneratedFile;
 import com.agenthub.runtime.domain.model.PlanStep;
 import com.agenthub.runtime.domain.model.PlanView;
@@ -170,6 +171,35 @@ public final class TrialChunkWriter implements TrialProgress, TrialStreamEnd {
         payload.put("steps", steps);
         payload.put("summary", TrialTexts.redact(plan.summary()));
         writer.emitLegacy("plan", payload);
+    }
+
+    /**
+     * 编排根下的子计划待批准。走独立事件名 {@code ma_child_plan_pending}：
+     * 根侧批准按钮必须按 route_key 定位具体子，不能复用单 Agent 的 plan 卡。
+     */
+    @Override
+    public void childPlanPending(ChildPlanPendingView pending) {
+        if (pending == null) {
+            return;
+        }
+        Map<String, Object> payload = new LinkedHashMap<>();
+        payload.put("routeKey", pending.routeKey());
+        payload.put("childAgentId", pending.childAgentId());
+        payload.put("childAgentName", TrialTexts.redact(pending.childAgentName()));
+        payload.put("planId", pending.planId());
+        payload.put("state", pending.state());
+        payload.put("runState", pending.runState());
+        payload.put("summary", TrialTexts.redact(pending.summary()));
+        List<Map<String, Object>> steps = new ArrayList<>();
+        for (PlanStep step : pending.steps()) {
+            Map<String, Object> one = new LinkedHashMap<>();
+            one.put("seq", step.seq());
+            one.put("title", TrialTexts.redact(step.title()));
+            one.put("detail", TrialTexts.redact(step.detail()));
+            steps.add(one);
+        }
+        payload.put("steps", steps);
+        writer.emitLegacy("ma_child_plan_pending", payload);
     }
 
     /**

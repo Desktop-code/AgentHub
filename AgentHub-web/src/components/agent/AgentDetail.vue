@@ -70,6 +70,24 @@
                   @change="onStatusChanged"
                 />
               </el-form-item>
+              <!--
+                允许被编排调用：关掉后其它编排根无法把本 Agent 选为候选专家。
+                ROUTER 恒为关且禁用（编排根不可作子），与后端强制写 0 的口径一致。
+              -->
+              <el-form-item class="span-2" label="允许被编排调用">
+                <div class="allow-orch">
+                  <el-switch
+                    :model-value="form.runMode === 'ROUTER' ? false : form.allowOrchestrated !== false"
+                    :disabled="!canEdit || form.runMode === 'ROUTER'"
+                    @change="onAllowOrchestratedChange"
+                  />
+                  <span class="allow-orch__hint">
+                    {{ form.runMode === 'ROUTER'
+                      ? '编排根不可作为子专家'
+                      : '关闭后，其它编排根无法将本 Agent 选为候选专家' }}
+                  </span>
+                </div>
+              </el-form-item>
               <el-form-item class="span-2" label="简介">
                 <el-input v-model="form.description" type="textarea" maxlength="1000" :rows="2" :disabled="!canEdit" />
               </el-form-item>
@@ -91,7 +109,7 @@
           </el-form>
           <el-alert
             v-if="form.runMode !== 'ROUTER' && savedMode === 'ROUTER'"
-            title="当前按所选模式隐藏「路由配置」。保存后已有子路由仍会保留，改回 Router 后可见。"
+            title="当前按所选模式隐藏「编排」。保存后已有子路由仍会保留，改回 Router 后可见。"
             type="info"
             show-icon
             :closable="false"
@@ -108,82 +126,23 @@
           </p>
         </el-tab-pane>
 
-        <el-tab-pane v-if="showRouteTab" label="路由配置" name="route">
-          <div class="router-runtime" v-if="form">
-            <h3 class="router-runtime-title">运行配置</h3>
-            <el-form label-width="140px" class="router-runtime-form">
-              <el-form-item label="多意图并行">
-                <!-- 开关即时落库：拨动即请求，成功后只刷新开关值，不点亮页底取消/保存 -->
-                <el-switch
-                  :model-value="form.runtimeConfig!.multiIntentEnabled !== false"
-                  :loading="runtimeSaving === 'multiIntentEnabled'"
-                  :disabled="!canEdit || runtimeSaving !== ''"
-                  inline-prompt
-                  @change="(on: string | number | boolean) => saveRuntimeSwitch('multiIntentEnabled', on === true)"
-                />
-                <span class="field-hint">开启后，若提问包含多个意图，将同时派发给多个子 Agent 并行处理；关闭则仅派发给最匹配的一个。</span>
-              </el-form-item>
-              <el-form-item label="回答合并策略">
-                <el-radio-group v-model="form.runtimeConfig!.answerMode" :disabled="!canEdit">
-                  <el-tooltip content="直接按顺序合并各子 Agent 的回答，速度快。" placement="top">
-                    <el-radio value="CONCAT">拼接</el-radio>
-                  </el-tooltip>
-                  <el-tooltip content="由主模型整合多个子 Agent 的结果，生成连贯回复，耗时稍长。" placement="top">
-                    <el-radio value="SUMMARIZE">汇总</el-radio>
-                  </el-tooltip>
-                </el-radio-group>
-              </el-form-item>
-              <el-form-item label="单次最大拆分任务数">
-                <el-input-number
-                  v-model="form.runtimeConfig!.maxRouteChildren"
-                  :min="1"
-                  :max="5"
-                  :step="1"
-                  :disabled="!canEdit"
-                />
-                <span class="field-hint">限制单次拆分出的最大子任务数，防止并发过高导致超时或费用失控（系统最大支持 5）。</span>
-              </el-form-item>
-            </el-form>
-          </div>
-          <div class="tab-bar">
-            <h3>子 Agent</h3>
-            <el-button v-if="canBind && savedMode === 'ROUTER'" type="primary" @click="routeOpen = true">+ 添加子 Agent</el-button>
-          </div>
-          <el-alert
-            v-if="savedMode === 'ROUTER' && !routes.length"
-            title="尚未配置子 Agent，不影响保存。"
-            type="warning"
-            show-icon
-            :closable="false"
-            class="block-alert"
+        <el-tab-pane v-if="showOrchestrationTab" label="编排" name="orchestration">
+          <!--
+            编排 Tab：产品化现网一层路由。候选 CRUD 走现网 /routes 接口；
+            策略字段写回 form.runtimeConfig，由页面底栏统一保存。
+          -->
+          <AgentOrchestrationPanel
+            :agent-id="agentId"
+            :agent-name="form.name"
+            :agent-status="form.status"
+            :config="form.runtimeConfig || {}"
+            :routes="routes"
+            :can-edit="canEdit"
+            :can-bind="canBind"
+            :saved-router="savedMode === 'ROUTER'"
+            @update:config="onOrchestrationConfig"
+            @routes-changed="onRoutesChanged"
           />
-          <el-table :data="routes" empty-text="还没有子 Agent">
-            <el-table-column label="子 Agent" min-width="180">
-              <template #default="{ row }">
-                <div>{{ row.childName || 'Agent 已删除' }}</div>
-                <div v-if="row.routeKey" class="route-key-sub">route_key · {{ row.routeKey }}</div>
-              </template>
-            </el-table-column>
-            <el-table-column prop="intent" label="意图" min-width="200" show-overflow-tooltip />
-            <el-table-column prop="sortOrder" label="排序" width="80" />
-            <el-table-column label="状态" width="150">
-              <template #default="{ row }">
-                <el-tag size="small" :type="row.status === 1 ? 'success' : 'info'" effect="plain">
-                  {{ row.status === 1 ? '启用' : '停用' }}
-                </el-tag>
-                <el-tag v-if="row.childRunMode && row.childRunMode !== 'REACT'" size="small" type="danger" effect="plain" class="gap">
-                  非 ReAct
-                </el-tag>
-              </template>
-            </el-table-column>
-            <el-table-column v-if="canBind && savedMode === 'ROUTER'" label="操作" width="180">
-              <template #default="{ row }">
-                <el-button link type="primary" @click="openRouteEdit(row)">编辑</el-button>
-                <el-button link type="primary" @click="toggleRoute(row)">{{ row.status === 1 ? '停用' : '启用' }}</el-button>
-                <el-button link type="danger" @click="removeRoute(row)">移除</el-button>
-              </template>
-            </el-table-column>
-          </el-table>
         </el-tab-pane>
 
         <el-tab-pane label="模型配置" name="model">
@@ -440,12 +399,6 @@
   />
   <ToolBindDialog v-model="toolOpen" :bound-ids="tools.map((item) => item.toolItemId)" @submit="addTool" />
   <SkillBindDialog v-model="skillOpen" :bound-ids="skills.map((item) => item.skillId)" @submit="addSkill" />
-  <RouteBindDialog
-    v-model="routeOpen"
-    :parent-id="agentId"
-    :bound-ids="routes.map((item) => item.childAgentId)"
-    @submit="addRoute"
-  />
 
   <!-- 非 CHAT 用途的 L3：落 agent_model_bind，与 CHAT 共用同一套 L3 表单 -->
   <PurposePromptDialog
@@ -456,43 +409,13 @@
     :disabled="!canBind"
     @submit="savePurposePrompt"
   />
-
-  <el-dialog v-model="routeEditOpen" title="编辑子路由" width="520px">
-    <el-form label-width="88px">
-      <el-form-item label="意图" required>
-        <el-input
-          v-model="routeDraft.intent"
-          maxlength="255"
-          type="textarea"
-          :rows="2"
-          placeholder="白话描述该子 Agent 负责什么，供判路由识别"
-        />
-      </el-form-item>
-      <el-form-item label="排序">
-        <el-input-number v-model="routeDraft.sortOrder" :min="0" :max="10000" controls-position="right" />
-      </el-form-item>
-      <el-collapse v-model="routeEditAdvanced" class="route-advanced">
-        <el-collapse-item title="高级 · 路由键" name="adv">
-          <el-form-item label="路由键">
-            <el-input v-model="routeDraft.routeKey" maxlength="64" placeholder="系统生成的稳定短码" />
-            <div class="route-hint">改后须与判路由输出一致；默认不要改，避免已跑通的提示词对不上</div>
-          </el-form-item>
-        </el-collapse-item>
-      </el-collapse>
-    </el-form>
-    <template #footer>
-      <!-- 未改任何字段时取消 / 保存都不可点；打开即回填基线 -->
-      <el-button :disabled="!routeEditDirty" @click="routeEditOpen = false">取消</el-button>
-      <el-button type="primary" :disabled="!routeEditDirty" @click="saveRouteEdit">保存</el-button>
-    </template>
-  </el-dialog>
   </div>
 </template>
 
 <script setup lang="ts">
 /**
  * Agent 详情表单。所属域：agent。
- * 固定 Tab：基本信息 /（路由配置，仅 Router）/ 模型配置 / 工具配置 / 技能配置 / 记忆配置 / 知识库 / 运行配置。
+ * 固定 Tab：基本信息 /（编排，仅 Router）/ 模型配置 / 工具配置 / 技能配置 / 记忆配置 / 知识库 / 运行配置。
  * 基本信息与运行配置共用 Agent 保存；记忆配置在面板内取消/保存策略。模型/工具/技能即时落库。
  * 用途槽只放模型能力（生成/多模态/音频/安全）；嵌入跟知识库向量实例、重排归「知识库」Tab 的检索链路。
  * 启停走 Switch；删除只在网格卡。标题行「对话」只通知外层打开已有抽屉。
@@ -505,11 +428,9 @@ import {
   getAgent,
   getRuntimeLimits,
   createModelBind,
-  createRoute,
   createSkillBind,
   createToolBind,
   deleteModelBind,
-  deleteRoute,
   deleteSkillBind,
   deleteToolBind,
   listModelBinds,
@@ -518,17 +439,16 @@ import {
   listToolBinds,
   updateAgent,
   updateModelBind,
-  updateRoute,
   updateSkillBind,
   updateToolBind
 } from '@/api/agent'
 import AgentMemoryPanel from '@/components/agent/AgentMemoryPanel.vue'
 import AgentKbPanel from '@/components/agent/AgentKbPanel.vue'
+import AgentOrchestrationPanel from '@/components/agent/AgentOrchestrationPanel.vue'
 import AgentPromptEditor from '@/components/agent/AgentPromptEditor.vue'
 import ModelBindDialog from '@/components/agent/ModelBindDialog.vue'
 import ModelPurposeSlots from '@/components/agent/ModelPurposeSlots.vue'
 import PurposePromptDialog from '@/components/agent/PurposePromptDialog.vue'
-import RouteBindDialog from '@/components/agent/RouteBindDialog.vue'
 import SkillBindDialog from '@/components/agent/SkillBindDialog.vue'
 import ToolBindDialog from '@/components/agent/ToolBindDialog.vue'
 import TablePager from '@/components/TablePager.vue'
@@ -548,7 +468,13 @@ import type {
 } from '@/types/agent'
 import { MEMORY_SLOT_PURPOSES, normalizeCapability, PURPOSE_SLOT_GROUPS } from '@/types/model'
 import { checkUserPrompt, promptAfterModeSwitch } from '@/utils/promptSafety'
-import { useFormDirty, useObjectDirty } from '@/composables/useFormDirty'
+import {
+  normalizeChildRunModes,
+  normalizeContextPolicy,
+  normalizeCriticMaxRounds,
+  normalizeTemplate
+} from '@/utils/orchestrationValidation'
+import { useFormDirty } from '@/composables/useFormDirty'
 import { registerDraft } from '@/composables/draftGuard'
 import { confirmDiscardUnsaved } from '@/utils/unsavedConfirm'
 
@@ -618,7 +544,13 @@ const props = defineProps({
    * 因此正常情况下用不到 false；保留此开关作为防御：
    * 若将来需要在动画帧内先挂载外壳，可传 false 后再手动触发 load。
    */
-  autoLoad: { type: Boolean, default: true }
+  autoLoad: { type: Boolean, default: true },
+  /**
+   * 打开详情时默认停留的 Tab，可空。
+   * 目前只由「编排 → 多智能体」列表传 'orchestration'（约定 query.tab=orchestration）；
+   * 其它入口不传，仍落「基本信息」。非法值/不可见 Tab 会回落到基本信息。
+   */
+  initialTab: { type: String, default: '' }
 })
 
 const emit = defineEmits<{
@@ -872,24 +804,13 @@ const modelOpen = ref(false)
 const modelAddPurpose = ref('')
 const toolOpen = ref(false)
 const skillOpen = ref(false)
-const routeOpen = ref(false)
-const routeEditOpen = ref(false)
 /** 非 CHAT 用途的 L3 弹窗：状态、绑定行、用途码 */
 const purposePromptOpen = ref(false)
 const purposePromptBind = ref<ModelBind | null>(null)
 const purposePromptPurpose = ref('')
-/** 编辑弹窗「高级」默认收起，避免误改 route_key */
-const routeEditAdvanced = ref<string[]>([])
 const promptEditor = ref<{ reveal: () => { errors: string[]; warnings: string[] } } | null>(null)
 const limitView = ref<RuntimeLimitsView | null>(null)
-const routeDraft = reactive({ id: 0, routeKey: '', intent: '', sortOrder: 0, status: 1 })
 
-/**
- * 编辑子路由弹窗的脏检查。打开时把回填值定为基线，未改动时底栏两个按钮不可点。
- * status 由行内启停按钮管理，不在弹窗里改，因此不参与比较。
- */
-const routeEditDirtyTracker = useObjectDirty(() => routeDraft, ['id', 'status'])
-const routeEditDirty = routeEditDirtyTracker.isDirty
 /** 切换 Agent 后旧请求返回时不再改界面，避免标题串到下一个 Agent。 */
 let active = true
 
@@ -899,13 +820,13 @@ const canEditMemory = computed(() => user.hasPerm('memory:policy:edit'))
 const canEnable = computed(() => user.hasPerm('agent:enable'))
 const canTrial = computed(() => user.hasPerm('runtime:trial:run') || user.hasPerm('runtime:trial:list'))
 const canBind = computed(() => user.hasPerm('agent:bind'))
-/** 跟表单上的运行模式走：切到非 Router 立刻收起路由，不必等保存。 */
-const showRouteTab = computed(() => form.value?.runMode === 'ROUTER')
+/** 跟表单上的运行模式走：切到非 Router 立刻收起编排，不必等保存。 */
+const showOrchestrationTab = computed(() => form.value?.runMode === 'ROUTER')
 /** Router 父节点不配工具/技能/记忆；REACT 与计划执行都要配，切模式立刻藏/显 Tab，绑定数据不删。 */
 const showReactBindTabs = computed(() => !!form.value && form.value.runMode !== 'ROUTER')
-/** 模型/工具/技能即时落库；基本信息 / 运行配置走外层底栏（记忆配置自带底栏）。 */
-/** 基本信息 / 路由运行配置 / 运行限制 共用底栏保存 */
-const showStickyBar = computed(() => tab.value === 'basic' || tab.value === 'route' || tab.value === 'limits')
+/** 模型/工具/技能即时落库；基本信息 / 编排策略 / 运行配置走外层底栏（记忆配置自带底栏）。 */
+/** 基本信息 / 编排策略 / 运行限制 共用底栏保存 */
+const showStickyBar = computed(() => tab.value === 'basic' || tab.value === 'orchestration' || tab.value === 'limits')
 
 type MemoryPanelExpose = {
   deactivate: () => void
@@ -974,16 +895,19 @@ async function onPromptChange(value: PromptBinding) {
 }
 
 /**
- * 脏检查纳入的字段：全部是「填写 / 选择」类（文本、单选、下拉、数字、日期）。
+ * 脏检查纳入的字段：全部是「填写 / 选择 / 开关」类配置（文本、单选、下拉、数字、Switch）。
  * <p>
- * 开关（status、multiIntentEnabled、requirePlanConfirm）**不在**本结构里：
- * 它们一律即时调接口落库，拨开关不应点亮页底取消 / 保存。
+ * 例外：`status`、`requirePlanConfirm` **不在**本结构里——它们即时调接口落库，
+ * 拨开关不应点亮页底取消 / 保存。编排 Tab 的策略字段（含多意图并行）统一走本快照，
+ * 由底部保存按钮一次提交，避免「开关即时落库、其它策略要保存」的分裂语义。
  * 因此本结构同时也是「取消」要回滚的字段集合。
  */
 interface DraftSnap {
   name: string
   code: string
   runMode: string
+  /** 允许被编排调用；ROUTER 快照恒为 false，切回其它模式默认 true */
+  allowOrchestrated: boolean
   description: string
   systemPrompt: string
   /** L3 四列；取消时一并回滚，避免只回滚正文留下半套配置 */
@@ -998,15 +922,30 @@ interface DraftSnap {
   maxLlmCalls: number | null
   consecutiveFailAbort: number | null
   toolResultMaxChars: number | null
+  /** 编排策略：多意图并行（旧字段，行为生效） */
+  multiIntentEnabled: boolean
+  /** 编排策略：汇总 CONCAT / SUMMARIZE，复用 answerMode */
   answerMode: string
+  /** 编排策略：最大并行，复用 maxRouteChildren */
   maxRouteChildren: number
+  /** 编排模板；ROUTER_PARALLEL | FIXED_SEQUENCE | FIXED_PARALLEL | CRITIC_LOOP | ROUTER_THEN_SEQUENCE */
+  maTemplate: string
+  /** 本编排允许的子运行模式；空按仅 REACT（订单3 刀4） */
+  maChildRunModesAllowed: string[]
+  /** 评审环：评审专家 agentId；非评审环时也保留，切回可恢复 */
+  maCriticAgentId: number | null
+  /** 评审环：最大评审轮次，1～3 */
+  maCriticMaxRounds: number
+  /** 上下文策略；ISOLATED（默认）| PRIOR_SUMMARY_ONLY（仅串行模板）| SHARED_SCRATCH（共享草稿区） */
+  maContextPolicy: string
+  /** 单意图是否继承父历史；各模板都按启用候选数=1 时生效 */
+  maAllowParentHistoryWhenSingle: boolean
   maxPlanSteps: number
   maxStepRetries: number
 }
 
-/** 已落库快照 = 草稿字段 + 开关值；拼即时保存体时要带上开关，但开关不参与 isDirty。 */
+/** 已落库快照 = 草稿字段 + 即时开关值；拼即时保存体时要带上开关，但开关不参与 isDirty。 */
 interface SavedSnap extends DraftSnap {
-  multiIntentEnabled: boolean
   requirePlanConfirm: boolean
 }
 
@@ -1026,6 +965,8 @@ function draftFromForm(source: AgentDetail | null): DraftSnap | null {
     name: source.name,
     code: source.code,
     runMode: source.runMode,
+    // ROUTER 恒为关（编排根不可作子）；其它模式 undefined 视为开，与服务端默认一致
+    allowOrchestrated: source.runMode === 'ROUTER' ? false : source.allowOrchestrated !== false,
     description: source.description || '',
     systemPrompt: source.systemPrompt || '',
     prompt: normalizePromptBinding(source.prompt),
@@ -1039,9 +980,17 @@ function draftFromForm(source: AgentDetail | null): DraftSnap | null {
     maxLlmCalls: source.maxLlmCalls ?? null,
     consecutiveFailAbort: source.consecutiveFailAbort ?? null,
     toolResultMaxChars: source.toolResultMaxChars ?? null,
-    // 运行配置里的选项类字段（单选 / 数字）；两个开关见 SavedSnap 注释
+    // 编排策略：开关也进快照，统一由底栏保存；status / requirePlanConfirm 仍即时落库
+    multiIntentEnabled: runtime?.multiIntentEnabled !== false,
     answerMode: runtime?.answerMode === 'SUMMARIZE' ? 'SUMMARIZE' : 'CONCAT',
     maxRouteChildren: Math.min(5, Math.max(1, runtime?.maxRouteChildren ?? 3)),
+    maTemplate: runtime?.maTemplate || 'ROUTER_PARALLEL',
+    maChildRunModesAllowed: normalizeChildRunModes(runtime?.maChildRunModesAllowed),
+    // 评审环：库里的 id 与轮次都进快照，取消 / 脏检查才不会把评审人洗掉
+    maCriticAgentId: runtime?.maCriticAgentId ?? null,
+    maCriticMaxRounds: normalizeCriticMaxRounds(runtime?.maCriticMaxRounds),
+    maContextPolicy: runtime?.maContextPolicy || 'ISOLATED',
+    maAllowParentHistoryWhenSingle: runtime?.maAllowParentHistoryWhenSingle !== false,
     maxPlanSteps: Math.min(20, Math.max(1, runtime?.maxPlanSteps ?? 8)),
     maxStepRetries: Math.min(3, Math.max(0, runtime?.maxStepRetries ?? 0))
   }
@@ -1060,6 +1009,7 @@ function restoreDraft(snap: DraftSnap) {
   target.name = snap.name
   target.code = snap.code
   target.runMode = snap.runMode
+  target.allowOrchestrated = snap.allowOrchestrated
   target.description = snap.description
   target.systemPrompt = snap.systemPrompt
   target.prompt = normalizePromptBinding(snap.prompt)
@@ -1073,11 +1023,18 @@ function restoreDraft(snap: DraftSnap) {
   target.maxLlmCalls = snap.maxLlmCalls
   target.consecutiveFailAbort = snap.consecutiveFailAbort
   target.toolResultMaxChars = snap.toolResultMaxChars
-  // 开关字段沿用当前值（它们本来就已落库），只覆盖选项类配置
+  // 编排策略与选项类字段一起回滚；requirePlanConfirm 是即时开关，保持当前已落库值
   target.runtimeConfig = {
     ...target.runtimeConfig,
+    multiIntentEnabled: snap.multiIntentEnabled,
     answerMode: snap.answerMode,
     maxRouteChildren: snap.maxRouteChildren,
+    maTemplate: snap.maTemplate,
+    maChildRunModesAllowed: snap.maChildRunModesAllowed,
+    maCriticAgentId: snap.maCriticAgentId,
+    maCriticMaxRounds: snap.maCriticMaxRounds,
+    maContextPolicy: snap.maContextPolicy,
+    maAllowParentHistoryWhenSingle: snap.maAllowParentHistoryWhenSingle,
     maxPlanSteps: snap.maxPlanSteps,
     maxStepRetries: snap.maxStepRetries
   }
@@ -1103,7 +1060,12 @@ const headingCode = computed(() => saved.value?.code || form.value?.code || '')
 watch(
   [() => props.agentId, () => props.autoLoad],
   () => {
-    tab.value = 'basic'
+    /*
+     * 默认回基本信息。从「编排 → 多智能体」进来时带 initialTab=orchestration，
+     * 需停在该 Tab；这里只做初值，等详情加载后若该 Agent 不是 ROUTER，
+     * 下方 showOrchestrationTab 的 watch 会把不可见 Tab 收回基本信息。
+     */
+    tab.value = props.initialTab === 'orchestration' ? 'orchestration' : 'basic'
     /*
      * autoLoad 为 false 时只做准备不发请求。
      * 该 prop 是响应式的：调用方从 false 改成 true 时会自动触发 load，
@@ -1138,11 +1100,24 @@ onActivated(() => {
 })
 
 /** 当前 Tab 被模式藏起时回到基本信息，避免停在不可见 pane。 */
-watch([showRouteTab, showReactBindTabs], ([routeVisible, reactVisible]) => {
-  if ((!routeVisible && tab.value === 'route') || (!reactVisible && ['tool', 'skill', 'memory', 'kb'].includes(tab.value))) {
+watch([showOrchestrationTab, showReactBindTabs], ([orchestrationVisible, reactVisible]) => {
+  if ((!orchestrationVisible && tab.value === 'orchestration') || (!reactVisible && ['tool', 'skill', 'memory', 'kb'].includes(tab.value))) {
     tab.value = 'basic'
   }
 })
+
+/**
+ * 同一个 Agent 再次从「编排 → 多智能体」进入时，KeepAlive 复用详情实例，
+ * agentId 未变 → 上面的重置 watch 不触发；这里只补一次 Tab 切换，不重拉详情。
+ */
+watch(
+  () => props.initialTab,
+  (value) => {
+    if (value === 'orchestration' && showOrchestrationTab.value) {
+      tab.value = 'orchestration'
+    }
+  }
+)
 
 /**
  * 与表单 runMode 对齐的锚点：仅用户点 radio 时做模板替换，避免 load/切 Agent 误覆盖。
@@ -1167,6 +1142,8 @@ function onRunModeChange(value: string | number | boolean) {
     form.value.systemPrompt = replaced
   }
   if (next === 'ROUTER') {
+    // 编排根不可作子：切到 ROUTER 就地把开关关掉（保存时服务端同样强制写 0）
+    form.value.allowOrchestrated = false
     if (form.value.prompt?.templateId) {
       ElMessage.warning('Router 模式的提示词请在「模型配置」的 ROUTER 用途槽配置，已清空 Agent 定义上的 CHAT 模板')
     }
@@ -1178,7 +1155,9 @@ function onRunModeChange(value: string | number | boolean) {
       promptExtra: form.value.prompt?.promptExtra || ''
     }
   } else if (prev === 'ROUTER') {
-    // 切回非 Router：恢复可配置能力；模板需重新选择（原来那份属于 ROUTER 用途槽）
+    // 切回非 Router：恢复可配置能力；按推荐口径让「允许被编排调用」默认恢复为开
+    form.value.allowOrchestrated = true
+    // 模板需重新选择（原来那份属于 ROUTER 用途槽）
     form.value.prompt = {
       supported: true,
       templateId: null,
@@ -1187,6 +1166,21 @@ function onRunModeChange(value: string | number | boolean) {
       promptExtra: form.value.prompt?.promptExtra || ''
     }
   }
+}
+
+/**
+ * 开关「允许被编排调用」。
+ *
+ * <p>只改表单草稿，随页面底部保存一次落库（与其它填写类字段同口径）。
+ * ROUTER 下 UI 已禁用，这里再兜一道：编排根永远不能写成允许，避免后续改动绕过禁用态。
+ *
+ * @param value el-switch 回传值
+ */
+function onAllowOrchestratedChange(value: string | number | boolean) {
+  if (!form.value) {
+    return
+  }
+  form.value.allowOrchestrated = form.value.runMode === 'ROUTER' ? false : value === true
 }
 
 onBeforeUnmount(() => {
@@ -1312,8 +1306,8 @@ async function load(preserveDraft = true) {
 }
 
 /**
- * 提交草稿。拼包时开关取「已落库」值，避免把用户刚拨、但还没落库的开关态写进去；
- * 开关走各自的即时接口，保存按钮只负责填写 / 选择类字段。
+ * 提交草稿。编排策略（含多意图并行）随本次保存落库；
+ * `requirePlanConfirm` 是即时开关，取「已落库」值，避免把未落库的拨动写进去。
  *
  * @return 提交用的表单体；表单未加载时为 null
  */
@@ -1326,6 +1320,8 @@ function payload(): AgentSave | null {
     name: form.value.name.trim(),
     code: form.value.code.trim(),
     runMode: form.value.runMode,
+    // ROUTER 一律上报 false（服务端也会强制）；其它模式按当前开关，undefined 视为开
+    allowOrchestrated: form.value.runMode === 'ROUTER' ? false : form.value.allowOrchestrated !== false,
     description: form.value.description?.trim() || '',
     systemPrompt: form.value.systemPrompt || '',
     // L3 四列整体回传：后端据 templateId 是否为空决定「挂模板 / 清空」
@@ -1347,8 +1343,7 @@ function payload(): AgentSave | null {
     toolResultMaxChars: form.value.toolResultMaxChars ?? null,
     runtimeConfig: {
       ...runtime,
-      // 两个开关以已落库值为准：拨动时已即时提交过，这里不再随保存重写
-      multiIntentEnabled: saved.value?.multiIntentEnabled ?? runtime.multiIntentEnabled,
+      // 多意图并行已并入编排草稿，跟随本次保存；requirePlanConfirm 是即时开关，取已落库值
       requirePlanConfirm: saved.value?.requirePlanConfirm ?? runtime.requirePlanConfirm
     }
   }
@@ -1371,20 +1366,37 @@ function normalizePromptBinding(raw?: PromptBinding | null): PromptBinding {
   }
 }
 
-/** 运行配置缺省：Router 那组（多意图开 / 拼接 / N=3）与计划那组（自动执行 / 8 步 / 0 重试）都给齐，切模式不丢值。 */
-function normalizeRuntimeConfig(raw?: AgentRuntimeConfig | null): AgentRuntimeConfig {  return {
+/**
+ * 运行配置缺省：Router 那组（多意图开 / 拼接 / N=3 / ROUTER_PARALLEL / ISOLATED / 单意图继承）
+ * 与计划那组（自动执行 / 8 步 / 0 重试）都给齐，切模式不丢值。
+ *
+ * <p>模板与上下文策略按三值白名单回显：固定串行默认前置摘要，其它模板一律隔离。
+ * 只有真正非法的历史脏值才回落 ROUTER_PARALLEL，禁止把用户选的固定模板洗回路由并行。
+ */
+function normalizeRuntimeConfig(raw?: AgentRuntimeConfig | null): AgentRuntimeConfig {
+  const template = normalizeTemplate(raw?.maTemplate)
+  return {
     multiIntentEnabled: raw?.multiIntentEnabled !== false,
     answerMode: raw?.answerMode === 'SUMMARIZE' ? 'SUMMARIZE' : 'CONCAT',
     maxRouteChildren: Math.min(5, Math.max(1, raw?.maxRouteChildren ?? 3)),
+    maTemplate: template,
+    maContextPolicy: normalizeContextPolicy(raw?.maContextPolicy, template),
+    maAllowParentHistoryWhenSingle: raw?.maAllowParentHistoryWhenSingle !== false,
     requirePlanConfirm: raw?.requirePlanConfirm === true,
     maxPlanSteps: Math.min(20, Math.max(1, raw?.maxPlanSteps ?? 8)),
-    maxStepRetries: Math.min(3, Math.max(0, raw?.maxStepRetries ?? 0))
+    maxStepRetries: Math.min(3, Math.max(0, raw?.maxStepRetries ?? 0)),
+    // 子运行模式：白名单清洗并恒补 ReAct；空/非法按仅 ReAct，与服务端保存口径一致
+    maChildRunModesAllowed: normalizeChildRunModes(raw?.maChildRunModesAllowed),
+    // 评审环：轮次夹到 1～3；评审专家只在模板=CRITIC_LOOP 时必填，其它模板保留值以便切回
+    maCriticMaxRounds: normalizeCriticMaxRounds(raw?.maCriticMaxRounds),
+    maCriticAgentId: raw?.maCriticAgentId ?? null
   }
 }
 
 /**
- * 记下已落库的状态：填写/选择类字段进脏检查基线，开关值单独保存供即时保存拼包。
- * 载入详情、保存成功、开关即时落库成功后都要调一次。
+ * 记下已落库的状态：编排策略 / 填写 / 选择类字段进脏检查基线，
+ * 仅 `requirePlanConfirm` 这类即时开关单独保存供拼包。
+ * 载入详情、保存成功、即时开关落库成功后都要调一次。
  *
  * 注意调用时机：调用时 form 里必须是「服务端刚返回的已落库值」。
  * load() 会在调用本函数之后才把用户草稿盖回表单，因此草稿不会被当成基线。
@@ -1398,7 +1410,6 @@ function remember() {
   }
   saved.value = {
     ...draft,
-    multiIntentEnabled: runtime?.multiIntentEnabled !== false,
     requirePlanConfirm: runtime?.requirePlanConfirm === true
   }
   // 载入 / 保存成功后重置脏基线：异步回填不能被当成用户改动
@@ -1493,17 +1504,17 @@ async function save() {
 }
 
 /**
- * 运行配置里的开关（多意图并行 / 规划后需确认）走即时落库。
+ * 运行配置里的即时开关（规划后需确认）走即时落库。
  * <p>
- * 这两个开关与选项类字段共用一份 runtime_config_json，没有独立接口，
+ * 该开关与编排策略 / 选项类字段共用一份 runtime_config_json，没有独立接口，
  * 因此走整份保存：拼包时**其余字段一律取已落库快照**，
- * 这样既不会把用户尚未提交的文本草稿写进去，也不会把开关之外的东西改掉；
- * 成功后只刷新快照里的开关值，底栏脏态保持不变。
+ * 这样既不会把用户尚未提交的文本 / 编排草稿写进去，也不会把开关之外的东西改掉；
+ * 成功后只刷新开关与已落库快照，底栏脏态保持不变。
  *
- * @param key   multiIntentEnabled | requirePlanConfirm
+ * @param key   requirePlanConfirm
  * @param value 目标布尔值
  */
-async function saveRuntimeSwitch(key: 'multiIntentEnabled' | 'requirePlanConfirm', value: boolean) {
+async function saveRuntimeSwitch(key: 'requirePlanConfirm', value: boolean) {
   const snapshot = saved.value
   if (!form.value || !snapshot || !canEdit.value || !active) {
     return
@@ -1512,10 +1523,16 @@ async function saveRuntimeSwitch(key: 'multiIntentEnabled' | 'requirePlanConfirm
     multiIntentEnabled: snapshot.multiIntentEnabled,
     answerMode: snapshot.answerMode,
     maxRouteChildren: snapshot.maxRouteChildren,
-    requirePlanConfirm: snapshot.requirePlanConfirm,
+    maTemplate: snapshot.maTemplate,
+    maContextPolicy: snapshot.maContextPolicy,
+    maAllowParentHistoryWhenSingle: snapshot.maAllowParentHistoryWhenSingle,
+    requirePlanConfirm: value,
     maxPlanSteps: snapshot.maxPlanSteps,
     maxStepRetries: snapshot.maxStepRetries,
-    [key]: value
+    // 整份运行配置回传：漏传这几项会被服务端按默认值洗掉（P&E 允许 / 评审环配置）
+    maChildRunModesAllowed: snapshot.maChildRunModesAllowed,
+    maCriticAgentId: snapshot.maCriticAgentId,
+    maCriticMaxRounds: snapshot.maCriticMaxRounds
   }
   const previous = form.value.runtimeConfig
   runtimeSaving.value = key
@@ -1530,25 +1547,22 @@ async function saveRuntimeSwitch(key: 'multiIntentEnabled' | 'requirePlanConfirm
       return
     }
     const landed = normalizeRuntimeConfig(data.data?.runtimeConfig ?? runtime)
-    // 只把开关写回表单；选项类字段保持用户当前编辑中的值（那是草稿，不归这次请求管）
+    // 只把即时开关写回表单；编排与计划数字保持用户当前编辑中的草稿，不归这次请求管
     form.value.runtimeConfig = {
       ...form.value.runtimeConfig,
-      multiIntentEnabled: landed.multiIntentEnabled,
       requirePlanConfirm: landed.requirePlanConfirm
     }
-    // 快照同步为落库值；isDirty 只比填写/选择类字段，因此开关变化不会点亮底栏
+    // 快照同步为落库值；isDirty 只比草稿字段，因此即时开关变化不会点亮底栏
     saved.value = {
       ...saved.value!,
-      multiIntentEnabled: landed.multiIntentEnabled === true,
       requirePlanConfirm: landed.requirePlanConfirm === true
     }
     ElMessage.success('开关已保存')
   } catch {
-    // 失败回滚开关 UI，不触碰其它草稿字段
+    // 失败只回滚即时开关，不触碰其它草稿字段
     if (form.value) {
       form.value.runtimeConfig = {
         ...form.value.runtimeConfig,
-        multiIntentEnabled: snapshot.multiIntentEnabled,
         requirePlanConfirm: snapshot.requirePlanConfirm
       }
     }
@@ -1569,6 +1583,8 @@ function payloadFromSaved(snapshot: SavedSnap): AgentSave {
     name: snapshot.name,
     code: snapshot.code,
     runMode: snapshot.runMode,
+    // 必须带上：这两条即时接口也走整份保存，漏传会被服务端按默认值重新打开开关
+    allowOrchestrated: snapshot.runMode === 'ROUTER' ? false : snapshot.allowOrchestrated,
     description: snapshot.description,
     systemPrompt: snapshot.systemPrompt,
     prompt: {
@@ -1591,22 +1607,29 @@ function payloadFromSaved(snapshot: SavedSnap): AgentSave {
       multiIntentEnabled: snapshot.multiIntentEnabled,
       answerMode: snapshot.answerMode,
       maxRouteChildren: snapshot.maxRouteChildren,
+      maTemplate: snapshot.maTemplate,
+      maContextPolicy: snapshot.maContextPolicy,
+      maAllowParentHistoryWhenSingle: snapshot.maAllowParentHistoryWhenSingle,
       requirePlanConfirm: snapshot.requirePlanConfirm,
       maxPlanSteps: snapshot.maxPlanSteps,
-      maxStepRetries: snapshot.maxStepRetries
+      maxStepRetries: snapshot.maxStepRetries,
+      // 深拷贝数组：保存体不能引用快照里的对象，避免后续草稿编辑连带改基线
+      maChildRunModesAllowed: [...snapshot.maChildRunModesAllowed],
+      maCriticAgentId: snapshot.maCriticAgentId,
+      maCriticMaxRounds: snapshot.maCriticMaxRounds
     }
   }
 }
 
 /**
  * 当前 Tab 是否有未提交的草稿。
- * 基本信息 / 路由 / 运行配置看页面级脏态；记忆配置看面板自己的脏态（它的底栏在面板内）。
+ * 基本信息 / 编排 / 运行配置看页面级脏态；记忆配置看面板自己的脏态（它的底栏在面板内）。
  *
  * @param name Tab name
  * @return true 表示该 Tab 有未提交改动
  */
 function tabHasDraft(name: string | number): boolean {
-  if (name === 'basic' || name === 'route' || name === 'limits') {
+  if (name === 'basic' || name === 'orchestration' || name === 'limits') {
     return isDirty.value
   }
   if (name === 'memory') {
@@ -1901,61 +1924,24 @@ async function removeSkill(row: SkillBind) {
   emit('changed', changedPatch())
 }
 
-async function addRoute(
-  body: { childAgentId: number; routeKey?: string; intent: string; sortOrder?: number },
-  done: () => void
-) {
-  try {
-    await createRoute(props.agentId, body)
-    routeOpen.value = false
-    await load()
-    emit('changed', changedPatch())
-  } finally {
-    done()
-  }
-}
-
-function openRouteEdit(row: AgentRouteRow) {
-  routeDraft.id = row.id
-  routeDraft.routeKey = row.routeKey || ''
-  routeDraft.intent = row.intent || ''
-  routeDraft.sortOrder = row.sortOrder
-  routeDraft.status = row.status
-  routeEditAdvanced.value = []
-  routeEditOpen.value = true
-  // 打开即把回填值定为基线：未改字段时底栏取消 / 保存不可点
-  routeEditDirtyTracker.markClean()
-}
-
-async function saveRouteEdit() {
-  const intent = routeDraft.intent.trim()
-  if (!intent) {
-    ElMessage.warning('请填写意图')
+/**
+ * 编排 Tab 的策略变更：写回 form.runtimeConfig，跟随页面底栏保存。
+ * 这里只做归一化，不直接落库——保存仍由 save() 统一提交。
+ *
+ * @param config 子组件回传的完整运行配置
+ */
+function onOrchestrationConfig(config: AgentRuntimeConfig) {
+  if (!form.value) {
     return
   }
-  await updateRoute(props.agentId, routeDraft.id, {
-    routeKey: routeDraft.routeKey.trim() || undefined,
-    intent,
-    sortOrder: routeDraft.sortOrder,
-    status: routeDraft.status
-  })
-  routeEditOpen.value = false
-  await load()
+  form.value.runtimeConfig = normalizeRuntimeConfig(config)
 }
 
-async function toggleRoute(row: AgentRouteRow) {
-  // 启停保留原 intent / key；空 key 由后端保存时补全。
-  await updateRoute(props.agentId, row.id, {
-    routeKey: row.routeKey || undefined,
-    intent: row.intent || undefined,
-    sortOrder: row.sortOrder,
-    status: row.status === 1 ? 0 : 1
-  })
-  await load()
-}
-
-async function removeRoute(row: AgentRouteRow) {
-  await deleteRoute(props.agentId, row.id)
+/**
+ * 候选增删改/启停成功：重新拉详情与候选，刷新 routeCount 与关系图。
+ * load() 默认保留未提交的编排草稿，不会把用户刚改的策略冲掉。
+ */
+async function onRoutesChanged() {
   await load()
   emit('changed', changedPatch())
 }
@@ -2083,22 +2069,6 @@ async function removeRoute(row: AgentRouteRow) {
   margin-bottom: 16px;
 }
 
-.router-runtime {
-  margin-bottom: 20px;
-  padding-bottom: 8px;
-  border-bottom: 1px solid var(--ah-border, #e8e9ef);
-}
-
-.router-runtime-title {
-  margin: 0 0 12px;
-  font-size: 14px;
-  font-weight: 650;
-}
-
-.router-runtime-form :deep(.el-form-item) {
-  margin-bottom: 12px;
-}
-
 .field-hint {
   display: inline-block;
   max-width: 36em;
@@ -2167,6 +2137,19 @@ async function removeRoute(row: AgentRouteRow) {
   display: grid;
   grid-template-columns: 1fr 1fr;
   column-gap: 16px;
+}
+
+/* 「允许被编排调用」：开关 + 一句帮助文案，整行占位避免挤坏两列栅格 */
+.allow-orch {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.allow-orch__hint {
+  color: var(--ah-text-secondary);
+  font-size: 12px;
+  line-height: 1.5;
 }
 
 .limits-hint {
@@ -2296,36 +2279,5 @@ async function removeRoute(row: AgentRouteRow) {
   display: flex;
   justify-content: flex-end;
   margin-top: 12px;
-}
-
-.route-key-sub {
-  margin-top: 2px;
-  font-size: 12px;
-  color: var(--ah-text-secondary);
-  line-height: 1.3;
-}
-
-.route-advanced {
-  margin-top: 4px;
-  border: none;
-}
-
-.route-advanced :deep(.el-collapse-item__header) {
-  height: 36px;
-  line-height: 36px;
-  font-size: 13px;
-  color: #6b7280;
-  border: none;
-}
-
-.route-advanced :deep(.el-collapse-item__wrap) {
-  border: none;
-}
-
-.route-hint {
-  margin-top: 4px;
-  font-size: 12px;
-  color: #9ca3af;
-  line-height: 1.4;
 }
 </style>

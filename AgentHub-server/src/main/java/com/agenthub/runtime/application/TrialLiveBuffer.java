@@ -1,6 +1,7 @@
 package com.agenthub.runtime.application;
 
 import com.agenthub.runtime.api.dto.EventResp;
+import com.agenthub.runtime.domain.model.ChildPlanPendingView;
 import com.agenthub.runtime.domain.model.EventType;
 import com.agenthub.runtime.domain.model.GeneratedFile;
 import com.agenthub.runtime.domain.model.PlanView;
@@ -198,6 +199,12 @@ public class TrialLiveBuffer {
             public void file(GeneratedFile file) {
                 recorder.file(file);
                 delegate.file(file);
+            }
+
+            @Override
+            public void childPlanPending(ChildPlanPendingView pending) {
+                recorder.childPlanPending(pending);
+                delegate.childPlanPending(pending);
             }
         };
     }

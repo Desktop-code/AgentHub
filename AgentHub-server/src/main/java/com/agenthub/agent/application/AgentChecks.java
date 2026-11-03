@@ -74,6 +74,23 @@ public final class AgentChecks {
     }
 
     /**
+     * 收口「允许被编排调用」开关。
+     * <p>ROUTER 必须为关：编排根本身就是父节点，被挂为子会形成 Router 套 Router，
+     * 因此即便请求体传 true 也强制写 0，与 {@code allow_orchestrated} 的 SQL 回填口径一致。
+     * <p>未传时按模式默认：ROUTER → 0，其它 → 1（含 PLAN_AND_EXECUTE）。
+     *
+     * @param raw     请求体开关，可空
+     * @param runMode 已规范化的运行模式
+     * @return 1 允许 / 0 禁止
+     */
+    public static int allowOrchestrated(Boolean raw, String runMode) {
+        if (AgentRunMode.ROUTER.name().equals(runMode)) {
+            return 0;
+        }
+        return raw == null || raw ? 1 : 0;
+    }
+
+    /**
      * 空白提示词存 null。只去掉首尾空白，不改中间换行。
      * 超长文案单独写「超过长度」，方便和安全检查的拒绝原因对齐。
      *

@@ -46,7 +46,7 @@
               :key="item.id"
               class="session-item"
               :class="{ 'is-active': item.id === session?.id, 'is-running': isRowRunning(item) }"
-              :title="sessionTitle(item)"
+              :title="sessionTooltip(item)"
               @click="openHistory(item.id)"
             >
               <div class="session-main">
@@ -79,6 +79,49 @@
 
       <section class="chat-col">
         <el-alert v-if="pageError" :title="pageError" type="error" show-icon :closable="false" class="block-alert" />
+        <!--
+          Router 试跑：编排泳道（只读）。非 ROUTER 不出现；临时草稿 / 无 trace 由组件给中文空态。
+          与下方思考分块并存：泳道看拓扑，思考看内容，不互相改写。
+        -->
+        <OrchestrationLane
+          v-if="shown.runMode === 'ROUTER' && canViewLane"
+          :session-id="session?.id ?? null"
+          :active="sending || resuming"
+          :paused-route-key="childPending?.routeKey || ''"
+          :paused-agent-id="childPending?.childAgentId ?? null"
+        />
+        <!--
+          子专家计划待批准：根试跑暂停时由 SSE ma_child_plan_pending / 刷新恢复接口驱动。
+          同时仅一个待批（后端单批准槽），因此这里只渲染一条，不排队多张卡片。
+        -->
+        <section v-if="childPending && canRun" class="child-approval">
+          <div class="child-approval-head">
+            <div class="child-approval-main">
+              <div class="section-label">子专家计划待批准</div>
+              <p class="child-approval-title">
+                子专家「{{ childPending.childAgentName || '子 Agent' }}」计划待批准
+              </p>
+              <p class="child-approval-sub">
+                根试跑已暂停（等待子计划批准）；同时仅允许一个待批子。批准后该子继续执行，拒绝则该子记为失败、其它子继续。
+              </p>
+            </div>
+            <div class="child-approval-actions">
+              <el-button type="primary" size="small" :loading="childDeciding" @click="decideChildPlan(true)">
+                批准
+              </el-button>
+              <el-button size="small" :disabled="childDeciding" @click="decideChildPlan(false)">拒绝</el-button>
+            </div>
+          </div>
+          <ol v-if="childPending.steps?.length" class="child-plan-steps">
+            <li v-for="step in childPending.steps" :key="step.seq">
+              <span class="child-plan-seq">{{ step.seq }}</span>
+              <span class="child-plan-text">
+                <strong>{{ step.title }}</strong>
+                <span v-if="step.detail" class="child-plan-detail">{{ step.detail }}</span>
+              </span>
+            </li>
+          </ol>
+        </section>
         <ChatPanel
           :turns="turns"
           :sending="sending || resuming"
@@ -115,6 +158,7 @@ import {
   clearTrialSession,
   createTrialSession,
   deleteTrialSession,
+  getPendingChildPlan,
   getPendingTrialPlan,
   getTrialCapability,
   getTrialSession,
@@ -124,9 +168,11 @@ import {
   pageTrialSessions,
   rejectTrialPlan,
   renameTrialSession,
-  streamTrialMessage
+  streamTrialMessage,
+  type TrialChildPlanPendingChunk
 } from '@/api/runtime'
 import ChatPanel from '@/components/runtime/ChatPanel.vue'
+import OrchestrationLane from '@/components/runtime/OrchestrationLane.vue'
 import {
   advancePlanState,
   appendFile,
@@ -184,6 +230,8 @@ const props = withDefaults(
 const user = useUserStore()
 const canRun = computed(() => user.hasPerm('runtime:trial:run'))
 const canList = computed(() => user.hasPerm('runtime:trial:list'))
+/** 编排泳道的数据来自调用追踪；两个读权限缺一就不渲染，避免在试跑里塞一块灰块 */
+const canViewLane = computed(() => user.hasPerm('obs:trace:list') && user.hasPerm('obs:span:list'))
 
 const agents = ref<TrialAgent[]>([])
 const pickedId = ref<number>()
@@ -222,6 +270,14 @@ const resuming = computed(() => {
 
 /** 计划批准/取消请求进行中。避免连点导致同一份计划被消费两次 */
 const approving = ref(false)
+
+/**
+ * 编排根下当前待批的子专家计划。同一根同时只允许一个，因此只存一条；
+ * 来源有两条：SSE {@code ma_child_plan_pending} 与刷新后的 child-pending 接口。
+ */
+const childPending = ref<TrialChildPlanPendingChunk | null>(null)
+/** 子计划批准/拒绝请求进行中；只影响这两个按钮，不复用单 Agent 的 approving */
+const childDeciding = ref(false)
 
 /**
  * 当前会话是否处于「连接已断、只能等落库」的状态。
@@ -638,6 +694,8 @@ function beginLocalDraft() {
   stopResume()
   session.value = sessionStub(TEMP_SESSION_ID, Date.now())
   turns.value = []
+  // 草稿是全新一轮：上一个会话遗留的子计划待批卡片不能带过来
+  childPending.value = null
   draftReady.value = true
 }
 
@@ -719,17 +777,17 @@ async function purgeUnaskedSessions(items: TrialSession[]) {
 }
 
 /**
- * 主标题：优先 session_title（自动生成 ≤10 汉字，或用户手改）；
- * 尚未生成时退回 lastMsgPreview 顶替，两者都空则显示「新对话」。
+ * 主标题：只认 session_title（自动生成 ≤10 汉字，或用户手改）。
+ *
+ * <p>为什么不用 lastMsgPreview 兜底：那是用户第一句话的截断，直接当标题会让左栏变成
+ * 一长串问句，和真标题混在一起分不清。没有标题就固定显示「新对话」，
+ * 等后端异步生成后再自然替换；预览一律交给副标题展示。
+ *
  * @param item 会话
  */
 function sessionTitle(item: TrialSession) {
   const title = (item.sessionTitle || '').trim()
-  if (title) {
-    return title
-  }
-  const preview = (item.lastMsgPreview || '').trim()
-  return preview || '新对话'
+  return title || '新对话'
 }
 
 /**
@@ -739,10 +797,21 @@ function sessionTitle(item: TrialSession) {
 function sessionSubtitle(item: TrialSession) {
   const preview = (item.lastMsgPreview || '').trim()
   const time = formatRelativeTime(item.updateTime || item.startTime)
-  if (!preview || preview === sessionTitle(item)) {
+  if (!preview) {
     return time
   }
   return `${preview} · ${time}`
+}
+
+/**
+ * 行悬停提示：标题 + 完整预览。
+ * 主标题已经不再兜底预览，行内两行又被省略号截断，悬停时才有地方看全。
+ * @param item 会话
+ */
+function sessionTooltip(item: TrialSession) {
+  const preview = (item.lastMsgPreview || '').trim()
+  const title = sessionTitle(item)
+  return preview ? `${title}\n${preview}` : title
 }
 
 /**
@@ -825,6 +894,8 @@ async function clearCurrent() {
     session.value = data.data
     turns.value = []
     pageError.value = ''
+    // 清空后端同时拒绝了待批子计划，本地卡片一并收起
+    childPending.value = null
     await loadHistory(false)
     ElMessage.success('已清空当前会话')
   } catch {
@@ -840,7 +911,8 @@ async function rename(item: TrialSession) {
   let title = ''
   try {
     const answered = await ElMessageBox.prompt('请输入会话名称', '重命名', {
-      inputValue: sessionTitle(item),
+      // 用库里真实的标题预填，而不是渲染兜底的「新对话」——否则用户得一键清空才能改名
+      inputValue: (item.sessionTitle || '').trim(),
       inputPattern: /\S+/,
       inputErrorMessage: '名称不能为空'
     })
@@ -940,6 +1012,9 @@ async function openHistory(id: number, force = false) {
   // 先登记，后面 syncSessionFromEvents 才能把补齐后的标题写回这一行
   rememberKnown(session.value)
   rememberTrialSession(activeId.value as number, id)
+  // 刷新后可能正停在「子计划待批准」：SSE 已断，按钮只能靠专用接口恢复；不阻塞主时间线加载
+  childPending.value = null
+  void refreshChildPending(id)
 
   // 1) 本页还在消费这一轮：直接接上，内容已在增长，禁止再用 events 拍平。
   //    已收尾的登记项不再回放（内容停在收尾那一刻），交给下面的 events 走权威路径。
@@ -1029,6 +1104,70 @@ async function fetchPendingPlanSafe(id: number) {
     return data.data || null
   } catch {
     return null
+  }
+}
+
+/**
+ * 读编排根下当前待批的子计划；失败返回 null，不影响已渲染的时间线。
+ *
+ * @param id 会话主键
+ */
+async function fetchChildPendingSafe(id: number) {
+  try {
+    const { data } = await getPendingChildPlan(id)
+    return data.data || null
+  } catch {
+    return null
+  }
+}
+
+/**
+ * 刷新「子计划待批准」卡片。刷新页面后 SSE 已断，按钮只能靠这条接口恢复。
+ *
+ * @param id 会话主键
+ */
+async function refreshChildPending(id: number) {
+  const pending = await fetchChildPendingSafe(id)
+  // 响应回来时已切了会话就丢弃，避免把上一个会话的待批卡片画到新会话上
+  if (session.value?.id !== id) {
+    return
+  }
+  childPending.value = pending
+}
+
+/**
+ * 批准 / 拒绝编排根下的子专家计划。
+ *
+ * <p>批准接口只负责唤醒等待中的子线程，不代替根跑完整轮，因此这里不需要轮询进度：
+ * 根 SSE 仍在连接上，子继续执行后的 PLAN / STEP / 终答都会照常推送。
+ *
+ * @param approved true＝批准，false＝拒绝
+ */
+async function decideChildPlan(approved: boolean) {
+  const target = childPending.value
+  const id = session.value?.id
+  if (!target || id == null || childDeciding.value) {
+    return
+  }
+  childDeciding.value = true
+  pageError.value = ''
+  try {
+    if (approved) {
+      await approveTrialPlan(id, target.routeKey)
+    } else {
+      await rejectTrialPlan(id, target.routeKey)
+    }
+    // 先本地收起卡片：接口成功后同一 route_key 已不可再批
+    childPending.value = null
+    if (!approved) {
+      ElMessage.info('已拒绝该子计划，该子会记为失败，其它子继续')
+    }
+  } catch (error) {
+    pageError.value = error instanceof Error ? error.message : approved ? '批准子计划失败' : '拒绝子计划失败'
+    // 失败时按服务端真实状态回填（可能已超时/已被处理），别让前端硬留一张过期卡片
+    await refreshChildPending(id)
+  } finally {
+    childDeciding.value = false
   }
 }
 
@@ -1411,6 +1550,8 @@ async function send(content: string, images?: string[]) {
   }
   sending.value = true
   pageError.value = ''
+  // 新一轮开始：上一轮遗留的子计划待批卡片必须清掉，避免误导
+  childPending.value = null
   // 手动发问接管展示：只停轮询，保留本会话的转圈（这一轮改由 SSE 驱动）。
   // 续订期间发送按钮是禁用的（服务端也会拒「该会话正在执行」），正常不会走到这里
   stopPolling()
@@ -1512,6 +1653,10 @@ async function send(content: string, images?: string[]) {
         })
         touchSnapshot()
       },
+      onChildPlanPending: (pending) => {
+        // 子专家计划待批准：后端单批准槽保证同时只有一条，这里直接覆盖本地
+        childPending.value = pending
+      },
       onFileGenerated: (file) => {
         // 产物是结果而不是过程：不改 phase，避免状态条从「回答生成中」退回「工具执行中」
         appendFile(live, {
@@ -1538,11 +1683,15 @@ async function send(content: string, images?: string[]) {
           live.status = 'done'
           live.phase = 'done'
         }
+        // 根本轮已出终答（或整轮失败）：子计划不可能还在待批，本地卡片必须收起
+        childPending.value = null
       },
       onError: (message) => {
         live.status = 'error'
         live.phase = 'error'
         pageError.value = message
+        // 连接断了就再也收不到批准结果，留着按钮只会点出「已失效」
+        childPending.value = null
       }
     }, controller.signal, images)
     // 落库成功后再用事件覆盖，避免把未入库的失败卡片刷掉。
@@ -2113,6 +2262,85 @@ function stopClock() {
 
 .block-alert {
   margin-bottom: 8px;
+}
+
+/* 子专家计划待批准：一条窄卡片，压在泳道与对话之间，不占聊天气泡位 */
+.child-approval {
+  margin-bottom: 10px;
+  padding: 12px 14px;
+  background: #fffdf6;
+  border: 1px solid #f2d9a0;
+  border-radius: 10px;
+}
+
+.child-approval-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.child-approval-main {
+  min-width: 0;
+}
+
+.child-approval-title {
+  margin: 4px 0 0;
+  font-size: 14px;
+  font-weight: 650;
+  color: var(--ah-text, #1f2430);
+}
+
+.child-approval-sub {
+  margin: 4px 0 0;
+  color: var(--ah-text-secondary, #8b90a0);
+  font-size: 12px;
+  line-height: 1.55;
+}
+
+.child-approval-actions {
+  display: flex;
+  flex: none;
+  gap: 8px;
+}
+
+.child-plan-steps {
+  margin: 10px 0 0;
+  padding-left: 0;
+  list-style: none;
+}
+
+.child-plan-steps li {
+  display: flex;
+  gap: 8px;
+  padding: 5px 0;
+  border-top: 1px dashed #f0e3c6;
+  font-size: 13px;
+}
+
+.child-plan-seq {
+  flex: none;
+  width: 20px;
+  height: 20px;
+  border-radius: 50%;
+  background: #fff3d6;
+  color: #8a6116;
+  font-size: 12px;
+  line-height: 20px;
+  text-align: center;
+}
+
+.child-plan-text {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+
+.child-plan-detail {
+  color: var(--ah-text-secondary, #8b90a0);
+  font-size: 12px;
+  line-height: 1.5;
 }
 </style>
 

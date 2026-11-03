@@ -24,6 +24,12 @@ public class AgentCreateReq {
     @Size(max = 32, message = "最长 32")
     private String runMode;
 
+    /**
+     * 是否允许被编排挂为子专家；可空。
+     * 未传时按运行模式默认：ROUTER → false，其它 → true。ROUTER 无论传什么都会强制写 false。
+     */
+    private Boolean allowOrchestrated;
+
     /** 用户业务段。按 Java char 计数，超过绝对上限直接 400 */
     @Size(max = 12000, message = "超过长度，最长 12000")
     private String systemPrompt;

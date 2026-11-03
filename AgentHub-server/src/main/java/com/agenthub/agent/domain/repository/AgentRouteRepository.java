@@ -2,7 +2,9 @@ package com.agenthub.agent.domain.repository;
 
 import com.agenthub.agent.domain.model.AgentRoute;
 
+import java.util.Collection;
 import java.util.List;
+import java.util.Map;
 import java.util.Optional;
 
 /**
@@ -51,6 +53,15 @@ public interface AgentRouteRepository {
      * @return 未删除子路由数
      */
     int countByParentId(Long parentAgentId);
+
+    /**
+     * 多智能体列表的「候选数」列：只数启用中的子路由，停用子不计入参与者。
+     * <p>按批量 id 一次聚合，避免列表逐行 count 造成 N+1。
+     *
+     * @param parentAgentIds 父 Agent 主键集合，可空
+     * @return parentAgentId → 启用中的未删除子路由数；没有路由的 id 不出现在结果里
+     */
+    Map<Long, Integer> countEnabledByParentIds(Collection<Long> parentAgentIds);
 
     /**
      * @param route      新路由

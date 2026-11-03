@@ -6,8 +6,10 @@ import com.agenthub.agent.api.dto.RouteUpdateReq;
 import com.agenthub.agent.domain.model.AgentDef;
 import com.agenthub.agent.domain.model.AgentRoute;
 import com.agenthub.agent.domain.model.AgentRunMode;
+import com.agenthub.agent.domain.model.AgentRuntimeConfig;
 import com.agenthub.agent.domain.model.AgentStatus;
 import com.agenthub.agent.domain.repository.AgentRouteRepository;
+import com.agenthub.agent.domain.service.AgentCriticPolicy;
 import com.agenthub.agent.domain.service.AgentRouteDefaults;
 import com.agenthub.agent.domain.service.AgentRoutePolicy;
 import com.agenthub.audit.domain.OperLogWriter;
@@ -92,6 +94,8 @@ public class AgentRouteAppService {
         route.setSortOrder(sortOrder);
         route.setStatus(status);
         Long id = routes.insert(route, operatorContext.requireUserId());
+        // 评审环角色闸：新增候选可能变成「第 2 个执行者」，保存即拦，避免库内出现跑不起来的配置
+        assertCriticRoles(parent);
         operLogWriter.write("agent", "bind", "agent_route", String.valueOf(id), "添加子 Agent " + child.getName());
         return toResp(routes.findById(id).orElseThrow());
     }
@@ -141,6 +145,8 @@ public class AgentRouteAppService {
         existing.setSortOrder(sortOrder);
         existing.setStatus(status);
         routes.update(existing, operatorContext.requireUserId());
+        // 重新启用候选同样可能凑出「第 2 个执行者」：与其他保存路径同口径再检查一次
+        assertCriticRoles(parent);
         operLogWriter.write("agent", "bind", "agent_route", String.valueOf(routeId), "更新子路由 " + child.getName());
         return toResp(routes.findById(routeId).orElseThrow());
     }
@@ -253,6 +259,23 @@ public class AgentRouteAppService {
         }
     }
 
+    /**
+     * 评审环角色闸：模板为 CRITIC_LOOP 时，启用候选（排除评审者）必须恰好 1 个。
+     *
+     * <p>放在写库之后：读取的是「本次写入后的真实列表」，避免新增/重新启用时自己再拼一遍推定状态；
+     * 抛异常由 {@code @Transactional} 回滚，库里不会留下半截配置。
+     *
+     * @param parent 父 Agent（已校验是 ROUTER）
+     * @throws BizException 执行者不是恰好 1 个，或评审者非法
+     */
+    private void assertCriticRoles(AgentDef parent) {
+        AgentRuntimeConfig runtime = AgentRuntimeConfig.parse(parent.getRuntimeConfigJson(), parent.getRunMode());
+        if (!runtime.isCriticLoop()) {
+            return;
+        }
+        AgentCriticPolicy.assertRoles(runtime, routes.listByParentId(parent.getId()), lookup::find);
+    }
+
     private AgentRoute requireOwned(Long agentId, Long routeId) {
         AgentRoute route = routes.findById(routeId)
                 .orElseThrow(() -> new BizException(ErrorCode.NOT_FOUND, "子路由不存在"));
@@ -276,6 +299,8 @@ public class AgentRouteAppService {
             resp.setChildCode(child.getCode());
             resp.setChildRunMode(child.getRunMode());
             resp.setChildStatus(child.getStatus());
+            // 供前端对「已存在但被关掉开关」的候选提前报错，不必等保存失败才发现
+            resp.setChildAllowOrchestrated(child.allowOrchestratedOn() ? 1 : 0);
         });
         return resp;
     }

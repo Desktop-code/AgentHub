@@ -15,6 +15,7 @@ import com.agenthub.obs.domain.model.ObsStatus;
 import com.agenthub.obs.domain.model.SpanClose;
 import com.agenthub.obs.domain.model.SpanType;
 import com.agenthub.obs.domain.service.ObsAttrs;
+import com.agenthub.runtime.domain.model.ChildPlanPendingView;
 import com.agenthub.runtime.domain.model.EventType;
 import com.agenthub.runtime.domain.model.GeneratedFile;
 import com.agenthub.runtime.domain.model.MeterScope;
@@ -29,6 +30,7 @@ import com.agenthub.runtime.domain.model.TrialTrace;
 import com.agenthub.runtime.domain.model.TrialTurn;
 import com.agenthub.runtime.domain.repository.RunEventRepository;
 import com.agenthub.runtime.domain.repository.RunSessionRepository;
+import com.agenthub.runtime.domain.service.CauseDigest;
 import com.agenthub.runtime.domain.service.PlanJson;
 import com.agenthub.runtime.domain.service.GeneratedFileMarker;
 import com.agenthub.runtime.domain.service.PromptInjectionHolder;
@@ -68,6 +70,7 @@ public class TrialRunAppService {
     private final RouterTrialExecutor router;
     private final PlanTrialExecutor planRunner;
     private final PlanPendingRegistry pendingPlans;
+    private final ChildPlanApprovalRegistry childApprovals;
     private final TrialEventWriter writer;
     private final TrialFlight flight;
     private final OperatorContext operatorContext;
@@ -88,6 +91,7 @@ public class TrialRunAppService {
      * @param router          一层分发
      * @param planRunner      计划执行外层编排
      * @param pendingPlans    待批准计划的内存登记表
+     * @param childApprovals  编排根下「子计划待批准」槽与登记（同一根同时仅 1 个）
      * @param writer          摘要入库
      * @param flight          单飞
      * @param operatorContext 当前用户
@@ -101,7 +105,8 @@ public class TrialRunAppService {
     public TrialRunAppService(RunSessionRepository sessions, RunEventRepository events, AgentDefRepository agents,
                               TrialAccess access, TrialBindingLoader loader, ReActTrialExecutor react,
                               RouterTrialExecutor router, PlanTrialExecutor planRunner,
-                              PlanPendingRegistry pendingPlans, TrialEventWriter writer, TrialFlight flight,
+                              PlanPendingRegistry pendingPlans, ChildPlanApprovalRegistry childApprovals,
+                              TrialEventWriter writer, TrialFlight flight,
                               OperatorContext operatorContext, OperLogWriter operLogWriter, TrialObsHooks obs,
                               TrialMemoryCoordinator memory, TrialLiveBuffer live, VisionOcrExecutor vision,
                               SessionTitleGeneratorAppService titleGenerator) {
@@ -114,6 +119,7 @@ public class TrialRunAppService {
         this.router = router;
         this.planRunner = planRunner;
         this.pendingPlans = pendingPlans;
+        this.childApprovals = childApprovals;
         this.writer = writer;
         this.flight = flight;
         this.operatorContext = operatorContext;
@@ -123,6 +129,26 @@ public class TrialRunAppService {
         this.live = live;
         this.vision = vision;
         this.titleGenerator = titleGenerator;
+    }
+
+    /**
+     * 记录带 cause 的 {@link TrialFailure}。
+     *
+     * <p>为什么不一律当「预期内失败」静默：{@code TrialFailure} 既可能是「撞限」「未绑模型」这类
+     * 正常业务拒绝，也可能是上游真正炸了才被包成人话。前者不需要栈，后者必须能查。
+     * 因此只在<b>挂了 cause</b> 时打 WARN 全栈，纯业务拒绝保持安静。
+     *
+     * @param label   日志用标签，如「试跑失败」
+     * @param scope   定位用 id（会话 / Agent）
+     * @param failure 已映射的失败
+     * @param message 已脱敏的人话说明，只用于日志前缀
+     */
+    private void logTrialFailure(String label, Object scope, TrialFailure failure, String message) {
+        if (failure == null || failure.getCause() == null) {
+            return;
+        }
+        log.warn("{} id={} type={} msg={} cause={}", label, scope, failure.getClass().getSimpleName(),
+                message, CauseDigest.of(failure.getCause()), failure);
     }
 
     /**
@@ -178,8 +204,15 @@ public class TrialRunAppService {
             end.done(executeTurn(sessionId, content, images, progress));
         } catch (BizException ex) {
             end.fail(ex.getMessage());
+        } catch (TrialFailure ex) {
+            // 这里极少走到（executeTurn 内部已把 TrialFailure 收成 FAILED 响应）；
+            // 万一走到，文案保持与原来一致，只在带 cause 时补栈
+            logTrialFailure("试跑流失败（已映射）", sessionId, ex, ex.getMessage());
+            end.fail("试跑失败");
         } catch (RuntimeException ex) {
-            log.warn("试跑流失败 sessionId={} type={}", sessionId, ex.getClass().getSimpleName());
+            // 流式路径的兜底 catch：带栈打，否则 SSE 断了以后控制台只剩一行类名
+            log.warn("试跑流失败 sessionId={} type={} cause={}",
+                    sessionId, ex.getClass().getSimpleName(), CauseDigest.of(ex), ex);
             end.fail("试跑失败");
         }
     }
@@ -223,11 +256,15 @@ public class TrialRunAppService {
             // 同一轮的续跑：不重复累加 message_count
             return succeed(session, turn, written, pending.userText(), false);
         } catch (TrialFailure ex) {
-            obs.finishError(trace, ex.getMessage(), ex.getFinishReason());
+            logTrialFailure("批准计划后试跑失败", sessionId, ex, ex.getMessage());
+            // 有 cause 时把脱敏摘要提到 trace 级：面板第一行就能看到真正原因
+            obs.finishError(trace, ex.getMessage(), ex.getFinishReason(), ex.getCause());
             return fail(session, written, ex.getMessage(), pending.userText(), false);
         } catch (RuntimeException ex) {
-            log.warn("批准计划后执行失败 sessionId={} type={}", sessionId, ex.getClass().getSimpleName());
-            obs.finishError(trace, "试跑失败", null);
+            // 批准续跑失败：带栈 + 脱敏 cause，便于区分「模型出站失败」与「装配缺失」
+            log.warn("批准计划后执行失败 sessionId={} type={} cause={}",
+                    sessionId, ex.getClass().getSimpleName(), CauseDigest.of(ex), ex);
+            obs.finishError(trace, "试跑失败", null, ex);
             return fail(session, written, "试跑失败", pending.userText(), false);
         } finally {
             PromptInjectionHolder.clear();
@@ -280,6 +317,87 @@ public class TrialRunAppService {
                 .map(item -> new PlanView(item.planId(), PlanState.PENDING, item.steps()));
     }
 
+    /**
+     * 编排根下的子计划待批准：批准并唤醒等待中的子线程。
+     *
+     * <p>与单 Agent 的 {@link #approvePlan(Long)} 分开：这条路径不续跑任何根侧步骤，
+     * 只是把控制权还给「已规划未执行」的 P&E 子线程；根终答仍由 Router 等齐后统一汇总。
+     *
+     * @param sessionId 根会话
+     * @param routeKey  待批子的路由键；空表示当前唯一待批
+     * @return 轻量确认（无新事件，根 SSE 会继续推后续增量）
+     * @throws BizException 没有待批子计划、已失效，或不属于当前用户
+     */
+    public MessageResp approveChildPlan(Long sessionId, String routeKey) {
+        return decideChildPlan(sessionId, routeKey, true);
+    }
+
+    /**
+     * 编排根下的子计划待批准：拒绝。该子以失败占位继续，其它子不受影响。
+     *
+     * @param sessionId 根会话
+     * @param routeKey  待批子的路由键；空表示当前唯一待批
+     * @return 轻量确认
+     * @throws BizException 没有待批子计划、已失效，或不属于当前用户
+     */
+    public MessageResp rejectChildPlan(Long sessionId, String routeKey) {
+        return decideChildPlan(sessionId, routeKey, false);
+    }
+
+    /**
+     * 查当前待批的子计划。刷新页面后前端靠它恢复「批准 / 拒绝」按钮；
+     * 与根 SSE 的 {@code ma_child_plan_pending} 载荷同构。
+     *
+     * @param sessionId 根会话
+     * @return 有待批子时为其视图；否则为空
+     */
+    public Optional<ChildPlanPendingView> pendingChildPlan(Long sessionId) {
+        access.require(sessionId);
+        long userId = operatorContext.requireUserId();
+        return childApprovals.peek(sessionId)
+                .filter(item -> item.plan().userId() == userId)
+                .map(item -> new ChildPlanPendingView(item.routeKey(), item.childAgentId(), item.childAgentName(),
+                        item.plan().planId(), PlanState.PENDING.name(), item.plan().steps(),
+                        ChildPlanPendingView.RUN_STATE_PAUSED));
+    }
+
+    /**
+     * 批准 / 拒绝子计划的共用落库与校验。
+     *
+     * @param sessionId 根会话
+     * @param routeKey  路由键，可空
+     * @param approved  true＝批准，false＝拒绝
+     * @return 轻量确认
+     */
+    private MessageResp decideChildPlan(Long sessionId, String routeKey, boolean approved) {
+        access.require(sessionId);
+        long userId = operatorContext.requireUserId();
+        ChildPlanApprovalRegistry.PendingChildPlan pending = childApprovals.find(sessionId, routeKey)
+                .orElseThrow(() -> new BizException(ErrorCode.BAD_REQUEST,
+                        "没有待批准的子计划（可能已过期或已被处理）"));
+        // 归属校验：会话校验只证明「库里的会话是你的」，这里再核登记项自身的 userId
+        if (pending.plan().userId() != userId) {
+            throw new BizException(ErrorCode.FORBIDDEN, "无权处理其它用户的子计划");
+        }
+        boolean decided = approved
+                ? childApprovals.approve(sessionId, routeKey)
+                : childApprovals.reject(sessionId, routeKey);
+        if (!decided) {
+            throw new BizException(ErrorCode.BAD_REQUEST, "该子计划已失效（可能已超时或被取消），请重新提问");
+        }
+        operLogWriter.write("runtime", approved ? "childPlanApprove" : "childPlanReject", "agent_run_session",
+                String.valueOf(sessionId),
+                "子专家「" + pending.childAgentName() + "」计划" + (approved ? "已批准" : "已拒绝"));
+        MessageResp resp = new MessageResp();
+        resp.setSessionId(sessionId);
+        resp.setStatus(RunStatus.SUCCESS.name());
+        resp.setPlanPending(false);
+        resp.setChildPlanApproved(approved);
+        resp.setChildRouteKey(pending.routeKey());
+        resp.setAssistantPreview(approved ? "已批准子计划，继续执行" : "已拒绝子计划，该子已跳过");
+        return resp;
+    }
+
     private MessageResp executeTurn(Long sessionId, String content, List<String> images, TrialProgress progress) {
         RunSession session = access.require(sessionId);
         // 仅取消（及已删除由 access 挡）不可再发。历史 SUCCESS 不挡；空闲不再写成 SUCCESS。
@@ -294,6 +412,8 @@ public class TrialRunAppService {
         try {
             // 新提问即放弃上一条待批准的计划：旧计划基于旧上下文，继续执行会张冠李戴
             pendingPlans.drop(sessionId);
+            // 同理清掉上一轮遗留的子计划待批与批准槽：否则排队中的 P&E 子会被旧槽挡住
+            childApprovals.rejectAll(sessionId);
             // 先落 RUNNING，页面在本轮结束前就能看到进行中的调用
             trace = obs.begin(session, content);
             AgentDef agent = agents.findById(session.getAgentId())
@@ -338,11 +458,16 @@ public class TrialRunAppService {
             obs.finishOk(trace);
             return succeed(session, turn, written, content);
         } catch (TrialFailure ex) {
-            obs.finishError(trace, ex.getMessage(), ex.getFinishReason());
+            // TrialFailure 映射处：文案已是人话，挂了 cause 时补一次全栈，
+            // 否则「连通测成功、试跑失败」在控制台仍只剩一句业务短句
+            logTrialFailure("试跑失败", sessionId, ex, ex.getMessage());
+            obs.finishError(trace, ex.getMessage(), ex.getFinishReason(), ex.getCause());
             return fail(session, written, ex.getMessage(), content);
         } catch (RuntimeException ex) {
-            log.warn("试跑失败 sessionId={} type={}", sessionId, ex.getClass().getSimpleName());
-            obs.finishError(trace, "试跑失败", null);
+            // 同步路径兜底 catch：带栈打，保证「再传图失败」时控制台有完整栈
+            log.warn("试跑失败 sessionId={} type={} cause={}",
+                    sessionId, ex.getClass().getSimpleName(), CauseDigest.of(ex), ex);
+            obs.finishError(trace, "试跑失败", null, ex);
             return fail(session, written, "试跑失败", content);
         } finally {
             PromptInjectionHolder.clear();
@@ -372,7 +497,9 @@ public class TrialRunAppService {
         Long visionInstanceId = loader.requireVisionModel(agent.getId());
         MeterScope scope = MeterScope.console(agent.getId(), visionInstanceId,
                 session.getId(), operatorContext.requireUserId());
-        // 视觉请求是阻塞的，本方法在请求线程上跑：整个试跑本来就是同步语义，这里不必再切线程
+        // 视觉请求是阻塞的，本方法在请求线程上跑：整个试跑本来就是同步语义，这里不必再切线程。
+        // 失败不在这里打日志：VisionOcrExecutor 已带 Throwable 打过一次全栈，
+        // 外层 TrialFailure 分支也会再打一次；此处重复打同一份栈只会把控制台刷乱
         String text = vision.extract(images, visionInstanceId, scope);
         if (text == null || text.isBlank()) {
             throw new TrialFailure("未能从图片中提取到文字，请换一张更清晰的图片重试");
@@ -403,11 +530,10 @@ public class TrialRunAppService {
         if (AgentRunMode.PLAN_AND_EXECUTE.name().equals(agent.getRunMode())) {
             return runPlan(agent, query, modelUser, session, written, seq, progress);
         }
-        TrialPlan plan = loader.loadReact(agent, query);
-        // 记忆段与「本轮已注入的长期记忆」一次取回，工具补参与提示词用同一份依据
-        TrialMemoryCoordinator.Augmented augmented = memory.augmentSystemWithFacts(session, plan.getSystemPrompt());
-        plan.setSystemPrompt(augmented.systemPrompt());
-        plan.setToolArgsFacts(augmented.injectedFacts());
+        // 记忆段在装配时进链（位于工具目录之前），不再往装配结果尾部追加
+        TrialMemoryCoordinator.Augmented recalled = memory.recallDurable(session);
+        TrialPlan plan = loader.loadReact(agent, query, recalled.memoryBlock());
+        plan.setToolArgsFacts(recalled.injectedFacts());
         memory.publishInjection(plan);
         seq = appendNotices(session.getId(), seq, plan.getNotices(), written);
         // 纯 ReAct 挂一个 AGENT 根，模型和工具都做它的子步骤
@@ -432,12 +558,15 @@ public class TrialRunAppService {
             memory.afterAssistant(session, turn.getAssistantText());
             return turn;
         } catch (RuntimeException ex) {
+            // AGENT 根步骤失败：先打全栈，再带脱敏 cause 关 span，页面与日志两侧都能定位
+            log.warn("Agent 执行失败 agentId={} type={} cause={}",
+                    agent.getId(), ex.getClass().getSimpleName(), CauseDigest.of(ex), ex);
             if (trace != null) {
                 SpanClose agentErr = new SpanClose();
                 agentErr.setStatus(ObsStatus.ERROR);
                 agentErr.setErrorSummary(ex.getMessage());
                 agentErr.setOutputText(ex.getMessage());
-                agentErr.setAttrsJson(ObsAttrs.withBrief(null, "Agent 失败"));
+                agentErr.setAttrsJson(ObsAttrs.withCause(ObsAttrs.withBrief(null, "Agent 失败"), CauseDigest.of(ex)));
                 trace.close(agentSpan, agentErr);
             }
             throw ex;
@@ -483,6 +612,8 @@ public class TrialRunAppService {
             planned = planRunner.plan(agent, content, modelUser, session.getUserId(), session.getId(), recorder);
         } catch (RuntimeException ex) {
             // 规划失败也要把已产生的帧写掉，否则时间线上看不到「为什么没有计划」
+            log.warn("计划阶段失败 sessionId={} type={} cause={}",
+                    session.getId(), ex.getClass().getSimpleName(), CauseDigest.of(ex), ex);
             appendPlanFrames(session.getId(), seq, recorder.drain(), written);
             throw ex;
         }
@@ -522,6 +653,8 @@ public class TrialRunAppService {
             executed = planRunner.execute(agent, pending, recorder);
         } catch (RuntimeException ex) {
             // 失败也要落计划/步骤帧：时间线要能看出「执行到第几步、失败在哪」
+            log.warn("计划执行阶段失败 sessionId={} type={} cause={}",
+                    session.getId(), ex.getClass().getSimpleName(), CauseDigest.of(ex), ex);
             appendPlanFrames(session.getId(), seq, recorder.drain(), written);
             throw ex;
         }
@@ -711,8 +844,8 @@ public class TrialRunAppService {
             titleGenerator.asyncGenerateTitle(session.getId(), session.getAgentId(), userText, answer);
         } catch (RuntimeException ex) {
             // 线程池拒绝等提交期异常：标题可以没有，本轮响应必须正常返回
-            log.warn("提交会话标题生成任务失败 sessionId={} type={}",
-                    session.getId(), ex.getClass().getSimpleName());
+            log.warn("提交会话标题生成任务失败 sessionId={} type={} cause={}",
+                    session.getId(), ex.getClass().getSimpleName(), CauseDigest.of(ex), ex);
         }
     }
 

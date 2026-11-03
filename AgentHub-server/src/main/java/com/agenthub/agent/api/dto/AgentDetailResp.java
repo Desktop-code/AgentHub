@@ -17,6 +17,11 @@ public class AgentDetailResp {
     private String code;
     private String description;
     private String runMode;
+    /**
+     * 是否允许被编排挂为子专家。ROUTER 恒为 false（编排根不可作子），
+     * 其它模式由配置页开关决定；前端据此禁用/回显。
+     */
+    private Boolean allowOrchestrated;
     /** 用户业务段 */
     private String systemPrompt;
     /**

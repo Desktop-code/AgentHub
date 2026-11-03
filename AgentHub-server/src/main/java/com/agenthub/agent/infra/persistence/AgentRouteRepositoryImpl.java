@@ -1,14 +1,19 @@
 package com.agenthub.agent.infra.persistence;
 
 import com.agenthub.agent.domain.model.AgentRoute;
+import com.agenthub.agent.domain.model.AgentStatus;
 import com.agenthub.agent.domain.repository.AgentRouteRepository;
 import com.agenthub.agent.infra.persistence.entity.AgentRouteEntity;
 import com.agenthub.agent.infra.persistence.mapper.AgentRouteMapper;
 import com.baomidou.mybatisplus.core.conditions.query.LambdaQueryWrapper;
+import com.baomidou.mybatisplus.core.conditions.query.QueryWrapper;
 import com.baomidou.mybatisplus.core.conditions.update.LambdaUpdateWrapper;
 import org.springframework.stereotype.Repository;
 
+import java.util.Collection;
+import java.util.HashMap;
 import java.util.List;
+import java.util.Map;
 import java.util.Optional;
 
 /**
@@ -85,6 +90,30 @@ public class AgentRouteRepositoryImpl implements AgentRouteRepository {
     public int countByParentId(Long parentAgentId) {
         return Math.toIntExact(mapper.selectCount(new LambdaQueryWrapper<AgentRouteEntity>()
                 .eq(AgentRouteEntity::getParentAgentId, parentAgentId)));
+    }
+
+    /** {@inheritDoc} */
+    @Override
+    public Map<Long, Integer> countEnabledByParentIds(Collection<Long> parentAgentIds) {
+        if (parentAgentIds == null || parentAgentIds.isEmpty()) {
+            return Map.of();
+        }
+        // 一条 group by 拿整页候选数；显式带 deleted=0，双保险避免把逻辑删除行算进候选
+        List<Map<String, Object>> grouped = mapper.selectMaps(new QueryWrapper<AgentRouteEntity>()
+                .select("parent_agent_id", "COUNT(*) AS cnt")
+                .eq("status", AgentStatus.ENABLED)
+                .eq("deleted", 0)
+                .in("parent_agent_id", parentAgentIds)
+                .groupBy("parent_agent_id"));
+        Map<Long, Integer> counts = new HashMap<>();
+        for (Map<String, Object> row : grouped) {
+            Object idValue = row.get("parent_agent_id");
+            Object countValue = row.get("cnt");
+            if (idValue instanceof Number id && countValue instanceof Number count) {
+                counts.put(id.longValue(), count.intValue());
+            }
+        }
+        return counts;
     }
 
     /** {@inheritDoc} */

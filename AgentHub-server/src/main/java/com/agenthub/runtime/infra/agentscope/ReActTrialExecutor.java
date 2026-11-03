@@ -1,18 +1,23 @@
 package com.agenthub.runtime.infra.agentscope;
 
 import com.agenthub.rag.application.RagToolContext;
-import com.agenthub.runtime.domain.model.EffectiveLimits;import com.agenthub.runtime.domain.model.MemoryFact;import com.agenthub.runtime.domain.model.MeterScope;
+import com.agenthub.runtime.domain.model.EffectiveLimits;
+import com.agenthub.runtime.domain.model.MemoryFact;
+import com.agenthub.runtime.domain.model.MeterScope;
 import com.agenthub.runtime.domain.model.TrialPlan;
 import com.agenthub.runtime.domain.model.TrialTurn;
+import com.agenthub.runtime.domain.service.CauseDigest;
 import com.agenthub.runtime.domain.service.FactKeyCanonicalizer;
 import com.agenthub.runtime.domain.service.LimitHitReasons;
 import com.agenthub.runtime.domain.service.ModelCallErrors;
 import com.agenthub.runtime.domain.service.RequiredToolArgs;
 import com.agenthub.runtime.domain.service.RunBudget;
 import com.agenthub.runtime.domain.service.RuntimeLimitResolver;
+import com.agenthub.runtime.domain.service.ScratchContext;
 import com.agenthub.runtime.domain.service.TextToolCallGuard;
 import com.agenthub.runtime.domain.service.TrialFailure;
 import com.agenthub.runtime.domain.service.TrialProgress;
+import com.agenthub.runtime.infra.agentscope.builtin.MaScratchTool;
 import io.agentscope.core.ReActAgent;
 import io.agentscope.core.agent.RuntimeContext;
 import io.agentscope.core.event.AgentEvent;
@@ -55,6 +60,10 @@ public class ReActTrialExecutor {
     private final RuntimeLimitResolver limitResolver;
     private final FactKeyCanonicalizer factKeys;
     private final RequiredArgProperties requiredArgProperties;
+    /** 超长工具结果落盘；与文件工具共用同一个工作区沙箱 */
+    private final ToolResultOffloadStore offload;
+    /** 落盘阈值与摘要长度来自 trial 配置 */
+    private final TrialProperties trialProperties;
 
     /**
      * @param models         打开模型并按轮记账
@@ -65,11 +74,14 @@ public class ReActTrialExecutor {
      * @param limitResolver  判定用限制（无 Agent 覆盖时）
      * @param factKeys       参数名/事实键归一，供必填参数闸门补参
      * @param requiredArgs   必填参数闸门开关与实体字段口径
+     * @param offload        超长工具结果落盘（阈值见 {@link TrialProperties}）
+     * @param trialProperties 试跑参数（句柄化阈值与摘要长度）
      */
     public ReActTrialExecutor(MeteredModelOpener models, InMemoryAgentStateStore states,
                               BuiltinToolkitAssembler tools, McpToolkitAssembler mcpTools,
                               AssembledPromptGuard prompts, RuntimeLimitResolver limitResolver,
-                              FactKeyCanonicalizer factKeys, RequiredArgProperties requiredArgs) {
+                              FactKeyCanonicalizer factKeys, RequiredArgProperties requiredArgs,
+                              ToolResultOffloadStore offload, TrialProperties trialProperties) {
         this.models = models;
         this.states = states;
         this.tools = tools;
@@ -78,6 +90,8 @@ public class ReActTrialExecutor {
         this.limitResolver = limitResolver;
         this.factKeys = factKeys;
         this.requiredArgProperties = requiredArgs;
+        this.offload = offload;
+        this.trialProperties = trialProperties;
     }
 
     /**
@@ -147,6 +161,12 @@ public class ReActTrialExecutor {
         RunBudget budget = new RunBudget(limits);
         // 先注册工具。BUILTIN 缺 Bean 或 MCP 无法建句柄时直接失败，不必先解密模型 Key。
         Toolkit toolkit = tools.assemble(plan.getTools());
+        // 共享草稿区：只有编排根选中 SHARED_SCRATCH 时上下文里才有板。
+        // 板随本轮 run 生命周期，工具实例直接持有板，因此工具跑在 boundedElastic 上也不会串轮。
+        ScratchContext.Scope scratch = ScratchContext.current();
+        if (scratch != null) {
+            toolkit = MaScratchTool.install(toolkit, scratch.board(), scratch.ownerRouteKey());
+        }
         mcpTools.register(toolkit, plan.getMcpTools());
         toolkit = ToolkitBudget.wrap(toolkit, budget);
         // 必填参数闸门：被拦下的调用不执行、不占工具配额，也不产生任何出站
@@ -156,7 +176,12 @@ public class ReActTrialExecutor {
         // 这样「哪个工具写了文件」都能被看见，标记也从模型上下文里被物理剔除。
         // 同一个 sink 既实时推给前端，也收集起来供整轮结束后落成 FILE 事件（刷新后回放要用）。
         GeneratedFileSink generated = new GeneratedFileSink(progress);
-        toolkit = ToolkitFileMarker.wrap(toolkit, generated);
+        // 超长结果在这里就落盘：出站时只看到一堆 messages，已经分不清「哪条结果来自哪个工具」，
+        // 也无法把落盘路径写回时间线给用户看。工具返回那一刻落盘，信息最全。
+        // 统计对象随包装一起注入：工具跑在 boundedElastic 上，ThreadLocal 取不到。
+        toolkit = ToolkitFileMarker.wrap(toolkit, generated, offload,
+                trialProperties.offloadChars(),
+                plan.getInjection());
         // 最外层重绑 RagToolContext：ToolExecutor 在 boundedElastic 上跑工具，主线程 ThreadLocal 不可见
         toolkit = ToolkitRagContext.wrap(toolkit, plan.getAgentId());
         Model model = new LimitingModel(
@@ -169,7 +194,11 @@ public class ReActTrialExecutor {
         int toolAttempts = Math.max(1, limits.toolMaxRetries() + 1);
         ExecutionConfig modelExec = ExecutionConfig.builder().timeout(llmTimeout).maxAttempts(1).build();
         ExecutionConfig toolExec = ExecutionConfig.builder().timeout(toolTimeout).maxAttempts(toolAttempts).build();
-        String prompt = prompts.require(plan.getSystemPrompt());
+        String prompt = prompts.require(plan.getSystemPrompt(), plan.getLayout());
+        if (scratch != null) {
+            // 平台前缀与锁定段已在上方校验过；共享草稿段只追加在工具目录之后，不改受保护前缀
+            prompt = prompt + MaScratchTool.promptSection();
+        }
         // RAG 检索工具只能从上下文取 Agent：@Tool 方法签名里没有 agentId。
         // 必须在 finally 清掉，否则线程池会把上一个 Agent 的身份带到下一次试跑（跨库串数据）。
         RagToolContext.bind(plan.getAgentId());
@@ -209,12 +238,16 @@ public class ReActTrialExecutor {
             }
             return turn;
         } catch (TrialFailure ex) {
+            // 已映射的失败：只有挂了 cause 才有排障价值（视觉/工具出站被包成人话），
+            // 纯业务拒绝（未绑模型、撞限文案）不再重复刷栈
+            logIfCaused("ReAct 执行失败（已映射） agentId=" + plan.getAgentId(), ex);
             throw ex;
         } catch (RuntimeException ex) {
-            log.warn("ReAct 执行失败 agentId={} type={} root={}",
-                    plan.getAgentId(), ex.getClass().getSimpleName(), rootType(ex));
+            // 带 Throwable 打全栈：上层只会看到「模型调用失败」一类人话，真实 cause 只在这里可见
+            log.warn("ReAct 执行失败 agentId={} type={} root={} cause={}",
+                    plan.getAgentId(), ex.getClass().getSimpleName(), rootType(ex), CauseDigest.of(ex), ex);
             if (isTimeout(ex) || System.nanoTime() >= budget.deadlineNanos()) {
-                throw new TrialFailure("撞限：timeout（试跑超时）", LimitHitReasons.TIMEOUT);
+                throw new TrialFailure("撞限：timeout（试跑超时）", LimitHitReasons.TIMEOUT, ex);
             }
             Throwable cause = ex;
             while (cause != null) {
@@ -223,8 +256,9 @@ public class ReActTrialExecutor {
                 }
                 cause = cause.getCause();
             }
-            // 网络、鉴权等按类型转成人话；不拼异常原文，避免 URL/Key 进 error_summary
-            throw new TrialFailure(ModelCallErrors.describe(ex));
+            // 网络、鉴权等按类型转成人话；不拼异常原文，避免 URL/Key 进 error_summary；
+            // 但把原始异常挂成 cause，日志与追踪才能看到真正的失败点
+            throw new TrialFailure(ModelCallErrors.describe(ex), LimitHitReasons.ERROR, ex);
         } finally {
             // 必须清：线程池复用会把上一个 Agent 的 id 带到下一轮，导致 RAG 工具查错库
             RagToolContext.clear();
@@ -312,13 +346,16 @@ public class ReActTrialExecutor {
             emitThinking(reply, progress);
             return reply.getTextContent();
         } catch (TrialFailure ex) {
+            logIfCaused(failLabel + "（已映射）", ex);
             throw ex;
         } catch (RuntimeException ex) {
-            log.warn("{} type={} root={}", failLabel, ex.getClass().getSimpleName(), rootType(ex));
+            // 单轮调用（判路由 / 规划 / 汇总）失败：同样带栈，否则父模型这步只会剩一句人话
+            log.warn("{} type={} root={} cause={}", failLabel, ex.getClass().getSimpleName(),
+                    rootType(ex), CauseDigest.of(ex), ex);
             if (isTimeout(ex)) {
-                throw new TrialFailure("撞限：timeout（" + timeoutLabel + "）", LimitHitReasons.TIMEOUT);
+                throw new TrialFailure("撞限：timeout（" + timeoutLabel + "）", LimitHitReasons.TIMEOUT, ex);
             }
-            throw new TrialFailure(ModelCallErrors.describe(ex));
+            throw new TrialFailure(ModelCallErrors.describe(ex), LimitHitReasons.ERROR, ex);
         }
     }
 
@@ -347,6 +384,22 @@ public class ReActTrialExecutor {
                 progress.reasoning(thinking.getThinking());
             }
         }
+    }
+
+    /**
+     * 只在失败带了原始 cause 时补一条带栈 WARN。
+     *
+     * <p>为什么要区分：{@link TrialFailure} 既可能是「撞限」「未绑模型」这类正常业务拒绝，
+     * 也可能是上游真炸了才被包成人话。前者打栈只会把控制台刷满噪音，后者没有栈就查不出原因。
+     *
+     * @param label 日志标签，含定位 id
+     * @param failure 已映射的失败
+     */
+    private static void logIfCaused(String label, TrialFailure failure) {
+        if (failure == null || failure.getCause() == null) {
+            return;
+        }
+        log.warn("{} msg={} cause={}", label, failure.getMessage(), CauseDigest.of(failure.getCause()), failure);
     }
 
     /**

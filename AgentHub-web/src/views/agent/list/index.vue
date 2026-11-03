@@ -254,6 +254,7 @@
                 :key="activeId"
                 :agent-id="activeId"
                 :auto-load="!detailSuspended"
+                :initial-tab="initialTab"
                 @changed="onCatalogChanged"
                 @trial="onTrial"
               />
@@ -418,6 +419,19 @@ watch(gridPageSize, (next) => {
 let railSearchTimer = 0
 /** 哨兵观察器；失活与卸载时都要断开。 */
 let railObserver: IntersectionObserver | null = null
+
+/**
+ * 深链约定：`/agent/list/:id?tab=orchestration` 由「编排 → 多智能体」列表使用，
+ * 详情壳据此落在「编排」Tab；其它入口不带 tab，仍落基本信息。
+ */
+const initialTab = computed(() => {
+  if (!route.path.startsWith('/agent/list/')) {
+    return ''
+  }
+  const raw = route.query.tab
+  const value = Array.isArray(raw) ? raw[0] : raw
+  return typeof value === 'string' ? value : ''
+})
 
 /**
  * 同页视图态。不跟路由瞬时绑定，避免 /list → /list/:id 中途拆掉网格。

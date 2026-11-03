@@ -72,12 +72,15 @@ import AgentPromptEditor from '@/components/agent/AgentPromptEditor.vue'
 import type { AgentSave, PromptBinding } from '@/types/agent'
 import { checkUserPrompt, promptAfterModeSwitch, recommendedPrompt } from '@/utils/promptSafety'
 
-/** 新建默认运行配置：Router 那组（多意图开 / 拼接 / N=3）与计划那组（自动执行 / 8 步 / 0 重试），与后端 defaults 对齐 */
+/** 新建默认运行配置：Router 那组（多意图开 / 拼接 / N=3 / ROUTER_PARALLEL）与计划那组（自动执行 / 8 步 / 0 重试），与后端 defaults 对齐 */
 function defaultRuntimeConfig() {
   return {
     multiIntentEnabled: true,
     answerMode: 'CONCAT' as const,
     maxRouteChildren: 3,
+    maTemplate: 'ROUTER_PARALLEL',
+    maContextPolicy: 'ISOLATED',
+    maAllowParentHistoryWhenSingle: true,
     requirePlanConfirm: false,
     maxPlanSteps: 8,
     maxStepRetries: 0

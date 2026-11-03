@@ -49,6 +49,7 @@ public class TrialSessionAppService {
     private final TrialSessionCloser closer;
     private final TrialLiveBuffer live;
     private final PlanPendingRegistry pendingPlans;
+    private final ChildPlanApprovalRegistry childApprovals;
     private final TrialBindingLoader loader;
 
     /**
@@ -65,13 +66,15 @@ public class TrialSessionAppService {
      * @param closer          取消结案、删除前批抽、空闲定时批抽
      * @param live            进行中一轮的内存快照，供刷新后的只读轮询
      * @param pendingPlans    待批准计划；清空/取消/删除时一并丢弃，避免批准到已废弃上下文
+     * @param childApprovals  编排根下的子计划待批；取消/清空/删除时一并拒绝，避免线程悬挂
      * @param loader          只读模型槽解析，用于判定是否配了 VISION
      */
     public TrialSessionAppService(RunSessionRepository sessions, RunEventRepository events, AgentDefRepository agents,
                                   TrialAccess access, OperatorContext operatorContext, OperLogWriter operLogWriter,
                                   TrialFlight flight, TrialProperties properties, ReActTrialExecutor react,
                                   TrialMemoryCoordinator memory, TrialSessionCloser closer, TrialLiveBuffer live,
-                                  PlanPendingRegistry pendingPlans, TrialBindingLoader loader) {
+                                  PlanPendingRegistry pendingPlans, ChildPlanApprovalRegistry childApprovals,
+                                  TrialBindingLoader loader) {
         this.sessions = sessions;
         this.events = events;
         this.agents = agents;
@@ -85,6 +88,7 @@ public class TrialSessionAppService {
         this.closer = closer;
         this.live = live;
         this.pendingPlans = pendingPlans;
+        this.childApprovals = childApprovals;
         this.loader = loader;
     }
 
@@ -225,6 +229,7 @@ public class TrialSessionAppService {
     public SessionResp cancel(Long id) {
         RunSession session = access.require(id);
         if (flight.running(id)) {
+            // 含「根停在等待子计划批准」：本轮请求线程仍活着，按根取消纪律不许取消，等用户批准/拒绝
             throw new BizException(ErrorCode.BAD_REQUEST, "本轮正在执行，请等待结束后再取消");
         }
         if (!RunStatus.RUNNING.name().equals(session.getStatus())) {
@@ -232,6 +237,8 @@ public class TrialSessionAppService {
         }
         // 取消即放弃待批准计划，避免之后还能批到一个已作废的会话上
         pendingPlans.drop(id);
+        // 兜底清理可能残留的子计划待批与批准槽（根取消后不得再有线程等在那里）
+        childApprovals.rejectAll(id);
         closer.cancel(session, operatorContext.requireUserId());
         operLogWriter.write("runtime", "cancel", "agent_run_session", String.valueOf(id), "取消试跑会话 " + id);
         return toResp(sessions.findById(id).orElseThrow());
@@ -278,6 +285,8 @@ public class TrialSessionAppService {
         memory.invalidate(id);
         // 清空即丢弃待批准计划：它引用的用户原文和窗口上下文都已不存在
         pendingPlans.drop(id);
+        // 编排根下若有子计划待批，一并拒绝，避免等待线程悬挂在已清空的会话上
+        childApprovals.rejectAll(id);
         if (session.getUserId() != null) {
             react.forget(session.getUserId(), id);
         }
@@ -305,6 +314,7 @@ public class TrialSessionAppService {
         }
         memory.invalidate(id);
         pendingPlans.drop(id);
+        childApprovals.rejectAll(id);
         sessions.logicDelete(id);
         operLogWriter.write("runtime", "remove", "agent_run_session", String.valueOf(id), "删除试跑会话 " + id);
     }

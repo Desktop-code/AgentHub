@@ -15,6 +15,11 @@ public class RouteResp {
     private String childCode;
     private String childRunMode;
     private Integer childStatus;
+    /**
+     * 子 Agent 是否允许被编排调用（0=禁止）。前端校验据此对已存在候选报 error，
+     * 子被后来关掉开关时不必等保存失败才发现。
+     */
+    private Integer childAllowOrchestrated;
     private String routeKey;
     private String intent;
     private Integer sortOrder;
