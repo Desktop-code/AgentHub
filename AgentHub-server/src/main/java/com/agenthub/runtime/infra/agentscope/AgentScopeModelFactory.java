@@ -10,7 +10,10 @@ import com.agenthub.model.domain.repository.ModelCredentialRepository;
 import com.agenthub.model.domain.repository.ModelInstanceRepository;
 import com.agenthub.model.domain.repository.ModelProviderRepository;
 import com.agenthub.model.domain.service.ModelTemperaturePolicy;
+import com.agenthub.runtime.domain.service.CauseDigest;
+import com.agenthub.runtime.domain.service.LimitHitReasons;
 import com.agenthub.runtime.domain.service.TrialFailure;
+import com.agenthub.runtime.domain.service.VisionMaxTokens;
 import com.agenthub.runtime.model.acl.impl.AdapterEndpointConfig;
 import com.agenthub.runtime.model.acl.impl.ModelAdapterFactory;
 import com.agenthub.spi.crypto.SecretContexts;
@@ -109,9 +112,30 @@ public class AgentScopeModelFactory {
         } catch (TrialFailure ex) {
             throw ex;
         } catch (RuntimeException ex) {
-            log.warn("构造模型客户端失败 instanceId={} type={}", instanceId, ex.getClass().getSimpleName());
-            throw new TrialFailure("模型客户端创建失败");
+            // 模型客户端构造失败（含桥接层初始化）：带栈打，否则只会剩一句「模型客户端创建失败」
+            log.warn("构造模型客户端失败 instanceId={} type={} cause={}",
+                    instanceId, ex.getClass().getSimpleName(), CauseDigest.of(ex), ex);
+            throw new TrialFailure("模型客户端创建失败", LimitHitReasons.ERROR, ex);
         }
+    }
+
+    /**
+     * 读该实例在 {@code extraJson} 里显式配置的输出上限。
+     *
+     * <p>为什么放在这里而不是让执行器自己查库：实例行只在装配模型时读一次，
+     * 让同一处提供「出站配置」能保证「用的模型」和「用的上限」来自同一条实例记录，
+     * 也不会在 runtime infra 里再开一条仓储依赖。
+     *
+     * @param instanceId 模型实例 id，可空
+     * @return 显式配置的 max_tokens；未配置、实例不存在或 JSON 非法时返回 null
+     */
+    public Integer maxTokensOf(Long instanceId) {
+        if (instanceId == null) {
+            return null;
+        }
+        return instances.findById(instanceId)
+                .map(item -> VisionMaxTokens.parse(item.getExtraJson()))
+                .orElse(null);
     }
 
     /**
@@ -227,8 +251,10 @@ public class AgentScopeModelFactory {
             return secretStore.decrypt(credential.getApiKeyCipher(),
                     SecretContexts.modelCredential(credential.getProviderId()));
         } catch (RuntimeException ex) {
-            log.warn("模型凭证解密失败 credentialId={} type={}", credential.getId(), ex.getClass().getSimpleName());
-            throw new TrialFailure("模型凭证无法解密");
+            // 只记异常类型与脱敏 cause：绝不打印密文或解密后的 Key
+            log.warn("模型凭证解密失败 credentialId={} type={} cause={}",
+                    credential.getId(), ex.getClass().getSimpleName(), CauseDigest.of(ex), ex);
+            throw new TrialFailure("模型凭证无法解密", LimitHitReasons.ERROR, ex);
         }
     }
 }

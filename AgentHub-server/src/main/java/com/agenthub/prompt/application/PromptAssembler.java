@@ -6,6 +6,7 @@ import com.agenthub.prompt.domain.enums.PromptPurpose;
 import com.agenthub.prompt.domain.model.PromptAssemblyResult;
 import com.agenthub.prompt.domain.model.PromptConstraintSnapshot;
 import com.agenthub.prompt.domain.model.PromptContext;
+import com.agenthub.prompt.domain.model.PromptLayout;
 import com.agenthub.prompt.domain.model.PromptSegmentSnapshot;
 import com.agenthub.prompt.domain.model.PromptTemplateRef;
 import com.agenthub.prompt.domain.model.PromptTemplateSnapshot;
@@ -22,6 +23,7 @@ import org.springframework.stereotype.Service;
 import java.time.LocalDateTime;
 import java.time.ZoneId;
 import java.time.format.DateTimeFormatter;
+import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.LinkedHashMap;
 import java.util.List;
@@ -31,19 +33,33 @@ import java.util.Optional;
 /**
  * 提示词统一组装门面。所属域：prompt。
  * <p>
- * 职责：把 L1 平台约束 + L2 用途模板（core 锁定、soft 可覆盖）+ L3（覆盖 / 追加 / 历史业务段）
+ * 职责：把 L1 平台约束 + L2 用途模板（锁定段、开放段）+ L3（覆盖 / 追加区 / 历史业务段）
  * 拼成一份出站 system prompt，并做**一次**非递归变量替换。
  * CHAT 与非 CHAT 只在上游 Adapter 上不同，本类只有一条链路。
  * <p>
  * 固定顺序（不可调换，单测锁死）：
  * <pre>
- * [L1 当前生效 content]
- * + [L2 各段按 sort_no：mutable=0 用库文；mutable=1 用 override 否则库文]
- * + [历史用户业务段 agent_def.system_prompt，带「业务提示词」标记]
- * + [L3 prompt_extra 追加区]
+ * [受保护 head]
+ *   L1 当前生效 content
+ *   + 平台侧追加句（ROUTER 路由说明，属平台约束延伸）
+ *   + L2 全部 mutable=0 锁定段（相位内按 sort_no）
+ * [可截断 tail]
+ *   + L2 全部 mutable=1 开放段（相位内按 sort_no；L3 覆盖就地替换）
+ *   + L3 追加区【补充要求】
+ *   + 历史业务段【业务提示词】（过渡：紧贴 L3 收口，待并入 L3 后移除）
  * → 一次性变量替换（模板侧 {{var}} → 值；值侧永不二次解析）
- * → 预算裁剪（L1 与 core 永不裁）
+ * → 安全阀裁剪（只裁 tail；head 是红线，宁可超预算也不砍）
  * </pre>
+ * <p>
+ * <b>预算口径（重要）</b>：本类的字符上限只是「单次组装的绝对安全阀」，用于挡住
+ * 「模板里写了几十万字」这类数据事故，<b>不是</b>业务预算。业务预算只有一套
+ * （{@code agenthub.prompt.system-prompt-max-chars}），由 runtime 的
+ * {@code PromptBudgetTrimmer} 在拼完全部段之后统一按优先级让出。历史上这里曾按 24000 切一刀，
+ * 与注入层的第二次截断口径打架，导致「该留的被砍、该砍的留下」，现已合并。
+ * <p>
+ * 为什么要把锁定段与开放段分相位：库里 sort_no 是人工填写的数字，开放段一旦填得比锁定段小，
+ * 锁定契约就会被挤到业务语气之后——模型先读「怎么说」再读「必须怎么输出」，红线名存实亡。
+ * 相位优先由代码保证，不依赖数据碰巧排对；详见 {@link PromptTemplateSnapshot#orderedSegmentsByPhase()}。
  * <p>
  * 阻断规则（故障 ≠ 业务空结果）：
  * <ul>
@@ -54,8 +70,9 @@ import java.util.Optional;
  *   <li>override 的键在该版模板里不是 soft 段 → 记 notice 并忽略（模板升级后旧键失效不应炸线上）。</li>
  * </ul>
  * <p>
- * Runtime 注入（tools / skills / RAG / memory）**不在**本类：仍由既有
- * {@code PromptInjectionComposer} 在 Assembler 之后追加，避免两套拼接。
+ * Runtime 注入（tools / skills / memory）**不在**本类：由既有 {@code PromptInjectionComposer}
+ * 接在本类产出的 head + tail 之后，按「记忆 → Skill → 工具目录」续拼，避免两套拼接。
+ * 本类通过 {@link PromptLayout} 把「受保护前缀长度」交给下游，下游预算裁剪不得越过它。
  * <p>
  * 线程安全：无状态单例；所有中间量都是方法局部变量。
  */
@@ -68,9 +85,13 @@ public class PromptAssembler {
     static final String BUSINESS_MARK = "【业务提示词】";
     /** L3 追加区标记 */
     static final String EXTRA_MARK = "【补充要求】";
+    /** 预算裁剪标记：出现即表示 tail 被截断，head 仍然完整 */
+    static final String TRUNCATED_MARK = "\n\n（提示词已按预算截断）";
 
     private static final DateTimeFormatter TIME_FORMAT = DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm:ss");
     private static final ZoneId ZONE = ZoneId.of("Asia/Shanghai");
+    /** 组装正文的默认安全阀：远大于系统提示业务预算，只防「模板里写了几十万字」这类数据事故 */
+    private static final int SAFETY_MAX_CHARS = 120_000;
 
     private final PromptSnapshotProvider snapshots;
     private final ObjectMapper json;
@@ -83,20 +104,35 @@ public class PromptAssembler {
     /**
      * Spring 装配用。平台侧 ROUTER 追加句按运行模式由 Adapter 放进 Context，故此处不需要它。
      * 类上有两个构造器，因此必须显式标注由容器使用哪一个。
+     * <p>
+     * 这里<b>没有</b>字符预算参数：预算只有一套（{@code agenthub.prompt.system-prompt-max-chars}），
+     * 由 runtime 的裁剪器统一执行。组装层只留 {@link #SAFETY_MAX_CHARS} 这个代码常量防数据事故。
      *
      * @param snapshots         快照读取（缓存装饰器或 DB 直读）
      * @param json              Jackson，复用容器配置
      * @param constraintEnabled L1 是否参与组装。默认 true；仅在排障时关，关闭会失去平台红线
      * @param defaultLocale     请求未指定语言时的回落值
-     * @param maxChars          组装正文上限
      */
     @Autowired
     public PromptAssembler(PromptSnapshotProvider snapshots,
                            ObjectMapper json,
                            @Value("${agenthub.prompt.assembler.constraint-enabled:true}") boolean constraintEnabled,
-                           @Value("${agenthub.prompt.assembler.default-locale:zh-CN}") String defaultLocale,
-                           @Value("${agenthub.prompt.assembler.max-chars:24000}") int maxChars) {
-        this(snapshots, json, constraintEnabled, defaultLocale, maxChars, null);
+                           @Value("${agenthub.prompt.assembler.default-locale:zh-CN}") String defaultLocale) {
+        this(snapshots, json, constraintEnabled, defaultLocale, SAFETY_MAX_CHARS, null);
+    }
+
+    /**
+     * 只指定安全阀的构造器（测试常用）：不注入平台追加句。
+     *
+     * @param snapshots         快照读取
+     * @param json              Jackson
+     * @param constraintEnabled L1 是否参与组装
+     * @param defaultLocale     默认语言
+     * @param safetyMaxChars    单次组装的绝对安全阀（只防极端数据事故，不是业务预算）
+     */
+    public PromptAssembler(PromptSnapshotProvider snapshots, ObjectMapper json, boolean constraintEnabled,
+                           String defaultLocale, int safetyMaxChars) {
+        this(snapshots, json, constraintEnabled, defaultLocale, safetyMaxChars, null);
     }
 
     /**
@@ -107,16 +143,16 @@ public class PromptAssembler {
      * @param json              Jackson
      * @param constraintEnabled L1 是否参与组装
      * @param defaultLocale     默认语言
-     * @param maxChars          正文上限
+     * @param safetyMaxChars    单次组装的绝对安全阀（只防极端数据事故，不是业务预算）
      * @param platformClause    平台侧固定追加句，可空；非空时优先于 Context#constraintExtra
      */
     public PromptAssembler(PromptSnapshotProvider snapshots, ObjectMapper json, boolean constraintEnabled,
-                           String defaultLocale, int maxChars, String platformClause) {
+                           String defaultLocale, int safetyMaxChars, String platformClause) {
         this.snapshots = snapshots;
         this.json = json;
         this.constraintEnabled = constraintEnabled;
         this.defaultLocale = defaultLocale == null || defaultLocale.isBlank() ? "zh-CN" : defaultLocale.trim();
-        this.maxChars = maxChars <= 0 ? 24_000 : maxChars;
+        this.maxChars = safetyMaxChars <= 0 ? SAFETY_MAX_CHARS : safetyMaxChars;
         this.platformClause = platformClause == null ? "" : platformClause.trim();
     }
 
@@ -124,7 +160,7 @@ public class PromptAssembler {
      * 组装出站系统提示。
      *
      * @param context 统一上下文，非空
-     * @return 正文 + 版本 + 统计
+     * @return 正文 + 版本 + 统计 + 结构描述（head 长度与各段渲染正文）
      * @throws BizException 阻断类失败（无 L1 / 无模板 / 缺必选段 / 变量未赋值）
      */
     public PromptAssemblyResult assemble(PromptContext context) {
@@ -153,12 +189,19 @@ public class PromptAssembler {
         PromptTemplateSnapshot template = loadTemplate(purpose, locale, context, result);
         result.setSegmentCount(template.orderedSegments().size());
 
-        // ---- 第三步：段落合并。override 只对 soft 段生效 ----
+        // 变量值先算好：段落在拼接时就要落地变量，避免「先拼后替换」时把用户输入当模板再扫一遍
+        Map<String, String> values = variablesOf(context, purpose, locale);
+
+        // ---- 第三步：段落两相位合并。锁定段进 head，开放段进 tail；override 只对开放段生效 ----
         Map<String, String> overrides = PromptOverrideReader.read(context.getOverrideJson(), json);
-        List<PromptSegmentSnapshot> segments = template.orderedSegments();
+        List<PromptSegmentSnapshot> segments = template.orderedSegmentsByPhase();
+        StringBuilder locked = new StringBuilder();
+        StringBuilder soft = new StringBuilder();
+        List<String> lockedBlocks = new ArrayList<>();
+        List<String> tailBlocks = new ArrayList<>();
         int overridden = 0;
-        StringBuilder body = new StringBuilder();
         for (PromptSegmentSnapshot segment : segments) {
+            // 必选段缺失在这里阻断：拼一份缺契约的提示词比直接失败更危险
             if (segment.mandatory() && isBlank(segment.getContent())) {
                 throw new BizException(ErrorCode.PROMPT_UNAVAILABLE,
                         "提示词模板缺必选段：" + segment.getSegKey() + "（" + template.getTemplateKey()
@@ -172,50 +215,83 @@ public class PromptAssembler {
                     overridden++;
                 }
             }
-            if (!text.isBlank()) {
-                appendBlock(body, text);
+            if (text.isBlank()) {
+                continue;
+            }
+            // 逐段渲染：布局里存的是渲染后正文，出站校验据此在最终提示词里定位锁定段
+            String rendered = PromptVariables.render(text, values);
+            if (segment.soft()) {
+                appendBlock(soft, rendered);
+                tailBlocks.add(rendered);
+            } else {
+                appendBlock(locked, rendered);
+                lockedBlocks.add(rendered);
             }
         }
         result.setOverriddenSegmentCount(overridden);
         reportUncoveredOverrides(overrides, segments, result);
 
-        // ---- 第四步：历史业务段（agent_def.system_prompt），L2 之后、extra 之前 ----
+        // ---- 第四步：L3 追加区（append-only），随后历史业务段收口 ----
+        // 业务段是过渡期遗留（agent_def.system_prompt）：先紧贴 L3 收口，等能并入 L3 后整段删除。
+        // 位置刻意放在 L3 之后：它与「补充要求」语义重复，夹在 L2 与 L3 之间会割裂开放段连续性。
+        String extra = context.getPromptExtra() == null ? "" : context.getPromptExtra().trim();
         String business = context.getBusinessSegment() == null ? "" : context.getBusinessSegment().trim();
+        if (!extra.isEmpty()) {
+            String rendered = PromptVariables.render(EXTRA_MARK + "\n" + extra, values);
+            appendBlock(soft, rendered);
+            tailBlocks.add(rendered);
+        }
         if (!business.isEmpty()) {
-            appendBlock(body, BUSINESS_MARK + "\n" + business);
+            String rendered = PromptVariables.render(BUSINESS_MARK + "\n" + business, values);
+            appendBlock(soft, rendered);
+            tailBlocks.add(rendered);
         }
         result.setBusinessChars(business.length());
-
-        // ---- 第五步：L3 追加区（append-only）----
-        String extra = context.getPromptExtra() == null ? "" : context.getPromptExtra().trim();
-        if (!extra.isEmpty()) {
-            appendBlock(body, EXTRA_MARK + "\n" + extra);
-        }
         result.setExtraChars(extra.length());
 
-        // ---- 第六步：一次性变量替换。骨架来自 L1..L3，值只做字面量落地 ----
-        Map<String, String> values = variablesOf(context, purpose, locale);
+        // ---- 第五步：拼 head 与 tail。head = L1 + 平台追加句 + 锁定段，永不参与后续裁剪 ----
         String l1 = PromptVariables.render(constraint, values);
         if (!clause.isEmpty()) {
-            l1 = l1.isEmpty() ? PromptVariables.render(clause, values)
-                    : l1 + "\n\n" + PromptVariables.render(clause, values);
+            String renderedClause = PromptVariables.render(clause, values);
+            l1 = l1.isEmpty() ? renderedClause : l1 + "\n\n" + renderedClause;
         }
-        String rest = PromptVariables.render(body.toString(), values);
+        String head = locked.length() == 0
+                ? l1
+                : (l1.isEmpty() ? locked.toString() : l1 + "\n\n" + locked);
+        String tail = soft.toString();
 
-        // ---- 第七步：预算裁剪，L1 与 core 已在不裁的段落里；此处只可能截断尾部 ----
-        String assembled = l1.isEmpty() ? rest : (rest.isEmpty() ? l1 : l1 + "\n\n" + rest);
+        // ---- 第六步：安全阀。只可能截断 tail；head 是红线，宁可超预算也不砍 ----
+        // 业务预算不在这里：全部段拼完之后由 runtime 的 PromptBudgetTrimmer 统一让出。
+        // 这里的上限只防「模板写了几十万字」这类数据事故，故意配得远大于业务预算。
         int budget = context.getMaxChars() > 0 ? Math.min(context.getMaxChars(), maxChars) : maxChars;
-        if (assembled.length() > budget) {
-            assembled = assembled.substring(0, budget) + "\n\n（提示词已按预算截断）";
-            result.setTruncated(true);
+        String assembled = head;
+        boolean truncated = false;
+        if (head.length() + (tail.isEmpty() ? 0 : tail.length() + 2) > budget) {
+            truncated = true;
+            // 预留标记本身的长度，避免「截断后又超一截」
+            int room = budget - head.length() - TRUNCATED_MARK.length() - 2;
+            if (room <= 0) {
+                // 锁定段单独就吃掉预算：tail 全部省略并留痕，禁止为了压字数去砍 head
+                result.getNotices().add("平台约束与锁定段已超出安全阀，可截断内容已全部省略");
+                assembled = head + TRUNCATED_MARK;
+            } else {
+                String cutTail = tail.length() > room ? tail.substring(0, room) : tail;
+                assembled = cutTail.isEmpty() ? head + TRUNCATED_MARK
+                        : head + "\n\n" + cutTail + TRUNCATED_MARK;
+            }
+        } else if (!tail.isEmpty()) {
+            assembled = head + "\n\n" + tail;
         }
+        result.setTruncated(truncated);
         result.setText(assembled);
+        // 结构描述：head 长度用于下游裁剪的下界，各段正文用于出站前的顺序校验
+        result.setLayout(new PromptLayout(head.length(), lockedBlocks, tailBlocks));
 
         // 只记版本与长度：正文可能含业务描述与用户输入，不进日志
-        log.info("提示词已组装 purpose={} locale={} l1v={} tpl={} v={} segs={} overridden={} chars={} truncated={}",
+        log.info("提示词已组装 purpose={} locale={} l1v={} tpl={} v={} segs={} overridden={} headChars={} chars={} truncated={}",
                 result.getPurpose(), result.getLocale(), result.getConstraintVersion(),
                 result.getTemplateKey(), result.getTemplateVersion(), result.getSegmentCount(),
-                result.getOverriddenSegmentCount(), assembled.length(), result.isTruncated());
+                result.getOverriddenSegmentCount(), head.length(), assembled.length(), truncated);
         return result;
     }
 

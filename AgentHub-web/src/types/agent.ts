@@ -8,6 +8,8 @@ export interface AgentCard {
   code: string
   description?: string
   runMode: string
+  /** 是否允许被编排挂为子专家；ROUTER 恒为 false */
+  allowOrchestrated?: boolean
   status: number
   updateTime?: string
 }
@@ -25,6 +27,8 @@ export interface AgentDetail {
   code: string
   description?: string
   runMode: string
+  /** 是否允许被编排挂为子专家；ROUTER 恒为 false（开关禁用且为关） */
+  allowOrchestrated?: boolean
   /** 用户业务段，不含平台前缀 */
   systemPrompt?: string
   /**
@@ -62,16 +66,40 @@ export interface AgentDetail {
 export interface AgentRuntimeConfig {
   /** 允许多意图路由；新建 ROUTER 默认 true */
   multiIntentEnabled?: boolean
-  /** CONCAT | SUMMARIZE；默认 CONCAT */
+  /** CONCAT | SUMMARIZE；默认 CONCAT；编排 Tab 的「汇总策略」 */
   answerMode?: 'CONCAT' | 'SUMMARIZE' | string
-  /** 每轮最多子数；默认 3，硬顶 5 */
+  /** 每轮最多子数；默认 3，硬顶 5；编排 Tab 的「最大并行子数」 */
   maxRouteChildren?: number
+  /** 编排模板；ROUTER_PARALLEL | FIXED_SEQUENCE | FIXED_PARALLEL | CRITIC_LOOP | ROUTER_THEN_SEQUENCE，非法/空回显 ROUTER_PARALLEL */
+  maTemplate?: string
+  /**
+   * 上下文策略；ISOLATED（默认）| PRIOR_SUMMARY_ONLY（仅串行模板：固定串行 / 路由后串行）|
+   * SHARED_SCRATCH（共享草稿区，五值模板都可选；与本字段单选的前置摘要互斥）。
+   */
+  maContextPolicy?: string
+  /** 单任务时是否继承父会话历史；默认 true */
+  maAllowParentHistoryWhenSingle?: boolean
   /** 计划执行：规划后是否需要人工批准才继续；默认 false（自动执行） */
   requirePlanConfirm?: boolean
   /** 计划执行：计划步数上限；默认 8，硬顶 20 */
   maxPlanSteps?: number
   /** 计划执行：单步失败重试次数；默认 0，硬顶 3 */
   maxStepRetries?: number
+  /**
+   * 允许挂为候选子的运行模式；至少含 REACT，可含 PLAN_AND_EXECUTE。
+   * 缺省/空按仅 REACT（与服务端同口径）；ROUTER 恒不在其中。
+   */
+  maChildRunModesAllowed?: string[]
+  /**
+   * 评审环（CRITIC_LOOP）：最大评审轮次，默认 1，服务端夹到 1～3。
+   * 一轮 = 一次评审判定 +（若 REVISE）一次执行者回修。
+   */
+  maCriticMaxRounds?: number
+  /**
+   * 评审环：评审专家 agentId；模板为 CRITIC_LOOP 时必填，且不能与执行者相同。
+   * 非评审环模板也保留该值，切回时可直接复用。
+   */
+  maCriticAgentId?: number | null
 }
 
 /** 平台运行限制默认与硬顶 */
@@ -105,6 +133,8 @@ export interface AgentSave {
   code: string
   description?: string
   runMode: string
+  /** 允许被编排调用；未传按模式默认（ROUTER→false，其它→true），ROUTER 服务端强制 false */
+  allowOrchestrated?: boolean
   systemPrompt?: string
   /** L3 提示词挂接；不传=不改现有配置，传空对象=清空模板与覆盖 */
   prompt?: PromptBinding
@@ -239,6 +269,8 @@ export interface AgentRouteRow {
   childCode?: string
   childRunMode?: string
   childStatus?: number
+  /** 子 Agent 是否允许被编排调用；0=禁止，前端校验据此提前报 error */
+  childAllowOrchestrated?: number
   routeKey?: string
   intent?: string
   sortOrder: number

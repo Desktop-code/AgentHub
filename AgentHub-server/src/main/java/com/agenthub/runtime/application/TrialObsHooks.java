@@ -5,7 +5,9 @@ import com.agenthub.obs.domain.ObsTraceScope;
 import com.agenthub.obs.domain.TraceRecorder;
 import com.agenthub.obs.domain.model.ObsStatus;
 import com.agenthub.obs.domain.model.TraceStart;
+import com.agenthub.obs.domain.service.ObsAttrs;
 import com.agenthub.runtime.domain.model.RunSession;
+import com.agenthub.runtime.domain.service.CauseDigest;
 import org.springframework.stereotype.Component;
 
 /**
@@ -63,9 +65,24 @@ public class TrialObsHooks {
      * @param finishReason 可空；撞限时写 timeout / max_rounds 等
      */
     public void finishError(ObsTraceScope scope, String reason, String finishReason) {
-        if (scope != null) {
-            recorder.finish(scope, ObsStatus.ERROR, reason, finishReason);
+        finishError(scope, reason, finishReason, null);
+    }
+
+    /**
+     * 同 {@link #finishError(ObsTraceScope, String, String)}，另写一份脱敏 cause 到 trace 扩展信息。
+     *
+     * <p>为什么需要：trace 是面板最外层那一行。失败时只有一句人话，
+     * 排查「连通测成功、试跑失败」就还得逐层展开步骤；把 cause 提到 trace 级一眼可见。
+     *
+     * @param cause 失败时的原始异常，可空；<b>调用方保证已脱敏</b>（本方法再经 ObsTexts 打一遍）
+     */
+    public void finishError(ObsTraceScope scope, String reason, String finishReason, Throwable cause) {
+        if (scope == null) {
+            return;
         }
+        // attrs 只在真有 cause 时才写：为空时 ObsAttrs.withCause 返回 null，不会污染既有 attrs
+        recorder.finish(scope, ObsStatus.ERROR, reason, finishReason,
+                ObsAttrs.withCause(null, CauseDigest.of(cause)));
     }
 
     /**

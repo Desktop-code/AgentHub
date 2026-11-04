@@ -2,8 +2,13 @@
   <el-dialog :model-value="modelValue" title="添加子 Agent" width="560px" @close="emit('update:modelValue', false)">
     <el-form label-width="88px">
       <el-form-item label="子 Agent" required>
-        <el-select v-model="form.childAgentId" filterable placeholder="只能选择已启用的 ReAct" style="width: 100%">
-          <el-option v-for="item in options" :key="item.id" :label="`${item.name} · ${item.code}`" :value="item.id" />
+        <el-select v-model="form.childAgentId" filterable placeholder="只能选择已启用且获本编排允许的子 Agent" style="width: 100%">
+          <el-option
+            v-for="item in options"
+            :key="item.id"
+            :label="`${item.name} · ${item.code} · ${childModeLabel(item.runMode)}`"
+            :value="item.id"
+          />
         </el-select>
       </el-form-item>
       <el-form-item label="意图" required>
@@ -28,7 +33,14 @@
         </el-collapse-item>
       </el-collapse>
     </el-form>
-    <el-empty v-if="loaded && !options.length" description="没有可添加的 ReAct Agent" />
+    <el-empty v-if="loaded && !options.length" description="没有可添加的子 Agent（受允许的子运行模式约束）" />
+    <!-- 被「允许被编排调用」挡下的 Agent 直接从下拉移除，并说明数量，避免用户以为列表漏数据 -->
+    <p v-if="hiddenByAllow > 0" class="hidden-hint">
+      另有 {{ hiddenByAllow }} 个 Agent 未允许被编排调用，已从候选列表隐藏
+    </p>
+    <p v-if="hiddenByMode > 0" class="hidden-hint">
+      另有 {{ hiddenByMode }} 个 Agent 的运行模式不在「允许的子运行模式」内，已隐藏（可在策略区勾选）
+    </p>
     <template #footer>
       <el-button @click="emit('update:modelValue', false)">取消</el-button>
       <el-button type="primary" :loading="saving" @click="submit">添加</el-button>
@@ -38,18 +50,22 @@
 
 <script setup lang="ts">
 /**
- * 选择一层 ReAct 子 Agent。所属域：agent。
+ * 选择一层子 Agent（ReAct / 计划执行）。所属域：agent。
  * 主路径只要求子 Agent + 意图；route_key / sort 默认由后端生成，高级里可选手填。
+ * 候选集受父编排「允许的子运行模式」约束：未勾选计划执行时，P&E 子不进下拉。
  */
 import { reactive, ref, watch } from 'vue'
 import { ElMessage } from 'element-plus'
 import { pageAgents } from '@/api/agent'
 import type { AgentCard } from '@/types/agent'
+import { MA_CHILD_MODE_PLAN, MA_CHILD_MODE_REACT, normalizeChildRunModes } from '@/utils/orchestrationValidation'
 
 const props = defineProps<{
   modelValue: boolean
   parentId: number
   boundIds: number[]
+  /** 父编排允许的子运行模式；空按仅 ReAct */
+  allowedChildRunModes?: string[]
 }>()
 
 const emit = defineEmits<{
@@ -62,6 +78,10 @@ const emit = defineEmits<{
 
 const saving = ref(false)
 const loaded = ref(false)
+/** 因 allow_orchestrated=0 被隐藏的数量，仅用于提示，不参与提交 */
+const hiddenByAllow = ref(0)
+/** 因父编排未允许其运行模式被隐藏的数量 */
+const hiddenByMode = ref(0)
 const advancedOpen = ref<string[]>([])
 const options = ref<AgentCard[]>([])
 const form = reactive({
@@ -83,18 +103,41 @@ watch(
     form.intent = ''
     form.sortOrder = undefined
     advancedOpen.value = []
+    hiddenByAllow.value = 0
+    hiddenByMode.value = 0
     saving.value = false
     load()
   }
 )
 
+/**
+ * @param mode 运行模式
+ * @return 中文模式名（下拉 label 用）
+ */
+function childModeLabel(mode?: string): string {
+  if (mode === MA_CHILD_MODE_PLAN) {
+    return '计划执行'
+  }
+  if (mode === MA_CHILD_MODE_REACT) {
+    return 'ReAct'
+  }
+  return mode || '未知'
+}
+
 async function load() {
   loaded.value = false
-  const { data } = await pageAgents({ current: 1, size: 100, runMode: 'REACT', status: 1 })
+  // 不再只查 REACT：父编排可能已允许计划执行；一律按 allowed 集合在前端过滤
+  const { data } = await pageAgents({ current: 1, size: 100, status: 1 })
+  const allowed = normalizeChildRunModes(props.allowedChildRunModes)
   const bound = new Set(props.boundIds)
-  options.value = (data.data?.records || []).filter(
-    (item) => item.id !== props.parentId && item.runMode === 'REACT' && item.status === 1 && !bound.has(item.id)
+  const enabled = (data.data?.records || []).filter(
+    (item) => item.id !== props.parentId && item.status === 1 && !bound.has(item.id) && item.runMode !== 'ROUTER'
   )
+  const modeAllowed = enabled.filter((item) => allowed.includes(String(item.runMode)))
+  hiddenByMode.value = enabled.length - modeAllowed.length
+  // 关掉「允许被编排调用」的 Agent 不进下拉：后端保存校验同样会拒，提前过滤少一次失败往返
+  options.value = modeAllowed.filter((item) => item.allowOrchestrated !== false)
+  hiddenByAllow.value = modeAllowed.length - options.value.length
   loaded.value = true
 }
 
@@ -147,5 +190,12 @@ function submit() {
   font-size: 12px;
   color: #9ca3af;
   line-height: 1.4;
+}
+
+.hidden-hint {
+  margin: 4px 0 0;
+  color: #b45309;
+  font-size: 12px;
+  line-height: 1.5;
 }
 </style>

@@ -15,6 +15,11 @@ public class AgentCardResp {
     private String code;
     private String description;
     private String runMode;
+    /**
+     * 是否允许被编排挂为子专家。编排「添加候选」弹层据此过滤私有 Agent；
+     * ROUTER 恒为 false，列表里不会出现可被挂的 ROUTER。
+     */
+    private Boolean allowOrchestrated;
     private Integer status;
     private LocalDateTime updateTime;
 }

@@ -11,6 +11,7 @@ import com.agenthub.obs.domain.model.SpanClose;
 import com.agenthub.obs.domain.model.SpanType;
 import com.agenthub.obs.domain.service.ObsAttrs;
 import com.agenthub.runtime.domain.model.EffectiveLimits;
+import com.agenthub.runtime.domain.model.ChildPlanPendingView;
 import com.agenthub.runtime.domain.model.GeneratedFile;
 import com.agenthub.runtime.domain.model.MeterScope;
 import com.agenthub.runtime.domain.model.PendingPlan;
@@ -23,6 +24,7 @@ import com.agenthub.runtime.domain.model.StepView;
 import com.agenthub.runtime.domain.model.TrialPlan;
 import com.agenthub.runtime.domain.model.TrialTrace;
 import com.agenthub.runtime.domain.model.TrialTurn;
+import com.agenthub.runtime.domain.service.CauseDigest;
 import com.agenthub.runtime.domain.service.LimitHitReasons;
 import com.agenthub.runtime.domain.service.PlanOutputParser;
 import com.agenthub.runtime.domain.service.RuntimeLimitResolver;
@@ -101,12 +103,11 @@ public class PlanTrialExecutor {
         AgentRuntimeConfig runtime = AgentRuntimeConfig.parse(agent.getRuntimeConfigJson(), agent.getRunMode());
         int maxSteps = runtime.maxPlanStepsOrDefault();
         EffectiveLimits limits = limitResolver.resolve(agent);
-        TrialPlan plan = loader.loadSingleAgent(agent, userText);
-        // 记忆段与「本轮已注入的长期记忆」一次取回，规划与各步执行都用同一份依据
-        TrialMemoryCoordinator.Augmented augmented = memory.augmentSystemWithFacts(
-                memorySession(agent.getId(), userId, sessionId), plan.getSystemPrompt());
-        plan.setSystemPrompt(augmented.systemPrompt());
-        plan.setToolArgsFacts(augmented.injectedFacts());
+        // 记忆段在装配时进链（位于工具目录之前），规划与各步执行都用同一份依据
+        TrialMemoryCoordinator.Augmented recalled = memory.recallDurable(
+                memorySession(agent.getId(), userId, sessionId));
+        TrialPlan plan = loader.loadSingleAgent(agent, userText, recalled.memoryBlock());
+        plan.setToolArgsFacts(recalled.injectedFacts());
         memory.publishInjection(plan);
         loader.tightenTimeout(plan, limits.timeoutMs());
 
@@ -148,12 +149,15 @@ public class PlanTrialExecutor {
             }
             return new PlannedTurn(planId, steps, state, plan, modelUser);
         } catch (RuntimeException ex) {
+            // 规划失败要能定位到具体出站：带 Throwable 打全栈，并在 PLAN 步骤写脱敏 cause
+            log.warn("计划生成失败 agentId={} type={} cause={}",
+                    agent.getId(), ex.getClass().getSimpleName(), CauseDigest.of(ex), ex);
             if (trace != null) {
                 SpanClose err = new SpanClose();
                 err.setStatus(ObsStatus.ERROR);
                 err.setErrorSummary(ex.getMessage());
                 err.setOutputText(ex.getMessage());
-                err.setAttrsJson(ObsAttrs.withBrief(null, "规划失败"));
+                err.setAttrsJson(ObsAttrs.withCause(ObsAttrs.withBrief(null, "规划失败"), CauseDigest.of(ex)));
                 trace.close(planSpan, err);
             }
             throw ex;
@@ -175,6 +179,21 @@ public class PlanTrialExecutor {
      * @throws TrialFailure 某步重试耗尽（错误说明里带已完成摘要）或墙钟超时
      */
     public ExecutedTurn execute(AgentDef agent, PendingPlan pending, TrialProgress progress) {
+        return execute(agent, pending, progress, true);
+    }
+
+    /**
+     * 按 seq 串行执行整份计划，最后汇总成一次终答。
+     *
+     * @param agent      Agent 定义
+     * @param pending    已批准或自动执行的计划（含复用所需的用户侧文本）
+     * @param progress   可空；推 step / reasoning / tool / assistant
+     * @param openRoot   true＝自己开 AGENT 根（单 Agent 试跑）；false＝复用调用方已挂的父
+     *                   （编排子派发：PLAN 与各步成为该子 AGENT 下的串行兄弟，不出现假并行）
+     * @return 终答与 token 合计、各步 traces
+     * @throws TrialFailure 某步重试耗尽（错误说明里带已完成摘要）或墙钟超时
+     */
+    public ExecutedTurn execute(AgentDef agent, PendingPlan pending, TrialProgress progress, boolean openRoot) {
         AgentRuntimeConfig runtime = AgentRuntimeConfig.parse(agent.getRuntimeConfigJson(), agent.getRunMode());
         int maxRetries = runtime.maxStepRetriesOrDefault();
         EffectiveLimits limits = limitResolver.resolve(agent);
@@ -183,7 +202,7 @@ public class PlanTrialExecutor {
         ObsTraceScope trace = ObsTraceHolder.current();
         Long rootSpan = null;
         Long previousParent = trace == null ? null : trace.implicitParent();
-        if (trace != null) {
+        if (trace != null && openRoot) {
             // 复用调用方已挂的父（AGENT 根或 PLAN）；没有父时才自己开根
             rootSpan = trace.open(SpanType.AGENT, agent.getName(), agent.getId(), previousParent, null);
             trace.bindParent(rootSpan);
@@ -230,19 +249,22 @@ public class PlanTrialExecutor {
                 progress.assistant(answer);
             }
             if (trace != null) {
-                closeSpan(trace, rootSpan, ObsStatus.OK, "计划执行完成", null);
+                closeSpan(trace, rootSpan, ObsStatus.OK, "计划执行完成", null, null);
             }
             return new ExecutedTurn(merged, pending.planId(), List.copyOf(doneResults));
         } catch (TrialFailure ex) {
             pushPlan(progress, new PlanView(pending.planId(), PlanState.FAILED, List.of()));
             if (trace != null) {
-                closeSpan(trace, rootSpan, ObsStatus.ERROR, ex.getMessage(), ex.getMessage());
+                closeSpan(trace, rootSpan, ObsStatus.ERROR, ex.getMessage(), ex.getMessage(), ex);
             }
             throw ex;
         } catch (RuntimeException ex) {
+            // 计划整体失败：带栈，并在根 AGENT 上写脱敏 cause
+            log.warn("计划执行失败 planId={} type={} cause={}",
+                    pending.planId(), ex.getClass().getSimpleName(), CauseDigest.of(ex), ex);
             pushPlan(progress, new PlanView(pending.planId(), PlanState.FAILED, List.of()));
             if (trace != null) {
-                closeSpan(trace, rootSpan, ObsStatus.ERROR, ex.getMessage(), ex.getMessage());
+                closeSpan(trace, rootSpan, ObsStatus.ERROR, ex.getMessage(), ex.getMessage(), ex);
             }
             throw ex;
         } finally {
@@ -276,14 +298,15 @@ public class PlanTrialExecutor {
                 trace.bindParent(stepSpan);
             }
             try {
-                // 每步重装提示词：用本轮用户原文判触发关键词，保证硬触发的 Skill 在每一步都在场
-                TrialPlan plan = loader.loadSingleAgent(agent, pending.userText());
-                TrialMemoryCoordinator.Augmented augmented = memory.augmentSystemWithFacts(
-                        memorySession(agent.getId(), pending.userId(), pending.sessionId()), plan.getSystemPrompt());
-                // 本步提示在已装配提示末尾追加「只做这一步」，平台前缀仍在最前
-                plan.setSystemPrompt(prompts.stepPrompt(augmented.systemPrompt(), steps, step,
+                // 每步重装提示词：用本轮用户原文判触发关键词，保证硬触发的 Skill 在每一步都在场；
+                // 记忆段同样在装配时进链，与规划阶段同一位置（工具目录之前）
+                TrialMemoryCoordinator.Augmented recalled = memory.recallDurable(
+                        memorySession(agent.getId(), pending.userId(), pending.sessionId()));
+                TrialPlan plan = loader.loadSingleAgent(agent, pending.userText(), recalled.memoryBlock());
+                // 本步提示在已装配提示末尾追加「只做这一步」，平台前缀与锁定段仍在最前
+                plan.setSystemPrompt(prompts.stepPrompt(plan.getSystemPrompt(), steps, step,
                         pending.userText(), doneResults));
-                plan.setToolArgsFacts(augmented.injectedFacts());
+                plan.setToolArgsFacts(recalled.injectedFacts());
                 memory.publishInjection(plan);
                 long remainMs = Math.max(1000L, (deadlineNanos - System.nanoTime()) / 1_000_000L);
                 loader.tightenTimeout(plan, Math.min(plan.getLimits().timeoutMs(), remainMs));
@@ -291,22 +314,26 @@ public class PlanTrialExecutor {
                         progress);
                 collect(merged, turn);
                 if (trace != null) {
-                    closeSpan(trace, stepSpan, ObsStatus.OK, "该步完成", null);
+                    closeSpan(trace, stepSpan, ObsStatus.OK, "该步完成", null, null);
                 }
                 return turn.getAssistantText();
             } catch (TrialFailure ex) {
                 last = ex;
                 if (trace != null) {
-                    closeSpan(trace, stepSpan, ObsStatus.ERROR, ex.getMessage(), ex.getMessage());
+                    closeSpan(trace, stepSpan, ObsStatus.ERROR, ex.getMessage(), ex.getMessage(), ex);
                 }
                 // 撞墙钟没有重试价值：重试只会更快撞下一次
                 if (LimitHitReasons.TIMEOUT.equals(ex.getFinishReason())) {
                     throw ex;
                 }
             } catch (RuntimeException ex) {
+                // 单步失败可能是工具出站或模型出站：带栈，并在 STEP 上写脱敏 cause
+                log.warn("计划步骤失败 sessionId={} seq={} attempt={} type={} cause={}",
+                        pending.sessionId(), step.seq(), attempt, ex.getClass().getSimpleName(),
+                        CauseDigest.of(ex), ex);
                 last = ex;
                 if (trace != null) {
-                    closeSpan(trace, stepSpan, ObsStatus.ERROR, ex.getMessage(), ex.getMessage());
+                    closeSpan(trace, stepSpan, ObsStatus.ERROR, ex.getMessage(), ex.getMessage(), ex);
                 }
             } finally {
                 // 回到该步之前的父，重试与后续步骤都挂回同一层
@@ -473,10 +500,25 @@ public class PlanTrialExecutor {
             public void file(GeneratedFile file) {
                 progress.file(file);
             }
+
+            /**
+             * 子计划待批必须透传：单步静音只针对助手正文，批准气泡不能被吞掉。
+             */
+            @Override
+            public void childPlanPending(ChildPlanPendingView pending) {
+                progress.childPlanPending(pending);
+            }
         };
     }
 
-    private void closeSpan(ObsTraceScope trace, Long spanId, ObsStatus status, String output, String error) {
+    /**
+     * 关一个 AGENT/PLAN/STEP 步骤。
+     *
+     * @param error 失败时的原始异常，可空；非空时脱敏后写进 attrs.cause，
+     *              让面板上「这一步失败」能直接看到真正的 cause
+     */
+    private void closeSpan(ObsTraceScope trace, Long spanId, ObsStatus status, String output, String error,
+                           Throwable cause) {
         if (trace == null || spanId == null) {
             return;
         }
@@ -486,6 +528,7 @@ public class PlanTrialExecutor {
         if (error != null) {
             close.setErrorSummary(error);
         }
+        close.setAttrsJson(ObsAttrs.withCause(null, CauseDigest.of(cause)));
         trace.close(spanId, close);
     }
 

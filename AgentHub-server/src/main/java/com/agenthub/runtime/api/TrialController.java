@@ -5,6 +5,7 @@ import cn.dev33.satoken.annotation.SaMode;
 import com.agenthub.common.api.PageResult;
 import com.agenthub.common.api.Result;
 import com.agenthub.runtime.api.dto.AgentOptionResp;
+import com.agenthub.runtime.api.dto.ChildPlanPendingResp;
 import com.agenthub.runtime.api.dto.EventResp;
 import com.agenthub.runtime.api.dto.MessageReq;
 import com.agenthub.runtime.api.dto.MessageResp;
@@ -16,6 +17,7 @@ import com.agenthub.runtime.api.dto.SessionTitleReq;
 import com.agenthub.runtime.application.TrialRunAppService;
 import com.agenthub.runtime.application.TrialSessionAppService;
 import com.agenthub.runtime.api.sse.ServletSseFrameSink;
+import com.agenthub.runtime.domain.model.ChildPlanPendingView;
 import com.agenthub.runtime.domain.model.PlanStep;
 import com.agenthub.runtime.domain.model.PlanView;
 import com.fasterxml.jackson.databind.ObjectMapper;
@@ -28,6 +30,7 @@ import org.springframework.web.bind.annotation.PathVariable;
 import org.springframework.web.bind.annotation.PostMapping;
 import org.springframework.web.bind.annotation.RequestBody;
 import org.springframework.web.bind.annotation.RequestMapping;
+import org.springframework.web.bind.annotation.RequestParam;
 import org.springframework.web.bind.annotation.RestController;
 
 import java.io.IOException;
@@ -212,25 +215,53 @@ public class TrialController {
      * 计划执行模式：批准待执行的计划，续跑剩余步骤并汇总终答。
      * 与发送同一套落库语义，返回本轮新事件；没有待批准计划时返回业务错误。
      *
-     * @param id 会话主键
-     * @return 本轮事件与终答预览
+     * <p>带 {@code routeKey} 时走「编排根下的子计划批准」：不续跑根侧步骤，
+     * 只唤醒等待中的 P&E 子线程，根 SSE 连接会继续推送后续增量。
+     *
+     * @param id       会话主键
+     * @param routeKey 子路由键，可空；空＝单 Agent 计划批准
+     * @return 本轮事件（单 Agent）或轻量确认（子计划）
      */
     @SaCheckPermission(RuntimePermissions.RUN)
     @PostMapping("/sessions/{id}/plan/approve")
-    public Result<MessageResp> approvePlan(@PathVariable Long id) {
+    public Result<MessageResp> approvePlan(@PathVariable Long id,
+                                          @RequestParam(required = false) String routeKey) {
+        if (routeKey != null && !routeKey.isBlank()) {
+            return Result.ok(runs.approveChildPlan(id, routeKey.trim()));
+        }
         return Result.ok(runs.approvePlan(id));
     }
 
     /**
      * 计划执行模式：取消待执行的计划。不执行任何步骤，只落一条「计划已取消」。
      *
-     * @param id 会话主键
-     * @return 本轮事件
+     * <p>带 {@code routeKey} 时拒绝的是编排根下的某个子计划：该子失败占位，其它子继续。
+     *
+     * @param id       会话主键
+     * @param routeKey 子路由键，可空
+     * @return 本轮事件（单 Agent）或轻量确认（子计划）
      */
     @SaCheckPermission(RuntimePermissions.RUN)
     @PostMapping("/sessions/{id}/plan/reject")
-    public Result<MessageResp> rejectPlan(@PathVariable Long id) {
+    public Result<MessageResp> rejectPlan(@PathVariable Long id,
+                                          @RequestParam(required = false) String routeKey) {
+        if (routeKey != null && !routeKey.isBlank()) {
+            return Result.ok(runs.rejectChildPlan(id, routeKey.trim()));
+        }
         return Result.ok(runs.rejectPlan(id));
+    }
+
+    /**
+     * 编排根下当前待批的子计划。刷新页面后靠它恢复「批准 / 拒绝」按钮；
+     * 没有待批子（未开规划确认、已批准/拒绝、已超时）时 data 为 null。
+     *
+     * @param id 根会话主键
+     * @return 子计划视图或 null
+     */
+    @SaCheckPermission(RuntimePermissions.LIST)
+    @GetMapping("/sessions/{id}/plan/child-pending")
+    public Result<ChildPlanPendingResp> pendingChildPlan(@PathVariable Long id) {
+        return Result.ok(runs.pendingChildPlan(id).map(this::toChildPlanResp).orElse(null));
     }
 
     /**
@@ -259,6 +290,33 @@ public class TrialController {
         resp.setSummary(plan.summary());
         List<PlanResp.Step> steps = new ArrayList<>();
         for (PlanStep step : plan.steps()) {
+            PlanResp.Step one = new PlanResp.Step();
+            one.setSeq(step.seq());
+            one.setTitle(step.title());
+            one.setDetail(step.detail());
+            steps.add(one);
+        }
+        resp.setSteps(steps);
+        return resp;
+    }
+
+    /**
+     * 子计划视图 → 接口响应。与 SSE {@code ma_child_plan_pending} 同一套字段。
+     *
+     * @param view 子计划待批视图
+     * @return 接口对象
+     */
+    private ChildPlanPendingResp toChildPlanResp(ChildPlanPendingView view) {
+        ChildPlanPendingResp resp = new ChildPlanPendingResp();
+        resp.setRouteKey(view.routeKey());
+        resp.setChildAgentId(view.childAgentId());
+        resp.setChildAgentName(view.childAgentName());
+        resp.setPlanId(view.planId());
+        resp.setState(view.state());
+        resp.setRunState(view.runState());
+        resp.setSummary(view.summary());
+        List<PlanResp.Step> steps = new ArrayList<>();
+        for (PlanStep step : view.steps()) {
             PlanResp.Step one = new PlanResp.Step();
             one.setSeq(step.seq());
             one.setTitle(step.title());

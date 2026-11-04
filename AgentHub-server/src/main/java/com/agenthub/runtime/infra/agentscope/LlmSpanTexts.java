@@ -24,6 +24,14 @@ public final class LlmSpanTexts {
     /** 与 {@code PromptAssembler} 的业务段标记一致 */
     static final String BUSINESS_MARK = "【业务提示词】";
 
+    /**
+     * 业务段之后可能紧跟的段头。业务要点必须以这些标记为右边界，
+     * 否则会把记忆 / Skill / 工具目录一起当成业务提示截进右栏。
+     */
+    private static final String[] NEXT_SECTION_MARKS = {
+            "【工作记忆】", "【用户偏好】", "## Skill ", "## 强制 Skill ", "## 工具目录"
+    };
+
     /** AgentScope 流式假工具名，禁止写入 output_text */
     static final String FRAGMENT_NAME = "__fragment__";
 
@@ -47,11 +55,17 @@ public final class LlmSpanTexts {
         text.append("[SYSTEM]\n平台前缀：已应用");
         PromptInjectionStats injection = PromptInjectionHolder.get();
         if (injection != null) {
+            // 一行给全「改了之后到底省在哪」：保护区 / 可压区 / 记忆 / Skill / 目录 / schema / 用户
             text.append("\ntools_injected=").append(injection.getToolsInjected())
                     .append(" skills_injected=").append(injection.getSkillsInjected())
                     .append(" skills_hard_triggered=").append(injection.getSkillsHardTriggered())
                     .append(" chars=").append(injection.totalChars())
+                    .append(" tokens_est=").append(injection.totalTokens())
                     .append(" truncated=").append(injection.isTruncated());
+            String breakdown = injection.breakdown();
+            if (breakdown != null && !breakdown.isBlank()) {
+                text.append("\n分段：").append(breakdown);
+            }
         }
         boolean firstRound = !hasAssistant(messages);
         if (firstRound) {
@@ -219,6 +233,15 @@ public final class LlmSpanTexts {
         return 0;
     }
 
+    /**
+     * 首轮业务提示要点：取【业务提示词】标记之后到下一个段落标记之前的内容。
+     * <p>
+     * 业务段现在收口在 L3 追加区之后，其后紧接记忆 / Skill / 工具目录，
+     * 因此不能「一直取到正文结尾」，否则右栏的业务要点会把偏好和工具清单一起带出来。
+     *
+     * @param messages 交给模型的完整消息列表
+     * @return 压成一行的要点；无业务段时 null
+     */
     private static String businessTip(List<Msg> messages) {
         for (Msg message : messages) {
             if (message == null || message.getRole() != MsgRole.SYSTEM) {
@@ -232,7 +255,15 @@ public final class LlmSpanTexts {
             if (mark < 0) {
                 continue;
             }
-            String business = body.substring(mark + BUSINESS_MARK.length()).trim();
+            String business = body.substring(mark + BUSINESS_MARK.length());
+            // 截到下一个段落标记：记忆 / Skill / 工具目录都不是「业务提示」的组成部分
+            for (String next : NEXT_SECTION_MARKS) {
+                int at = business.indexOf(next);
+                if (at >= 0) {
+                    business = business.substring(0, at);
+                }
+            }
+            business = business.trim();
             if (business.isEmpty()) {
                 return null;
             }

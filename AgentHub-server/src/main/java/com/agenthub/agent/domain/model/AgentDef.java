@@ -17,6 +17,11 @@ public class AgentDef {
     private String description;
     /** REACT 或 ROUTER */
     private String runMode;
+    /**
+     * 是否允许被编排挂为子专家。1=允许，0=禁止，可空（旧数据/未迁移时按模式兜底）。
+     * <p>ROUTER 恒为禁止；其它模式由配置页开关决定，默认允许。
+     */
+    private Integer allowOrchestrated;
     /** 用户业务段。平台前缀不在此字段，试跑时由组装器加在前面 */
     private String systemPrompt;
     /** CHAT 引用的 L2 模板 id；空=按用途取当前生效版 */
@@ -47,4 +52,18 @@ public class AgentDef {
     private LocalDateTime createTime;
     private Long updatedBy;
     private LocalDateTime updateTime;
+
+    /**
+     * 是否允许被编排挂为子专家（运行期/保存校验统一走这里）。
+     * <p>ROUTER 恒为 false：编排根不能作子，与 {@code AgentRoutePolicy} 的「子必须 REACT」同口径。
+     * <p>列可空时非 ROUTER 视为允许：兼容加列前读到的旧对象，避免存量 REACT 子被误判成私有。
+     *
+     * @return true 表示可以被编排根选为候选
+     */
+    public boolean allowOrchestratedOn() {
+        if (AgentRunMode.ROUTER.name().equals(runMode)) {
+            return false;
+        }
+        return allowOrchestrated == null || allowOrchestrated != 0;
+    }
 }

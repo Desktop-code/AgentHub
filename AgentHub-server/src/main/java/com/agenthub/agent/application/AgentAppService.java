@@ -15,6 +15,7 @@ import com.agenthub.agent.api.dto.RuntimeLimitsViewResp;
 import com.agenthub.agent.domain.model.AgentDef;
 import com.agenthub.agent.domain.model.AgentPromptBinding;
 import com.agenthub.agent.domain.model.AgentQuery;
+import com.agenthub.agent.domain.model.AgentRoute;
 import com.agenthub.agent.domain.model.AgentRunMode;
 import com.agenthub.agent.domain.model.AgentRuntimeConfig;
 import com.agenthub.agent.domain.model.AgentStatus;
@@ -24,6 +25,7 @@ import com.agenthub.agent.domain.repository.AgentRouteRepository;
 import com.agenthub.agent.domain.repository.AgentSkillBindRepository;
 import com.agenthub.agent.domain.repository.AgentToolBindRepository;
 import com.agenthub.agent.domain.service.AgentCodePolicy;
+import com.agenthub.agent.domain.service.AgentCriticPolicy;
 import com.agenthub.agent.domain.service.AgentPromptTemplatePort;
 import com.agenthub.agent.domain.service.PlatformPromptPrefix;
 import com.agenthub.audit.domain.OperLogWriter;
@@ -177,6 +179,8 @@ public class AgentAppService {
                 req.getToolMaxRetries(), req.getMaxToolCalls(), req.getLlmTimeoutMs(),
                 req.getMaxLlmCalls(), req.getConsecutiveFailAbort(), req.getToolResultMaxChars());
         agent.setRuntimeConfigJson(toRuntimeJson(req.getRuntimeConfig(), agent.getRunMode()));
+        // 允许被编排调用：未传按模式默认，ROUTER 强制 0（编排根不可作子）
+        agent.setAllowOrchestrated(AgentChecks.allowOrchestrated(req.getAllowOrchestrated(), agent.getRunMode()));
         agent.setStatus(AgentStatus.ENABLED);
         Long id = agents.insert(agent, operatorContext.requireUserId());
         operLogWriter.write("agent", "create", "agent_def", String.valueOf(id), "创建 Agent " + agent.getName());
@@ -203,6 +207,18 @@ public class AgentAppService {
                 req.getToolMaxRetries(), req.getMaxToolCalls(), req.getLlmTimeoutMs(),
                 req.getMaxLlmCalls(), req.getConsecutiveFailAbort(), req.getToolResultMaxChars());
         existing.setRuntimeConfigJson(toRuntimeJson(req.getRuntimeConfig(), existing.getRunMode()));
+        // 反向校验：已挂候选若用了本次要禁用的子运行模式，拒存；避免库里留下「校验区报错但已落库」的矛盾配置
+        assertChildRunModesStillAllowed(id, existing.getRunMode(), existing.getRuntimeConfigJson());
+        // 评审环角色闸：执行者恰好 1 个 + 评审者合法，保存即拦，避免「存得下、跑必挂」
+        assertCriticRoles(id, existing.getRunMode(), existing.getRuntimeConfigJson());
+        /*
+         * 未传 = 本次不改：保留已落库值，避免其它「整份保存」的旁路接口漏传时把私有开关悄悄打开。
+         * ROUTER 无论传什么都强制 0（allowOrchestratedOn 对 ROUTER 恒 false）。
+         */
+        Boolean allowReq = req.getAllowOrchestrated();
+        existing.setAllowOrchestrated(allowReq == null
+                ? (existing.allowOrchestratedOn() ? 1 : 0)
+                : AgentChecks.allowOrchestrated(allowReq, existing.getRunMode()));
         // 只有显式传了 prompt 才改四列，避免只改名称时把 L3 配置清空
         if (req.getPrompt() != null) {
             applyPromptBinding(existing, req.getPrompt());
@@ -329,6 +345,7 @@ public class AgentAppService {
         resp.setCode(agent.getCode());
         resp.setDescription(agent.getDescription());
         resp.setRunMode(agent.getRunMode());
+        resp.setAllowOrchestrated(agent.allowOrchestratedOn());
         resp.setStatus(agent.getStatus());
         resp.setUpdateTime(agent.getUpdateTime());
         return resp;
@@ -340,6 +357,7 @@ public class AgentAppService {
         resp.setCode(agent.getCode());
         resp.setDescription(agent.getDescription());
         resp.setRunMode(agent.getRunMode());
+        resp.setAllowOrchestrated(agent.allowOrchestratedOn());
         resp.setSystemPrompt(agent.getSystemPrompt());
         // L3 回显：用途按运行模式推导，与 applyPromptBinding 的校验口径同源
         resp.setPrompt(promptBindingResp(agent));
@@ -392,25 +410,88 @@ public class AgentAppService {
     private static String toRuntimeJson(AgentRuntimeConfigReq req, String runMode) {
         AgentRuntimeConfig config = new AgentRuntimeConfig();
         if (req != null) {
+            config.setMaTemplate(req.getMaTemplate());
+            config.setMaContextPolicy(req.getMaContextPolicy());
+            config.setMaAllowParentHistoryWhenSingle(req.getMaAllowParentHistoryWhenSingle());
             config.setMultiIntentEnabled(req.getMultiIntentEnabled());
             config.setAnswerMode(req.getAnswerMode());
             config.setMaxRouteChildren(req.getMaxRouteChildren());
             config.setRequirePlanConfirm(req.getRequirePlanConfirm());
             config.setMaxPlanSteps(req.getMaxPlanSteps());
             config.setMaxStepRetries(req.getMaxStepRetries());
+            config.setMaChildRunModesAllowed(req.getMaChildRunModesAllowed());
+            config.setMaCriticMaxRounds(req.getMaCriticMaxRounds());
+            config.setMaCriticAgentId(req.getMaCriticAgentId());
         }
         return AgentRuntimeConfig.toStorageJson(config, runMode);
+    }
+
+    /**
+     * 保存编排策略前的反向校验：已挂候选若使用了即将被禁用的子运行模式，直接拒存。
+     *
+     * <p>为什么要在服务端拦：前端校验只是提示，把 allowed 缩回仅 ReAct 后若库里仍挂着 P&E 子，
+     * 下一轮试跑会静默跳过该子，用户却以为它还参与编排。这里让保存失败并给出中文原因，
+     * 由用户先移除/停用候选再关开关，状态永远自洽。
+     *
+     * @param parentAgentId 父 Agent 主键
+     * @param parentRunMode 父运行模式（非 ROUTER 直接跳过）
+     * @param runtimeJson   本次要落库的运行配置 JSON
+     * @throws BizException 已有候选的运行模式不在新的允许集合内
+     */
+    private void assertChildRunModesStillAllowed(Long parentAgentId, String parentRunMode, String runtimeJson) {
+        if (!AgentRunMode.ROUTER.name().equals(parentRunMode)) {
+            return;
+        }
+        AgentRuntimeConfig next = AgentRuntimeConfig.parse(runtimeJson, parentRunMode);
+        for (AgentRoute route : routes.listByParentId(parentAgentId)) {
+            AgentDef child = lookup.find(route.getChildAgentId()).orElse(null);
+            if (child == null || next.allowsChildRunMode(child.getRunMode())) {
+                continue;
+            }
+            String mode = AgentRunMode.PLAN_AND_EXECUTE.name().equals(child.getRunMode()) ? "计划执行" : "ReAct";
+            throw new BizException(ErrorCode.BAD_REQUEST,
+                    "已挂候选「" + child.getName() + "」使用" + mode
+                            + "模式，请先移除或停用该候选，再关闭「允许的子运行模式」");
+        }
+    }
+
+    /**
+     * 评审环保存闸：模板为 CRITIC_LOOP 时，执行者候选必须恰好 1 个，且评审者合法、非自评。
+     *
+     * <p>与 {@link AgentCriticPolicy} 同口径：执行者按「启用路由行 + 子可用」统计，
+     * 评审者从候选计数中排除（它挂不挂成候选都不影响执行者个数）。
+     *
+     * @param parentAgentId 父 Agent 主键
+     * @param parentRunMode 父运行模式（非 ROUTER 直接跳过）
+     * @param runtimeJson   本次要落库的运行配置 JSON
+     * @throws BizException 执行者不是 1 个、未选评审者或评审者非法
+     */
+    private void assertCriticRoles(Long parentAgentId, String parentRunMode, String runtimeJson) {
+        if (!AgentRunMode.ROUTER.name().equals(parentRunMode)) {
+            return;
+        }
+        AgentRuntimeConfig next = AgentRuntimeConfig.parse(runtimeJson, parentRunMode);
+        if (!next.isCriticLoop()) {
+            return;
+        }
+        AgentCriticPolicy.assertRoles(next, routes.listByParentId(parentAgentId), lookup::find);
     }
 
     private static AgentRuntimeConfigResp toRuntimeResp(AgentDef agent) {
         AgentRuntimeConfig config = AgentRuntimeConfig.parse(agent.getRuntimeConfigJson(), agent.getRunMode());
         AgentRuntimeConfigResp resp = new AgentRuntimeConfigResp();
+        resp.setMaTemplate(config.maTemplateOrDefault());
+        resp.setMaContextPolicy(config.maContextPolicyOrDefault());
+        resp.setMaAllowParentHistoryWhenSingle(config.allowParentHistoryWhenSingleOn());
         resp.setMultiIntentEnabled(config.multiIntentOn());
         resp.setAnswerMode(config.answerModeEnum().name());
         resp.setMaxRouteChildren(config.maxRouteChildrenOrDefault());
         resp.setRequirePlanConfirm(config.requirePlanConfirmOn());
         resp.setMaxPlanSteps(config.maxPlanStepsOrDefault());
         resp.setMaxStepRetries(config.maxStepRetriesOrDefault());
+        resp.setMaChildRunModesAllowed(config.childRunModesAllowedOrDefault());
+        resp.setMaCriticMaxRounds(config.criticMaxRoundsOrDefault());
+        resp.setMaCriticAgentId(config.getMaCriticAgentId());
         return resp;
     }
 

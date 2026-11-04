@@ -1,6 +1,8 @@
 package com.agenthub.runtime.infra.agentscope;
 
 import com.agenthub.runtime.domain.model.BuiltinToolSpec;
+import com.agenthub.runtime.domain.service.CauseDigest;
+import com.agenthub.runtime.domain.service.LimitHitReasons;
 import com.agenthub.runtime.domain.service.TrialFailure;
 import io.agentscope.core.tool.AgentTool;
 import io.agentscope.core.tool.Toolkit;
@@ -53,8 +55,10 @@ public class BuiltinToolkitAssembler {
                 try {
                     toolkit.registerTool(bean);
                 } catch (RuntimeException ex) {
-                    log.warn("注册内置工具失败 name={} type={}", name, ex.getClass().getSimpleName());
-                    throw new TrialFailure("内置工具「" + name + "」注册失败");
+                    // 注册失败会让整轮直接起不来：带栈打，才能看出是重名、schema 非法还是引擎反射问题
+                    log.warn("注册内置工具失败 name={} type={} cause={}",
+                            name, ex.getClass().getSimpleName(), CauseDigest.of(ex), ex);
+                    throw new TrialFailure("内置工具「" + name + "」注册失败", LimitHitReasons.ERROR, ex);
                 }
             }
             if (toolkit.getTool(name) == null) {

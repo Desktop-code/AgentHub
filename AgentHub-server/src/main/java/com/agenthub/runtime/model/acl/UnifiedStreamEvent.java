@@ -20,6 +20,14 @@ import java.util.Map;
 @AllArgsConstructor
 public class UnifiedStreamEvent {
 
+    /**
+     * error 事件的扩展键：上游原始（已脱敏）失败原因，例如「上游返回 HTTP 400：image too large」。
+     *
+     * <p>为什么不直接用 {@link #content}：content 会随 SSE 直接进用户可见的错误帧，必须保持固定话术；
+     * 排障需要的具体原因单独放这里，只供引擎侧异常与日志消费。
+     */
+    public static final String EXT_UPSTREAM_DETAIL = "upstream.detail";
+
     /** 事件类型；为 null 视为映射错误，下游按未知类型忽略 */
     private UnifiedStreamEventType type;
 

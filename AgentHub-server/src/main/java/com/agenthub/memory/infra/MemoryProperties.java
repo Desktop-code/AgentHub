@@ -20,9 +20,19 @@ public class MemoryProperties {
 
     private int shortDefaultTtlSec = 86400;
     private int shortDefaultTtlMaxSec = 604800;
-    private int ctxMaxTurns = 20;
+    /**
+     * 近轮滑动窗：最多保留多少轮（user + assistant 各算一轮）。
+     * <p>
+     * 默认从 20 降到 12：每轮都要在每轮对话里重新出站，20 轮往往只是把同一段历史反复计费；
+     * 更早的内容已由滚动摘要覆盖（摘要与近轮已去重，不会双份）。
+     */
+    private int ctxMaxTurns = 12;
     private int ctxMaxTurnsCap = 50;
-    private int ctxMaxChars = 32000;
+    /**
+     * 近轮滑动窗的字符上限。默认从 32000 降到 16000：
+     * 32000 字已接近多数模型的上下文窗口大头，留给系统提示与工具结果的空间会被压到很小。
+     */
+    private int ctxMaxChars = 16000;
     private int ctxMaxCharsCap = 64000;
     private int ctxIdleTtlSec = 7200;
     private int ctxIdleTtlMaxSec = 86400;

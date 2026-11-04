@@ -1,11 +1,14 @@
 package com.agenthub.runtime.infra.agentscope;
 
+import com.agenthub.runtime.domain.service.CauseDigest;
 import com.agenthub.runtime.domain.service.RunBudget;
 import com.agenthub.runtime.domain.service.TrialFailure;
 import io.agentscope.core.message.ToolResultBlock;
 import io.agentscope.core.message.ToolResultState;
 import io.agentscope.core.tool.AgentTool;
 import io.agentscope.core.tool.ToolCallParam;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import reactor.core.publisher.Mono;
 
 import java.util.Map;
@@ -15,6 +18,8 @@ import java.util.Map;
  * 计次、连续失败中止；结果正文不截断（截断只发生在进模型消息路径）。
  */
 public final class BudgetingAgentTool implements AgentTool {
+
+    private static final Logger log = LoggerFactory.getLogger(BudgetingAgentTool.class);
 
     private final AgentTool delegate;
     private final RunBudget budget;
@@ -89,7 +94,22 @@ public final class BudgetingAgentTool implements AgentTool {
                     if (!(error instanceof TrialFailure)) {
                         budget.afterTool(false);
                     }
+                    // 工具链里的异常常被引擎转成错误块丢掉栈：这里带 Throwable 打一次，
+                    // 才能看出是参数、网络还是工具内部实现炸了
+                    log.warn("工具执行异常 tool={} type={} cause={}",
+                            safeName(), error.getClass().getSimpleName(), CauseDigest.of(error), error);
                 });
+    }
+
+    /**
+     * @return 工具名；委托对象抛异常时退回占位，日志本身不允许再失败
+     */
+    private String safeName() {
+        try {
+            return delegate.getName();
+        } catch (RuntimeException ex) {
+            return "未知工具";
+        }
     }
 
     private static boolean isSuccess(ToolResultBlock result) {

@@ -1,5 +1,6 @@
 package com.agenthub.runtime.application;
 
+import com.agenthub.runtime.domain.model.ChildPlanPendingView;
 import com.agenthub.runtime.domain.model.EventType;
 import com.agenthub.runtime.domain.model.GeneratedFile;
 import com.agenthub.runtime.domain.model.PlanView;
@@ -175,6 +176,17 @@ public final class PlanProgressRecorder implements TrialProgress {
                 GeneratedFileMarker.payload(file.fileName(), file.size())));
         if (delegate != null) {
             delegate.file(file);
+        }
+    }
+
+    /**
+     * 子计划待批准：不落库为时间线事件（刷新恢复走 child-pending 接口），只透传给 SSE / 快照。
+     * {@inheritDoc}
+     */
+    @Override
+    public void childPlanPending(ChildPlanPendingView pending) {
+        if (delegate != null) {
+            delegate.childPlanPending(pending);
         }
     }
 

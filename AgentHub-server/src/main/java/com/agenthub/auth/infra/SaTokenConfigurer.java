@@ -11,7 +11,8 @@ import org.springframework.web.servlet.config.annotation.WebMvcConfigurer;
 
 /**
  * Sa-Token 拦截。所属域：auth。
- * 约束：不注册 Spring Security 过滤器；除登录和健康检查外，/api 都要登录。
+ * 约束：不注册 Spring Security 过滤器；除登录、健康检查与 OpenAPI 外，/api 都要登录。
+ * OpenAPI（{@code /api/open/**}）免用户 Bearer，改由应用密钥拦截器（admin 域）校验 app_key + secret。
  * 浏览器跨域会先发 OPTIONS，预检没有 Token，不能当成未登录。
  * 滑动续期：checkLogin 通过后 renewTimeout，与 active-timeout 的 autoRenew 一起续命。
  */
@@ -35,7 +36,8 @@ public class SaTokenConfigurer implements WebMvcConfigurer {
             SaTokenSlidingRenew.renewAbsoluteTimeout();
         }))
                 .addPathPatterns("/api/**")
-                .excludePathPatterns("/api/auth/login", "/api/health", "/swagger-ui.html", "/swagger-ui/**", "/v3/api-docs/**");
+                .excludePathPatterns("/api/auth/login", "/api/health", "/api/open/**",
+                        "/swagger-ui.html", "/swagger-ui/**", "/v3/api-docs/**");
     }
 
     /**

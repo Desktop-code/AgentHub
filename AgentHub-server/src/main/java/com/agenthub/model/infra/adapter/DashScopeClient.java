@@ -11,7 +11,7 @@ import java.util.Map;
 
 /**
  * 灵积探活。所属域：model。
- * 经 {@link ModelPurposeMatrix} 分流：Chat / Embedding 按 baseUrl 选兼容或原生；
+ * 经 {@link ModelPurposeMatrix} 分流：Chat / Embedding / 视觉按 baseUrl 选兼容或原生；
  * RERANK <b>一律</b>打原生 text-rerank（与 compatible-mode 无关），禁止走 Chat。
  */
 @Component
@@ -40,6 +40,7 @@ public class DashScopeClient implements ModelClient {
             case CHAT -> compatible ? compatibleChat(command) : nativeChat(command);
             case EMBEDDING -> compatible ? compatibleEmbed(command) : nativeEmbed(command);
             case RERANK -> nativeRerank(command);
+            case VISION -> nativeVision(command, compatible);
             default -> ProbeResult.unsupported(route.message());
         };
     }
@@ -85,5 +86,31 @@ public class DashScopeClient implements ModelClient {
                 "parameters", Map.of("top_n", 1)));
         String url = DashScopeNativePaths.join(command.baseUrl(), DashScopeNativePaths.TEXT_RERANK);
         return http.postJson(url, command.apiKey(), body, "ok");
+    }
+
+    /**
+     * 视觉连通测：只有 compatible-mode 基址才有 OpenAI 多模态 chat/completions。
+     * <p>
+     * 原生 generation 端点的多模态报文（input.messages + image 列表）各版本差异大且未在本仓验证过，
+     * 因此基址不是 compatible-mode 时明确「用途未适配」而不是拼一个可能 400 的请求——
+     * 这类失败会被误读成「模型坏了」。不发 HTTP 也能避免用户白等一次超时。
+     *
+     * @param command    出站参数
+     * @param compatible 基址是否为兼容模式
+     * @return 探活结果
+     */
+    private ProbeResult nativeVision(ProbeCommand command, boolean compatible) {
+        if (!compatible) {
+            return ProbeResult.unsupported("用途未适配：DASHSCOPE×VISION，视觉探活仅支持 compatible-mode 基址"
+                    + "（如 https://dashscope.aliyuncs.com/compatible-mode/v1）");
+        }
+        Map<String, Object> userMessage = Map.of(
+                "role", "user",
+                "content", VisionProbePayload.openAiContent());
+        String body = http.json(Map.of(
+                "model", command.modelId(),
+                "messages", List.of(userMessage),
+                "max_tokens", 16));
+        return http.postJson(http.join(command.baseUrl(), "/chat/completions"), command.apiKey(), body, "视觉连通");
     }
 }

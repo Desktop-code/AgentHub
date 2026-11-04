@@ -1,7 +1,10 @@
 package com.agenthub.runtime.model.acl.impl;
 
+import com.agenthub.runtime.domain.service.CauseDigest;
 import com.agenthub.runtime.model.acl.UnifiedFinishReason;
 import com.agenthub.runtime.model.acl.UnifiedStreamEvent;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 import java.time.Duration;
 import java.util.ArrayList;
@@ -16,8 +19,12 @@ import java.util.concurrent.atomic.AtomicBoolean;
  */
 final class UpstreamFailures {
 
+    private static final Logger log = LoggerFactory.getLogger(UpstreamFailures.class);
+
     /** 上游连接失败类异常的简单名关键字，用于把异常归到「连接失败」文案 */
     private static final String[] CONNECT_HINTS = {"Connect", "Unresolved", "UnknownHost", "Connection"};
+
+    static final String DETAIL_KEY = UnifiedStreamEvent.EXT_UPSTREAM_DETAIL;
 
     private UpstreamFailures() {
     }
@@ -53,14 +60,39 @@ final class UpstreamFailures {
      * @return 至多若干 completed + 一个 error + 一个 done
      */
     static List<UnifiedStreamEvent> errorEvents(Throwable error, VendorStreamDecoder decoder, AtomicBoolean doneSent) {
+        // 出站收尾点：Adapter 内部把异常转成 error 事件后就不再上抛，
+        // 若不在这里留一条带栈日志，上层只能看到「模型调用失败」这句固定文案
+        log.warn("模型出站失败 type={} summary={} detail={} cause={}",
+                error == null ? "null" : error.getClass().getSimpleName(), describe(error),
+                detail(error), CauseDigest.of(error), error);
         List<UnifiedStreamEvent> events = new ArrayList<>(decoder.drainCompleted());
         UnifiedFinishReason reason = isTimeout(error) ? UnifiedFinishReason.TIMEOUT : UnifiedFinishReason.ERROR;
-        events.add(UnifiedStreamEvent.error(describe(error), reason));
+        UnifiedStreamEvent refused = UnifiedStreamEvent.error(describe(error), reason);
+        // 上游原始原因（已脱敏）走 extensions，不进 content：
+        // content 是 SSE 上给用户看的错误帧，必须保持固定话术；extensions 只喂引擎侧异常与日志
+        String detail = detail(error);
+        if (detail != null) {
+            refused.getExtensions().put(DETAIL_KEY, detail);
+        }
+        events.add(refused);
         // 错误路径同样必须有 done，否则前端会一直等 Loading
         if (doneSent.compareAndSet(false, true)) {
             events.add(UnifiedStreamEvent.done(reason, decoder.usage()));
         }
         return events;
+    }
+
+    /**
+     * 上游返回的脱敏原因（含状态码与响应体摘要）。只用于日志与异常 cause，不进用户可见文案。
+     *
+     * @param error 原始异常，可空
+     * @return 形如 {@code 上游返回 HTTP 400：image too large} 的文本；非 HTTP 错误时为 null
+     */
+    static String detail(Throwable error) {
+        if (error instanceof UpstreamHttpException http) {
+            return http.getMessage();
+        }
+        return null;
     }
 
     /**

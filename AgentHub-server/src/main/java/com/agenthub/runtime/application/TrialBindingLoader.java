@@ -65,13 +65,26 @@ public class TrialBindingLoader {
      * @throws TrialFailure 未启用、不是 REACT，或没有对话模型
      */
     public TrialPlan loadReact(AgentDef agent, String userQuery) {
+        return loadReact(agent, userQuery, null);
+    }
+
+    /**
+     * 带记忆段的 REACT 装配（Router 子节点 / 纯 ReAct 主链路）。
+     *
+     * @param agent     定义，调用方已确认存在
+     * @param userQuery 子节点的本轮用户输入
+     * @param memory    记忆段正文，可空
+     * @return 计划
+     * @throws TrialFailure 未启用、不是 REACT，或没有对话模型
+     */
+    public TrialPlan loadReact(AgentDef agent, String userQuery, String memory) {
         if (agent.getStatus() == null || agent.getStatus() != AgentStatus.ENABLED) {
             throw new TrialFailure("Agent 未启用");
         }
         if (!AgentRunMode.REACT.name().equals(agent.getRunMode())) {
             throw new TrialFailure("子 Agent 必须是 REACT");
         }
-        return loadSingleAgent(agent, userQuery);
+        return loadSingleAgent(agent, userQuery, memory);
     }
 
     /**
@@ -85,6 +98,19 @@ public class TrialBindingLoader {
      * @throws TrialFailure 未启用、不是 REACT / PLAN_AND_EXECUTE，或没有对话模型
      */
     public TrialPlan loadSingleAgent(AgentDef agent, String userQuery) {
+        return loadSingleAgent(agent, userQuery, null);
+    }
+
+    /**
+     * 带记忆段的装配。记忆必须在这一步进链（位于工具目录之前），不能在装配完成后往尾部追加。
+     *
+     * @param agent     定义，调用方已确认存在
+     * @param userQuery 本轮用户输入；用于判定 Skill 触发关键词，命中则强制注入该 Skill 正文
+     * @param memory    记忆段正文（【工作记忆】/【用户偏好】），可空
+     * @return 计划
+     * @throws TrialFailure 未启用、不是 REACT / PLAN_AND_EXECUTE，或没有对话模型
+     */
+    public TrialPlan loadSingleAgent(AgentDef agent, String userQuery, String memory) {
         if (agent.getStatus() == null || agent.getStatus() != AgentStatus.ENABLED) {
             throw new TrialFailure("Agent 未启用");
         }
@@ -97,8 +123,9 @@ public class TrialBindingLoader {
         plan.setAgentName(agent.getName());
         plan.setRunMode(agent.getRunMode());
         plan.setModelInstanceId(modelId);
-        TrialPromptFactory.Built built = promptFactory.build(agent, userQuery);
+        TrialPromptFactory.Built built = promptFactory.build(agent, userQuery, memory);
         plan.setSystemPrompt(built.prompt());
+        plan.setLayout(built.layout());
         plan.setTools(built.tools());
         plan.setMcpTools(built.mcpTools());
         plan.setInjection(built.stats());

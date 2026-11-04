@@ -8,6 +8,7 @@ import com.agenthub.memory.domain.model.MemoryPolicy;
 import com.agenthub.memory.domain.model.WindowState;
 import com.agenthub.memory.domain.service.ContextWindowStore;
 import com.agenthub.memory.domain.service.SessionTurnSource;
+import com.agenthub.memory.domain.service.TurnDeduplicator;
 import org.springframework.dao.DataAccessException;
 import org.springframework.stereotype.Component;
 
@@ -74,6 +75,14 @@ public class ContextWindowFacade {
 
     /**
      * 组进模型的用户侧正文：摘要、近轮（不含刚追加的当前用户话）、短期记忆、当前用户话。
+     * <p>
+     * <b>摘要与近轮去重（P1 硬要求）</b>：滚动摘要的输入就是被裁掉的旧轮。模型若照抄原文，
+     * 摘要里就含有近轮那段话，随后【最近对话】再给一遍，同一段内容付两次费，还会让模型
+     * 误以为那件事发生了两遍。这里逐条过滤「已被摘要覆盖」的近轮，并保证近轮整体
+     * 被摘要覆盖时整段不输出。
+     * <p>
+     * 判据在 {@link com.agenthub.runtime.domain.service.UserPromptSections#turnCoveredBySummary}，
+     * 去空白后比对子串；太短的轮次不判重（正常对话节奏不该被当成重复）。
      *
      * @param state   已含当前用户轮的窗口
      * @param current 当前用户话
@@ -82,10 +91,11 @@ public class ContextWindowFacade {
      */
     public String renderUser(WindowState state, String current, List<MemoryItem> shorts) {
         StringBuilder text = new StringBuilder();
-        if (state.getSummary() != null && !state.getSummary().isBlank()) {
-            text.append("【会话摘要】\n").append(state.getSummary().trim()).append("\n\n");
+        String summary = state.getSummary() == null ? "" : state.getSummary().trim();
+        if (!summary.isBlank()) {
+            text.append("【会话摘要】\n").append(summary).append("\n\n");
         }
-        String recent = recentWithoutCurrent(state.getTurns(), current);
+        String recent = recentWithoutCurrent(state.getTurns(), current, summary);
         if (!recent.isBlank()) {
             text.append("【最近对话】\n").append(recent).append('\n');
         }
@@ -174,7 +184,18 @@ public class ContextWindowFacade {
         }
     }
 
-    private String recentWithoutCurrent(List<ContextTurn> turns, String current) {
+    /**
+     * 近轮渲染，排除当前用户话与已被摘要覆盖的轮次。
+     * <p>
+     * 为什么必须逐条过滤而不是整体比对：摘要通常只覆盖最老的那几轮，
+     * 近轮里往往既有重复的（早期）也有新增的（刚发生）。整段比对会漏掉「部分重复」这种最常见形态。
+     *
+     * @param turns   窗口内全部轮次（含当前用户轮）
+     * @param current 当前用户话，用于排除最后一条
+     * @param summary 会话摘要正文，可空；空则不做去重
+     * @return 渲染后的近轮正文；全部被覆盖时为空串
+     */
+    private String recentWithoutCurrent(List<ContextTurn> turns, String current, String summary) {
         if (turns == null || turns.isEmpty()) {
             return "";
         }
@@ -184,7 +205,23 @@ public class ContextWindowFacade {
                 && current.equals(last.getText())) {
             end = turns.size() - 1;
         }
-        return com.agenthub.memory.domain.service.MemoryTexts.renderTurns(turns.subList(0, end)).trim();
+        List<ContextTurn> kept = new ArrayList<>(end);
+        for (ContextTurn turn : turns.subList(0, end)) {
+            // 摘要已经写过这件事，近轮再给一遍就是同一份内容双份占用
+            if (TurnDeduplicator.covered(summary, turn.getText())) {
+                continue;
+            }
+            kept.add(turn);
+        }
+        if (kept.isEmpty()) {
+            return "";
+        }
+        // 整体再判一次：逐条放过但拼起来仍被摘要覆盖（短句各自不足阈值、合计重复）时整段省略
+        String rendered = com.agenthub.memory.domain.service.MemoryTexts.renderTurns(kept).trim();
+        if (TurnDeduplicator.blockCovered(summary, rendered)) {
+            return "";
+        }
+        return rendered;
     }
 
     private BizException window(RuntimeException ex, String message) {

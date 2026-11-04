@@ -192,6 +192,9 @@ public class TraceQueryAppService {
         resp.setTokenTotal(trace.getTokenTotal());
         resp.setPrimaryModelName(trace.getPrimaryModelName());
         resp.setFinishReason(trace.getFinishReason());
+        // trace 级扩展信息：失败时带脱敏 cause，面板第一行就能看到真正原因
+        resp.setAttrsJson(trace.getAttrsJson());
+        resp.setCause(ObsAttrs.causeOf(trace.getAttrsJson()));
         return resp;
     }
 
@@ -240,6 +243,25 @@ public class TraceQueryAppService {
         resp.setToolsInjected(ObsAttrs.intField(span.getAttrsJson(), "tools_injected"));
         resp.setSkillsInjected(ObsAttrs.intField(span.getAttrsJson(), "skills_injected"));
         resp.setPromptChars(ObsAttrs.intField(span.getAttrsJson(), "prompt_chars"));
+        // 分段计量：面板据此展示「钱花在哪一段」，缺失时字段为 null 由前端省略
+        resp.setPromptTokensEst(ObsAttrs.intField(span.getAttrsJson(), "prompt_tokens_est"));
+        resp.setProtectedChars(ObsAttrs.intField(span.getAttrsJson(), "protected_chars"));
+        resp.setSoftChars(ObsAttrs.intField(span.getAttrsJson(), "soft_chars"));
+        resp.setMemoryChars(ObsAttrs.intField(span.getAttrsJson(), "memory_chars"));
+        resp.setSkillChars(ObsAttrs.intField(span.getAttrsJson(), "skill_chars"));
+        resp.setCatalogChars(ObsAttrs.intField(span.getAttrsJson(), "catalog_chars"));
+        resp.setSchemaChars(ObsAttrs.intField(span.getAttrsJson(), "schema_chars"));
+        resp.setUserChars(ObsAttrs.intField(span.getAttrsJson(), "user_chars"));
+        // 用户侧细分与工具句柄：P1 的省 token 来源要能在面板上逐项读到
+        resp.setUserSummaryChars(ObsAttrs.intField(span.getAttrsJson(), "user_summary_chars"));
+        resp.setUserRecentChars(ObsAttrs.intField(span.getAttrsJson(), "user_recent_chars"));
+        resp.setUserShortChars(ObsAttrs.intField(span.getAttrsJson(), "user_short_chars"));
+        resp.setUserCurrentChars(ObsAttrs.intField(span.getAttrsJson(), "user_current_chars"));
+        resp.setToolResultsOffloaded(ObsAttrs.intField(span.getAttrsJson(), "tool_results_offloaded"));
+        resp.setToolResultsOffloadedChars(
+                ObsAttrs.intField(span.getAttrsJson(), "tool_results_offloaded_chars"));
+        resp.setForcedSkillClipped(ObsAttrs.intField(span.getAttrsJson(), "forced_skill_clipped"));
+        resp.setPromptBreakdown(ObsAttrs.textField(span.getAttrsJson(), "prompt_breakdown"));
         resp.setTruncated(ObsAttrs.truncated(span.getAttrsJson()));
         // 仅当新列皆空时带回旧 content，供右栏兼容
         if (isBlank(span.getInputText()) && isBlank(span.getOutputText()) && !isBlank(span.getContent())) {

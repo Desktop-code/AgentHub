@@ -62,6 +62,23 @@ public interface TraceRecorder {
     }
 
     /**
+     * 同 {@link #finish(ObsTraceScope, ObsStatus, String, String)}，并写入 trace 级扩展信息。
+     *
+     * <p>为什么 trace 级也要一份：面板上整次提问是最外层一行，失败时若只写 error_summary，
+     * 看到的就是一句人话文案；把脱敏 cause 写进 trace.attrs_json，排障不必先展开每一层步骤。
+     *
+     * @param scope        当前 trace
+     * @param status       终态
+     * @param errorSummary 已打码的失败说明，可空
+     * @param finishReason 可空；空则按 status 推导
+     * @param attrsJson    扩展 JSON（已脱敏），可空
+     */
+    default void finish(ObsTraceScope scope, ObsStatus status, String errorSummary, String finishReason,
+                        String attrsJson) {
+        finish(scope, status, errorSummary, finishReason);
+    }
+
+    /**
      * 会话被取消时，把该会话下仍为 RUNNING 的 trace 和步骤改成 CANCELLED。
      *
      * @param sessionId 试跑会话

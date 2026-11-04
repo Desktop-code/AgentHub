@@ -86,7 +86,40 @@ export interface ObsSpan {
   brief?: string | null
   toolsInjected?: number | null
   skillsInjected?: number | null
+  /** 系统提示 + Skill + 目录 + schema + 用户消息的字符合计 */
   promptChars?: number | null
+  /** 上述合计的出站前估算 token（与 usage 精确值不同，用于看占比） */
+  promptTokensEst?: number | null
+  /** 受保护前缀字符数（L1 + 平台追加句 + 锁定段），红线，永不被裁 */
+  protectedChars?: number | null
+  /** 可压区字符数（开放段 + L3 追加 + 历史业务段） */
+  softChars?: number | null
+  /** 记忆段字符数；被预算让出时为 0 */
+  memoryChars?: number | null
+  /** Skill 段字符数（强制 + 按需） */
+  skillChars?: number | null
+  /** 工具目录字符数 */
+  catalogChars?: number | null
+  /** 可调用工具 schema 字符数（走 tools 字段） */
+  schemaChars?: number | null
+  /** 本轮用户侧消息字符数 */
+  userChars?: number | null
+  /** 其中【会话摘要】段字符数 */
+  userSummaryChars?: number | null
+  /** 其中【最近对话】段字符数 */
+  userRecentChars?: number | null
+  /** 其中【短期记忆】段字符数 */
+  userShortChars?: number | null
+  /** 其中本轮用户原文段字符数 */
+  userCurrentChars?: number | null
+  /** 本轮被落盘成文件的工具结果条数 */
+  toolResultsOffloaded?: number | null
+  /** 被落盘工具结果的原始正文合计字符数 */
+  toolResultsOffloadedChars?: number | null
+  /** 被硬上限截断正文的强制 Skill 条数 */
+  forcedSkillClipped?: number | null
+  /** 分段占比人话摘要，直接展示即可 */
+  promptBreakdown?: string | null
   truncated?: boolean | null
   /** 旧正文兼容；仅当 input/output 皆空时可能出现 */
   content?: string | null

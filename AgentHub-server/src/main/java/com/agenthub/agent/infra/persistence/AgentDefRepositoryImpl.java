@@ -79,6 +79,7 @@ public class AgentDefRepositoryImpl implements AgentDefRepository {
         entity.setCode(agent.getCode());
         entity.setDescription(agent.getDescription());
         entity.setRunMode(agent.getRunMode());
+        entity.setAllowOrchestrated(agent.getAllowOrchestrated());
         entity.setSystemPrompt(agent.getSystemPrompt());
         entity.setPromptTemplateId(agent.getPromptTemplateId());
         entity.setTemplateVersion(agent.getTemplateVersion());
@@ -102,6 +103,7 @@ public class AgentDefRepositoryImpl implements AgentDefRepository {
                 .set(AgentDefEntity::getCode, agent.getCode())
                 .set(AgentDefEntity::getDescription, agent.getDescription())
                 .set(AgentDefEntity::getRunMode, agent.getRunMode())
+                .set(AgentDefEntity::getAllowOrchestrated, agent.getAllowOrchestrated())
                 .set(AgentDefEntity::getSystemPrompt, agent.getSystemPrompt())
                 .set(AgentDefEntity::getPromptTemplateId, agent.getPromptTemplateId())
                 .set(AgentDefEntity::getTemplateVersion, agent.getTemplateVersion())
@@ -159,6 +161,7 @@ public class AgentDefRepositoryImpl implements AgentDefRepository {
         agent.setCode(entity.getCode());
         agent.setDescription(entity.getDescription());
         agent.setRunMode(entity.getRunMode());
+        agent.setAllowOrchestrated(entity.getAllowOrchestrated());
         agent.setSystemPrompt(entity.getSystemPrompt());
         agent.setPromptTemplateId(entity.getPromptTemplateId());
         agent.setTemplateVersion(entity.getTemplateVersion());

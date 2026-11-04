@@ -6,6 +6,7 @@ import com.agenthub.agent.domain.model.AgentToolBind;
 import com.agenthub.agent.domain.repository.AgentSkillBindRepository;
 import com.agenthub.agent.domain.repository.AgentToolBindRepository;
 import com.agenthub.agent.infra.PromptBudgetProperties;
+import com.agenthub.prompt.domain.model.PromptLayout;
 import com.agenthub.runtime.domain.model.BuiltinToolSpec;
 import com.agenthub.runtime.domain.model.McpToolSpec;
 import com.agenthub.runtime.domain.model.PromptInjectionStats;
@@ -32,6 +33,10 @@ import java.util.Set;
 
 /**
  * 按预算组装系统提示和可调用工具。所属域：runtime。
+ * <p>
+ * 段落顺序固定为「L1 与锁定段（受保护）→ 开放段与 L3 → 记忆 → Skill → 工具目录」，
+ * 由 {@link SystemPromptAssembler} 产出前半段、{@link PromptInjectionComposer} 续拼后半段，本类只做编排。
+ * <p>
  * Skill 目录始终带 title + description（场景），供模型判断何时加载；正文只在预算内灌入。
  * 触发关键词命中时改为强制注入：该 Skill 全文带固定前缀直接进上下文，不经模型决定。
  * 可调用工具要么完整 schema 进预算并注册，要么本轮不暴露；禁止「仅留名当可调用」。
@@ -60,7 +65,7 @@ public class TrialPromptFactory {
      * @param items          工具项
      * @param sources        区分 BUILTIN 和 MCP
      * @param skills         Skill 正文
-     * @param prompts        平台前缀在业务段之前
+     * @param prompts        平台前缀、锁定段在业务段之前
      * @param budgets        三类字符预算
      * @param builtinSchemas BUILTIN 的 Java schema；MCP 用库表 schema
      */
@@ -85,27 +90,53 @@ public class TrialPromptFactory {
      * @return 系统提示、可注册内置/MCP 工具、装配说明和注入统计
      */
     public Built build(AgentDef agent) {
-        return build(agent, null);
+        return build(agent, null, null);
     }
 
     /**
+     * 不带记忆段的装配：测试与不需要长期记忆的路径使用。
+     *
      * @param agent     已启用的定义
      * @param userQuery 本轮用户原文；命中某 Skill 的 trigger_keywords 即强制注入该 Skill 正文
      * @return 系统提示、可注册内置/MCP 工具、装配说明和注入统计
      */
     public Built build(AgentDef agent, String userQuery) {
+        return build(agent, userQuery, null);
+    }
+
+    /**
+     * 正式装配：组装顺序为「L1 与锁定段 → 开放段与 L3 → 记忆 → Skill → 工具目录」。
+     *
+     * @param agent     已启用的定义
+     * @param userQuery 本轮用户原文；命中某 Skill 的 trigger_keywords 即强制注入该 Skill 正文
+     * @param memory    记忆段正文（【工作记忆】/【用户偏好】，由 {@code TrialMemoryCoordinator} 取得）；
+     *                  可空。它必须在这里进链，不能在装配完成后往提示词尾部拼——
+     *                  那样记忆会落在工具目录之后，模型先读工具清单再读偏好
+     * @return 系统提示、结构描述、可注册内置/MCP 工具、装配说明和注入统计
+     */
+    public Built build(AgentDef agent, String userQuery, String memory) {
         List<String> notices = new ArrayList<>();
         List<PromptInjectionComposer.SkillInput> skillInputs = skillsOf(agent.getId(), userQuery);
         PreparedTools prepared = toolsOf(agent.getId(), notices);
+        SystemPromptAssembler.Assembled assembled = prompts.assemble(agent, userQuery);
         PromptInjectionComposer.Outcome outcome = PromptInjectionComposer.compose(
-                prompts.build(agent, userQuery),
+                new PromptInjectionComposer.Assembled(assembled.text(), assembled.layout()),
+                memory,
                 skillInputs,
                 prepared.inputs(),
                 new PromptInjectionComposer.Budgets(
-                        budgets.systemBudget(), budgets.skillsBudget(), budgets.toolsSchemaBudget()));
+                        budgets.systemBudget(), budgets.skillsBudget(), budgets.toolsSchemaBudget(),
+                        budgets.forcedSkillBudget(),
+                        budgets.onDemandSkillBody()
+                                ? PromptInjectionComposer.OnDemandBodyMode.FIT_BUDGET
+                                : PromptInjectionComposer.OnDemandBodyMode.HEADER_ONLY));
         // 通知按段区分：其它段截断 ≠ 工具额度耗尽，避免「仍有工具额度」时误报未暴露
         if (outcome.stats().isPromptSegmentTruncated()) {
             notices.add("提示词已按预算截断");
+        }
+        // 强制 Skill 被硬上限裁过：模型执行的是残缺规则，必须让使用者看见
+        if (outcome.stats().getForcedSkillsClipped() > 0) {
+            notices.add("强制 Skill 正文超过平台上限已截断：" + outcome.stats().getForcedSkillsClipped() + " 条");
         }
         List<BuiltinToolSpec> builtins = new ArrayList<>();
         List<McpToolSpec> mcps = new ArrayList<>();
@@ -136,7 +167,8 @@ public class TrialPromptFactory {
                 builtins.add(spec);
             }
         }
-        return new Built(outcome.prompt(), builtins, mcps, notices, outcome.stats());
+        PromptLayout layout = assembled.layout() == null ? PromptLayout.EMPTY : assembled.layout();
+        return new Built(outcome.prompt(), layout, builtins, mcps, notices, outcome.stats());
     }
 
     /**
@@ -251,13 +283,14 @@ public class TrialPromptFactory {
     }
 
     /**
-     * @param prompt   系统提示
+     * @param prompt   系统提示（顺序：L1 与锁定段 → 开放段与 L3 → 记忆 → Skill → 工具目录）
+     * @param layout   结构描述：受保护前缀长度与各段正文，供出站校验与预算裁剪使用
      * @param tools    需要注册的内置工具
      * @param mcpTools 需要注册可调用句柄的 MCP 工具
      * @param notices  装配说明
      * @param stats    注入统计
      */
-    public record Built(String prompt, List<BuiltinToolSpec> tools, List<McpToolSpec> mcpTools,
+    public record Built(String prompt, PromptLayout layout, List<BuiltinToolSpec> tools, List<McpToolSpec> mcpTools,
                         List<String> notices, PromptInjectionStats stats) {
     }
 }

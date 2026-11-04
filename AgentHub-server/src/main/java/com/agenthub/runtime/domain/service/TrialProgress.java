@@ -1,5 +1,6 @@
 package com.agenthub.runtime.domain.service;
 
+import com.agenthub.runtime.domain.model.ChildPlanPendingView;
 import com.agenthub.runtime.domain.model.GeneratedFile;
 import com.agenthub.runtime.domain.model.PlanView;
 import com.agenthub.runtime.domain.model.StepView;
@@ -87,5 +88,17 @@ public interface TrialProgress {
      */
     default void file(GeneratedFile file) {
         // 不产生文件的实现（大多数工具）默认忽略
+    }
+
+    /**
+     * 编排根下某个 P&E 子进入「计划待批准」。
+     *
+     * <p>与单 Agent 的 {@link #plan(PlanView)} 分开：根侧的批准按钮要按 route_key 定位到具体子，
+     * 而单 Agent 计划卡只按 planId 更新；混用会让前端把子计划误当成根计划。
+     *
+     * @param pending 子计划待批视图（routeKey / 子标识 / 步骤 / 根暂停态）
+     */
+    default void childPlanPending(ChildPlanPendingView pending) {
+        // REACT / 单 Agent 路径不会产生子计划待批，默认忽略
     }
 }

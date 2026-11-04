@@ -30,7 +30,7 @@ public enum ModelCapability {
     EMBEDDING(ModelCapabilityGroup.RETRIEVAL),
     /** 重排序；须走协议×用途矩阵（如 DASHSCOPE text-rerank），禁冒充 Chat */
     RERANK(ModelCapabilityGroup.RETRIEVAL),
-    /** 视觉 / 版面理解（含原 OCR）；本期连通测明确「用途未适配」 */
+    /** 视觉 / 版面理解（含原 OCR）；OPENAI_COMPAT 与 DashScope 兼容模式发 1x1 图片，其余仍「用途未适配」 */
     VISION(ModelCapabilityGroup.MULTIMODAL),
     /** 语音识别；可配，连通测明确「用途未适配」 */
     ASR(ModelCapabilityGroup.AUDIO),
@@ -90,6 +90,16 @@ public enum ModelCapability {
      */
     public boolean usesRerank() {
         return this == RERANK;
+    }
+
+    /**
+     * 是否走视觉探活 / 出站。当前仅 OPENAI_COMPAT 有图文混排路径，
+     * 具体适配与否仍以 {@code ModelPurposeMatrix} 为准。
+     *
+     * @return 视觉用途
+     */
+    public boolean usesVision() {
+        return this == VISION;
     }
 
     /**

@@ -5,6 +5,7 @@ import com.agenthub.memory.infra.MemoryProperties;
 import com.agenthub.runtime.domain.model.RunSession;
 import com.agenthub.runtime.domain.model.RunStatus;
 import com.agenthub.runtime.domain.repository.RunSessionRepository;
+import com.agenthub.runtime.domain.service.CauseDigest;
 import com.agenthub.runtime.domain.service.SessionIdle;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -79,10 +80,11 @@ public class TrialSessionCloser {
                 handled++;
                 sleepBetween();
             } catch (RuntimeException ex) {
-                // 不把异常抛到 scheduling 线程空转刷；已终态的会话不会再进 listRunning
-                log.warn("空闲收口或批抽失败 sessionId={} type={} msg={}",
+                // 不把异常抛到 scheduling 线程空转刷；已终态的会话不会再进 listRunning。
+                // 必须带 Throwable：收口失败会让会话一直挂在 RUNNING，栈是唯一线索
+                log.warn("空闲收口或批抽失败 sessionId={} type={} cause={}",
                         session == null ? null : session.getId(),
-                        ex.getClass().getSimpleName(), ex.getMessage());
+                        ex.getClass().getSimpleName(), CauseDigest.of(ex), ex);
             }
         }
     }
