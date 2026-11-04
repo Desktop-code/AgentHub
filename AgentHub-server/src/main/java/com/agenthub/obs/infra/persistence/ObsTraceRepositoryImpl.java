@@ -22,7 +22,7 @@ import java.util.Optional;
 
 /**
  * obs_trace 仓储实现。所属域：obs。Entity 不出本包。
- * 编排预留列不在 insert 里赋值，保持数据库默认 NULL。
+ * 对话场景编排列保持 NULL；工作流场景由应用层传入 workflow_run_id 与 attrs。
  */
 @Repository
 public class ObsTraceRepositoryImpl implements ObsTraceRepository {
@@ -47,6 +47,19 @@ public class ObsTraceRepositoryImpl implements ObsTraceRepository {
         entity.setAppId(trace.getAppId());
         entity.setChannel(trace.getChannel() == null ? ObsChannel.CONSOLE.name() : trace.getChannel().name());
         entity.setTitle(trace.getTitle());
+        // 编排列：对话场景为空；工作流根 trace 写 workflow_run_id
+        entity.setWorkflowRunId(trace.getWorkflowRunId());
+        entity.setTaskNodeId(trace.getTaskNodeId());
+        entity.setRootTraceId(trace.getRootTraceId());
+        entity.setRoundCount(trace.getRoundCount());
+        entity.setTokenPrompt(trace.getTokenPrompt());
+        entity.setTokenCompletion(trace.getTokenCompletion());
+        entity.setTokenTotal(trace.getTokenTotal());
+        entity.setPrimaryModelInstanceId(trace.getPrimaryModelInstanceId());
+        entity.setPrimaryModelName(trace.getPrimaryModelName());
+        entity.setFinishReason(trace.getFinishReason());
+        // 创建时即可带编排扩展（工作流名 / 版本 / runId），已由应用层打码
+        entity.setAttrsJson(trace.getAttrsJson());
         entity.setStatus(trace.getStatus() == null ? ObsStatus.RUNNING.name() : trace.getStatus().name());
         entity.setStartTime(trace.getStartTime() == null ? LocalDateTime.now() : trace.getStartTime());
         entity.setEndTime(trace.getEndTime());
@@ -145,9 +158,16 @@ public class ObsTraceRepositoryImpl implements ObsTraceRepository {
         long current = Math.max(query.getCurrent(), 1);
         long size = Math.min(Math.max(query.getSize(), 1), 100);
         LambdaQueryWrapper<ObsTraceEntity> wrapper = new LambdaQueryWrapper<ObsTraceEntity>()
-                .eq(ObsTraceEntity::getSessionId, query.getSessionId())
                 .orderByDesc(ObsTraceEntity::getStartTime)
                 .orderByDesc(ObsTraceEntity::getId);
+        // 会话是对话侧的必填条件；按工作流过滤时不带会话，只按 run 集合收窄
+        if (query.getSessionId() != null) {
+            wrapper.eq(ObsTraceEntity::getSessionId, query.getSessionId());
+        }
+        // 工作流过滤：由应用层把 defId 换成该工作流最近的 run id 集合（走 idx_workflow_run_id）
+        if (query.getWorkflowRunIds() != null && !query.getWorkflowRunIds().isEmpty()) {
+            wrapper.in(ObsTraceEntity::getWorkflowRunId, query.getWorkflowRunIds());
+        }
         if (query.getUserId() != null) {
             wrapper.eq(ObsTraceEntity::getUserId, query.getUserId());
         }

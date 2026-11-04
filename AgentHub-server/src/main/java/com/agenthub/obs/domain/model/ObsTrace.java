@@ -5,8 +5,8 @@ import lombok.Data;
 import java.time.LocalDateTime;
 
 /**
- * 一次用户提问。所属域：obs。不是表实体。
- * workflowRunId、taskNodeId、rootTraceId 是编排预留，一期保持空，接口不返回。
+ * 一次提问 / 一次编排运行。所属域：obs。不是表实体。
+ * 对话场景 workflowRunId / taskNodeId / rootTraceId 保持空；工作流场景写 workflow_run_id。
  * 时间字段对齐库列 start_time / end_time / create_time / update_time。
  */
 @Data
@@ -20,7 +20,7 @@ public class ObsTrace {
     private Long appId;
     private ObsChannel channel;
     private String title;
-    /** 预留：同一次编排运行。一期不写 */
+    /** 预留：同一次编排运行（工作流 run 场景写入 workflow_run.id） */
     private String workflowRunId;
     /** 预留：编排节点。一期不写 */
     private String taskNodeId;

@@ -23,7 +23,34 @@ public interface TraceRecorder {
     Optional<ObsTraceScope> beginConsole(TraceStart start);
 
     /**
-     * 追加一个 RUNNING 步骤。TASK 会被丢掉。
+     * 为一次编排运行（工作流 run）打开根 trace：channel=WORKFLOW，落 {@code workflow_run_id} 与编排扩展信息。
+     *
+     * <p>默认空实现：保证既有控制台埋点实现与测试桩不需要改动；正式实现见
+     * {@code TraceRecorderAppService}。没有对话会话时由调用方传约定占位 sessionId。
+     *
+     * @param start          标题、用户；sessionId 为占位值
+     * @param workflowRunId  workflow_run.id 字符串，写入 obs_trace.workflow_run_id
+     * @param attrsJson      编排队列扩展信息（已脱敏），可空
+     * @return 打开成功时的范围；实现未接线或写入失败时为空
+     */
+    default Optional<ObsTraceScope> beginWorkflow(TraceStart start, String workflowRunId, String attrsJson) {
+        return Optional.empty();
+    }
+
+    /**
+     * 暂停后恢复调度时，按已有 traceId 重新取回范围，seq / step_no 从库里已用的最大号接续。
+     *
+     * <p>默认空实现，理由同 {@link #beginWorkflow(TraceStart, String, String)}。
+     *
+     * @param traceId 业务 traceId
+     * @return 可继续开步的范围；trace 不存在、已终态或实现未接线时为空
+     */
+    default Optional<ObsTraceScope> resumeWorkflow(String traceId) {
+        return Optional.empty();
+    }
+
+    /**
+     * 追加一个 RUNNING 步骤。工作流编排节点用 TASK。
      *
      * @param scope 当前 trace
      * @param draft 类型、父子和可选输入

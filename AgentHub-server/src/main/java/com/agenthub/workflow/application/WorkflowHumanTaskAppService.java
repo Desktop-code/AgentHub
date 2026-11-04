@@ -25,6 +25,7 @@ import com.agenthub.workflow.domain.repository.WorkflowRunRepository;
 import com.agenthub.workflow.domain.service.WorkflowAssigneeRule;
 import com.agenthub.workflow.domain.service.WorkflowStateMachine;
 import com.agenthub.workflow.domain.service.WorkflowTenantProvider;
+import com.agenthub.workflow.domain.service.WorkflowTraceWriter;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import org.slf4j.Logger;
@@ -63,6 +64,8 @@ public class WorkflowHumanTaskAppService {
     private final OperLogWriter operLogWriter;
     private final WorkflowDefRepository defs;
     private final ObjectMapper json;
+    /** 埋点端口：驳回后直接 FAILED 的分支不经过引擎，需要自己收口根 trace */
+    private final WorkflowTraceWriter traces;
 
     /**
      * @param humanTasks      待办仓储
@@ -76,6 +79,7 @@ public class WorkflowHumanTaskAppService {
      * @param operLogWriter   操作日志
      * @param defs            工作流定义（待办列表展示工作流名）
      * @param json            全站 ObjectMapper
+     * @param traces          工作流埋点
      */
     public WorkflowHumanTaskAppService(WorkflowHumanTaskRepository humanTasks,
                                        WorkflowNodeRunRepository nodeRuns,
@@ -87,7 +91,8 @@ public class WorkflowHumanTaskAppService {
                                        OperatorContext operatorContext,
                                        OperLogWriter operLogWriter,
                                        WorkflowDefRepository defs,
-                                       ObjectMapper json) {
+                                       ObjectMapper json,
+                                       WorkflowTraceWriter traces) {
         this.humanTasks = humanTasks;
         this.nodeRuns = nodeRuns;
         this.runs = runs;
@@ -99,6 +104,7 @@ public class WorkflowHumanTaskAppService {
         this.operLogWriter = operLogWriter;
         this.defs = defs;
         this.json = json;
+        this.traces = traces;
     }
 
     /**
@@ -417,6 +423,14 @@ public class WorkflowHumanTaskAppService {
                 null, run.getEndTime(), operatorId);
         // 其余未走分支统一收口，画布上不再出现「一直转圈」
         nodeRuns.cancelOpen(run.getId());
+        // 这条 FAILED 不经过引擎：收口根 trace，避免 Trace 页一直显示进行中
+        // 拒绝已被 accepted 落库，埋点失败不能把操作变红：只告警
+        try {
+            traces.finishRun(run);
+        } catch (RuntimeException ex) {
+            log.warn("人工拒绝后收口 trace 失败 runId={} type={}",
+                    run.getId(), ex.getClass().getSimpleName());
+        }
     }
 
     private void resume(WorkflowRun run, long operatorId) {

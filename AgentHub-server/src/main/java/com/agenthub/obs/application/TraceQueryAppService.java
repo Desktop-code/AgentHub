@@ -13,12 +13,12 @@ import com.agenthub.obs.api.dto.ObsTraceResp;
 import com.agenthub.obs.domain.model.ObsSpan;
 import com.agenthub.obs.domain.model.ObsTrace;
 import com.agenthub.obs.domain.model.ObsTraceQuery;
-import com.agenthub.obs.domain.model.SpanType;
 import com.agenthub.obs.domain.repository.ObsSpanRepository;
 import com.agenthub.obs.domain.repository.ObsTraceRepository;
 import com.agenthub.obs.domain.service.ObsAttrs;
 import com.agenthub.obs.domain.service.SpanDepth;
 import com.agenthub.obs.domain.service.SpanEnvelope;
+import com.agenthub.obs.domain.spi.WorkflowRunLookup;
 import com.agenthub.runtime.domain.model.RunSession;
 import com.agenthub.runtime.domain.model.SessionQuery;
 import com.agenthub.runtime.domain.repository.RunSessionRepository;
@@ -42,21 +42,28 @@ public class TraceQueryAppService {
     private final ObsSpanRepository spans;
     private final AgentDefRepository agents;
     private final ObsAccess access;
+    /** 按工作流定义过滤 trace 时，把 defId 换成最近的 run id 集合（obs 不直接查 workflow 表） */
+    private final WorkflowRunLookup workflowRuns;
+
+    /** 单次按工作流过滤最多反查的 run 数；超出部分按时间更早、本刀不保证可筛 */
+    private static final int MAX_WORKFLOW_RUNS = 500;
 
     /**
-     * @param sessions 左栏会话
-     * @param traces   中栏提问
-     * @param spans    右栏步骤
-     * @param agents   名称解析
-     * @param access   admin 全部，其它仅本人
+     * @param sessions     左栏会话
+     * @param traces       中栏提问
+     * @param spans        右栏步骤
+     * @param agents       名称解析
+     * @param access       admin 全部，其它仅本人
+     * @param workflowRuns 工作流定义 → 最近 run id 反查
      */
     public TraceQueryAppService(RunSessionRepository sessions, ObsTraceRepository traces, ObsSpanRepository spans,
-                                AgentDefRepository agents, ObsAccess access) {
+                                AgentDefRepository agents, ObsAccess access, WorkflowRunLookup workflowRuns) {
         this.sessions = sessions;
         this.traces = traces;
         this.spans = spans;
         this.agents = agents;
         this.access = access;
+        this.workflowRuns = workflowRuns;
     }
 
     /**
@@ -78,6 +85,37 @@ public class TraceQueryAppService {
         for (RunSession session : page.getRecords()) {
             records.add(toSession(session, names));
         }
+        return PageResult.of(page.getTotal(), page.getCurrent(), page.getSize(), records);
+    }
+
+    /**
+     * 按工作流定义查 trace（工作流「运行记录」入口）。
+     *
+     * <p>为什么走 defId→runId 反查而不是 join：obs 是横切域，不直接依赖 workflow 的仓储；
+     * 反查只取 id 列，最终仍用 {@code obs_trace.workflow_run_id} 的索引过滤。
+     * <p>口径：与对话列表一致，仍按调用方可见范围（非管理员只看自己触发的 run）。
+     *
+     * @param req 分页、q、workflowId（必填）
+     * @return 该工作流最近若干 run 的 trace，按开始时间倒序
+     * @throws BizException workflowId 缺失
+     */
+    public PageResult<ObsTraceResp> tracesByWorkflow(ObsTracePageReq req) {
+        if (req.getWorkflowId() == null) {
+            throw new BizException(ErrorCode.BAD_REQUEST, "缺少 workflowId，无法按工作流筛选调用记录");
+        }
+        List<String> runIds = workflowRuns.recentRunIds(req.getWorkflowId(), MAX_WORKFLOW_RUNS);
+        if (runIds.isEmpty()) {
+            return PageResult.of(0, req.getCurrent(), req.getSize(), List.of());
+        }
+        ObsTraceQuery query = new ObsTraceQuery();
+        query.setCurrent(req.getCurrent());
+        query.setSize(req.getSize());
+        query.setWorkflowRunIds(runIds);
+        query.setUserId(access.ownerFilter());
+        query.setKeyword(blankToNull(req.getQ()));
+        PageResult<ObsTrace> page = traces.page(query);
+        Map<Long, String> names = new HashMap<>();
+        List<ObsTraceResp> records = page.getRecords().stream().map(row -> toTrace(row, names)).toList();
         return PageResult.of(page.getTotal(), page.getCurrent(), page.getSize(), records);
     }
 
@@ -115,7 +153,7 @@ public class TraceQueryAppService {
     }
 
     /**
-     * 右栏。按 seq 升序，并带上父子深度。TASK 即使库里有也不返回。
+     * 右栏。按 seq 升序，并带上父子深度。编排节点（TASK）照常返回，供工作流 run 展示节点树。
      *
      * @param traceId 业务 traceId
      * @return 完整步骤，不是分页
@@ -123,9 +161,7 @@ public class TraceQueryAppService {
      */
     public List<ObsSpanResp> spans(String traceId) {
         ObsTrace trace = requireTrace(traceId, access.ownerFilter());
-        List<ObsSpan> rows = new ArrayList<>(spans.listByTraceId(trace.getTraceId()).stream()
-                .filter(span -> span.getSpanType() != SpanType.TASK)
-                .toList());
+        List<ObsSpan> rows = new ArrayList<>(spans.listByTraceId(trace.getTraceId()));
         // 父步骤 close 往往早于子步骤落库，展示前把区间扩到包住子孙
         SpanEnvelope.apply(rows);
         Map<Long, Integer> depth = SpanDepth.of(rows);
@@ -175,6 +211,10 @@ public class TraceQueryAppService {
         ObsTraceResp resp = new ObsTraceResp();
         resp.setTraceId(trace.getTraceId());
         resp.setSessionId(trace.getSessionId());
+        // 编排列：对话场景为空，工作流场景从预留列与 attrs 带回，前端据此展示工作流名与回跳
+        resp.setWorkflowRunId(trace.getWorkflowRunId());
+        resp.setWorkflowId(ObsAttrs.longField(trace.getAttrsJson(), "workflow_def_id"));
+        resp.setWorkflowName(ObsAttrs.textField(trace.getAttrsJson(), "workflow_name"));
         resp.setAgentId(trace.getAgentId());
         resp.setAgentName(agentName(trace.getAgentId(), names));
         resp.setUserId(trace.getUserId());

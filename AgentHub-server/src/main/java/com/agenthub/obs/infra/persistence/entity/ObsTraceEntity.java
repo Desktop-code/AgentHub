@@ -10,7 +10,7 @@ import java.time.LocalDateTime;
 
 /**
  * obs_trace。所属域：obs 的 infra。
- * 列与重建后的 v2 表一致；编排预留列一期写入保持 NULL。
+ * 列与重建后的 v2 表一致；编排预留列对话场景为 NULL，工作流场景写 workflow_run_id。
  * 时间列：start_time / end_time / create_time / update_time。
  */
 @Data

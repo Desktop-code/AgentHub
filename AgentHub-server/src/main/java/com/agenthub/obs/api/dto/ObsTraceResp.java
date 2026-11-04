@@ -6,8 +6,9 @@ import lombok.Data;
 import java.time.LocalDateTime;
 
 /**
- * 一次提问。所属域：obs。不返回编排预留列。空字段不输出。
+ * 一次提问 / 一次编排运行。所属域：obs。空字段不输出。
  * 时间主字段为 startTime / endTime，禁止再以 startTime 作为主字段。
+ * 编排列（workflowRunId / workflowId / workflowName）对话场景为空，前端按有无决定展示。
  */
 @Data
 @JsonInclude(JsonInclude.Include.NON_NULL)
@@ -15,6 +16,12 @@ public class ObsTraceResp {
 
     private String traceId;
     private Long sessionId;
+    /** 编排场景：obs_trace.workflow_run_id（工作流 run 主键的字符串形式）；对话为空 */
+    private String workflowRunId;
+    /** 编排场景：工作流定义 id（从 attrs 解析，仅用于展示与回跳）；对话为空 */
+    private Long workflowId;
+    /** 编排场景：工作流名称（从 attrs 解析，无需再查 workflow 表）；对话为空 */
+    private String workflowName;
     private Long agentId;
     private String agentName;
     private Long userId;

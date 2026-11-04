@@ -24,6 +24,7 @@ import com.agenthub.workflow.domain.service.WorkflowNodeConfig;
 import com.agenthub.workflow.domain.service.WorkflowNodeInputs;
 import com.agenthub.workflow.domain.service.WorkflowStateMachine;
 import com.agenthub.workflow.domain.service.WorkflowToolInvoker;
+import com.agenthub.workflow.domain.service.WorkflowTraceWriter;
 import com.agenthub.workflow.infra.WorkflowProperties;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
@@ -66,6 +67,8 @@ public class WorkflowEngine {
     private final WorkflowGraphCodec codec;
     private final WorkflowProperties properties;
     private final ObjectMapper json;
+    /** 埋点端口：根 trace + 每节点 TASK 步；实现失败只记日志，不影响调度 */
+    private final WorkflowTraceWriter traces;
 
     /**
      * @param runs         run 仓储
@@ -76,6 +79,7 @@ public class WorkflowEngine {
      * @param codec        图 JSON 解析
      * @param properties   墙钟 / 人工超时默认值
      * @param json         全站 ObjectMapper
+     * @param traces       工作流埋点端口
      */
     public WorkflowEngine(WorkflowRunRepository runs,
                           WorkflowNodeRunRepository nodeRuns,
@@ -84,7 +88,8 @@ public class WorkflowEngine {
                           WorkflowToolInvoker toolInvoker,
                           WorkflowGraphCodec codec,
                           WorkflowProperties properties,
-                          ObjectMapper json) {
+                          ObjectMapper json,
+                          WorkflowTraceWriter traces) {
         this.runs = runs;
         this.nodeRuns = nodeRuns;
         this.humanTasks = humanTasks;
@@ -93,6 +98,7 @@ public class WorkflowEngine {
         this.codec = codec;
         this.properties = properties;
         this.json = json;
+        this.traces = traces;
     }
 
     /**
@@ -132,37 +138,59 @@ public class WorkflowEngine {
         int maxSteps = Math.max(runtime.nodes().size() * 2 + 8, 16);
         int steps = 0;
 
-        while (true) {
-            // 协作式取消放最前：取消接口可能在另一线程写库，这里每拍重读一次。
-            // 顺序有意为之——用户主动取消优先于墙钟 / 无进展文案，避免「已取消」被误报成「撞限」。
-            WorkflowRun fresh = runs.findById(run.getId()).orElse(null);
-            if (fresh == null) {
-                return;
+        // 埋点：首次运行在这里建根 trace，HUMAN 恢复后按 run.trace_id 续用同一条
+        traceSafely("beginRun", run.getId(), () -> traces.beginRun(run));
+        try {
+            while (true) {
+                // 协作式取消放最前：取消接口可能在另一线程写库，这里每拍重读一次。
+                // 顺序有意为之——用户主动取消优先于墙钟 / 无进展文案，避免「已取消」被误报成「撞限」。
+                WorkflowRun fresh = runs.findById(run.getId()).orElse(null);
+                if (fresh == null) {
+                    return;
+                }
+                WorkflowRunStatus freshStatus = WorkflowRunStatus.parse(fresh.getStatus());
+                if (freshStatus == WorkflowRunStatus.CANCELLED) {
+                    run.setStatus(fresh.getStatus());
+                    return;
+                }
+                if (++steps > maxSteps) {
+                    failRun(run, "撞限：单次调度无进展（节点步数超过 " + maxSteps + "）；"
+                            + progressBrief(rowByNode), operatorId);
+                    return;
+                }
+                if (System.currentTimeMillis() > deadline) {
+                    failRun(run, "撞限：工作流运行超出墙钟上限 " + wallMs
+                            + "ms（agenthub.workflow.wall-ms）；" + progressBrief(rowByNode), operatorId);
+                    return;
+                }
+                WorkflowNode next = pickNext(runtime, rowByNode);
+                if (next == null) {
+                    settle(run, runtime, rowByNode, operatorId);
+                    return;
+                }
+                boolean keepGoing = executeNode(run, runtime, next, rowByNode, ctx, outputs, operatorId);
+                if (!keepGoing) {
+                    return;
+                }
             }
-            WorkflowRunStatus freshStatus = WorkflowRunStatus.parse(fresh.getStatus());
-            if (freshStatus == WorkflowRunStatus.CANCELLED) {
-                run.setStatus(fresh.getStatus());
-                return;
-            }
-            if (++steps > maxSteps) {
-                failRun(run, "撞限：单次调度无进展（节点步数超过 " + maxSteps + "）；"
-                        + progressBrief(rowByNode), operatorId);
-                return;
-            }
-            if (System.currentTimeMillis() > deadline) {
-                failRun(run, "撞限：工作流运行超出墙钟上限 " + wallMs
-                        + "ms（agenthub.workflow.wall-ms）；" + progressBrief(rowByNode), operatorId);
-                return;
-            }
-            WorkflowNode next = pickNext(runtime, rowByNode);
-            if (next == null) {
-                settle(run, runtime, rowByNode, operatorId);
-                return;
-            }
-            boolean keepGoing = executeNode(run, runtime, next, rowByNode, ctx, outputs, operatorId);
-            if (!keepGoing) {
-                return;
-            }
+        } finally {
+            // 只有终态才收口；PAUSED_HUMAN 保持 RUNNING，等人工通过后续写
+            traceSafely("finishRun", run.getId(), () -> traces.finishRun(run));
+        }
+    }
+
+    /**
+     * 埋点调用的安全壳：观测是旁路，写失败只告警，绝不能改变 run 的结果。
+     *
+     * @param action 动作名，仅用于日志定位（beginRun / beginNode / endNode / finishRun）
+     * @param runId  运行 id
+     * @param task   实际埋点调用
+     */
+    private void traceSafely(String action, Long runId, Runnable task) {
+        try {
+            task.run();
+        } catch (RuntimeException ex) {
+            log.warn("工作流埋点失败 action={} runId={} type={}", action, runId, ex.getClass().getSimpleName(), ex);
         }
     }
 
@@ -245,6 +273,8 @@ public class WorkflowEngine {
         nodeRuns.update(row);
 
         WorkflowNodeType type = runtime.type(node.getId());
+        // 埋点：节点步在这里开，收口统一放 finally（成功 / 失败 / 取消都落终态）
+        traceSafely("beginNode", run.getId(), () -> traces.beginNode(run, node));
         try {
             switch (type) {
                 case START -> {
@@ -328,6 +358,9 @@ public class WorkflowEngine {
                     run.getId(), node.getCode(), type, ex.getClass().getSimpleName(), ex);
             return handleFailure(run, runtime, node, row,
                     "节点「" + node.getCode() + "」执行异常：" + safe(ex.getMessage()), ex, operatorId);
+        } finally {
+            // 哪怕上面已 return，也要把节点步收成终态；WAITING_HUMAN 由根 trace 统一收口
+            traceSafely("endNode", run.getId(), () -> traces.endNode(run, node, row));
         }
     }
 

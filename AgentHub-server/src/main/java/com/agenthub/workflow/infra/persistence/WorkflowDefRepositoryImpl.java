@@ -122,6 +122,18 @@ public class WorkflowDefRepositoryImpl implements WorkflowDefRepository {
                 .set(WorkflowDefEntity::getUpdateTime, LocalDateTime.now()));
     }
 
+    /** {@inheritDoc} */
+    @Override
+    public int softDelete(Long id, long tenantId, Long operatorId) {
+        // 显式写 deleted=1 与审计列：@TableLogic 的 deleteById 不会顺手更新 updated_by
+        return mapper.update(null, new LambdaUpdateWrapper<WorkflowDefEntity>()
+                .eq(WorkflowDefEntity::getId, id)
+                .eq(WorkflowDefEntity::getTenantId, tenantId)
+                .set(WorkflowDefEntity::getDeleted, 1)
+                .set(WorkflowDefEntity::getUpdatedBy, operatorId)
+                .set(WorkflowDefEntity::getUpdateTime, LocalDateTime.now()));
+    }
+
     /**
      * MySQL 默认反斜杠转义 LIKE；这里抹掉用户输入里的通配符含义。
      */

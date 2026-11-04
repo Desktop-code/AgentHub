@@ -19,6 +19,22 @@ public final class StepNoAllocator {
     private final ConcurrentHashMap<Long, Integer> forkBase = new ConcurrentHashMap<>();
 
     /**
+     * 全新 trace 用：串行号从 1 开始。
+     */
+    public StepNoAllocator() {
+        this(0);
+    }
+
+    /**
+     * 续跑已有 trace 用：串行号从库里最大号接着发，避免同一条 trace 里 step_no 重号。
+     *
+     * @param initialSerial 已用过的最大串行号；小于 0 按 0 处理
+     */
+    public StepNoAllocator(int initialSerial) {
+        this.serial.set(Math.max(initialSerial, 0));
+    }
+
+    /**
      * 为新步骤分配展示号。
      *
      * @param parentId       父行 id；根为空
