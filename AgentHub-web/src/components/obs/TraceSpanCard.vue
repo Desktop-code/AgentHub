@@ -3,26 +3,46 @@
     执行链路单步卡片。所属域：obs。
     按 span_type 动态展示 LLM/TOOL/ROUTE/RETRIEVE 专属字段；
     isWideMode 时入参/出参左右并排；树状缩进 + 耗时着色。
+    入出参默认只露约 6 行短预览（FoldableCodeBlock），展开后限高自滚，避免整卡占满半屏。
   -->
   <article
+    ref="cardRef"
     class="span-card"
+    :id="`span-${span.id}`"
     :class="[
       `span-card--${typeKey}`,
       {
-        'is-error': span.status === 'ERROR',
+        'is-error': isError,
         'is-wide': isWideMode,
-        'is-flat': hideIndent
+        'is-flat': hideIndent,
+        'is-collapsed': collapsible && !open,
+        'is-hit': isHit
       }
     ]"
-    :style="indentStyle"
+    :style="[paletteStyle, indentStyle]"
   >
     <div v-if="!hideIndent && depth > 0" class="span-card__rail" aria-hidden="true" />
 
-    <header class="span-card__head">
+    <header
+      class="span-card__head"
+      :class="{ 'is-clickable': collapsible }"
+      :role="collapsible ? 'button' : undefined"
+      :tabindex="collapsible ? 0 : undefined"
+      :aria-expanded="collapsible ? open : undefined"
+      @click="onHeadClick"
+      @keydown.enter.prevent="onHeadClick"
+      @keydown.space.prevent="onHeadClick"
+    >
+      <!-- 折叠箭头：只有可折叠卡才出现，展开方向朝下 -->
+      <el-icon v-if="collapsible" class="span-card__chevron" :class="{ 'is-open': open }">
+        <ArrowRight />
+      </el-icon>
       <span class="seq">#{{ span.stepNo || span.seq }}</span>
       <el-tag size="small" :type="typeTagType" effect="plain">{{ typeLabel }}</el-tag>
       <strong class="span-card__name">{{ displayName }}</strong>
-      <el-tag size="small" :type="statusType">{{ statusLabel }}</el-tag>
+      <!-- 失败只在文字层提示：类型色与卡片底色保持，不做整卡红，也不与状态标签重复 -->
+      <span v-if="isError" class="err-flag">ERROR</span>
+      <el-tag v-else size="small" :type="statusType">{{ statusLabel }}</el-tag>
 
       <!-- LLM：模型名 / 厂商；TOOL：工具类型 -->
       <template v-if="span.spanType === 'LLM'">
@@ -57,6 +77,8 @@
       <span class="latency" :class="latencyClass">{{ latencyText }}</span>
     </header>
 
+    <!-- Body：折叠时只隐藏不销毁（v-show），保留代码块展开态与滚动位置 -->
+    <div v-show="!collapsible || open" class="span-card__body">
     <!-- 整条纯色：相对全部步骤的统一时间轴偏移和宽度 -->
     <div v-if="gantt" class="gantt">
       <el-tooltip :content="gantt.tip" placement="top">
@@ -70,8 +92,13 @@
       </el-tooltip>
     </div>
 
-    <!-- ERROR 必须顶显错误摘要 -->
-    <p v-if="span.status === 'ERROR' && span.errorSummary" class="error-box">{{ span.errorSummary }}</p>
+    <!-- ERROR 必须顶显错误摘要；TOOL 失败改在卡尾右下角小红字，见 error-tail -->
+    <p
+      v-if="span.status === 'ERROR' && span.errorSummary && span.spanType !== 'TOOL'"
+      class="error-box"
+    >
+      {{ span.errorSummary }}
+    </p>
 
     <!-- ROUTE / RETRIEVE 专属行 -->
     <div v-if="span.spanType === 'ROUTE'" class="spec-block">
@@ -79,7 +106,8 @@
         v-if="span.routeDecision"
         label="路由决策"
         :text="routeDecisionText"
-        :max-height="codeMaxHeight"
+        :preview-height="codePreviewHeight"
+        :expanded-max-height="codeExpandedMaxHeight"
       />
       <p v-if="span.childAgentId != null">
         分配至：{{ agentLabel(null, span.childAgentId) }}
@@ -103,14 +131,29 @@
       :class="{ 'io--wide': sideBySide }"
     >
       <div v-if="inputText" class="io__cell">
-        <FoldableCodeBlock label="入参" :text="inputText" :max-height="codeMaxHeight" />
+        <FoldableCodeBlock
+          label="入参"
+          :text="inputText"
+          :preview-height="codePreviewHeight"
+          :expanded-max-height="codeExpandedMaxHeight"
+        />
       </div>
       <div v-if="outputText" class="io__cell">
-        <FoldableCodeBlock label="出参" :text="outputText" :max-height="codeMaxHeight" />
+        <FoldableCodeBlock
+          label="出参"
+          :text="outputText"
+          :preview-height="codePreviewHeight"
+          :expanded-max-height="codeExpandedMaxHeight"
+        />
       </div>
     </div>
     <div v-else-if="span.content" class="io">
-      <FoldableCodeBlock label="内容" :text="span.content" :max-height="codeMaxHeight" />
+      <FoldableCodeBlock
+        label="内容"
+        :text="span.content"
+        :preview-height="codePreviewHeight"
+        :expanded-max-height="codeExpandedMaxHeight"
+      />
     </div>
 
     <!-- 扩展信息默认收起：优先 attrs_json，并附带其它非空元数据 -->
@@ -149,44 +192,188 @@
           v-if="span.attrsJson"
           label="attrs_json"
           :text="span.attrsJson"
-          :max-height="codeMaxHeight"
+          :preview-height="codePreviewHeight"
+          :expanded-max-height="codeExpandedMaxHeight"
         />
       </div>
+    </div>
+
+    <!-- 嵌套子卡插槽：AGENT 展开后渲染子 LLM/TOOL，不再画树状折线 -->
+    <div v-if="$slots.default" class="span-card__children">
+      <slot />
+    </div>
+
+    <!-- TOOL 失败：右下角小红字，保持卡片外框淡红 + 默认展开，一眼能认出哪一步炸了 -->
+    <p v-if="span.spanType === 'TOOL' && isError" class="error-tail">
+      {{ span.errorSummary || (span.toolSuccess === 0 ? '工具执行失败' : '执行失败') }}
+    </p>
     </div>
   </article>
 </template>
 
 <script setup lang="ts">
-import { computed, ref } from 'vue'
+import { computed, nextTick, onBeforeUnmount, ref, watch } from 'vue'
+import { ArrowRight } from '@element-plus/icons-vue'
 import type { ObsSpan } from '@/types/obs'
 import type { SpanBar } from '@/utils/traceParallel'
+import { traceTypeAccent } from '@/utils/tracePalette'
 import { tryPrettyJson } from '@/utils/codeDisplay'
 import FoldableCodeBlock from '@/components/obs/FoldableCodeBlock.vue'
 
 const props = withDefaults(
   defineProps<{
     span: ObsSpan
-    /** 放大抽屉宽屏：入参/出参左右对照，代码块限高放宽 */
+    /** 放大抽屉宽屏：入参/出参左右对照；预览高度不变（高度靠短预览控，不随宽度放开） */
     isWideMode?: boolean
     /** 并行容器内取消树缩进，避免双列错位 */
     hideIndent?: boolean
     /** 相对整条链路时间轴的单色进度条；无时间时为空 */
     gantt?: SpanBar | null
+    /** 是否可折叠：列表区 AGENT 大卡默认只留 Header */
+    collapsible?: boolean
+    /** 初始是否展开；省略时按「非 AGENT 默认展开」由调用方决定 */
+    defaultOpen?: boolean
+    /** 上方拓扑点中的节点 id：相等时该卡会强制展开、滚动到位并短暂高亮 */
+    activeSpanId?: number | null
+    /** 该卡是否位于「被点节点的祖先链」上：用于逐级自动展开，否则目标卡藏在折叠 Body 里 */
+    forceOpen?: boolean
   }>(),
-  { isWideMode: false, hideIndent: false, gantt: null }
+  {
+    isWideMode: false,
+    hideIndent: false,
+    gantt: null,
+    collapsible: false,
+    defaultOpen: true,
+    activeSpanId: null,
+    forceOpen: false
+  }
 )
 
 const extraOpen = ref(false)
+/** 折叠态；不可折叠时恒为 true */
+const open = ref(true)
 
-/** 窄栏 150，放大模式 400 */
-const codeMaxHeight = computed(() => (props.isWideMode ? 400 : 150))
+/**
+ * 折叠初始态：失败一律展开（ERROR 必须第一眼可见），否则用调用方给的值。
+ * <p>依赖 span.id：复用同一个卡片组件渲染不同步骤时必须重算，否则会串展开态。
+ */
+watch(
+  () => [props.span.id, props.collapsible, props.defaultOpen, isErrorGuard()] as const,
+  () => {
+    open.value = !props.collapsible ? true : props.defaultOpen || isErrorGuard()
+  },
+  { immediate: true }
+)
+
+/** 失败判定在初始化时就要用，单独抽一层避免 watch 回调里读不到 computed */
+function isErrorGuard(): boolean {
+  return (
+    props.span.status === 'ERROR' ||
+    (props.span.spanType === 'TOOL' && props.span.toolSuccess === 0)
+  )
+}
+
+/** 点 Header 切换折叠；不可折叠时不响应 */
+function onHeadClick() {
+  if (!props.collapsible) {
+    return
+  }
+  open.value = !open.value
+}
+
+/** 卡片根节点：定位时用来滚到视野中间 */
+const cardRef = ref<HTMLElement | null>(null)
+/** 命中高亮：滚到后几秒自动褪去，避免长期发光干扰阅读 */
+const isHit = ref(false)
+/** 高亮留存计时器：避免连点多个节点时上一张一直亮着 */
+let highlightTimer: number | null = null
+
+/**
+ * 祖先卡自动展开：被点节点若藏在折叠的 AGENT Body 里，必须逐级打开才能看见。
+ * <p>只负责展开，不负责收起——用户手动关掉后不要因为别的定位又被弹开。
+ */
+watch(
+  () => props.forceOpen,
+  (force) => {
+    if (force && props.collapsible) {
+      open.value = true
+    }
+  }
+)
+
+/**
+ * 定位联动：拓扑点中本卡时展开自身并平滑滚到视野中间。
+ * <p>滚动的时机必须是「祖先展开已经落到 DOM 之后」，否则祖先 Body 仍是 display:none，
+ * scrollIntoView 等于没滚，所以这里等两轮 nextTick 再滚。
+ */
+watch(
+  () => props.activeSpanId,
+  (id) => {
+    if (id == null || id !== props.span.id) {
+      return
+    }
+    if (props.collapsible) {
+      open.value = true
+    }
+    isHit.value = true
+    if (highlightTimer != null) {
+      window.clearTimeout(highlightTimer)
+    }
+    highlightTimer = window.setTimeout(() => {
+      isHit.value = false
+      highlightTimer = null
+    }, 2400)
+    void nextTick(() =>
+      nextTick(() => {
+        cardRef.value?.scrollIntoView({ behavior: 'smooth', block: 'center' })
+      })
+    )
+  }
+)
+
+// 卸载时清计时器，防止抽屉关掉后仍回调已销毁组件
+onBeforeUnmount(() => {
+  if (highlightTimer != null) {
+    window.clearTimeout(highlightTimer)
+  }
+})
+
+/**
+ * 入出参短预览高度（px）：约 6 行（12px 字号 / 1.55 行高 ≈ 112）。
+ * <p>宽窄栏一致——用户反馈的是「竖向太高」，宽屏给 400 只会让整卡更高，
+ * 高度控制不该随宽度变化。
+ */
+const codePreviewHeight = computed(() => 112)
+
+/**
+ * 展开全文后的区内自滚上限（px）：宽屏 320、窄栏 260，都留出列表可见空间。
+ * <p>展开不是「无限铺开」，而是「给更大的窗口 + 内部滚动」。
+ */
+const codeExpandedMaxHeight = computed(() => (props.isWideMode ? 320 : 260))
 
 const depth = computed(() => Math.max(0, props.span.depth ?? 0))
+
+/**
+ * 失败口径与拓扑图保持一致：显式 ERROR，或工具自报失败（toolSuccess=0）。
+ * <p>两处必须同口径，否则同一页里图上是红的、列表里像成功，排查会误判。
+ */
+const isError = computed(() => isErrorGuard())
 
 /** 左侧缩进 + 给连接线留位；并行格内不缩进 */
 const indentStyle = computed(() =>
   props.hideIndent ? undefined : { marginLeft: `${depth.value * 20}px` }
 )
+
+/**
+ * 类型色：左侧色条取 {@code traceTypeAccent}（与拓扑同色相、半透明），
+ * 卡片底色一律纯白，不再上类型底色。
+ * <p>用 CSS 变量注入而不是给每个类型写一条 scoped 规则，新增类型不必再改样式表。
+ */
+const paletteStyle = computed(() => {
+  return {
+    '--span-accent': traceTypeAccent(props.span.spanType)
+  } as Record<string, string>
+})
 
 const typeKey = computed(() => (props.span.spanType || 'step').toLowerCase())
 
@@ -329,44 +516,58 @@ function agentLabel(name: string | null | undefined, id: number | null | undefin
   position: relative;
   margin-bottom: 12px;
   padding: 12px 14px;
+  /* 白卡，不上类型底色；左侧色条由 paletteStyle 注入的 CSS 变量决定（半透明同色相） */
   background: #fff;
   border: 1px solid var(--ah-border);
   border-radius: 10px;
-  border-left: 3px solid var(--ah-border);
+  border-left: 3px solid var(--span-accent, var(--ah-border));
 }
 
-.span-card--llm {
-  border-left-color: #635bff;
+/* 折叠态只留 Header：上下留白略收，视觉上像一行可点的标题条 */
+.span-card.is-collapsed {
+  padding-top: 10px;
+  padding-bottom: 10px;
 }
 
-.span-card--tool {
-  border-left-color: #12b76a;
-}
-
-/* 图片识别与工具同为「外部能力调用」，用同色系但略浅，避免与工具混淆 */
-.span-card--vision {
-  border-left-color: #36b37e;
-}
-
-.span-card--route,
-.span-card--agent,
-.span-card--system {
-  border-left-color: #98a2b3;
-  background: #fafbfc;
-}
-
-.span-card--retrieve {
-  border-left-color: #f79009;
-}
-
+/*
+ * 失败态：三边框转淡红（外框淡红），左侧色条保持类型色。
+ * 这样「同一类型同色」在图与列表都不破，失败另由红字 + 淡红外框表达。
+ */
 .span-card.is-error {
-  border-color: #fecdca;
-  background: #fffbfa;
+  border-color: #fda29b;
+  border-left-color: var(--span-accent, var(--ah-border));
 }
 
+/*
+ * 命中定位：淡紫描边 + 一圈柔和外发光，持续约 2.4s 后自动褪去。
+ * 不用位移/缩放，避免滚动落点后再抖一下。
+ */
+.span-card.is-hit {
+  border-color: #a5b4fc;
+  box-shadow: 0 0 0 3px rgba(99, 91, 255, 0.16);
+}
+
+/* TOOL 卡尾右下角小红字；只报错误，不占 Header 注意力 */
+.error-tail {
+  margin: 8px 0 0;
+  color: #d92d20;
+  font-size: 11px;
+  line-height: 1.4;
+  text-align: right;
+  word-break: break-word;
+}
+
+/* 与拓扑图同口径的 ERROR 小字：10～11px 红字，不做大红块 */
+.err-flag {
+  color: #dc2626;
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+}
+
+/* 列表内嵌：外层已用 gap 控距，这里只清掉自带外边距 */
 .span-card.is-flat {
   margin-bottom: 0;
-  height: 100%;
 }
 
 .gantt {
@@ -424,6 +625,35 @@ function agentLabel(name: string | null | undefined, id: number | null | undefin
   flex-wrap: wrap;
   align-items: center;
   gap: 8px;
+}
+
+/* 可折叠：整行可点，键盘也能操作；hover 提示可点 */
+.span-card__head.is-clickable {
+  cursor: pointer;
+  user-select: none;
+}
+
+.span-card__head.is-clickable:hover .span-card__name {
+  color: var(--ah-primary, #635bff);
+}
+
+.span-card__chevron {
+  color: var(--ah-text-secondary);
+  font-size: 12px;
+  transition: transform 0.15s ease;
+}
+
+.span-card__chevron.is-open {
+  transform: rotate(90deg);
+}
+
+/* 嵌套子卡：只做缩进，不画树状折线/连接轨；层级靠卡片自带左侧色条区分 */
+.span-card__children {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin-top: 10px;
+  padding-left: 2px;
 }
 
 .seq {
