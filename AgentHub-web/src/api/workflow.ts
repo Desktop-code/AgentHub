@@ -42,6 +42,15 @@ export function updateWorkflowDef(id: number, data: { name: string; description?
   return request.put<Result<WorkflowDefRow>>(`/api/workflow/defs/${id}`, data)
 }
 
+/**
+ * 逻辑删除定义；历史发布版本与运行记录保留，删除后应用触发失效。
+ *
+ * @param id 定义 id
+ */
+export function removeWorkflowDef(id: number) {
+  return request.delete<Result<null>>(`/api/workflow/defs/${id}`)
+}
+
 /** 读取草稿图 */
 export function getWorkflowDraft(id: number) {
   return request.get<Result<WorkflowDraftResp>>(`/api/workflow/defs/${id}/draft`)
