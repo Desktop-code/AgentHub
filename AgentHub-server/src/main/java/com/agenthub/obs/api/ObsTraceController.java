@@ -59,10 +59,10 @@ public class ObsTraceController {
     }
 
     /**
-     * 按工作流定义筛选调用记录（工作流列表「运行记录」入口）。
+     * 按工作流筛选调用记录（工作流列表「运行记录」入口）。
      *
-     * @param req 分页、q、workflowId（必填）
-     * @return 该工作流的 trace，时间降序
+     * @param req 分页、q、可选 workflowId；缺省时返回全部工作流运行记录
+     * @return 匹配的 trace，时间降序
      */
     @SaCheckPermission(ObsPermissions.TRACE_LIST)
     @GetMapping("/traces")

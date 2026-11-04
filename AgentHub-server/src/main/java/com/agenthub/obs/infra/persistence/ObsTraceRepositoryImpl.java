@@ -168,6 +168,10 @@ public class ObsTraceRepositoryImpl implements ObsTraceRepository {
         if (query.getWorkflowRunIds() != null && !query.getWorkflowRunIds().isEmpty()) {
             wrapper.in(ObsTraceEntity::getWorkflowRunId, query.getWorkflowRunIds());
         }
+        // 来源过滤：工作流入口未选定义时只取 WORKFLOW 根 trace，避免把对话记录混进运行记录
+        if (query.getChannel() != null) {
+            wrapper.eq(ObsTraceEntity::getChannel, query.getChannel().name());
+        }
         if (query.getUserId() != null) {
             wrapper.eq(ObsTraceEntity::getUserId, query.getUserId());
         }

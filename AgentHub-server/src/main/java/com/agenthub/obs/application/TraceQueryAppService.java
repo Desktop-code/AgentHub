@@ -10,6 +10,7 @@ import com.agenthub.obs.api.dto.ObsSessionResp;
 import com.agenthub.obs.api.dto.ObsSpanResp;
 import com.agenthub.obs.api.dto.ObsTracePageReq;
 import com.agenthub.obs.api.dto.ObsTraceResp;
+import com.agenthub.obs.domain.model.ObsChannel;
 import com.agenthub.obs.domain.model.ObsSpan;
 import com.agenthub.obs.domain.model.ObsTrace;
 import com.agenthub.obs.domain.model.ObsTraceQuery;
@@ -89,28 +90,31 @@ public class TraceQueryAppService {
     }
 
     /**
-     * 按工作流定义查 trace（工作流「运行记录」入口）。
+     * 按工作流查 trace（工作流「运行记录」入口）。
      *
      * <p>为什么走 defId→runId 反查而不是 join：obs 是横切域，不直接依赖 workflow 的仓储；
      * 反查只取 id 列，最终仍用 {@code obs_trace.workflow_run_id} 的索引过滤。
+     * <p>workflowId 缺省表示不按定义收窄：此时只取 {@code channel=WORKFLOW} 的根 trace，
+     * 供「调用追踪 → 工作流」页签默认分页查询全部运行记录。
      * <p>口径：与对话列表一致，仍按调用方可见范围（非管理员只看自己触发的 run）。
      *
-     * @param req 分页、q、workflowId（必填）
-     * @return 该工作流最近若干 run 的 trace，按开始时间倒序
-     * @throws BizException workflowId 缺失
+     * @param req 分页、q、workflowId（可选）
+     * @return 全部或该工作流最近若干 run 的 trace，按开始时间倒序
      */
     public PageResult<ObsTraceResp> tracesByWorkflow(ObsTracePageReq req) {
-        if (req.getWorkflowId() == null) {
-            throw new BizException(ErrorCode.BAD_REQUEST, "缺少 workflowId，无法按工作流筛选调用记录");
-        }
-        List<String> runIds = workflowRuns.recentRunIds(req.getWorkflowId(), MAX_WORKFLOW_RUNS);
-        if (runIds.isEmpty()) {
-            return PageResult.of(0, req.getCurrent(), req.getSize(), List.of());
+        List<String> runIds = null;
+        if (req.getWorkflowId() != null) {
+            runIds = workflowRuns.recentRunIds(req.getWorkflowId(), MAX_WORKFLOW_RUNS);
+            if (runIds.isEmpty()) {
+                return PageResult.of(0, req.getCurrent(), req.getSize(), List.of());
+            }
         }
         ObsTraceQuery query = new ObsTraceQuery();
         query.setCurrent(req.getCurrent());
         query.setSize(req.getSize());
         query.setWorkflowRunIds(runIds);
+        // 未指定定义时按来源收窄到工作流根 trace；指定定义时 run 集合已足够精确
+        query.setChannel(req.getWorkflowId() == null ? ObsChannel.WORKFLOW : null);
         query.setUserId(access.ownerFilter());
         query.setKeyword(blankToNull(req.getQ()));
         PageResult<ObsTrace> page = traces.page(query);

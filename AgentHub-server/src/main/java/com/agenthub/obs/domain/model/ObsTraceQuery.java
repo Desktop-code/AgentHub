@@ -18,6 +18,8 @@ public class ObsTraceQuery {
     private Long sessionId;
     /** 工作流侧：该定义下最近若干 run 的 id（obs_trace.workflow_run_id 集合）；空表示不限 */
     private List<String> workflowRunIds;
+    /** 非空时只看该调用来源；工作流入口未选定义时用 WORKFLOW 排除对话 trace */
+    private ObsChannel channel;
     /** 非空时只看这个平台用户 */
     private Long userId;
     /** 模糊匹配 title，可空 */
