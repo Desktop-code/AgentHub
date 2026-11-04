@@ -3,7 +3,7 @@
     <!-- 页头：本页只做入口与总览，新建定义仍回 Agent 管理，避免双入口 -->
     <PageHeader
       title="多智能体"
-      description="编排根（ROUTER）总览：点一行进入该 Agent 的「编排」Tab 编辑候选与模板。本页不新建定义。"
+      description="编排根（ROUTER）总览：点一行进入该 Agent 的「编排」Tab 编辑候选与模板；「试跑」开全屏对话页。本页不新建定义。"
     />
 
     <!-- 筛选：关键字匹配名称/编码；状态跟 agent_def 启停 -->
@@ -72,9 +72,11 @@
         <el-table-column label="更新时间" min-width="180" align="center">
           <template #default="{ row }">{{ formatTime(row.updateTime) }}</template>
         </el-table-column>
-        <el-table-column label="操作" min-width="130" align="center" fixed="right">
+        <el-table-column label="操作" min-width="170" align="center" fixed="right">
           <template #default="{ row }">
             <el-button link type="primary" @click.stop="openOrchestration(row)">打开编排</el-button>
+            <!-- 试跑进独立全屏页：本页不做对话，只给入口 -->
+            <el-button v-if="canTrial" link type="primary" @click.stop="openTrial(row)">试跑</el-button>
           </template>
         </el-table-column>
 
@@ -123,10 +125,16 @@ import { RefreshRight, Search } from '@element-plus/icons-vue'
 import PageHeader from '@/components/PageHeader.vue'
 import TablePager from '@/components/TablePager.vue'
 import { pageMultiAgents } from '@/api/ma'
+import { useUserStore } from '@/stores/user'
 import type { MaListRow } from '@/types/ma'
 import { maTemplateHint, maTemplateLabel, maTemplateTagType } from '@/utils/maList'
+import { maTrialPath } from '@/utils/maTrial'
 
 const router = useRouter()
+const user = useUserStore()
+
+/** 试跑权限：与 Agent 详情「对话」按钮同口径；无权限时不渲染试跑入口 */
+const canTrial = computed(() => user.hasPerm('runtime:trial:run') || user.hasPerm('runtime:trial:list'))
 
 const loading = ref(false)
 const listError = ref('')
@@ -197,6 +205,16 @@ function resetFilter() {
  */
 function openOrchestration(row: MaListRow) {
   void router.push({ path: `/agent/list/${row.id}`, query: { tab: 'orchestration' } })
+}
+
+/**
+ * 进入该编排根的独立试跑页。
+ * 运行时再按 run_mode 校验一次（本页数据源已限定 ROUTER），失败由试跑页中文提示并回列表。
+ *
+ * @param row 被点击的多智能体行
+ */
+function openTrial(row: MaListRow) {
+  void router.push(maTrialPath(row.id))
 }
 
 /** 空态引导：去 Agent 管理创建 ROUTER */

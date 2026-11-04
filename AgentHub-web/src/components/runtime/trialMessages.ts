@@ -807,6 +807,33 @@ export function formatRelativeTime(value?: string) {
   return `${date.getMonth() + 1}-${pad(date.getDate())} ${pad(date.getHours())}:${pad(date.getMinutes())}`
 }
 
+/**
+ * 给助手轮打上「编排调度卡」前端标记（ROUTER_TRACE）。
+ *
+ * <p>只影响前端时间线：不写入 agent_run_event、不参与 {@link turnsFromEvents} 回放，
+ * 刷新后由试跑状态重新判定再挂上。插到块列表最前，保证「调度卡 → 思考 → 终答」的阅读顺序。
+ *
+ * @param turn 目标助手轮；用户轮直接忽略
+ */
+export function markRouterTrace(turn: ChatTurn) {
+  if (turn.role !== 'assistant') {
+    return
+  }
+  if (turn.blocks.some((block) => block.kind === 'ROUTER_TRACE')) {
+    return
+  }
+  turn.blocks.unshift({ kind: 'ROUTER_TRACE', text: '正在调度…' })
+}
+
+/**
+ * 这一轮是否带编排调度卡标记。
+ * 仅用于展示层判位，不参与任何落库/回放逻辑。
+ * @param turn 助手轮
+ */
+export function hasRouterTrace(turn: ChatTurn): boolean {
+  return turn.role === 'assistant' && turn.blocks.some((block) => block.kind === 'ROUTER_TRACE')
+}
+
 function userTurn(id: number, text: string): ChatTurn {
   return {
     key: `u-${id}`,

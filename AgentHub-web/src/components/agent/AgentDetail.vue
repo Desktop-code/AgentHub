@@ -140,8 +140,10 @@
             :can-edit="canEdit"
             :can-bind="canBind"
             :saved-router="savedMode === 'ROUTER'"
+            :can-trial="canTrial"
             @update:config="onOrchestrationConfig"
             @routes-changed="onRoutesChanged"
+            @trial="onTalk"
           />
         </el-tab-pane>
 
@@ -1702,7 +1704,13 @@ function onStatusChanged() {
   emit('changed', changedPatch())
 }
 
-/** 用已保存的名称和运行模式打开抽屉。按钮在标题行右侧，行为仍是现有试跑。停用 Agent 直接拦截。 */
+/**
+ * 用已保存的名称和运行模式打开试跑。按钮在标题行右侧、编排 Tab 底部也复用同一条路径。
+ * 停用 Agent 直接拦截。
+ *
+ * <p>落点由父级决定：Router 编排根跳独立全屏试跑页（消息流内编排卡），
+ * ReAct / 计划执行仍开原抽屉；本组件只管把当前已保存的模式交出去。
+ */
 function onTalk() {
   if (!form.value || form.value.status !== 1) {
     return

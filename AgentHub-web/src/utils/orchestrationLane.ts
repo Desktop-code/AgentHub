@@ -461,8 +461,8 @@ export function buildOrchestrationLane(
       key: `aggregate-${lastAggregate.id}`,
       atMs: msOf(lastAggregate.endTime) ?? msOf(lastAggregate.startTime),
       text: isFailed(lastAggregate)
-        ? `汇总策略 SUMMARIZE 失败，已降级为拼接：${shortText(lastAggregate.errorSummary, 40) || '未知原因'}`
-        : (isRunning(lastAggregate) ? '汇总策略 SUMMARIZE 执行中…' : '汇总策略 SUMMARIZE 成功'),
+        ? `结果合成 SUMMARIZE 失败，已降级为拼接：${shortText(lastAggregate.errorSummary, 40) || '未知原因'}`
+        : (isRunning(lastAggregate) ? '结果合成 SUMMARIZE 执行中…' : '结果合成 SUMMARIZE 成功'),
       tone: isFailed(lastAggregate) ? 'danger' : (isRunning(lastAggregate) ? 'info' : 'ok'),
       spanIds: [lastAggregate.id]
     })
@@ -470,7 +470,7 @@ export function buildOrchestrationLane(
     events.push({
       key: 'aggregate-missing',
       atMs: msOf(lastChild?.endTime) ?? null,
-      text: '汇总策略 SUMMARIZE：未找到汇总调用，已按拼接出终答',
+      text: '结果合成 SUMMARIZE：未找到汇总调用，已按拼接出终答',
       tone: 'warn',
       spanIds: lastChild ? [lastChild.id] : []
     })
@@ -488,10 +488,10 @@ export function buildOrchestrationLane(
       key: 'aggregate-concat',
       atMs: msOf(lastChild?.endTime) ?? msOf(route.endTime),
       text: fixedTemplate
-        ? `汇总策略 CONCAT：按${fixedParallel ? '并行' : '串行'}顺序拼接各子终答`
+        ? `结果合成 CONCAT：按${fixedParallel ? '并行' : '串行'}顺序拼接各子终答`
         : routerThenSequence
-          ? '汇总策略 CONCAT：按判定顺序串行拼接各子终答'
-          : '汇总策略 CONCAT：按路由顺序拼接各子终答',
+          ? '结果合成 CONCAT：按判定顺序串行拼接各子终答'
+          : '结果合成 CONCAT：按路由顺序拼接各子终答',
       tone: 'info',
       spanIds: lastChild ? [lastChild.id] : []
     })

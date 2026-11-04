@@ -66,14 +66,14 @@ export interface AgentDetail {
 export interface AgentRuntimeConfig {
   /** 允许多意图路由；新建 ROUTER 默认 true */
   multiIntentEnabled?: boolean
-  /** CONCAT | SUMMARIZE；默认 CONCAT；编排 Tab 的「汇总策略」 */
+  /** CONCAT | SUMMARIZE；默认 CONCAT；编排 Tab 的「结果合成」 */
   answerMode?: 'CONCAT' | 'SUMMARIZE' | string
-  /** 每轮最多子数；默认 3，硬顶 5；编排 Tab 的「最大并行子数」 */
+  /** 每轮最多子数；默认 3，硬顶 5；编排 Tab 的「并行上限」 */
   maxRouteChildren?: number
-  /** 编排模板；ROUTER_PARALLEL | FIXED_SEQUENCE | FIXED_PARALLEL | CRITIC_LOOP | ROUTER_THEN_SEQUENCE，非法/空回显 ROUTER_PARALLEL */
+  /** 协作模式；ROUTER_PARALLEL | FIXED_SEQUENCE | FIXED_PARALLEL | CRITIC_LOOP | ROUTER_THEN_SEQUENCE，非法/空回显 ROUTER_PARALLEL */
   maTemplate?: string
   /**
-   * 上下文策略；ISOLATED（默认）| PRIOR_SUMMARY_ONLY（仅串行模板：固定串行 / 路由后串行）|
+   * 上下文共享；ISOLATED（默认）| PRIOR_SUMMARY_ONLY（仅串行模板：固定串行 / 路由后串行）|
    * SHARED_SCRATCH（共享草稿区，五值模板都可选；与本字段单选的前置摘要互斥）。
    */
   maContextPolicy?: string
