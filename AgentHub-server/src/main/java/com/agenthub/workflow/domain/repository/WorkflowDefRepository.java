@@ -65,4 +65,14 @@ public interface WorkflowDefRepository {
      * @param operatorId 操作人
      */
     void touch(Long id, long tenantId, Long operatorId);
+
+    /**
+     * 逻辑删除定义；草稿与发布版本不物理删除，保留历史快照与运行追溯。
+     *
+     * @param id         主键
+     * @param tenantId   当前租户
+     * @param operatorId 操作人
+     * @return 影响行数；0 表示不存在或跨租户
+     */
+    int softDelete(Long id, long tenantId, Long operatorId);
 }

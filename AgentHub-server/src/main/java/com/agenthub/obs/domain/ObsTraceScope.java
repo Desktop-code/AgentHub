@@ -21,8 +21,8 @@ public final class ObsTraceScope {
 
     private final String traceId;
     private final TraceRecorder recorder;
-    private final AtomicInteger seq = new AtomicInteger();
-    private final StepNoAllocator stepNos = new StepNoAllocator();
+    private final AtomicInteger seq;
+    private final StepNoAllocator stepNos;
     /** 已落库步骤 id → step_no，供 bindParent 写入 stack */
     private final ConcurrentHashMap<Long, String> stepNoById = new ConcurrentHashMap<>();
     private final ThreadLocal<ObsSpanStack> stacks = ThreadLocal.withInitial(ObsSpanStack::new);
@@ -30,12 +30,30 @@ public final class ObsTraceScope {
     private final AtomicReference<Long> lastLlmSpanId = new AtomicReference<>();
 
     /**
+     * 全新 trace：seq 与 step_no 都从 1 起号。
+     *
      * @param traceId  业务 traceId
      * @param recorder 实际落库。失败由实现吞掉
      */
     public ObsTraceScope(String traceId, TraceRecorder recorder) {
+        this(traceId, recorder, 0, 0);
+    }
+
+    /**
+     * 续跑已有 trace：seq / step_no 从库里已用过的最大号接着发。
+     * <p>为什么需要：工作流 run 可能在 HUMAN 节点暂停，恢复调度时是同一条 trace，
+     * 若不接号会出现两个 step「1」，面板排序会乱。
+     *
+     * @param traceId       业务 traceId
+     * @param recorder      实际落库。失败由实现吞掉
+     * @param initialSeq    已用过的最大 seq；小于 0 按 0 处理
+     * @param initialSerial 已用过的最大串行 step 号；小于 0 按 0 处理
+     */
+    public ObsTraceScope(String traceId, TraceRecorder recorder, int initialSeq, int initialSerial) {
         this.traceId = traceId;
         this.recorder = recorder;
+        this.seq = new AtomicInteger(Math.max(initialSeq, 0));
+        this.stepNos = new StepNoAllocator(initialSerial);
     }
 
     /**

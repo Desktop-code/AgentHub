@@ -29,7 +29,8 @@ import java.util.concurrent.ConcurrentHashMap;
 
 /**
  * 把试跑步骤写入 obs_trace / obs_span。所属域：obs。
- * 任何失败只记异常类型，不抛回试跑，也不写计费。编排预留列保持空，不写 TASK。
+ * 任何失败只记异常类型，不抛回试跑，也不写计费。
+ * 对话场景写 CONSOLE，工作流场景写 WORKFLOW（根 trace 带 workflow_run_id，节点步为 TASK）。
  * 树键为自增 id + parent_id；step_no 写入时发号；seq 由 ObsTraceScope 串行分配。
  * 开/关步用墙钟毫秒算 latency，避免 datetime 秒精度把父子/先后步挤成同一秒。
  */
@@ -64,15 +65,8 @@ public class TraceRecorderAppService implements TraceRecorder {
             if (start == null || start.sessionId() == null || start.userId() == null) {
                 return Optional.empty();
             }
-            ObsTrace trace = new ObsTrace();
-            trace.setTraceId(newId());
-            trace.setSessionId(start.sessionId());
-            trace.setAgentId(start.agentId());
-            trace.setUserId(start.userId());
+            ObsTrace trace = newTrace(start);
             trace.setChannel(ObsChannel.CONSOLE);
-            trace.setTitle(ObsTexts.mask(start.title()));
-            trace.setStatus(ObsStatus.RUNNING);
-            trace.setStartTime(LocalDateTime.now());
             traces.insert(trace, start.userId());
             return Optional.of(new ObsTraceScope(trace.getTraceId(), this));
         } catch (RuntimeException ex) {
@@ -81,11 +75,101 @@ public class TraceRecorderAppService implements TraceRecorder {
         }
     }
 
+    /**
+     * {@inheritDoc}
+     * <p>工作流 run 没有对话会话：sessionId 由调用方传 {@code ObsPlaceholders.SESSION_NONE}。
+     * channel 固定 WORKFLOW，编排扩展信息先打码再落库。
+     */
+    @Override
+    public Optional<ObsTraceScope> beginWorkflow(TraceStart start, String workflowRunId, String attrsJson) {
+        try {
+            if (start == null || start.sessionId() == null || start.userId() == null) {
+                return Optional.empty();
+            }
+            ObsTrace trace = newTrace(start);
+            trace.setChannel(ObsChannel.WORKFLOW);
+            trace.setWorkflowRunId(blankToNull(workflowRunId));
+            // 编排信息（工作流名 / 版本 / runId）只作展示与排障，同样禁止明文 Key 入库
+            trace.setAttrsJson(ObsTexts.mask(attrsJson));
+            traces.insert(trace, start.userId());
+            return Optional.of(new ObsTraceScope(trace.getTraceId(), this));
+        } catch (RuntimeException ex) {
+            log.warn("工作流 trace 创建失败 type={}", ex.getClass().getSimpleName());
+            return Optional.empty();
+        }
+    }
+
+    /**
+     * {@inheritDoc}
+     * <p>续号口径：seq 取库里最大 seq，step_no 取最大的纯整数串行号；
+     * 并行点号支（3.1）不复用作基号，避免恢复后串行步与历史分支重号。
+     */
+    @Override
+    public Optional<ObsTraceScope> resumeWorkflow(String traceId) {
+        try {
+            if (traceId == null || traceId.isBlank()) {
+                return Optional.empty();
+            }
+            ObsTrace trace = traces.findByTraceId(traceId).orElse(null);
+            // 已终态的 trace 不再续写：收尾后的行不能被重新当作「运行中」
+            if (trace == null || trace.getStatus() != ObsStatus.RUNNING) {
+                return Optional.empty();
+            }
+            int maxSeq = 0;
+            int maxSerial = 0;
+            for (ObsSpan span : spans.listByTraceId(traceId)) {
+                if (span.getSeq() != null && span.getSeq() > maxSeq) {
+                    maxSeq = span.getSeq();
+                }
+                maxSerial = Math.max(maxSerial, serialOf(span.getStepNo()));
+            }
+            return Optional.of(new ObsTraceScope(traceId, this, maxSeq, maxSerial));
+        } catch (RuntimeException ex) {
+            log.warn("工作流 trace 续号失败 type={}", ex.getClass().getSimpleName());
+            return Optional.empty();
+        }
+    }
+
+    /**
+     * 新建 trace 的公共字段：身份、标题打码、RUNNING、开始时间。
+     *
+     * @param start 会话 / 用户 / 标题
+     * @return 未落库的 trace（channel 与编排列由调用方补）
+     */
+    private ObsTrace newTrace(TraceStart start) {
+        ObsTrace trace = new ObsTrace();
+        trace.setTraceId(newId());
+        trace.setSessionId(start.sessionId());
+        trace.setAgentId(start.agentId());
+        trace.setUserId(start.userId());
+        trace.setTitle(ObsTexts.mask(start.title()));
+        trace.setStatus(ObsStatus.RUNNING);
+        trace.setStartTime(LocalDateTime.now());
+        return trace;
+    }
+
+    /**
+     * 只认纯整数 step_no；点号支与非法值都返回 0。
+     *
+     * @param stepNo 展示号
+     * @return 串行基号
+     */
+    private int serialOf(String stepNo) {
+        if (stepNo == null || stepNo.isBlank()) {
+            return 0;
+        }
+        try {
+            return Integer.parseInt(stepNo.trim());
+        } catch (NumberFormatException ex) {
+            return 0;
+        }
+    }
+
     /** {@inheritDoc} */
     @Override
     public Long openSpan(ObsTraceScope scope, SpanDraft draft) {
         try {
-            if (scope == null || draft == null || draft.type() == null || draft.type() == SpanType.TASK) {
+            if (scope == null || draft == null || draft.type() == null) {
                 return null;
             }
             Long parentId = draft.parentId();

@@ -89,6 +89,14 @@ export interface WorkflowFlowNodeData {
   config: WorkflowNodeConfig
   /** 试跑高亮：由 run 详情回填，不参与保存 */
   runStatus?: WorkflowNodeRunStatus | string
+  /** AGENT 节点绑定后的 Agent 名称：仅画布展示，不进 graph_json */
+  agentName?: string
+  /** AGENT 节点绑定后的 Agent 编码：仅画布展示，不进 graph_json */
+  agentCode?: string
+  /** TOOL 节点绑定后的工具显示名（title 优先）：仅画布展示，不进 graph_json */
+  toolTitle?: string
+  /** TOOL 节点绑定后的工具技术名（MCP 原始 name）：仅画布展示，不进 graph_json */
+  toolName?: string
 }
 
 /** 画布边 data */
@@ -97,6 +105,24 @@ export interface WorkflowFlowEdgeData {
   label?: string | null
   condition?: unknown
   config?: Record<string, unknown>
+}
+
+/**
+ * 入参映射「来源节点」下拉项。所属域：workflow 的前端画布层。
+ * <p>由编辑页按拓扑算出（当前节点的所有祖先），只在 UI 使用，不落库；
+ * 落库仍然是「目标字段 → $.input / $.outputs.code / $.vars 路径」的扁平字符串对象。
+ */
+export interface WorkflowMappingSource {
+  /** 画布节点 id */
+  id: string
+  /** 节点编码：拼 $.outputs.<code> 路径用 */
+  code: string
+  /** 节点显示名 */
+  name: string
+  /** 下拉展示文案：类型 · 名称（编码） */
+  label: string
+  /** 该节点 outputMapping 的键；有值时才是真实可取的输出字段，空则只有 text */
+  outputKeys: string[]
 }
 
 /** 定义行 */

@@ -6,8 +6,8 @@
       <span class="wf-node__type">{{ typeLabel }}</span>
       <span class="wf-node__code">{{ data.code }}</span>
     </div>
-    <div class="wf-node__name">{{ data.name || data.code }}</div>
-    <div v-if="summary" class="wf-node__summary">{{ summary }}</div>
+    <div class="wf-node__name" :title="displayName">{{ displayName }}</div>
+    <div v-if="summary" class="wf-node__summary" :title="summary">{{ summary }}</div>
     <div v-if="runLabel" class="wf-node__run">{{ runLabel }}</div>
     <Handle v-if="nodeType !== 'END'" type="source" :position="Position.Right" />
   </div>
@@ -19,10 +19,14 @@
  * <p>VueFlow 的单一自定义节点类型（nodeTypes.workflow）按 data.nodeType 上色与标注；
  * 只在画布内使用，不含编辑逻辑，属性编辑在右侧抽屉。
  * <p>data.runStatus 由试跑抽屉回填，仅影响视觉，不参与草稿保存。
+ * <p>data.agentName / agentCode 由编辑页按 agentId 注入，只用于把节点标题显示成真实 Agent 名称；
+ * data.toolTitle / toolName 同理服务于 TOOL 节点标题；
+ * 画布保存走 buildGraph 的字段白名单，这些展示字段不会写进 graph_json。
  */
 import { computed } from 'vue'
 import { Handle, Position } from '@vue-flow/core'
 import type { NodeProps } from '@vue-flow/core'
+import { summarizeJsonLogic } from '@/utils/jsonLogicSummary'
 import type { WorkflowFlowNodeData } from '@/types/workflow'
 
 const props = defineProps<NodeProps<WorkflowFlowNodeData>>()
@@ -62,14 +66,42 @@ const nodeType = computed(() => String(props.data?.nodeType || 'UNKNOWN'))
 const typeLabel = computed(() => TYPE_LABEL[nodeType.value] || nodeType.value)
 const tone = computed(() => TYPE_TONE[nodeType.value] || 'other')
 
+/**
+ * 节点主标题。
+ * <p>优先显示绑定资源的真实名称，避免画布上只剩「Agent #30 / 工具 #12」这类无信息文案：
+ * AGENT → Agent 名称（如 IT_Ops_Expert）；TOOL → 工具显示名（title 优先，回退技术名）。
+ * <p>未绑定或资源已被删除时回退到节点显示名，保证旧草稿仍可读。
+ */
+const displayName = computed(() => {
+  const data = props.data
+  if (nodeType.value === 'AGENT' && data.agentName) {
+    return String(data.agentName)
+  }
+  if (nodeType.value === 'TOOL') {
+    const toolName = data.toolTitle || data.toolName
+    if (toolName) {
+      return String(toolName)
+    }
+  }
+  return String(data.name || data.code || '')
+})
+
 /** 卡片第三行：只展示最关键的绑定信息，避免节点被撑高 */
 const summary = computed(() => {
   const config = props.data?.config || {}
   if (nodeType.value === 'AGENT') {
-    return config.agentId ? `Agent #${config.agentId}` : '未绑定 Agent'
+    // 主标题已经是 Agent 名称，这里补 Agent 编码，方便和主键 / 日志对照
+    if (!config.agentId) {
+      return '未绑定 Agent'
+    }
+    return props.data?.agentCode ? String(props.data.agentCode) : '已绑定 Agent'
   }
   if (nodeType.value === 'TOOL') {
-    return config.toolId ? `工具 #${config.toolId}` : '未绑定工具'
+    if (!config.toolId) {
+      return '未绑定工具'
+    }
+    // 标题用的是 title，这里补 MCP 原始工具名，便于和工具目录 / 调用日志对照
+    return props.data?.toolName ? String(props.data.toolName) : '已绑定工具'
   }
   if (nodeType.value === 'HUMAN') {
     return config.timeoutPolicy ? `超时：${config.timeoutPolicy}` : '未配置超时策略'
@@ -78,7 +110,9 @@ const summary = computed(() => {
     return config.forkGroupId ? `组：${config.forkGroupId}` : '未配置 forkGroupId'
   }
   if (nodeType.value === 'CONDITION') {
-    return config.condition ? 'JSONLogic 已配置' : '未配置条件表达式'
+    // 条件节点直接给出规则摘要（如 `type = refund`），而不是「已配置」这种空信息
+    const rule = summarizeJsonLogic(config.condition)
+    return rule || '未配置条件表达式'
   }
   return ''
 })

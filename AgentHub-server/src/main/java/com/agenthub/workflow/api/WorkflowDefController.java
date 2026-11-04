@@ -15,6 +15,7 @@ import com.agenthub.workflow.application.WorkflowDefAppService;
 import com.fasterxml.jackson.databind.JsonNode;
 import jakarta.validation.Valid;
 import org.springframework.web.bind.annotation.GetMapping;
+import org.springframework.web.bind.annotation.DeleteMapping;
 import org.springframework.web.bind.annotation.PathVariable;
 import org.springframework.web.bind.annotation.PostMapping;
 import org.springframework.web.bind.annotation.PutMapping;
@@ -90,6 +91,19 @@ public class WorkflowDefController {
     public Result<WorkflowDefResp> update(@PathVariable Long id,
                                           @Valid @RequestBody WorkflowDefUpdateReq req) {
         return Result.ok(service.update(id, req));
+    }
+
+    /**
+     * 逻辑删除定义；历史版本与运行记录保留，删除后应用触发失效。
+     *
+     * @param id 主键
+     * @return 空
+     */
+    @SaCheckPermission(WorkflowPermissions.DEF_EDIT)
+    @DeleteMapping("/{id:\\d+}")
+    public Result<Void> delete(@PathVariable Long id) {
+        service.delete(id);
+        return Result.ok(null);
     }
 
     /**

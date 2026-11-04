@@ -184,6 +184,26 @@ public class WorkflowDefAppService {
     }
 
     /**
+     * 逻辑删除工作流定义。
+     * <p>草稿与发布版本保留为历史快照；删除后列表、详情与应用触发均不可见。
+     *
+     * @param id 主键
+     * @throws BizException 定义不存在或跨租户
+     */
+    @Transactional
+    public void delete(Long id) {
+        WorkflowDef def = requireDef(id);
+        Long operatorId = operatorContext.requireUserId();
+        int affected = defs.softDelete(id, def.getTenantId(), operatorId);
+        if (affected == 0) {
+            // 并发下已被他人删除：仍按 404 收口，避免前端误以为成功
+            throw new BizException(ErrorCode.NOT_FOUND, "工作流不存在");
+        }
+        operLogWriter.write("workflow", "def_delete", "workflow_def", String.valueOf(id),
+                "删除工作流 code=" + def.getCode());
+    }
+
+    /**
      * 读取草稿。
      *
      * @param id 主键

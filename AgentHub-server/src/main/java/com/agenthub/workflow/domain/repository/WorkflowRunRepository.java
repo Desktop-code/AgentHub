@@ -63,6 +63,23 @@ public interface WorkflowRunRepository {
     List<WorkflowRun> listByWorkflowId(Long workflowId, int limit);
 
     /**
+     * 某工作流最近若干次 run 的 id，按 id 倒序。供 obs 按定义过滤 trace 用（只回 id，不加载整行）。
+     *
+     * @param workflowId 定义 id
+     * @param limit      条数上限；实现方钳制在 [1, 500]
+     * @return id 列表；无数据为空列表
+     */
+    List<Long> recentIdsByWorkflowId(Long workflowId, int limit);
+
+    /**
+     * 绑定 obs 根 trace。只写 trace_id 一列，不参与状态机，也不触发状态迁移。
+     *
+     * @param id      run 主键
+     * @param traceId 业务 traceId
+     */
+    void attachTraceId(Long id, String traceId);
+
+    /**
      * 应用触发的幂等查询：同 app 下同一 clientRequestId 只应有一个 run。
      *
      * @param appId           应用 id

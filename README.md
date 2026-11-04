@@ -211,3 +211,36 @@ npm run dev
 ## 文档
 
 - `docs/架构设计.md`：分层总图、试跑主链路、三种运行模式、模型防腐、提示词三层、RAG 双流水、工具闸门、记忆分层、可观测与部署拓扑（含 mermaid 图）
+
+## 开源协议与致谢 (License & Acknowledgements)
+
+本项目的画布编排功能依赖于开源项目 [Vue Flow](https://vueflow.dev/)，遵循 MIT 开源协议。感谢开源社区的贡献。
+
+### 第三方组件清单
+
+| 组件 | 版本 | 协议 | 用途 | 版权声明 |
+|---|---|---|---|---|
+| [@vue-flow/core](https://www.npmjs.com/package/@vue-flow/core) | `^1.48.2` | MIT | 工作流画布：节点渲染、连线、缩放平移 | `LICENSES/Vue-Flow-LICENSE.txt` |
+| [@vue-flow/background](https://www.npmjs.com/package/@vue-flow/background) | `^1.3.2` | MIT | 画布网格背景 | 同上（同源版权，见该文件） |
+
+Vue Flow 原始版权声明（MIT）：
+
+```text
+Copyright (c) 2019-2025 webkid GmbH
+Copyright (c) 2021-2025 Burak Cakmakoglu
+```
+
+完整许可证正文见 [`LICENSES/Vue-Flow-LICENSE.txt`](LICENSES/Vue-Flow-LICENSE.txt)，发布或再分发时必须与产物一并保留。
+
+### 使用方式声明
+
+- 本项目**仅通过公开 API 引用** Vue Flow（`VueFlow` / `useVueFlow` / `Handle` / `Position` / `MarkerType` 等）及其发行版样式文件，**未复制、未修改其内部源码**，因此仓库内不存在需要单独加注版权头的衍生文件。
+- 画布上的节点卡片（`WorkflowNodeCard.vue`）、悬浮工具栏、折叠面板等均为本项目自研实现，不属于 Vue Flow 衍生作品。
+- 若后续为修 bug 或适配而 fork / 内联 Vue Flow 源码，必须在对应文件头部保留上述原始版权声明与本 MIT 声明全文，并在本表中登记。
+
+### 新增第三方依赖的合规要求
+
+1. 引入前确认协议与本项目（对外分发）兼容，优先 MIT / Apache-2.0 / BSD。
+2. 在 `LICENSES/` 下新增 `{组件名}-LICENSE.txt`，内容为上游 `node_modules/<包>/LICENSE` 的**原样副本**，不得改写。
+3. 同步登记到上面的「第三方组件清单」，写清版本、协议、用途与版权文件路径。
+4. 若协议要求署名展示（如 Apache-2.0 的 NOTICE），一并保留并在本节引用。

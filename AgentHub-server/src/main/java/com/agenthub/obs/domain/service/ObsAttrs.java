@@ -152,6 +152,21 @@ public final class ObsAttrs {
     }
 
     /**
+     * 取一个长整数字段（如 workflow_def_id）。
+     *
+     * @param attrsJson attrs
+     * @param name      整数字段名
+     * @return 没有该字段或不是数字时为 null
+     */
+    public static Long longField(String attrsJson, String name) {
+        JsonNode value = fieldOf(attrsJson, name);
+        if (value == null || !value.isNumber()) {
+            return null;
+        }
+        return value.asLong();
+    }
+
+    /**
      * @param attrsJson attrs
      * @return truncated；没有该字段时为 null
      */

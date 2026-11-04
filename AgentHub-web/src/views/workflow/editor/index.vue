@@ -1,6 +1,7 @@
 <template>
-  <div class="wf-page">
-    <!-- 顶栏：保存 / 校验 / 发布；试跑本刀禁用并标注「下刀」 -->
+  <!-- is-focus：专注模式，画布吃掉页签条与主区留白后的全部高度 -->
+  <div class="wf-page" :class="{ 'is-focus': focusMode }">
+    <!-- 顶栏：保存 / 校验 / 发布；试跑入口已移到画布底部悬浮工具栏 -->
     <PageHeader :title="def?.name || '工作流编辑'" :description="headerDesc">
       <template #extra>
         <el-button @click="goList">返回列表</el-button>
@@ -9,6 +10,11 @@
           保存草稿
         </el-button>
         <el-button :loading="validating" @click="onValidate">校验</el-button>
+        <!-- 专注模式：收起左右面板 + 隐藏全局侧导航；ESC 或再次点击退出 -->
+        <el-button :type="focusMode ? 'primary' : 'default'" @click="toggleFocusMode">
+          <el-icon class="btn-icon"><FullScreen /></el-icon>
+          {{ focusMode ? '退出专注' : '专注模式' }}
+        </el-button>
         <el-button
           v-if="canPublish"
           type="primary"
@@ -17,15 +23,6 @@
           @click="onPublish"
         >
           发布
-        </el-button>
-        <el-button
-          v-if="canRunTrial"
-          type="primary"
-          plain
-          :disabled="!workflowId"
-          @click="trialVisible = true"
-        >
-          试跑
         </el-button>
       </template>
     </PageHeader>
@@ -56,25 +53,76 @@
     </div>
 
     <div v-loading="loading" class="wf-body">
-      <!-- 左：P0 节点面板；P1 灰显不可拖 -->
-      <aside class="wf-palette">
-        <h3 class="wf-panel__title">节点</h3>
-        <div class="wf-palette__list">
-          <div
-            v-for="item in PALETTE"
-            :key="item.type"
-            class="wf-palette__item"
-            :class="{ 'is-p1': !item.p0 }"
-            :draggable="item.p0"
-            :title="item.p0 ? `拖到画布添加「${item.label}」` : 'P1：本刀不实现'"
-            @dragstart="onDragStart(item, $event)"
-          >
-            <span class="wf-palette__label">{{ item.label }}</span>
-            <span v-if="!item.p0" class="wf-palette__p1">P1</span>
-            <span class="wf-palette__hint">{{ item.hint }}</span>
+      <!-- 专注模式：贴边 hover 临时唤出面板，移开自动收起；非专注模式不启用，避免误触 -->
+      <template v-if="focusMode">
+        <div
+          v-if="paletteHidden"
+          class="wf-edge-hot is-left"
+          @mouseenter="peekPanel('left')"
+          @mouseleave="scheduleUnpeek('left')"
+        />
+        <div
+          v-if="propsHidden"
+          class="wf-edge-hot is-right"
+          @mouseenter="peekPanel('right')"
+          @mouseleave="scheduleUnpeek('right')"
+        />
+      </template>
+
+      <!-- 左：节点面板可折叠；折叠后画布吃满剩余宽度 -->
+      <aside
+        class="wf-palette wf-panel"
+        :class="{ 'is-collapsed': paletteHidden }"
+        @mouseenter="peekPanel('left')"
+        @mouseleave="scheduleUnpeek('left')"
+      >
+        <!-- 内层定宽：宽度动画期间文字不重排 -->
+        <div class="wf-panel__inner">
+          <div class="wf-panel__head">
+            <h3 class="wf-panel__title">节点</h3>
+            <el-tooltip content="收起节点库" placement="right">
+              <button
+                type="button"
+                class="wf-panel__fold"
+                aria-label="收起节点库"
+                @click="collapsePanel('left')"
+              >
+                <el-icon><ArrowLeft /></el-icon>
+              </button>
+            </el-tooltip>
+          </div>
+          <div class="wf-palette__list">
+            <div
+              v-for="item in PALETTE"
+              :key="item.type"
+              class="wf-palette__item"
+              :class="{ 'is-p1': !item.p0 }"
+              :draggable="item.p0"
+              :title="item.p0 ? `拖到画布添加「${item.label}」` : 'P1：本刀不实现'"
+              @dragstart="onDragStart(item, $event)"
+              @dragend="onPaletteDragEnd"
+            >
+              <span class="wf-palette__label">{{ item.label }}</span>
+              <span v-if="!item.p0" class="wf-palette__p1">P1</span>
+              <span class="wf-palette__hint">{{ item.hint }}</span>
+            </div>
           </div>
         </div>
       </aside>
+
+      <!-- 折叠后左边缘的唤醒页签：hover 展开并浮出文字，避免用户找不到面板去哪了 -->
+      <Transition name="wf-wake">
+        <button
+          v-if="paletteHidden"
+          type="button"
+          class="wf-edge-wake is-left"
+          aria-label="展开节点库"
+          @click="expandPanel('left')"
+        >
+          <el-icon class="wf-edge-wake__icon"><ArrowRight /></el-icon>
+          <span class="wf-edge-wake__label">展开节点库</span>
+        </button>
+      </Transition>
 
       <!-- 中：VueFlow 画布 -->
       <div class="wf-canvas" @dragover.prevent @drop.prevent="onDrop">
@@ -94,6 +142,12 @@
           :max-zoom="2"
           :delete-key-code="['Delete', 'Backspace']"
           :fit-view-on-init="false"
+          :zoom-on-scroll="true"
+          :zoom-on-pinch="true"
+          :zoom-on-double-click="false"
+          :pan-on-scroll="false"
+          :pan-on-drag="true"
+          pan-activation-key-code="Space"
           @connect="onConnect"
           @node-click="onNodeClick"
           @edge-click="onEdgeClick"
@@ -101,17 +155,77 @@
           @error="onVueFlowError"
         >
           <Background :gap="16" color="#e5e7eb" />
-          <Controls />
         </VueFlow>
+
+        <!-- 底部悬浮胶囊：缩放 / 自适应 / 试跑；空白处穿透，不挡画布拖拽 -->
+        <!-- keydown.space.prevent：避免焦点停在按钮上时按空格误触发按钮，把空格让给画布平移 -->
+        <div class="wf-dock" @pointerdown.stop @keydown.space.prevent>
+          <el-tooltip content="缩小" placement="top">
+            <button type="button" class="wf-dock__btn" aria-label="缩小" @click="zoomOutCanvas">
+              <el-icon><Minus /></el-icon>
+            </button>
+          </el-tooltip>
+          <span class="wf-dock__zoom" title="当前缩放比例">{{ zoomPercent }}%</span>
+          <el-tooltip content="放大" placement="top">
+            <button type="button" class="wf-dock__btn" aria-label="放大" @click="zoomInCanvas">
+              <el-icon><Plus /></el-icon>
+            </button>
+          </el-tooltip>
+          <span class="wf-dock__divider" aria-hidden="true" />
+          <el-tooltip content="自适应画布" placement="top">
+            <button
+              type="button"
+              class="wf-dock__btn"
+              aria-label="自适应画布"
+              @click="fitCanvas"
+            >
+              <el-icon><FullScreen /></el-icon>
+            </button>
+          </el-tooltip>
+          <button
+            v-if="canRunTrial"
+            type="button"
+            class="wf-dock__run"
+            :disabled="!workflowId"
+            @click="trialVisible = true"
+          >
+            试跑
+          </button>
+        </div>
       </div>
 
-      <!-- 右：属性抽屉 -->
-      <aside class="wf-props">
+      <!-- 右：属性面板可折叠；标题随选中态切换，折叠按钮固定在标题行右侧 -->
+      <aside
+        class="wf-props wf-panel"
+        :class="{ 'is-collapsed': propsHidden }"
+        @mouseenter="peekPanel('right')"
+        @mouseleave="scheduleUnpeek('right')"
+      >
+        <div class="wf-panel__inner">
+          <div class="wf-panel__head">
+            <h3 class="wf-panel__title">
+              <template v-if="selectedNode">
+                节点属性
+                <el-tag size="small" effect="plain">{{ nodeTypeLabel(selectedNode.data.nodeType) }}</el-tag>
+              </template>
+              <template v-else-if="selectedEdge">
+                连线属性
+                <el-tag size="small" effect="plain">{{ edgeTypeLabel(selectedEdge.data.edgeType) }}</el-tag>
+              </template>
+              <template v-else>属性</template>
+            </h3>
+            <el-tooltip content="收起属性面板" placement="left">
+              <button
+                type="button"
+                class="wf-panel__fold"
+                aria-label="收起属性面板"
+                @click="collapsePanel('right')"
+              >
+                <el-icon><ArrowRight /></el-icon>
+              </button>
+            </el-tooltip>
+          </div>
         <template v-if="selectedNode">
-          <h3 class="wf-panel__title">
-            节点属性
-            <el-tag size="small" effect="plain">{{ nodeTypeLabel(selectedNode.data.nodeType) }}</el-tag>
-          </h3>
           <el-form label-position="top" class="wf-form">
             <el-form-item label="编码 code" required>
               <el-input v-model="selectedNode.data.code" maxlength="64" :disabled="!canEdit" />
@@ -133,12 +247,13 @@
                 />
                 <el-select
                   v-else
-                  v-model="selectedNode.data.config.agentId"
+                  :model-value="selectedNode.data.config.agentId"
                   class="wf-field"
                   clearable
                   filterable
                   placeholder="选择 Agent（不含 ROUTER）"
                   :disabled="!canEdit"
+                  @update:model-value="setNodeAgent"
                 >
                   <el-option
                     v-for="item in agentOptions"
@@ -148,6 +263,10 @@
                   />
                 </el-select>
               </el-form-item>
+              <!-- 画布节点标题会优先显示绑定 Agent 名称；这里说明回退规则，避免用户以为「显示名」失效 -->
+              <div class="wf-tip">
+                画布上优先显示绑定 Agent 的名称；未绑定或 Agent 已删除时回退显示「显示名」。
+              </div>
               <el-alert
                 v-if="routerBindingHint"
                 :title="routerBindingHint"
@@ -171,12 +290,13 @@
                 />
                 <el-select
                   v-else
-                  v-model="selectedNode.data.config.toolId"
+                  :model-value="selectedNode.data.config.toolId"
                   class="wf-field"
                   clearable
                   filterable
                   placeholder="选择工具项"
                   :disabled="!canEdit"
+                  @update:model-value="setNodeTool"
                 >
                   <el-option
                     v-for="item in toolOptions"
@@ -186,6 +306,10 @@
                   />
                 </el-select>
               </el-form-item>
+              <!-- 画布节点标题会优先显示工具显示名；这里说明回退规则 -->
+              <div class="wf-tip">
+                画布上优先显示工具的显示名；未绑定或工具已删除时回退显示「显示名」。
+              </div>
             </template>
 
             <!-- CONDITION：JSONLogic 子集，禁 SpEL -->
@@ -277,11 +401,14 @@
               </el-form-item>
             </template>
 
-            <!-- 映射：简单 KV，路径只认 $.input / $.outputs / $.vars -->
+            <!-- 入参映射：可视化「来源节点 → 输出字段」，落库仍是 $.input / $.outputs / $.vars 路径 -->
             <template v-if="showMapping">
               <el-form-item label="入参映射">
-                <MappingEditor
+                <InputMappingEditor
                   :model-value="selectedNode.data.config.inputMapping"
+                  :sources="mappingSources"
+                  :start-codes="startCodes"
+                  :disabled="!canEdit"
                   @update:model-value="setInputMapping"
                 />
               </el-form-item>
@@ -300,10 +427,6 @@
         </template>
 
         <template v-else-if="selectedEdge">
-          <h3 class="wf-panel__title">
-            连线属性
-            <el-tag size="small" effect="plain">{{ edgeTypeLabel(selectedEdge.data.edgeType) }}</el-tag>
-          </h3>
           <el-form label-position="top" class="wf-form">
             <el-form-item label="连线类型">
               <el-select
@@ -343,7 +466,23 @@
           <p>在画布上选中节点或连线以编辑属性。</p>
           <p class="wf-props__empty-hint">从左侧拖入节点，从节点两侧锚点拉线连线。</p>
         </div>
+        <!-- /.wf-panel__inner：折叠动画靠它保持定宽，内容不重排 -->
+        </div>
       </aside>
+
+      <!-- 折叠后右边缘的唤醒页签：与左侧对称 -->
+      <Transition name="wf-wake">
+        <button
+          v-if="propsHidden"
+          type="button"
+          class="wf-edge-wake is-right"
+          aria-label="展开属性面板"
+          @click="expandPanel('right')"
+        >
+          <span class="wf-edge-wake__label">展开属性面板</span>
+          <el-icon class="wf-edge-wake__icon"><ArrowLeft /></el-icon>
+        </button>
+      </Transition>
     </div>
 
     <!-- 底栏：草稿状态 + 上次校验计数 -->
@@ -381,9 +520,10 @@ defineOptions({ name: 'WorkflowEditor' })
  * <p>单一真源：画布状态在 VueFlow store；节点/边的修改都走 store API，
  * 保存时从 store 读，避免「画布显示的」和「保存出去的」不一致。
  */
-import { computed, markRaw, nextTick, onActivated, onMounted, ref, watch } from 'vue'
+import { computed, markRaw, nextTick, onActivated, onBeforeUnmount, onDeactivated, onMounted, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { ElMessage, ElMessageBox } from 'element-plus'
+import { ArrowLeft, ArrowRight, FullScreen, Minus, Plus } from '@element-plus/icons-vue'
 import { MarkerType, VueFlow, useVueFlow } from '@vue-flow/core'
 import type {
   Connection,
@@ -396,16 +536,16 @@ import type {
   NodeTypesObject
 } from '@vue-flow/core'
 import { Background } from '@vue-flow/background'
-import { Controls } from '@vue-flow/controls'
 import '@vue-flow/core/dist/style.css'
 import '@vue-flow/core/dist/theme-default.css'
-import '@vue-flow/controls/dist/style.css'
 import PageHeader from '@/components/PageHeader.vue'
+import { useWorkflowFocus } from '@/composables/workflowFocus'
+import InputMappingEditor from './InputMappingEditor.vue'
 import MappingEditor from './MappingEditor.vue'
 import JsonLogicEditor from './JsonLogicEditor.vue'
 import WorkflowNodeCard from './WorkflowNodeCard.vue'
 import WorkflowTrialDrawer from './WorkflowTrialDrawer.vue'
-import { pageAgents } from '@/api/agent'
+import { pageAgents, getAgent } from '@/api/agent'
 import { listAllItems } from '@/api/tool'
 import {
   getWorkflowDef,
@@ -427,6 +567,7 @@ import type {
   WorkflowGraphEdge,
   WorkflowGraphNode,
   WorkflowIssue,
+  WorkflowMappingSource,
   WorkflowNodeConfig,
   WorkflowNodeType,
   WorkflowPaletteItem,
@@ -527,8 +668,32 @@ const router = useRouter()
 const nodeTypes = { workflow: markRaw(WorkflowNodeCard) } as NodeTypesObject
 
 const vf = useVueFlow()
-const { addNodes, addEdges, removeNodes, removeEdges, findNode, screenToFlowCoordinate, getViewport, fitView, setCenter } =
-  vf
+const {
+  addNodes,
+  addEdges,
+  removeNodes,
+  removeEdges,
+  findNode,
+  screenToFlowCoordinate,
+  getViewport,
+  fitView,
+  setCenter,
+  zoomIn,
+  zoomOut,
+  viewport
+} = vf
+
+/** 专注模式跨壳层开关；本页只负责进入 / 退出与失活复位 */
+const { setFocus: setWorkflowFocus } = useWorkflowFocus()
+
+/** 下拉第一页以外的 Agent 名称缓存（id → 名称 / 编码），只服务画布标题展示 */
+const agentLabelCache = new Map<number, { name: string; code: string }>()
+/** 详情接口也解析不到的 id（已删除 / 无权限），避免反复请求 */
+const agentLabelMissing = new Set<number>()
+/** 详情补查进行中标记：防止回填触发递归请求 */
+let agentLabelResolving = false
+/** Agent 下拉是否已加载完（成功或失败）：未完成前不补查详情，避免多余请求 */
+let agentOptionsReady = false
 
 interface SelectedElement {
   kind: 'node' | 'edge'
@@ -579,6 +744,152 @@ const canHumanAct = computed(() => user.hasPerm('workflow:human:act'))
 
 const trialVisible = ref(false)
 
+/* ===== 模块一 / 二：布局折叠与悬浮工具栏（纯 UI 状态，不参与 graph_json） ===== */
+/** 左「节点库」是否折叠（用户意图，不含 hover 临时展开） */
+const paletteCollapsed = ref(false)
+/** 右「节点属性」是否折叠（用户意图，不含 hover 临时展开） */
+const propsCollapsed = ref(false)
+/** 专注模式：同时收起左右面板，并通知壳层隐藏全局侧导航 */
+const focusMode = ref(false)
+/** 进入专注前的面板状态快照，退出时原样恢复 */
+const panelStateBeforeFocus = ref<{ palette: boolean; props: boolean } | null>(null)
+/** 当前缩放百分比，供悬浮工具栏展示 */
+const zoomPercent = computed(() => Math.round((viewport.value?.zoom ?? 1) * 100))
+
+/** 侧边面板标识 */
+type PanelSide = 'left' | 'right'
+/** 贴边 hover 临时展开的侧别；非空时该侧即使「已折叠」也显示 */
+const peekSide = ref<PanelSide | null>(null)
+/**
+ * 选中节点 / 连线时临时唤出右侧属性面板。
+ * <p>为什么独立于 peekSide：hover 唤出会随鼠标移开被 240ms 定时器收回，
+ * 而「正在配参数」必须保持可见；这个标记只由选中态驱动，取消选中才清。
+ * <p>只在专注模式用：普通模式下折叠面板被选中直接常驻展开（见 onNodeClick）。
+ */
+const propsPeekForSelection = ref(false)
+/** 收起临时面板的延时句柄，供鼠标跨越缝隙时取消 */
+let unpeekTimer: number | undefined
+/** 左面板当前是否不可见：折叠意图 + hover 临时展开共同决定 */
+const paletteHidden = computed(() => paletteCollapsed.value && peekSide.value !== 'left')
+/** 右面板当前是否不可见：折叠意图 + hover 临时展开 + 选中节点临时唤出共同决定 */
+const propsHidden = computed(
+  () => propsCollapsed.value && peekSide.value !== 'right' && !propsPeekForSelection.value
+)
+/** 正在从节点库拖拽：拖拽期间不自动收起，否则拖到一半面板消失 */
+const paletteDragActive = ref(false)
+
+/** 取消待执行的收起动作 */
+function cancelUnpeek() {
+  if (unpeekTimer !== undefined) {
+    window.clearTimeout(unpeekTimer)
+    unpeekTimer = undefined
+  }
+}
+
+/**
+ * 贴边 / 面板 hover：临时唤出该侧面板（仅专注模式启用，避免日常编辑误触）。
+ *
+ * @param side 侧别
+ */
+function peekPanel(side: PanelSide) {
+  if (!focusMode.value) {
+    return
+  }
+  cancelUnpeek()
+  peekSide.value = side
+}
+
+/**
+ * 延迟收起 hover 唤出的面板。
+ * <p>留 240ms 缓冲，让鼠标从贴边热区跨进面板本体时不被判成「已移开」。
+ *
+ * @param side 侧别
+ */
+function scheduleUnpeek(side: PanelSide) {
+  if (!focusMode.value || paletteDragActive.value) {
+    return
+  }
+  cancelUnpeek()
+  unpeekTimer = window.setTimeout(() => {
+    unpeekTimer = undefined
+    if (peekSide.value === side) {
+      peekSide.value = null
+    }
+  }, 240)
+}
+
+/**
+ * 点击唤醒页签：把「用户意图」改成展开。
+ * <p>不用直接改 peekSide：点了就是明确要常驻，动效交给面板自身的宽度过渡。
+ *
+ * @param side 侧别
+ */
+function expandPanel(side: PanelSide) {
+  cancelUnpeek()
+  peekSide.value = null
+  if (side === 'left') {
+    paletteCollapsed.value = false
+  } else {
+    propsCollapsed.value = false
+    // 常驻展开后不再需要「选中临时唤出」，避免两个标记互相覆盖
+    propsPeekForSelection.value = false
+  }
+}
+
+/**
+ * 收起某一侧面板（用户点折叠按钮）。
+ * <p>右侧要同时清掉「选中临时唤出」：显式收起优先级最高，
+ * 否则选中节点期间点折叠按钮看起来没反应。
+ *
+ * @param side 侧别
+ */
+function collapsePanel(side: PanelSide) {
+  cancelUnpeek()
+  if (side === 'left') {
+    paletteCollapsed.value = true
+    return
+  }
+  propsCollapsed.value = true
+  propsPeekForSelection.value = false
+}
+
+/**
+ * 复位左右面板为「默认全展开」。
+ * <p>本页被 KeepAlive 缓存，折叠是纯 UI 状态、不该跨路由残留：
+ * 首次挂载与每次页签切回都重置，保证「刚进入页面」就是完整初始视野。
+ */
+function resetPanelLayout() {
+  cancelUnpeek()
+  peekSide.value = null
+  propsPeekForSelection.value = false
+  paletteCollapsed.value = false
+  propsCollapsed.value = false
+}
+
+/**
+ * 选中节点 / 连线后确保属性面板可见。
+ * <p>普通模式：折叠意图直接改为展开（用户接下来必然要配参数，常驻更稳）；
+ * 专注模式：只临时唤出，取消选中即收回画布空间（专注模式的核心承诺是全画布）。
+ *
+ * @param hasSelection 当前是否选中了节点或连线
+ */
+function revealPropsForSelection(hasSelection: boolean) {
+  if (!hasSelection) {
+    propsPeekForSelection.value = false
+    return
+  }
+  if (focusMode.value) {
+    // 清掉 hover 状态，改由选中标记驱动，避免鼠标移开被定时器收回
+    cancelUnpeek()
+    peekSide.value = null
+    propsPeekForSelection.value = true
+    return
+  }
+  if (propsCollapsed.value) {
+    expandPanel('right')
+  }
+}
+
 const errorCount = computed(() => issues.value.filter((item) => item.level === 'error').length)
 const warnCount = computed(() => issues.value.filter((item) => item.level === 'warn').length)
 /** 图改过但还没重新校验：提示用户结果已过期 */
@@ -624,6 +935,89 @@ const showMapping = computed(() => {
   const type = selectedNode.value?.data?.nodeType
   return type === 'START' || type === 'END' || type === 'AGENT' || type === 'TOOL'
 })
+
+/** 图内所有 START 节点编码：入参映射把 $.outputs.&lt;start&gt; 归一成 $.input，需要这份名单 */
+const startCodes = computed(() =>
+  vf.nodes.value
+    .map((node) => (node.data || {}) as WorkflowFlowNodeData)
+    .filter((data) => String(data.nodeType) === 'START')
+    .map((data) => String(data.code ?? ''))
+    .filter(Boolean)
+)
+
+/**
+ * 入参映射的「来源节点」候选：当前节点的所有前置节点（多跳祖先）。
+ * <p>START 已排除：它的输出等价于运行入参，在编辑器里由固定的「运行入参（$.input）」选项表示，
+ * 避免同一份取值出现两个来源选项。
+ */
+const mappingSources = computed<WorkflowMappingSource[]>(() => {
+  const node = selectedNode.value
+  if (!node) {
+    return []
+  }
+  return collectAncestors(node.id)
+    .filter((item) => String(item.data?.nodeType) !== 'START')
+    .map((item) => {
+      const data = (item.data || {}) as WorkflowFlowNodeData
+      const code = String(data.code ?? '')
+      const name = String(data.name ?? '')
+      const outputMapping = (data.config?.outputMapping ?? {}) as Record<string, string>
+      return {
+        id: item.id,
+        code,
+        name,
+        label: `${nodeTypeLabel(String(data.nodeType))} · ${name || code}（${code}）`,
+        // 有出参映射时，真实产出键就是这些；没有映射时后端只保留 {text}
+        outputKeys: Object.keys(outputMapping)
+      }
+    })
+    .filter((item) => item.code)
+})
+
+/**
+ * 反向广度优先收集前置节点（多跳祖先）。
+ * <p>不区分边类型：ERROR 分支同样会产出输出，理应可被下游引用。
+ * <p>已访问集合同时充当环保护：画布允许画出环，成环由校验器拦截，这里不能死循环。
+ *
+ * @param nodeId 起点节点 id（结果不含自身）
+ * @return 祖先节点，按距离由近到远
+ */
+function collectAncestors(nodeId: string): Node<WorkflowFlowNodeData>[] {
+  // 反邻接表：目标节点 → 直接前驱节点 id 列表
+  const incoming = new Map<string, string[]>()
+  vf.edges.value.forEach((edge) => {
+    const source = String(edge.source ?? '')
+    const target = String(edge.target ?? '')
+    if (!source || !target) {
+      return
+    }
+    const list = incoming.get(target)
+    if (list) {
+      list.push(source)
+    } else {
+      incoming.set(target, [source])
+    }
+  })
+  const visited = new Set<string>([nodeId])
+  const queue: string[] = [nodeId]
+  const result: Node<WorkflowFlowNodeData>[] = []
+  while (queue.length) {
+    const current = queue.shift() as string
+    for (const source of incoming.get(current) ?? []) {
+      // 已访问直接跳过：既去重也防环
+      if (visited.has(source)) {
+        continue
+      }
+      visited.add(source)
+      queue.push(source)
+      const found = vf.nodes.value.find((item) => item.id === source)
+      if (found) {
+        result.push(found as Node<WorkflowFlowNodeData>)
+      }
+    }
+  }
+  return result
+}
 
 /** HUMAN 处理人规则解析结果；非法时模板给红字提示（发布会被后端拒） */
 const assigneeParsed = computed(() => parseAssigneeRule(selectedNode.value?.data?.config?.assigneeRule))
@@ -828,6 +1222,71 @@ function edgeTypeLabel(type: string): string {
   return EDGE_TYPE_LABEL[type] || type || '未知'
 }
 
+/**
+ * 切换专注模式。
+ * <p>进入：先记下左右面板当前状态，再统一收起并通知壳层隐藏全局导航；
+ * 退出：按快照恢复面板，避免用户进专注前专门展开的面板被永久收掉。
+ */
+function toggleFocusMode() {
+  if (focusMode.value) {
+    exitFocusMode()
+    return
+  }
+  panelStateBeforeFocus.value = { palette: paletteCollapsed.value, props: propsCollapsed.value }
+  paletteCollapsed.value = true
+  propsCollapsed.value = true
+  // 进专注先给全画布；属性面板由「再次选中节点」按需临时唤出，避免一进来就被面板吃掉宽度
+  propsPeekForSelection.value = false
+  focusMode.value = true
+  setWorkflowFocus(true)
+}
+
+/** 退出专注模式：恢复进入前的面板状态，并解除壳层隐藏 */
+function exitFocusMode() {
+  focusMode.value = false
+  setWorkflowFocus(false)
+  // hover 临时展开不属于持久状态，一并清掉，避免退出后残留半开面板
+  cancelUnpeek()
+  peekSide.value = null
+  // 选中临时唤出同样不是持久状态：退出专注后按快照恢复折叠意图
+  propsPeekForSelection.value = false
+  const before = panelStateBeforeFocus.value
+  if (before) {
+    paletteCollapsed.value = before.palette
+    propsCollapsed.value = before.props
+    panelStateBeforeFocus.value = null
+  }
+}
+
+/**
+ * 全局 ESC：专注模式下退出。
+ * <p>弹窗 / 抽屉打开时不抢占 ESC，避免一次按键同时关弹窗和退专注。
+ */
+function onFocusKeydown(event: KeyboardEvent) {
+  if (event.key !== 'Escape' || !focusMode.value) {
+    return
+  }
+  if (document.querySelector('.el-overlay')) {
+    return
+  }
+  exitFocusMode()
+}
+
+/** 悬浮工具栏放大；以画布中心为锚点 */
+function zoomInCanvas() {
+  void zoomIn()
+}
+
+/** 悬浮工具栏缩小；以画布中心为锚点 */
+function zoomOutCanvas() {
+  void zoomOut()
+}
+
+/** 悬浮工具栏自适应：与首屏载入使用同一套 padding / maxZoom */
+function fitCanvas() {
+  void fitView({ padding: 0.2, maxZoom: 1.1, duration: 250 }).catch(() => false)
+}
+
 /** 工具下拉文案：停用也展示，避免用户以为工具消失 */
 function toolLabel(item: ToolItemRow): string {
   const name = item.title ? `${item.title}（${item.name}）` : item.name
@@ -854,6 +1313,9 @@ async function loadAll() {
     const graph = draftResp.data.data.graph || { nodes: [], edges: [] }
     vf.setNodes((graph.nodes || []).map(toFlowNode))
     vf.setEdges((graph.edges || []).map(toFlowEdge))
+    // Agent / 工具选项可能已先加载完成：铺完节点立刻补一次名称，避免首屏闪「Agent #30」
+    syncAgentLabels()
+    syncToolLabels()
     draftUpdateTime.value = draftResp.data.data.updateTime || ''
     selected.value = null
     issues.value = []
@@ -912,6 +1374,10 @@ async function loadAgentOptions() {
     agentOptions.value = []
     agentLoadError.value = 'Agent 列表加载失败，暂时无法绑定 Agent；请刷新页面重试'
   }
+  // 标记下拉已就绪：此后回填节点标题时，第一页没覆盖到的 id 才会去补查详情
+  agentOptionsReady = true
+  // 选项到位 / 失败后统一回填节点标题：失败时清空名称，回退显示节点「显示名」
+  syncAgentLabels()
 }
 
 /** 工具下拉：含停用项，由文案标注 */
@@ -922,6 +1388,8 @@ async function loadToolOptions() {
     toolOptions.value = []
     toolLoadError.value = '工具列表加载失败，暂时无法绑定工具；请刷新页面重试'
   }
+  // 选项到位 / 失败后统一回填节点标题：失败时清空名称，回退显示节点「显示名」
+  syncToolLabels()
 }
 
 /** 保存草稿；silent=true 用于校验/发布前的自动保存 */
@@ -1065,6 +1533,8 @@ function onDragStart(item: WorkflowPaletteItem, event: Event) {
     dragEvent.preventDefault()
     return
   }
+  // 拖拽期间锁定面板：hover 收起逻辑要跳过，否则拖到一半节点库自己缩回去
+  paletteDragActive.value = true
   dragEvent.dataTransfer?.setData(DRAG_MIME, item.type)
   dragEvent.dataTransfer?.setData('text/plain', item.type)
   if (dragEvent.dataTransfer) {
@@ -1072,9 +1542,19 @@ function onDragStart(item: WorkflowPaletteItem, event: Event) {
   }
 }
 
+/**
+ * 拖拽结束（含中途取消）：解锁 hover 收起。
+ * <p>必须挂在 dragend 上：用户把节点拖到画布外松手时不会触发 drop，只会有 dragend。
+ */
+function onPaletteDragEnd() {
+  paletteDragActive.value = false
+}
+
 /** 落到画布：屏幕坐标转流坐标后新增节点 */
 function onDrop(event: Event) {
   const dragEvent = event as DragEvent
+  // 不论后面是否成功新增，落点即代表本次拖拽结束，先解锁面板的 hover 收起
+  paletteDragActive.value = false
   if (!canEdit.value) {
     ElMessage.warning('没有编辑权限')
     return
@@ -1174,16 +1654,22 @@ function onConnect(connection: Connection) {
 /** 选中节点 */
 function onNodeClick({ node }: NodeMouseEvent) {
   selected.value = { kind: 'node', id: node.id }
+  // 选中即要配参数：折叠状态下强制把右侧属性面板拉出来（专注模式为临时唤出）
+  revealPropsForSelection(true)
 }
 
 /** 选中连线 */
 function onEdgeClick({ edge }: EdgeMouseEvent) {
   selected.value = { kind: 'edge', id: edge.id }
+  // 连线属性同样在右侧面板编辑，联动规则与节点一致
+  revealPropsForSelection(true)
 }
 
 /** 点空白清空选中 */
 function onPaneClick() {
   selected.value = null
+  // 专注模式下取消选中就收回临时唤出的属性面板，恢复全画布视野
+  revealPropsForSelection(false)
 }
 
 /**
@@ -1209,9 +1695,55 @@ watch(
         : vf.edges.value.some((edge) => edge.id === sel.id)
     if (!exists) {
       selected.value = null
+      // 关联元素被删掉后，选中临时唤出的面板不应继续挂着
+      revealPropsForSelection(false)
     }
   }
 )
+
+/**
+ * 绑定 / 解绑工具。
+ * <p>除 toolId 外同步写入展示用名称：画布节点标题要直接显示工具名，
+ * 但这两个字段只存在于画布 data，buildGraph 不会落库。
+ *
+ * @param value 下拉选中的 toolId；清空时为 undefined / 空串
+ */
+function setNodeTool(value: number | string | undefined) {
+  const node = selectedNode.value
+  if (!node) {
+    return
+  }
+  const toolId = value === undefined || value === null || value === '' ? undefined : Number(value)
+  const tool = toolOptions.value.find((item) => item.id === toolId)
+  node.data = {
+    ...node.data,
+    config: { ...node.data.config, toolId },
+    toolTitle: tool?.title ?? '',
+    toolName: tool?.name ?? ''
+  }
+}
+
+/**
+ * 把 toolId 对应的工具名称回填到所有 TOOL 节点。
+ * <p>工具下拉与草稿并行加载，草稿先到时名称还解析不出来；
+ * 这里在两边任一就绪后统一补齐，同值短路避免无意义重渲染。
+ */
+function syncToolLabels() {
+  const byId = new Map(toolOptions.value.map((item) => [item.id, item]))
+  vf.nodes.value.forEach((node) => {
+    const data = (node.data || {}) as WorkflowFlowNodeData
+    if (String(data.nodeType) !== 'TOOL') {
+      return
+    }
+    const tool = byId.get(Number(data.config?.toolId))
+    const toolTitle = tool?.title ?? ''
+    const toolName = tool?.name ?? ''
+    if (data.toolTitle === toolTitle && data.toolName === toolName) {
+      return
+    }
+    node.data = { ...data, toolTitle, toolName }
+  })
+}
 
 /** 条件节点表达式写回 config */
 function setCondition(value: unknown) {
@@ -1220,6 +1752,100 @@ function setCondition(value: unknown) {
     return
   }
   node.data = { ...node.data, config: { ...node.data.config, condition: value } }
+}
+
+/**
+ * 绑定 / 解绑 Agent。
+ * <p>除 agentId 外同步写入展示用名称与编码：画布节点标题要直接显示 Agent 名称，
+ * 但这两个字段只存在于画布 data，buildGraph 不会落库。
+ *
+ * @param value 下拉选中的 agentId；清空时为 undefined / 空串
+ */
+function setNodeAgent(value: number | string | undefined) {
+  const node = selectedNode.value
+  if (!node) {
+    return
+  }
+  const agentId = value === undefined || value === null || value === '' ? undefined : Number(value)
+  const agent = agentOptions.value.find((item) => item.id === agentId)
+  node.data = {
+    ...node.data,
+    config: { ...node.data.config, agentId },
+    agentName: agent?.name ?? '',
+    agentCode: agent?.code ?? ''
+  }
+}
+
+/**
+ * 把 agentId 对应的 Agent 名称/编码回填到所有 AGENT 节点。
+ * <p>Agent 下拉与草稿是并行加载的，草稿先到时名称还解析不出来；
+ * 这里在两边任一就绪后统一补齐，且做同值短路，避免无意义地触发画布重渲染。
+ * <p>下拉只取第一页（上限 100 条）：命中不了的 id 再走详情接口补名称，避免画布退化成「Agent #30」。
+ */
+function syncAgentLabels() {
+  const byId = new Map(agentOptions.value.map((item) => [item.id, item]))
+  const unresolved: number[] = []
+  vf.nodes.value.forEach((node) => {
+    const data = (node.data || {}) as WorkflowFlowNodeData
+    if (String(data.nodeType) !== 'AGENT') {
+      return
+    }
+    const agentId = Number(data.config?.agentId)
+    const agent = byId.get(agentId) ?? agentLabelCache.get(agentId)
+    if (!agent && Number.isFinite(agentId) && agentId > 0 && !agentLabelMissing.has(agentId)) {
+      unresolved.push(agentId)
+    }
+    const agentName = agent?.name ?? ''
+    const agentCode = agent?.code ?? ''
+    if (data.agentName === agentName && data.agentCode === agentCode) {
+      return
+    }
+    node.data = { ...data, agentName, agentCode }
+  })
+  // 下拉还没加载完就先不补查详情：等 loadAgentOptions 收尾后会再同步一次
+  if (agentOptionsReady) {
+    void resolveAgentLabels(unresolved)
+  }
+}/**
+ * 为下拉第一页里没有的 Agent 补查名称。
+ * <p>并发去重 + 失败记入 missing，保证同一 id 不会反复打接口；
+ * 补全后清空缓存标记再回填一次节点标题。
+ *
+ * @param ids 未解析出名称的 agentId 列表
+ */
+async function resolveAgentLabels(ids: number[]) {
+  if (agentLabelResolving) {
+    return
+  }
+  const unique = [...new Set(ids)]
+  if (!unique.length) {
+    return
+  }
+  agentLabelResolving = true
+  try {
+    const results = await Promise.all(
+      unique.map(async (id) => {
+        try {
+          const { data } = await getAgent(id)
+          const detail = data.data
+          return detail ? { id, name: detail.name, code: detail.code } : { id, missing: true as const }
+        } catch {
+          // 已删除 / 无查看权限：记下来，后续不再重复请求
+          return { id, missing: true as const }
+        }
+      })
+    )
+    results.forEach((item) => {
+      if ('missing' in item) {
+        agentLabelMissing.add(item.id)
+        return
+      }
+      agentLabelCache.set(item.id, { name: item.name, code: item.code })
+    })
+  } finally {
+    agentLabelResolving = false
+  }
+  syncAgentLabels()
 }
 
 /** 入参映射写回 config */
@@ -1334,7 +1960,24 @@ watch(workflowId, (next, prev) => {
 })
 
 onMounted(async () => {
+  window.addEventListener('keydown', onFocusKeydown)
+  // 首次进入：左右面板默认全展开，给完整初始视野（不记忆上次的折叠意图）
+  resetPanelLayout()
   await Promise.all([loadAll(), loadAgentOptions(), loadToolOptions()])
+})
+
+/** 组件真正销毁（关页签）时摘掉全局监听并复位壳层，防止侧栏永久隐藏 */
+onBeforeUnmount(() => {
+  window.removeEventListener('keydown', onFocusKeydown)
+  cancelUnpeek()
+  exitFocusMode()
+})
+
+/** KeepAlive 切走时退出专注：壳层布局是全局的，不能跟着缓存页一起走 */
+onDeactivated(() => {
+  if (focusMode.value) {
+    exitFocusMode()
+  }
 })
 
 /**
@@ -1348,6 +1991,8 @@ onActivated(() => {
     activatedOnce = true
     return
   }
+  // 页签切回等同「重新进入页面」：折叠是纯 UI 状态，复位为默认全展开
+  resetPanelLayout()
   if (workflowId.value && !dirty.value) {
     void loadAll()
   }
@@ -1361,6 +2006,12 @@ onActivated(() => {
   /* 顶栏 + 页签 + 主区留白之外的可视高度；画布区自行滚动 */
   height: calc(100vh - 200px);
   min-height: 520px;
+}
+
+/* 专注模式：页签条与主区留白已被壳层收起，页面直接吃满剩余高度 */
+.wf-page.is-focus {
+  height: calc(100vh - 72px);
+  min-height: 0;
 }
 
 .block-alert {
@@ -1436,29 +2087,201 @@ onActivated(() => {
 }
 
 .wf-body {
+  position: relative;
   display: flex;
   flex: 1;
   gap: 12px;
   min-height: 0;
 }
 
-.wf-palette {
-  flex: 0 0 200px;
-  padding: 12px;
-  overflow-y: auto;
+/* ===== 模块一：左右面板折叠（宽度过渡 + 内层定宽防重排） ===== */
+.wf-panel {
+  position: relative;
+  min-width: 0;
+  overflow: hidden;
   border: 1px solid var(--ah-border, #e5e7eb);
   border-radius: 12px;
   background: #fff;
+  transition: flex-basis 0.22s ease, width 0.22s ease, margin 0.22s ease, border-color 0.22s ease;
+}
+
+.wf-palette {
+  flex: 0 0 200px;
+  width: 200px;
+}
+
+/* 折叠后宽度归零；负 margin 抵消 wf-body 的 12px gap，画布真正贴边 */
+.wf-palette.is-collapsed {
+  flex-basis: 0;
+  width: 0;
+  margin-right: -12px;
+  border-color: transparent;
+}
+
+.wf-panel__inner {
+  box-sizing: border-box;
+  height: 100%;
+  padding: 12px;
+  overflow-y: auto;
+  transition: opacity 0.15s ease;
+}
+
+.wf-palette .wf-panel__inner {
+  width: 200px;
+}
+
+.wf-panel.is-collapsed .wf-panel__inner {
+  opacity: 0;
+  pointer-events: none;
+}
+
+.wf-panel__head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  margin-bottom: 10px;
 }
 
 .wf-panel__title {
   display: flex;
   align-items: center;
   gap: 8px;
-  margin: 0 0 10px;
+  margin: 0;
+  min-width: 0;
   color: var(--ah-text-primary, #111827);
   font-size: 13px;
   font-weight: 600;
+}
+
+/* 标题右侧的折叠按钮：低干扰，hover 才显形 */
+.wf-panel__fold {
+  display: inline-flex;
+  flex: none;
+  align-items: center;
+  justify-content: center;
+  width: 22px;
+  height: 22px;
+  padding: 0;
+  border: 0;
+  border-radius: 6px;
+  background: transparent;
+  color: #9ca3af;
+  cursor: pointer;
+  transition: background 0.15s ease, color 0.15s ease;
+}
+
+.wf-panel__fold:hover {
+  background: #f3f4f6;
+  color: #4b5563;
+}
+
+/*
+ * 折叠后贴在画布左右边缘的唤醒页签。
+ * 常态只露一条窄边（22px），hover 平滑横向展开并浮出文字，
+ * 让用户在专注模式下也能一眼看出「面板收去哪了、点哪里能回来」。
+ */
+.wf-edge-wake {
+  position: absolute;
+  top: 50%;
+  z-index: 7;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 4px;
+  width: 22px;
+  height: 64px;
+  padding: 0;
+  overflow: hidden;
+  border: 1px solid rgb(15 23 42 / 8%);
+  /* 半透明浅灰底 + 轻阴影：比纯白描边更显眼，又不喧宾夺主 */
+  background: rgb(243 244 246 / 92%);
+  color: #4b5563;
+  box-shadow: 0 2px 10px rgb(15 23 42 / 12%);
+  cursor: pointer;
+  white-space: nowrap;
+  transform: translateY(-50%);
+  transition: width 0.22s ease, background 0.18s ease, color 0.18s ease, box-shadow 0.18s ease;
+}
+
+.wf-edge-wake:hover,
+.wf-edge-wake:focus-visible {
+  width: 104px;
+  background: #fff;
+  color: #635bff;
+  box-shadow: 0 6px 18px rgb(99 91 255 / 22%);
+}
+
+.wf-edge-wake:focus-visible {
+  outline: 2px solid rgb(99 91 255 / 45%);
+  outline-offset: 1px;
+}
+
+.wf-edge-wake__icon {
+  flex: none;
+  font-size: 13px;
+}
+
+/* 文字默认收起，hover 时随宽度一起浮现 */
+.wf-edge-wake__label {
+  flex: none;
+  font-size: 11px;
+  font-weight: 600;
+  opacity: 0;
+  transition: opacity 0.16s ease;
+}
+
+.wf-edge-wake:hover .wf-edge-wake__label,
+.wf-edge-wake:focus-visible .wf-edge-wake__label {
+  opacity: 1;
+  transition-delay: 0.06s;
+}
+
+.wf-edge-wake.is-left {
+  left: 0;
+  border-left: 0;
+  border-radius: 0 8px 8px 0;
+  /* 图标贴边不居中：展开时箭头位置不动，只有文字浮现，观感更稳 */
+  justify-content: flex-start;
+  padding-left: 3px;
+}
+
+.wf-edge-wake.is-right {
+  right: 0;
+  border-right: 0;
+  border-radius: 8px 0 0 8px;
+  justify-content: flex-end;
+  padding-right: 3px;
+}
+
+/*
+ * 专注模式的贴边热区：鼠标贴到画布最左 / 最右 8px 时临时唤出面板。
+ * 透明 + 无事件阻挡以外的副作用；面板展开后本元素会被 v-if 移除，不叠加遮挡。
+ */
+.wf-edge-hot {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  z-index: 6;
+  width: 8px;
+}
+
+.wf-edge-hot.is-left {
+  left: 0;
+}
+
+.wf-edge-hot.is-right {
+  right: 0;
+}
+
+.wf-wake-enter-active,
+.wf-wake-leave-active {
+  transition: opacity 0.15s ease;
+}
+
+.wf-wake-enter-from,
+.wf-wake-leave-to {
+  opacity: 0;
 }
 
 .wf-palette__list {
@@ -1534,13 +2357,104 @@ onActivated(() => {
   z-index: 5;
 }
 
+/* ===== 模块二：底部居中悬浮胶囊工具栏 ===== */
+.wf-dock {
+  position: absolute;
+  bottom: 16px;
+  left: 50%;
+  z-index: 6;
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  padding: 5px 8px;
+  border: 1px solid rgb(15 23 42 / 8%);
+  border-radius: 999px;
+  background: #fff;
+  box-shadow: 0 10px 26px rgb(15 23 42 / 14%);
+  transform: translateX(-50%);
+  /* 胶囊留白处穿透：节点拖到工具栏下方时仍能被抓住 */
+  pointer-events: none;
+  user-select: none;
+}
+
+.wf-dock > * {
+  pointer-events: auto;
+}
+
+.wf-dock__btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 28px;
+  height: 28px;
+  padding: 0;
+  border: 0;
+  border-radius: 50%;
+  background: transparent;
+  color: #4b5563;
+  font-size: 14px;
+  cursor: pointer;
+  transition: background 0.15s ease, color 0.15s ease;
+}
+
+.wf-dock__btn:hover {
+  background: #f3f4f6;
+  color: #635bff;
+}
+
+.wf-dock__zoom {
+  min-width: 42px;
+  color: #6b7280;
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+  text-align: center;
+}
+
+.wf-dock__divider {
+  width: 1px;
+  height: 16px;
+  margin: 0 4px;
+  background: #e5e7eb;
+}
+
+/* 试跑是工具栏唯一主色按钮，视觉权重高于缩放 */
+.wf-dock__run {
+  height: 28px;
+  margin-left: 4px;
+  padding: 0 14px;
+  border: 0;
+  border-radius: 999px;
+  background: #635bff;
+  color: #fff;
+  font-size: 12px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: background 0.15s ease;
+}
+
+.wf-dock__run:hover {
+  background: #5147e6;
+}
+
+.wf-dock__run:disabled {
+  background: #c7c3ff;
+  cursor: not-allowed;
+}
+
 .wf-props {
   flex: 0 0 300px;
-  padding: 12px;
-  overflow-y: auto;
-  border: 1px solid var(--ah-border, #e5e7eb);
-  border-radius: 12px;
-  background: #fff;
+  width: 300px;
+}
+
+.wf-props.is-collapsed {
+  flex-basis: 0;
+  width: 0;
+  margin-left: -12px;
+  border-color: transparent;
+}
+
+.wf-props .wf-panel__inner {
+  width: 300px;
 }
 
 .wf-form :deep(.el-form-item) {

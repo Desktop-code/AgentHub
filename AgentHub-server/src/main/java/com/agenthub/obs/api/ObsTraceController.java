@@ -59,6 +59,18 @@ public class ObsTraceController {
     }
 
     /**
+     * 按工作流定义筛选调用记录（工作流列表「运行记录」入口）。
+     *
+     * @param req 分页、q、workflowId（必填）
+     * @return 该工作流的 trace，时间降序
+     */
+    @SaCheckPermission(ObsPermissions.TRACE_LIST)
+    @GetMapping("/traces")
+    public Result<PageResult<ObsTraceResp>> tracesByWorkflow(@Valid ObsTracePageReq req) {
+        return Result.ok(queries.tracesByWorkflow(req));
+    }
+
+    /**
      * @param traceId 业务 traceId
      * @return 一条提问
      */

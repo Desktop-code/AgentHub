@@ -5,7 +5,7 @@ package com.agenthub.obs.domain.model;
  * parentId 为空表示树根。inputText 可先空着，结束时再补输入/输出。
  * parallelFanout 为 true 时按并行分叉发 step_no（N.1 / N.2）。
  *
- * @param type           步骤类型。TASK 会被拒绝
+ * @param type           步骤类型；TASK 供工作流编排节点使用
  * @param name           展示名，受列宽限制
  * @param agentId        本步所属 Agent，可空
  * @param parentId       父行自增 id，可空

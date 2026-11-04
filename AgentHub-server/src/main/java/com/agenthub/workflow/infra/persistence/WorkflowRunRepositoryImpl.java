@@ -116,6 +116,34 @@ public class WorkflowRunRepositoryImpl implements WorkflowRunRepository {
 
     /** {@inheritDoc} */
     @Override
+    public List<Long> recentIdsByWorkflowId(Long workflowId, int limit) {
+        // 只查 id 列：obs 按定义过滤 trace 时不需要 graph_json 等大字段
+        int size = Math.min(Math.max(limit, 1), 500);
+        return mapper.selectList(new LambdaQueryWrapper<WorkflowRunEntity>()
+                        .select(WorkflowRunEntity::getId)
+                        .eq(WorkflowRunEntity::getWorkflowId, workflowId)
+                        .orderByDesc(WorkflowRunEntity::getId)
+                        .last("LIMIT " + size))
+                .stream()
+                .map(WorkflowRunEntity::getId)
+                .toList();
+    }
+
+    /** {@inheritDoc} */
+    @Override
+    public void attachTraceId(Long id, String traceId) {
+        if (id == null || traceId == null || traceId.isBlank()) {
+            return;
+        }
+        // 只写 trace_id：不碰 status / end_time，避免与调度线程的状态迁移互相覆盖
+        mapper.update(null, new LambdaUpdateWrapper<WorkflowRunEntity>()
+                .eq(WorkflowRunEntity::getId, id)
+                .set(WorkflowRunEntity::getTraceId, traceId)
+                .set(WorkflowRunEntity::getUpdateTime, LocalDateTime.now()));
+    }
+
+    /** {@inheritDoc} */
+    @Override
     public Optional<WorkflowRun> findByAppAndClientRequestId(Long appId, String clientRequestId) {
         if (appId == null || clientRequestId == null || clientRequestId.isBlank()) {
             return Optional.empty();

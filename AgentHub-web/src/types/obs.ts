@@ -17,7 +17,14 @@ export interface ObsSession {
 
 export interface ObsTrace {
   traceId: string
-  sessionId: number
+  /** 对话场景为会话主键；工作流场景为占位 0，前端按 workflowId 判断是否展示 */
+  sessionId: number | null
+  /** 编排场景：obs_trace.workflow_run_id（工作流 run 主键的字符串） */
+  workflowRunId?: string | null
+  /** 编排场景：工作流定义 id */
+  workflowId?: number | null
+  /** 编排场景：工作流名称（后端从 attrs 解出，无需再查） */
+  workflowName?: string | null
   agentId: number | null
   agentName: string | null
   userId: number | null
@@ -35,6 +42,10 @@ export interface ObsTrace {
   tokenTotal?: number | null
   primaryModelName?: string | null
   finishReason?: string | null
+  /** trace 级扩展 JSON（已脱敏） */
+  attrsJson?: string | null
+  /** 从 attrs 解出的脱敏失败原因，工作流场景可直接展示 */
+  cause?: string | null
 }
 
 /**

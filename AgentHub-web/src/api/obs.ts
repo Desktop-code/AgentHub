@@ -16,6 +16,19 @@ export function pageObsTraces(sessionId: number, params: { current: number; size
   return request.get<Result<PageResult<ObsTrace>>>(`/api/obs/sessions/${sessionId}/traces`, { params })
 }
 
+/**
+ * 按工作流定义查调用记录（工作流列表「运行记录」入口）。
+ * workflowId 是工作流定义 id；后端会换算成该定义最近的 run 再过滤 trace。
+ */
+export function pageObsTracesByWorkflow(params: {
+  current: number
+  size: number
+  workflowId: number
+  q?: string
+}) {
+  return request.get<Result<PageResult<ObsTrace>>>('/api/obs/traces', { params })
+}
+
 /** 右栏。按 seq 升序的完整步骤，含父子深度。 */
 export function listObsSpans(traceId: string) {
   return request.get<Result<ObsSpan[]>>(`/api/obs/traces/${traceId}/spans`)

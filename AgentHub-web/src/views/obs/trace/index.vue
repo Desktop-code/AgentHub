@@ -2,12 +2,20 @@
   <div class="page">
     <PageHeader
       title="调用追踪"
-      description="按会话查看每次问题和执行步骤。一次问题一条记录，路由按父子步骤展开，不计入 Token 用量。"
+      :description="pageDescription"
     />
+
+    <!-- 工作流入口：从「运行记录」跳进来时显示当前定义，避免用户误以为是全量列表 -->
+    <div v-if="workflowMode" class="wf-bar">
+      <span class="wf-label">工作流</span>
+      <el-tag effect="plain">{{ workflowName || `#${workflowId}` }}</el-tag>
+      <span class="wf-hint">只显示该工作流最近的运行记录</span>
+      <el-button link type="primary" @click="exitWorkflow">退出筛选</el-button>
+    </div>
 
     <div class="filter-bar">
       <el-form class="filter-form" inline @submit.prevent="onSearch">
-        <el-form-item label="智能体">
+        <el-form-item v-if="!workflowMode" label="智能体">
           <el-select
             v-model="agentId"
             clearable
@@ -18,7 +26,7 @@
             <el-option v-for="item in agents" :key="item.id" :label="item.name" :value="item.id" />
           </el-select>
         </el-form-item>
-        <el-form-item label="会话">
+        <el-form-item v-if="!workflowMode" label="会话">
           <el-input
             v-model="sessionQ"
             class="filter-input"
@@ -26,12 +34,12 @@
             placeholder="预览或会话编号"
           />
         </el-form-item>
-        <el-form-item label="问题">
+        <el-form-item :label="workflowMode ? '标题' : '问题'">
           <el-input
             v-model="traceQ"
             class="filter-input"
             clearable
-            placeholder="搜索问题"
+            :placeholder="workflowMode ? '搜索运行标题' : '搜索问题'"
           />
         </el-form-item>
         <el-form-item>
@@ -47,9 +55,9 @@
       </el-form>
     </div>
 
-    <!-- 三栏：会话 25% / 问题 25% / 执行链路 50% -->
-    <div class="board">
-      <section class="col">
+    <!-- 三栏：会话 25% / 问题 25% / 执行链路 50%；工作流入口下会话列无意义，退化为两栏 -->
+    <div class="board" :class="{ 'board--workflow': workflowMode }">
+      <section v-if="!workflowMode" class="col">
         <div class="col-head">
           <h2>会话</h2>
         </div>
@@ -105,7 +113,7 @@
 
       <section class="col">
         <div class="col-head">
-          <h2>问题</h2>
+          <h2>{{ workflowMode ? '运行记录' : '问题' }}</h2>
         </div>
         <div v-loading="traceLoading" class="col-body col-body--scroll">
           <button
@@ -124,10 +132,13 @@
                 · <span :class="latencyClass(row.latencyMs)">{{ latency(row.latencyMs) }}</span>
               </template>
               <template v-if="row.tokenTotal != null"> · {{ row.tokenTotal }} tok</template>
+              <template v-if="row.workflowRunId"> · run #{{ row.workflowRunId }}</template>
             </span>
           </button>
-          <p v-if="selectedSessionId == null" class="empty">先选择左侧会话</p>
-          <p v-else-if="!traceLoading && traces.length === 0" class="empty">没有问题</p>
+          <p v-if="!canQueryTraces" class="empty">先选择左侧会话</p>
+          <p v-else-if="!traceLoading && traces.length === 0" class="empty">
+            {{ workflowMode ? '该工作流还没有运行记录' : '没有问题' }}
+          </p>
         </div>
         <div class="col-pager">
           <span class="col-pager-meta">共 {{ traceTotal }} 条 · 第 {{ traceQuery.current }}/{{ tracePages }} 页</span>
@@ -135,7 +146,7 @@
             <el-button
               size="small"
               text
-              :disabled="selectedSessionId == null || traceQuery.current <= 1 || traceLoading"
+              :disabled="!canQueryTraces || traceQuery.current <= 1 || traceLoading"
               @click="goTracePage(traceQuery.current - 1)"
             >
               ‹
@@ -143,7 +154,7 @@
             <el-button
               size="small"
               text
-              :disabled="selectedSessionId == null || traceQuery.current >= tracePages || traceLoading"
+              :disabled="!canQueryTraces || traceQuery.current >= tracePages || traceLoading"
               @click="goTracePage(traceQuery.current + 1)"
             >
               ›
@@ -155,7 +166,7 @@
                 type="number"
                 min="1"
                 :max="tracePages"
-                :disabled="selectedSessionId == null || traceLoading"
+                :disabled="!canQueryTraces || traceLoading"
                 @keyup.enter="commitTraceJump"
                 @blur="commitTraceJump"
               />
@@ -193,7 +204,9 @@
         </div>
         <div v-loading="spanLoading" class="col-body col-body--scroll">
           <p v-if="!user.hasPerm('obs:span:list')" class="empty">没有步骤查询权限</p>
-          <p v-else-if="selectedTraceId == null" class="empty">选择一条问题后查看步骤</p>
+          <p v-else-if="selectedTraceId == null" class="empty">
+            {{ workflowMode ? '选择一条运行记录后查看步骤' : '选择一条问题后查看步骤' }}
+          </p>
           <div v-else class="span-tree">
             <!-- 三栏只渲染瀑布流；拓扑图仅放大后展示 -->
             <TraceSpanFlow :spans="spans" />
@@ -252,12 +265,13 @@ defineOptions({ name: 'CallTrace' })
  * 调用追踪三栏。所属域：obs。
  * 右栏瀑布流常驻；顶部拓扑仅在放大抽屉中展示。
  */
-import { computed, onMounted, reactive, ref, watch } from 'vue'
+import { computed, onActivated, onMounted, reactive, ref, watch } from 'vue'
+import { useRoute, useRouter } from 'vue-router'
 import { ElMessage } from 'element-plus'
 import { FullScreen, RefreshRight, Search } from '@element-plus/icons-vue'
 import { pageAgents } from '@/api/agent'
 import { pageEvalSuites, promoteFromTrace } from '@/api/eval'
-import { listObsSpans, pageObsSessions, pageObsTraces } from '@/api/obs'
+import { listObsSpans, pageObsSessions, pageObsTraces, pageObsTracesByWorkflow } from '@/api/obs'
 import type { AgentCard } from '@/types/agent'
 import type { EvalSuiteRow } from '@/types/eval'
 import type { ObsSession, ObsSpan, ObsTrace } from '@/types/obs'
@@ -267,6 +281,14 @@ import TraceLinkDrawer from '@/components/obs/TraceLinkDrawer.vue'
 import TraceSpanFlow from '@/components/obs/TraceSpanFlow.vue'
 
 const user = useUserStore()
+const route = useRoute()
+const router = useRouter()
+/** 工作流定义 id；非空即「运行记录」入口，隐藏会话列、改查 /api/obs/traces */
+const workflowId = ref<number | null>(null)
+const workflowName = ref('')
+/** 已应用的路由条件快照：KeepAlive 下再次从列表跳转时据此判断是否需要重拉 */
+let appliedWorkflowKey: string | null = null
+
 const agents = ref<AgentCard[]>([])
 const agentId = ref<number | undefined>()
 
@@ -307,6 +329,16 @@ const canExpandSpans = computed(
   () => !!selectedTraceId.value && user.hasPerm('obs:span:list') && spans.value.length > 0
 )
 
+/** 工作流入口：会话列无意义，列表按定义过滤 */
+const workflowMode = computed(() => workflowId.value != null)
+/** 中栏是否具备查询条件：对话要选会话，工作流只要带 defId */
+const canQueryTraces = computed(() => workflowMode.value || selectedSessionId.value != null)
+const pageDescription = computed(() =>
+  workflowMode.value
+    ? '按工作流查看每次试跑 / 执行：一次 run 一条记录，右栏按节点展开步骤树。'
+    : '按会话查看每次问题和执行步骤。一次问题一条记录，路由按父子步骤展开，不计入 Token 用量。'
+)
+
 /** 总页数至少为 1，便于跳转输入框 max 与按钮禁用态。 */
 const sessionPages = computed(() => Math.max(1, Math.ceil(sessionTotal.value / sessionQuery.size) || 1))
 const tracePages = computed(() => Math.max(1, Math.ceil(traceTotal.value / traceQuery.size) || 1))
@@ -323,6 +355,43 @@ watch(
     traceJump.value = String(page)
   }
 )
+
+/**
+ * 读取路由上的工作流条件。返回 true 表示条件变化、需要重新拉取列表。
+ * workflowId 非法（空串 / NaN / ≤0）按「无过滤」处理，页面行为与旧版一致。
+ */
+function applyWorkflowQuery(): boolean {
+  const rawId = Array.isArray(route.query.workflowId) ? route.query.workflowId[0] : route.query.workflowId
+  const rawName = Array.isArray(route.query.workflowName) ? route.query.workflowName[0] : route.query.workflowName
+  const parsed = rawId == null || String(rawId).trim() === '' ? null : Number(rawId)
+  const id = parsed != null && Number.isFinite(parsed) && parsed > 0 ? Math.trunc(parsed) : null
+  const key = id == null ? '' : String(id)
+  if (appliedWorkflowKey === key) {
+    return false
+  }
+  appliedWorkflowKey = key
+  workflowId.value = id
+  workflowName.value = typeof rawName === 'string' ? rawName : ''
+  return true
+}
+
+/** 条件变化后的统一收口：清空选中与步骤，按当前模式重新查 */
+function reloadForWorkflowChange() {
+  selectedSessionId.value = null
+  traceQ.value = ''
+  traceQuery.current = 1
+  resetDetail()
+  if (workflowMode.value) {
+    loadTraces()
+  } else {
+    reloadSessions()
+  }
+}
+
+/** 退出工作流筛选：清掉 query 后回到普通会话视角 */
+function exitWorkflow() {
+  void router.replace({ path: route.path, query: {} })
+}
 
 /** 有名称用名称，解析失败或缺失时用 #id。 */
 function agentLabel(name: string | null | undefined, id: number | null | undefined) {
@@ -367,19 +436,27 @@ function reloadSessions() {
   loadSessions()
 }
 
-/** 点查询：会话与问题条件同时生效；有选中会话时刷新问题列表。 */
+/** 点查询：会话与问题条件同时生效；有选中会话时刷新问题列表。工作流模式只重查运行记录。 */
 function onSearch() {
+  if (workflowMode.value) {
+    reloadTraces()
+    return
+  }
   reloadSessions()
   if (selectedSessionId.value != null) {
     reloadTraces()
   }
 }
 
-/** 清空智能体 / 会话 / 问题筛选后重新拉取。 */
+/** 清空智能体 / 会话 / 问题筛选后重新拉取。工作流模式保留定义条件，只清关键字。 */
 function onReset() {
   agentId.value = undefined
   sessionQ.value = ''
   traceQ.value = ''
+  if (workflowMode.value) {
+    reloadTraces()
+    return
+  }
   selectedSessionId.value = null
   resetDetail()
   reloadSessions()
@@ -451,10 +528,10 @@ function reloadTraces() {
 }
 
 /**
- * 提问翻页。未选会话时不请求。
+ * 提问翻页。未选会话且非工作流模式时不请求。
  */
 function goTracePage(page: number) {
-  if (selectedSessionId.value == null) {
+  if (!canQueryTraces.value) {
     return
   }
   const next = Math.min(Math.max(1, page), tracePages.value)
@@ -467,7 +544,7 @@ function goTracePage(page: number) {
 }
 
 function commitTraceJump() {
-  if (selectedSessionId.value == null) {
+  if (!canQueryTraces.value) {
     return
   }
   const parsed = Number.parseInt(String(traceJump.value), 10)
@@ -479,7 +556,7 @@ function commitTraceJump() {
 }
 
 async function loadTraces() {
-  if (selectedSessionId.value == null) {
+  if (!canQueryTraces.value) {
     traces.value = []
     traceTotal.value = 0
     traceJump.value = '1'
@@ -487,12 +564,17 @@ async function loadTraces() {
   }
   traceLoading.value = true
   try {
+    // 筛条件变严后旧页码可能越界：先按当前页拉，再钳到末页重拉一次
     for (let attempt = 0; attempt < 2; attempt++) {
-      const { data } = await pageObsTraces(selectedSessionId.value, {
+      const params = {
         current: traceQuery.current,
         size: traceQuery.size,
         q: traceQ.value.trim() || undefined
-      })
+      }
+      // 工作流模式走 defId 过滤；对话模式仍按会话，二者互斥
+      const { data } = workflowMode.value
+        ? await pageObsTracesByWorkflow({ ...params, workflowId: workflowId.value as number })
+        : await pageObsTraces(selectedSessionId.value as number, params)
       traces.value = data.data.records
       traceTotal.value = data.data.total
       if (traceQuery.current <= tracePages.value) {
@@ -584,15 +666,46 @@ async function submitPromote() {
   }
 }
 
-onMounted(async () => {
+/** Agent 字典只用于会话列名称兜底；失败不影响列表 */
+async function loadAgents() {
   try {
     const { data } = await pageAgents({ current: 1, size: 100 })
     agents.value = data.data.records
   } catch {
     agents.value = []
   }
-  await loadSessions()
+}
+
+onMounted(async () => {
+  await loadAgents()
+  // 首次进入先读 query：带 workflowId 时直接查运行记录，否则维持旧的三栏会话视角
+  applyWorkflowQuery()
+  if (workflowMode.value) {
+    await loadTraces()
+  } else {
+    await loadSessions()
+  }
 })
+
+// KeepAlive 下再次从工作流列表跳转可能复用本组件，条件变化才重拉
+onActivated(() => {
+  if (applyWorkflowQuery()) {
+    reloadForWorkflowChange()
+  }
+})
+
+watch(
+  () => [route.query.workflowId, route.query.workflowName],
+  () => {
+    // 离开本页时 query 被清空也会触发，跳过避免后台空拉一次列表
+    if (route.path !== '/ops/traces') {
+      return
+    }
+    if (applyWorkflowQuery()) {
+      reloadForWorkflowChange()
+    }
+  }
+)
 </script>
 
 <style scoped>
@@ -621,6 +734,37 @@ onMounted(async () => {
   gap: 16px;
   align-items: stretch;
   min-height: 0;
+}
+
+/* 工作流入口没有会话列：两栏，给运行记录与链路更多宽度 */
+.board--workflow {
+  grid-template-columns: 35% 65%;
+}
+
+.wf-bar {
+  display: flex;
+  flex: none;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 12px;
+  padding: 10px 12px;
+  background: var(--ah-surface);
+  border: 1px solid var(--ah-border);
+  border-radius: var(--ah-radius-lg);
+}
+
+.wf-label {
+  color: var(--ah-text-secondary);
+  font-size: 13px;
+}
+
+.wf-hint {
+  color: var(--ah-text-secondary);
+  font-size: 12px;
+}
+
+.wf-bar .el-button {
+  margin-left: auto;
 }
 
 .col {

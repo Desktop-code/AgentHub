@@ -22,9 +22,12 @@ import com.agenthub.workflow.domain.repository.WorkflowNodeRunRepository;
 import com.agenthub.workflow.domain.repository.WorkflowReleaseRepository;
 import com.agenthub.workflow.domain.repository.WorkflowRunRepository;
 import com.agenthub.workflow.domain.service.WorkflowTenantProvider;
+import com.agenthub.workflow.domain.service.WorkflowTraceWriter;
 import com.agenthub.workflow.infra.WorkflowProperties;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import org.springframework.stereotype.Service;
 
 import java.time.LocalDateTime;
@@ -43,6 +46,8 @@ import java.util.List;
 @Service
 public class WorkflowRunAppService {
 
+    private static final Logger log = LoggerFactory.getLogger(WorkflowRunAppService.class);
+
     private final WorkflowRunRepository runs;
     private final WorkflowNodeRunRepository nodeRuns;
     private final WorkflowHumanTaskRepository humanTasks;
@@ -57,6 +62,8 @@ public class WorkflowRunAppService {
     private final OperLogWriter operLogWriter;
     private final WorkflowProperties properties;
     private final ObjectMapper json;
+    /** 埋点端口：取消这类不经过引擎的终态迁移，需要自己收口根 trace */
+    private final WorkflowTraceWriter traces;
 
     /**
      * @param runs             run 仓储
@@ -73,6 +80,7 @@ public class WorkflowRunAppService {
      * @param operLogWriter    操作日志（只记 run 元数据）
      * @param properties       硬顶配置（max-node-runs-per-run）
      * @param json             全站 ObjectMapper
+     * @param traces           工作流埋点（取消时收口根 trace）
      */
     public WorkflowRunAppService(WorkflowRunRepository runs,
                                  WorkflowNodeRunRepository nodeRuns,
@@ -87,7 +95,8 @@ public class WorkflowRunAppService {
                                  WorkflowHumanTaskAppService humanTaskService,
                                  OperLogWriter operLogWriter,
                                  WorkflowProperties properties,
-                                 ObjectMapper json) {
+                                 ObjectMapper json,
+                                 WorkflowTraceWriter traces) {
         this.runs = runs;
         this.nodeRuns = nodeRuns;
         this.humanTasks = humanTasks;
@@ -102,6 +111,7 @@ public class WorkflowRunAppService {
         this.operLogWriter = operLogWriter;
         this.properties = properties;
         this.json = json;
+        this.traces = traces;
     }
 
     /**
@@ -206,6 +216,15 @@ public class WorkflowRunAppService {
         for (WorkflowHumanTask task : humanTaskService.openTasks(id)) {
             humanTasks.decide(task.getId(), "EXPIRED",
                     "{\"cancelled\":true,\"reason\":\"run 被取消\"}", operatorId, operatorId);
+        }
+        // 取消不经过引擎：这里把对象状态对齐后收口根 trace（CANCELLED）
+        run.setStatus(WorkflowRunStatus.CANCELLED.name());
+        run.setErrorSummary(error);
+        // 取消失败不能因为埋点异常回滚：观测是旁路，只告警
+        try {
+            traces.finishRun(run);
+        } catch (RuntimeException ex) {
+            log.warn("取消后收口 trace 失败 runId={} type={}", id, ex.getClass().getSimpleName());
         }
         operLogWriter.write("workflow", "run_cancel", "workflow_run", String.valueOf(id), "取消试跑");
         return detail(id, tenantId);

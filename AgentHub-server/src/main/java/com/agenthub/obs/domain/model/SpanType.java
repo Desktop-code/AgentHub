@@ -4,7 +4,7 @@ package com.agenthub.obs.domain.model;
  * 步骤类型。所属域：obs。
  * Router 用 ROUTE → AGENT → LLM/TOOL 组成父子树；
  * Plan-and-Execute 用 AGENT →（PLAN ∥ 各步 AGENT）→ LLM/TOOL，PLAN 与每步互不为父子，都是串行兄弟。
- * TASK 只留给以后的编排节点。
+ * TASK 只留给编排节点（工作流 run 的每个节点），对话埋点不写。
  */
 public enum SpanType {
 
@@ -28,6 +28,9 @@ public enum SpanType {
     RETRIEVE,
     /** 其它系统步 */
     SYSTEM,
-    /** 预留编排节点。一期对话埋点禁止写入 */
+    /**
+     * 编排节点（工作流 run 的每个节点一步）。
+     * 对话埋点不写；工作流埋点写入，节点内部不再强行编造父子层。
+     */
     TASK
 }
