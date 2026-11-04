@@ -24,13 +24,17 @@
       </div>
     </section>
 
-    <!-- 关系概览：轻量静态树，不引入 X6 / VueFlow；串行模板用箭头示意，子多时自然换行 -->
+    <!--
+      关系概览：轻量静态树，不引入 X6 / VueFlow。
+      连线只表达「根 → 候选子」的一层主从分发：每个子节点各有一条直角折线接回父级汇流线；
+      子节点之间不再画串行箭头（串行的先后由候选排序与执行语义表达，不画成节点间连线）。
+    -->
     <section class="orch-card">
       <div class="card-head">
         <div>
           <h4>关系概览</h4>
           <span class="hint">
-            根 → 候选子（一层）；{{ serialTemplate ? '串行模板按判定/排序依次执行' : isCriticTemplate ? '评审环由执行者出稿、评审专家判定' : '并行模板同时派发' }}；灰色表示停用或不可用
+            只画「根 → 候选子」一层分发，子节点之间不连线；{{ serialTemplate ? '串行先后以候选排序为准' : isCriticTemplate ? '评审环由执行者出稿、评审专家判定' : '并行模板同时派发' }}；灰色表示停用或不可用
           </span>
         </div>
         <span class="hint">候选 {{ routes.length }} · 启用 {{ enabledCount }}</span>
@@ -41,52 +45,55 @@
           <span>编排根 · ROUTER</span>
           <el-tag v-if="agentStatus !== 1" type="info" size="small" effect="plain">已停用</el-tag>
         </div>
-        <div class="map-stem" :class="{ 'is-sequence': serialTemplate }" />
-        <div v-if="routes.length" class="map-children" :class="{ 'is-sequence': serialTemplate }">
-          <template v-for="(row, index) in routes" :key="row.id">
-            <div
-              class="child-node"
-              :class="{
-                off: row.status !== 1 || row.childStatus !== 1 || !isModeAllowed(row.childRunMode),
-                blocked: row.childAllowOrchestrated === 0
-              }"
-            >
-              <strong :title="childLabel(row)">{{ childLabel(row) }}</strong>
-              <span class="child-key">{{ row.routeKey || 'route_key 待生成' }}</span>
-              <div class="child-tags">
-                <el-tag size="small" :type="row.status === 1 ? 'success' : 'info'" effect="plain">
-                  {{ row.status === 1 ? '启用' : '停用' }}
-                </el-tag>
-                <!-- 子运行模式：ReAct 走默认标签，计划执行用绿色区分，避免和「失败」红混淆 -->
-                <el-tag
-                  size="small"
-                  :type="row.childRunMode === MA_CHILD_MODE_PLAN ? 'success' : 'primary'"
-                  effect="plain"
-                >
-                  {{ childRunModeText(row.childRunMode) }}
-                </el-tag>
-                <!-- 子后来被缩回仅 ReAct 或关掉「允许被编排调用」：保存前由校验区报硬错误 -->
-                <el-tag
-                  v-if="row.childRunMode && !isModeAllowed(row.childRunMode)"
-                  size="small"
-                  type="warning"
-                  effect="plain"
-                >
-                  未获允许
-                </el-tag>
-                <el-tag
-                  v-if="row.childAllowOrchestrated === 0"
-                  size="small"
-                  type="warning"
-                  effect="plain"
-                >
-                  未允许被编排
-                </el-tag>
-              </div>
+        <!-- 干线：始终从根节点底部中心竖直向下，不随模板变形 -->
+        <div class="map-stem" />
+        <!--
+          子节点区：只有根 → 子的连线（每条由子节点自己的伪元素绘制），
+          汇流线宽度按子节点数量算出，不写死坐标。
+        -->
+        <div v-if="routes.length" class="map-children" :style="forkBusStyle">
+          <div
+            v-for="row in routes"
+            :key="row.id"
+            class="child-node"
+            :class="{
+              off: row.status !== 1 || row.childStatus !== 1 || !isModeAllowed(row.childRunMode),
+              blocked: row.childAllowOrchestrated === 0
+            }"
+          >
+            <strong :title="childLabel(row)">{{ childLabel(row) }}</strong>
+            <span class="child-key">{{ row.routeKey || 'route_key 待生成' }}</span>
+            <div class="child-tags">
+              <el-tag size="small" :type="row.status === 1 ? 'success' : 'info'" effect="plain">
+                {{ row.status === 1 ? '启用' : '停用' }}
+              </el-tag>
+              <!-- 子运行模式：ReAct 走默认标签，计划执行用绿色区分，避免和「失败」红混淆 -->
+              <el-tag
+                size="small"
+                :type="row.childRunMode === MA_CHILD_MODE_PLAN ? 'success' : 'primary'"
+                effect="plain"
+              >
+                {{ childRunModeText(row.childRunMode) }}
+              </el-tag>
+              <!-- 子后来被缩回仅 ReAct 或关掉「允许被编排调用」：保存前由校验区报硬错误 -->
+              <el-tag
+                v-if="row.childRunMode && !isModeAllowed(row.childRunMode)"
+                size="small"
+                type="warning"
+                effect="plain"
+              >
+                未获允许
+              </el-tag>
+              <el-tag
+                v-if="row.childAllowOrchestrated === 0"
+                size="small"
+                type="warning"
+                effect="plain"
+              >
+                未允许被编排
+              </el-tag>
             </div>
-            <!-- 串行模板：节点之间画箭头，提示「有先后顺序」，并行模板不画 -->
-            <span v-if="serialTemplate && index < routes.length - 1" class="seq-arrow">→</span>
-          </template>
+          </div>
         </div>
         <el-empty v-else description="还没有候选子 Agent" :image-size="48" />
         <!-- 评审环轻量示意：执行者 → 评审专家 → 虚线回修；静态节点，不引入 X6 -->
@@ -118,246 +125,322 @@
       </div>
     </section>
 
-    <div class="orch-grid">
-      <!-- 下左：候选列表；增删改/启停即时落库，与现网 /routes API 等价 -->
-      <section class="orch-card">
-        <div class="card-head">
-          <div>
-            <h4>候选列表</h4>
-            <span class="hint">route_key / 意图 / 子 Agent / 启停</span>
-          </div>
-          <el-button v-if="canOperate" type="primary" @click="routeOpen = true">+ 添加候选</el-button>
+    <!--
+      候选与策略：Tab 切换替代左右分栏，任一 Tab 内容都占满全宽。
+      策略项的解释性长文一律收进 Label 旁问号 Tooltip，界面上只留控件本身，避免说明堆积。
+    -->
+    <section class="orch-card">
+      <div class="card-head">
+        <div>
+          <h4>候选与策略</h4>
+          <span class="hint">候选增删改与启停即时落库；策略改完点页面底部「保存」生效</span>
         </div>
-        <el-alert
-          v-if="!savedRouter"
-          title="当前运行模式是 Router 但尚未保存：保存后才能维护候选。"
-          type="warning"
-          show-icon
-          :closable="false"
-          class="block-alert"
-        />
-        <el-table class="cand-table" :data="routes" size="small" empty-text="还没有候选子 Agent">
-          <el-table-column label="route_key" width="130">
-            <template #default="{ row }">
-              <code class="cand-key">{{ row.routeKey || '待生成' }}</code>
-            </template>
-          </el-table-column>
-          <el-table-column label="意图" min-width="150" show-overflow-tooltip>
-            <template #default="{ row }">{{ row.intent || '—' }}</template>
-          </el-table-column>
-          <el-table-column label="子 Agent" min-width="150">
-            <template #default="{ row }">
-              <div class="cand-name" :title="childLabel(row)">{{ childLabel(row) }}</div>
-              <div class="cand-sub">
-                {{ childRunModeText(row.childRunMode) }} · {{ row.childStatus === 1 ? '启用' : '停用' }}
-                <span v-if="row.childRunMode && !isModeAllowed(row.childRunMode)" class="cand-blocked"> · 未获本编排允许</span>
-                <span v-if="row.childAllowOrchestrated === 0" class="cand-blocked"> · 未允许被编排调用</span>
-              </div>
-            </template>
-          </el-table-column>
-          <el-table-column label="启停" width="76" align="center">
-            <template #default="{ row }">
-              <el-switch
-                v-if="canOperate"
-                :model-value="row.status === 1"
-                :loading="rowBusy === row.id"
-                @change="(on: string | number | boolean) => onToggle(row, on === true)"
-              />
-              <el-tag v-else size="small" :type="row.status === 1 ? 'success' : 'info'" effect="plain">
-                {{ row.status === 1 ? '启用' : '停用' }}
-              </el-tag>
-            </template>
-          </el-table-column>
-          <el-table-column v-if="canOperate" label="操作" width="112" align="center">
-            <template #default="{ row }">
-              <el-button link type="primary" @click="openEdit(row)">编辑</el-button>
-              <el-button link type="danger" @click="removeRow(row)">移除</el-button>
-            </template>
-          </el-table-column>
-        </el-table>
-      </section>
+      </div>
 
-      <!-- 下右：策略；选择类字段进页面底栏保存，开关同样随底栏提交 -->
-      <section class="orch-card">
-        <div class="card-head">
-          <div>
-            <h4>策略</h4>
-            <span class="hint">改完点页面底部「保存」生效</span>
+      <el-tabs v-model="activeTab" class="orch-tabs">
+        <!-- Tab 一：候选列表；增删改/启停即时落库，与现网 /routes API 等价 -->
+        <el-tab-pane label="候选列表" name="routes">
+          <div class="pane-toolbar">
+            <span class="hint">
+              route_key / 意图 / 子 Agent / 启停 · 共 {{ routes.length }} 个候选，启用 {{ enabledCount }} 个
+            </span>
+            <!-- 新建入口跟随本 Tab 顶部，不回到页头，避免和全局「新建 Agent」混淆 -->
+            <el-button v-if="canOperate" type="primary" @click="routeOpen = true">+ 添加候选</el-button>
           </div>
-        </div>
-        <el-form label-width="126px" class="strategy-form">
-          <el-form-item label="编排模板">
-            <el-select
-              :model-value="config.maTemplate || MA_TEMPLATE_ROUTER_PARALLEL"
-              :disabled="!canEdit"
-              style="width: 100%"
-              @change="onTemplateChange"
-            >
-              <el-option label="路由并行（判路由 → 多子并行）" value="ROUTER_PARALLEL" />
-              <el-option label="固定串行（跳过判路由，按排序依次执行）" value="FIXED_SEQUENCE" />
-              <el-option label="固定并行（跳过判路由，全部子一起跑）" value="FIXED_PARALLEL" />
-              <el-option label="评审环（执行者出稿 → 评审 → 有限回修）" value="CRITIC_LOOP" />
-              <el-option label="路由后串行（判路由 → 按判定顺序串行）" value="ROUTER_THEN_SEQUENCE" />
-            </el-select>
-            <div class="field-hint">
-              五种模板都可保存；非法值回落「路由并行」。固定模板 / 评审环都没有判路由；
-              评审环的参与者＝恰好 1 个执行者 + 1 个评审专家。
-              <span v-if="isRouterThenSequence">
-                先判路由选出专家与子问，再按判定顺序串行；后步只看前置摘要。
-              </span>
-            </div>
-          </el-form-item>
 
-          <!-- 评审环专属：评审专家 + 最大评审轮次；其它模板隐藏，但库里 maCritic* 不清空，切回可恢复 -->
-          <template v-if="isCriticTemplate">
-            <el-form-item label="评审专家" required>
-              <el-select
-                :model-value="config.maCriticAgentId ?? undefined"
-                :disabled="!canEdit"
-                filterable
-                placeholder="选择评审专家（需已启用且允许被编排）"
-                style="width: 100%"
-                @change="(value: number | undefined) => onCriticChange(value)"
-              >
-                <el-option
-                  v-for="item in criticOptions"
-                  :key="item.id"
-                  :label="`${item.name} · ${item.code} · ${childRunModeText(item.runMode)}`"
-                  :value="item.id"
+          <el-alert
+            v-if="!savedRouter"
+            title="当前运行模式是 Router 但尚未保存：保存后才能维护候选。"
+            type="warning"
+            show-icon
+            :closable="false"
+            class="block-alert"
+          />
+
+          <!-- 全宽表格：意图列吃掉剩余空间，route_key / 子 Agent 给足固定下限，避免挤压换行 -->
+          <el-table class="cand-table" :data="routes" size="small" empty-text="还没有候选子 Agent">
+            <el-table-column label="route_key" min-width="160">
+              <template #default="{ row }">
+                <code class="cand-key">{{ row.routeKey || '待生成' }}</code>
+              </template>
+            </el-table-column>
+            <el-table-column label="意图" min-width="320" show-overflow-tooltip>
+              <template #default="{ row }">
+                <span class="cand-intent">{{ row.intent || '—' }}</span>
+              </template>
+            </el-table-column>
+            <el-table-column label="子 Agent" min-width="240">
+              <template #default="{ row }">
+                <div class="cand-name" :title="childLabel(row)">{{ childLabel(row) }}</div>
+                <div class="cand-sub">
+                  {{ childRunModeText(row.childRunMode) }} · {{ row.childStatus === 1 ? '启用' : '停用' }}
+                  <span v-if="row.childRunMode && !isModeAllowed(row.childRunMode)" class="cand-blocked"> · 未获本编排允许</span>
+                  <span v-if="row.childAllowOrchestrated === 0" class="cand-blocked"> · 未允许被编排调用</span>
+                </div>
+              </template>
+            </el-table-column>
+            <el-table-column label="启停" width="90" align="center">
+              <template #default="{ row }">
+                <el-switch
+                  v-if="canOperate"
+                  :model-value="row.status === 1"
+                  :loading="rowBusy === row.id"
+                  @change="(on: string | number | boolean) => onToggle(row, on === true)"
                 />
-              </el-select>
-              <div class="field-hint">
-                执行者出稿后由评审专家判定；不同意则回修（默认 1 轮）。
-                评审专家不能与执行者相同，且不必出现在候选列表里。
-              </div>
-            </el-form-item>
-            <el-form-item label="最大评审轮次">
-              <el-input-number
-                :model-value="criticRounds"
-                :min="1"
-                :max="MAX_CRITIC_ROUNDS_CAP"
-                :step="1"
-                :disabled="!canEdit"
-                controls-position="right"
-                style="width: 120px"
-                @change="(value: number | undefined) => patchConfig({ maCriticMaxRounds: value ?? DEFAULT_CRITIC_MAX_ROUNDS })"
-              />
-              <div class="field-hint">
-                1～3 轮，默认 1；每一轮＝一次评审判定 +（若 REVISE）一次执行者回修。
-              </div>
-            </el-form-item>
-          </template>
+                <el-tag v-else size="small" :type="row.status === 1 ? 'success' : 'info'" effect="plain">
+                  {{ row.status === 1 ? '启用' : '停用' }}
+                </el-tag>
+              </template>
+            </el-table-column>
+            <el-table-column v-if="canOperate" label="操作" width="130" align="center">
+              <template #default="{ row }">
+                <el-button link type="primary" @click="openEdit(row)">编辑</el-button>
+                <el-button link type="danger" @click="removeRow(row)">移除</el-button>
+              </template>
+            </el-table-column>
+          </el-table>
+        </el-tab-pane>
 
-          <el-form-item label="汇总策略">
-            <el-radio-group
-              :model-value="config.answerMode || 'CONCAT'"
-              :disabled="!canEdit"
-              @change="(value: string | number | boolean) => patchConfig({ answerMode: String(value) })"
-            >
-              <el-radio value="CONCAT">拼接 CONCAT</el-radio>
-              <el-radio value="SUMMARIZE">汇总 SUMMARIZE</el-radio>
-            </el-radio-group>
-            <div class="field-hint">SUMMARIZE 用父 ROUTER 文本模型再整合一轮；失败自动降级拼接。</div>
-          </el-form-item>
+        <!-- Tab 二：编排策略；两列栅格横向展开，Label 在左，控件在右 -->
+        <el-tab-pane label="编排策略" name="strategy">
+          <el-form class="strategy-form" label-width="112px" label-position="left">
+            <div class="strategy-grid">
+              <!-- 协作模式：下拉铺满本格；模板差异说明收进问号 -->
+              <el-form-item>
+                <template #label>
+                  <span class="label-with-tip">
+                    协作模式
+                    <el-tooltip placement="top" :show-after="200">
+                      <template #content>
+                        <div class="field-tip">{{ templateHint }}</div>
+                      </template>
+                      <el-icon class="tip-icon"><QuestionFilled /></el-icon>
+                    </el-tooltip>
+                  </span>
+                </template>
+                <el-select
+                  :model-value="config.maTemplate || MA_TEMPLATE_ROUTER_PARALLEL"
+                  :disabled="!canEdit"
+                  style="width: 100%"
+                  @change="onTemplateChange"
+                >
+                  <el-option label="路由并行（判路由 → 多子并行）" value="ROUTER_PARALLEL" />
+                  <el-option label="固定串行（跳过判路由，按排序依次执行）" value="FIXED_SEQUENCE" />
+                  <el-option label="固定并行（跳过判路由，全部子一起跑）" value="FIXED_PARALLEL" />
+                  <el-option label="评审环（执行者出稿 → 评审 → 有限回修）" value="CRITIC_LOOP" />
+                  <el-option label="路由后串行（判路由 → 按判定顺序串行）" value="ROUTER_THEN_SEQUENCE" />
+                </el-select>
+              </el-form-item>
 
-          <el-form-item label="上下文策略">
-            <el-radio-group
-              :model-value="contextPolicy"
-              :disabled="!canEdit"
-              @change="(value: string | number | boolean) => onContextChange(String(value))"
-            >
-              <el-radio :value="MA_CONTEXT_ISOLATED">多项隔离</el-radio>
-              <el-radio
-                :value="MA_CONTEXT_PRIOR_SUMMARY_ONLY"
-                :disabled="!serialTemplate"
+              <!-- 结果合成：横向单选框 -->
+              <el-form-item>
+                <template #label>
+                  <span class="label-with-tip">
+                    结果合成
+                    <el-tooltip placement="top" :show-after="200" :content="answerModeHint">
+                      <el-icon class="tip-icon"><QuestionFilled /></el-icon>
+                    </el-tooltip>
+                  </span>
+                </template>
+                <el-radio-group
+                  :model-value="config.answerMode || 'CONCAT'"
+                  :disabled="!canEdit"
+                  @change="(value: string | number | boolean) => patchConfig({ answerMode: String(value) })"
+                >
+                  <el-radio value="CONCAT">拼接</el-radio>
+                  <el-radio value="SUMMARIZE">汇总</el-radio>
+                </el-radio-group>
+              </el-form-item>
+
+              <!-- 上下文共享：三选项横向并排，独占整行避免拥挤 -->
+              <el-form-item class="span-2">
+                <template #label>
+                  <span class="label-with-tip">
+                    上下文共享
+                    <el-tooltip placement="top" :show-after="200">
+                      <template #content>
+                        <div class="field-tip">{{ contextHint }}</div>
+                      </template>
+                      <el-icon class="tip-icon"><QuestionFilled /></el-icon>
+                    </el-tooltip>
+                  </span>
+                </template>
+                <el-radio-group
+                  :model-value="contextPolicy"
+                  :disabled="!canEdit"
+                  @change="(value: string | number | boolean) => onContextChange(String(value))"
+                >
+                  <el-radio :value="MA_CONTEXT_ISOLATED">多项隔离</el-radio>
+                  <el-radio :value="MA_CONTEXT_PRIOR_SUMMARY_ONLY" :disabled="!serialTemplate">
+                    前置摘要（仅串行）
+                  </el-radio>
+                  <el-radio :value="MA_CONTEXT_SHARED_SCRATCH">共享草稿区</el-radio>
+                </el-radio-group>
+                <!-- 串行 + 共享草稿是真冲突（前置摘要不会同时生效），保留一行极短警示 -->
+                <span
+                  v-if="serialTemplate && contextPolicy === MA_CONTEXT_SHARED_SCRATCH"
+                  class="field-warn"
+                >
+                  串行下不再自动拼接前置摘要，后步需自查草稿
+                </span>
+              </el-form-item>
+
+              <!-- 评审环专属：评审专家 + 最大评审轮次；其它模板隐藏，但库里 maCritic* 不清空，切回可恢复 -->
+              <template v-if="isCriticTemplate">
+                <el-form-item required>
+                  <template #label>
+                    <span class="label-with-tip">
+                      评审专家
+                      <el-tooltip placement="top" :show-after="200">
+                        <template #content>
+                          <div class="field-tip">{{ criticHint }}</div>
+                        </template>
+                        <el-icon class="tip-icon"><QuestionFilled /></el-icon>
+                      </el-tooltip>
+                    </span>
+                  </template>
+                  <el-select
+                    :model-value="config.maCriticAgentId ?? undefined"
+                    :disabled="!canEdit"
+                    filterable
+                    placeholder="选择评审专家"
+                    style="width: 100%"
+                    @change="(value: number | undefined) => onCriticChange(value)"
+                  >
+                    <el-option
+                      v-for="item in criticOptions"
+                      :key="item.id"
+                      :label="`${item.name} · ${item.code} · ${childRunModeText(item.runMode)}`"
+                      :value="item.id"
+                    />
+                  </el-select>
+                </el-form-item>
+
+                <el-form-item>
+                  <template #label>
+                    <span class="label-with-tip">
+                      最大评审轮次
+                      <el-tooltip placement="top" :show-after="200" :content="criticRoundsHint">
+                        <el-icon class="tip-icon"><QuestionFilled /></el-icon>
+                      </el-tooltip>
+                    </span>
+                  </template>
+                  <el-input-number
+                    :model-value="criticRounds"
+                    :min="1"
+                    :max="MAX_CRITIC_ROUNDS_CAP"
+                    :step="1"
+                    :disabled="!canEdit"
+                    controls-position="right"
+                    style="width: 120px"
+                    @change="(value: number | undefined) => patchConfig({ maCriticMaxRounds: value ?? DEFAULT_CRITIC_MAX_ROUNDS })"
+                  />
+                </el-form-item>
+              </template>
+
+              <!-- 子数上限 + 子 Agent 运行模式并排 -->
+              <el-form-item>
+                <template #label>
+                  <span class="label-with-tip">
+                    {{ isRouterThenSequence ? '串行上限' : '并行上限' }}
+                    <el-tooltip placement="top" :show-after="200">
+                      <template #content>
+                        <div class="field-tip">{{ maxChildrenHint }}</div>
+                      </template>
+                      <el-icon class="tip-icon"><QuestionFilled /></el-icon>
+                    </el-tooltip>
+                  </span>
+                </template>
+                <el-input-number
+                  :model-value="config.maxRouteChildren ?? 3"
+                  :min="1"
+                  :max="5"
+                  :step="1"
+                  :disabled="!canEdit"
+                  controls-position="right"
+                  style="width: 120px"
+                  @change="(value: number | undefined) => patchConfig({ maxRouteChildren: value ?? 3 })"
+                />
+              </el-form-item>
+
+              <el-form-item>
+                <template #label>
+                  <span class="label-with-tip">
+                    子 Agent 运行模式
+                    <el-tooltip placement="top" :show-after="200">
+                      <template #content>
+                        <div class="field-tip">{{ childModesHint }}</div>
+                      </template>
+                      <el-icon class="tip-icon"><QuestionFilled /></el-icon>
+                    </el-tooltip>
+                  </span>
+                </template>
+                <el-checkbox-group
+                  :model-value="allowedChildRunModes"
+                  :disabled="!canEdit"
+                  @change="onChildModesChange"
+                >
+                  <el-checkbox :value="MA_CHILD_MODE_REACT" disabled>ReAct</el-checkbox>
+                  <el-checkbox :value="MA_CHILD_MODE_PLAN">计划执行</el-checkbox>
+                </el-checkbox-group>
+              </el-form-item>
+
+              <!-- 协作深度：只读展示，说明收进问号 -->
+              <el-form-item>
+                <template #label>
+                  <span class="label-with-tip">
+                    协作深度
+                    <el-tooltip placement="top" :show-after="200" :content="depthHint">
+                      <el-icon class="tip-icon"><QuestionFilled /></el-icon>
+                    </el-tooltip>
+                  </span>
+                </template>
+                <el-input model-value="1" disabled style="width: 88px" />
+              </el-form-item>
+
+              <!-- 开关项：各占一整行，Label 在左、Switch 在右，不与上方字段混排 -->
+              <div
+                v-if="!isFixedTemplate && !isCriticTemplate"
+                class="switch-row span-2"
               >
-                前置摘要（仅串行）
-              </el-radio>
-              <el-radio :value="MA_CONTEXT_SHARED_SCRATCH">共享草稿区</el-radio>
-            </el-radio-group>
-            <div class="field-hint">
-              {{ contextHint }}
-            </div>
-            <!-- 串行模板选了共享草稿：字段单选，前置摘要不会同时生效，必须明确提示 -->
-            <div v-if="serialTemplate && contextPolicy === MA_CONTEXT_SHARED_SCRATCH" class="field-warn">
-              串行推荐「仅前置摘要」：选了共享草稿区后不再自动拼接前置摘要，后步需自己调用 ma_scratch_get 读取。
-            </div>
-          </el-form-item>
+                <span class="switch-row__label label-with-tip">
+                  {{ isRouterThenSequence ? '多意图串行' : '多意图并行' }}
+                  <el-tooltip placement="top" :show-after="200">
+                    <template #content>
+                      <div class="field-tip">{{ multiIntentHint }}</div>
+                    </template>
+                    <el-icon class="tip-icon"><QuestionFilled /></el-icon>
+                  </el-tooltip>
+                </span>
+                <el-switch
+                  :model-value="config.multiIntentEnabled !== false"
+                  :disabled="!canEdit"
+                  inline-prompt
+                  @change="(on: string | number | boolean) => patchConfig({ multiIntentEnabled: on === true })"
+                />
+              </div>
 
-          <el-form-item
-            v-if="!isFixedTemplate && !isCriticTemplate"
-            :label="isRouterThenSequence ? '多意图串行' : '多意图并行'"
-          >
-            <el-switch
-              :model-value="config.multiIntentEnabled !== false"
-              :disabled="!canEdit"
-              inline-prompt
-              @change="(on: string | number | boolean) => patchConfig({ multiIntentEnabled: on === true })"
-            />
-            <div class="field-hint">
-              {{ isRouterThenSequence
-                ? '关闭后只跑最匹配的 1 个专家；开启才可能按判定顺序串行多个。'
-                : '关闭后只派给最匹配的一个子；开启才可能多子并行。' }}
+              <div v-if="!isCriticTemplate" class="switch-row span-2">
+                <span class="switch-row__label label-with-tip">
+                  同会话继承父上下文
+                  <el-tooltip placement="top" :show-after="200">
+                    <template #content>
+                      <div class="field-tip">{{ parentHistoryHint }}</div>
+                    </template>
+                    <el-icon class="tip-icon"><QuestionFilled /></el-icon>
+                  </el-tooltip>
+                </span>
+                <el-switch
+                  :model-value="config.maAllowParentHistoryWhenSingle !== false"
+                  :disabled="!canEdit"
+                  @change="(on: string | number | boolean) => patchConfig({ maAllowParentHistoryWhenSingle: on === true })"
+                />
+              </div>
             </div>
-          </el-form-item>
-
-          <el-form-item v-if="!isCriticTemplate" label="单意图继承父历史">
-            <el-switch
-              :model-value="config.maAllowParentHistoryWhenSingle !== false"
-              :disabled="!canEdit"
-              @change="(on: string | number | boolean) => patchConfig({ maAllowParentHistoryWhenSingle: on === true })"
-            />
-            <div class="field-hint">
-              仅「只有 1 个启用候选」时生效：开＝子可继承父会话历史，关＝硬隔离只看用户原问。
-            </div>
-          </el-form-item>
-
-          <el-form-item :label="isRouterThenSequence ? '最大串行子数' : '最大并行子数'">
-            <el-input-number
-              :model-value="config.maxRouteChildren ?? 3"
-              :min="1"
-              :max="5"
-              :step="1"
-              :disabled="!canEdit"
-              controls-position="right"
-              style="width: 120px"
-              @change="(value: number | undefined) => patchConfig({ maxRouteChildren: value ?? 3 })"
-            />
-            <div class="field-hint">
-              {{ isRouterThenSequence
-                ? '路由后串行：判定条数超过上限时只跑判定顺序前 N 个，其余标「已跳过」；串行执行不并行扇出。'
-                : isSequenceTemplate
-                  ? '固定串行按顺序跑全部候选，不受此上限限制。'
-                  : isCriticTemplate
-                    ? '评审环只跑 1 个执行者，不受此上限影响。'
-                    : isFixedTemplate
-                      ? '固定并行：超过上限的候选按排序标「已跳过」，不参与执行。'
-                      : '路由并行：判路由最多返回这么多个意图；1～5，后端夹紧。' }}
-            </div>
-          </el-form-item>
-
-          <el-form-item label="允许的子运行模式">
-            <el-checkbox-group
-              :model-value="allowedChildRunModes"
-              :disabled="!canEdit"
-              @change="onChildModesChange"
-            >
-              <el-checkbox :value="MA_CHILD_MODE_REACT" disabled>ReAct</el-checkbox>
-              <el-checkbox :value="MA_CHILD_MODE_PLAN">计划执行</el-checkbox>
-            </el-checkbox-group>
-            <div class="field-hint">
-              ReAct 恒可用；勾选「计划执行」后，可把 P&E 子挂为候选并真跑。子仍需自身开启「允许被编排调用」。
-              若某个子开启「规划确认」，试跑会暂停等待批准（同时仅一个待批）。
-            </div>
-          </el-form-item>
-
-          <el-form-item label="编排深度">
-            <el-input model-value="1" disabled style="width: 88px" />
-            <div class="field-hint">一层；子不得为 ROUTER（禁嵌套）。</div>
-          </el-form-item>
-        </el-form>
-      </section>
-    </div>
+          </el-form>
+        </el-tab-pane>
+      </el-tabs>
+    </section>
 
     <!-- 底部：校验关系图。前端按现网 RouteResp 字段校验，不发起新请求 -->
     <section class="orch-card">
@@ -390,10 +473,16 @@
       <p v-else class="hint">尚未校验。点击右上「校验关系图」。</p>
     </section>
 
-    <!-- 底部薄入口：只读看最近一轮试跑的编排泳道；无试跑会话时提示先跑一轮 -->
+    <!-- 底部薄入口：试跑进独立全屏页；只读看最近一轮试跑的编排泳道（无会话时提示先跑一轮） -->
     <footer class="orch-foot">
-      <span class="hint">只读：按最近一轮试跑会话拉调用追踪，展示判路由 → 子并行 → 汇总的泳道</span>
-      <el-button size="small" :loading="laneOpening" @click="openLane">查看最近试跑泳道</el-button>
+      <span class="hint">泳道只读：按最近一轮试跑会话拉调用追踪，展示判路由 → 子并行 → 汇总；试跑为全屏对话页</span>
+      <div class="orch-foot__ops">
+        <!-- 试跑入口：行为由父级决定（Router 跳独立页，其它模式维持原抽屉） -->
+        <el-button v-if="canTrial" size="small" type="primary" :disabled="agentStatus !== 1" @click="emit('trial')">
+          试跑
+        </el-button>
+        <el-button size="small" :loading="laneOpening" @click="openLane">查看最近试跑泳道</el-button>
+      </div>
     </footer>
 
     <RouteBindDialog
@@ -464,6 +553,7 @@
  */
 import { computed, reactive, ref, watch } from 'vue'
 import { ElMessage } from 'element-plus'
+import { QuestionFilled } from '@element-plus/icons-vue'
 import { createRoute, deleteRoute, pageAgents, updateRoute } from '@/api/agent'
 import { pageTrialSessions } from '@/api/runtime'
 import { useUserStore } from '@/stores/user'
@@ -513,6 +603,8 @@ const props = defineProps<{
   canBind: boolean
   /** 父 Agent 是否已按 ROUTER 落库；未保存前禁止维护候选 */
   savedRouter: boolean
+  /** 是否有试跑权限；无权限不渲染底部试跑入口 */
+  canTrial?: boolean
 }>()
 
 const emit = defineEmits<{
@@ -520,6 +612,8 @@ const emit = defineEmits<{
   'update:config': [config: AgentRuntimeConfig]
   /** 候选增删改/启停成功；父组件重新拉取详情与候选 */
   'routes-changed': []
+  /** 点「试跑」：交回父级决定落点（Router 跳独立页，其它模式维持原抽屉） */
+  trial: []
 }>()
 
 /** 已归一的模板码：库内非法/空值回落到路由并行，页面与后端同口径 */
@@ -528,7 +622,7 @@ const templateCode = computed(() => normalizeTemplate(props.config.maTemplate))
 const isSequenceTemplate = computed(() => templateCode.value === MA_TEMPLATE_FIXED_SEQUENCE)
 /** 是否路由后串行模板：有 JUDGE，但子按判定序串行 */
 const isRouterThenSequence = computed(() => templateCode.value === MA_TEMPLATE_ROUTER_THEN_SEQUENCE)
-/** 是否串行模板（固定串行 / 路由后串行）：决定关系图箭头与上下文策略是否放开前置摘要 */
+/** 是否串行模板（固定串行 / 路由后串行）：决定关系图提示文案与上下文共享是否放开前置摘要 */
 const serialTemplate = computed(() => isSerialTemplateCode(templateCode.value))
 /** 是否固定并行模板：决定上限提示与参与者口径 */
 const isFixedParallelTemplate = computed(() => templateCode.value === MA_TEMPLATE_FIXED_PARALLEL)
@@ -539,12 +633,12 @@ const isCriticTemplate = computed(() => templateCode.value === MA_TEMPLATE_CRITI
 /** 评审环轮次：库内非法/空值在页面上先按服务端同口径夹紧 */
 const criticRounds = computed(() => normalizeCriticMaxRounds(props.config.maCriticMaxRounds))
 
-/** 上下文策略：串行默认前置摘要，其它模板默认隔离；显式选的共享草稿区原样保留 */
+/** 上下文共享：串行默认前置摘要，其它模板默认隔离；显式选的共享草稿区原样保留 */
 const contextPolicy = computed(() =>
   normalizeContextPolicy(props.config.maContextPolicy, templateCode.value)
 )
 
-/** 上下文策略的一句话说明：三种策略各说自己的口径，不混用文案 */
+/** 上下文共享的一句话说明：三种策略各说自己的口径，不混用文案 */
 const contextHint = computed(() => {
   if (contextPolicy.value === MA_CONTEXT_SHARED_SCRATCH) {
     return '本轮子 Agent 可用 ma_scratch_get / ma_scratch_put 读写键控草稿；同键第二次写入会被拒绝（不覆盖），草稿随本轮结束丢弃。'
@@ -554,6 +648,63 @@ const contextHint = computed(() => {
   }
   return '多项隔离：子只见自己的子问题；前置摘要只对串行模板（固定串行 / 路由后串行）生效。'
 })
+
+/*
+ * 策略项的说明文案：界面上不再铺长文，改由 Label 旁问号 Tooltip 悬浮展示。
+ * 放在这里集中维护，模板只引用，避免说明与控件逻辑两处漂移。
+ */
+
+/** 协作模式 Tooltip：五值合法性 + 各模板是否有判路由；路由后串行额外补一句执行顺序 */
+const templateHint = computed(() => {
+  const base =
+    '五种模板都可保存；库里非法或空值回落「路由并行」。固定串行 / 固定并行 / 评审环都没有判路由；'
+    + '评审环的参与者＝恰好 1 个执行者 + 1 个评审专家。'
+  return isRouterThenSequence.value
+    ? `${base}本模板先判路由选出专家与子问，再按判定顺序串行，后步只看前置摘要。`
+    : base
+})
+
+/** 结果合成 Tooltip：SUMMARIZE 多一轮父模型整合，失败降级拼接 */
+const answerModeHint = 'CONCAT 直接拼接各子终答；SUMMARIZE 用父 ROUTER 的文本模型再整合一轮，失败自动降级拼接。'
+
+/** 评审专家 Tooltip：角色约束与轮次来源 */
+const criticHint = '执行者出稿后由评审专家判定，不同意则回修。评审专家不能与执行者相同，也不必出现在候选列表里；下拉只列已启用、非 ROUTER 且允许被编排的 Agent。'
+
+/** 最大评审轮次 Tooltip */
+const criticRoundsHint = '1～3 轮，默认 1；每一轮＝一次评审判定 +（若 REVISE）一次执行者回修。'
+
+/** 多意图开关 Tooltip：串行与并行两种语义分开说，避免开关含义被误读 */
+const multiIntentHint = computed(() =>
+  isRouterThenSequence.value
+    ? '关闭后只跑最匹配的 1 个专家；开启才可能按判定顺序串行多个。'
+    : '关闭后只派给最匹配的一个子；开启才可能多子并行。'
+)
+
+/** 同会话继承父上下文 Tooltip：只在「恰好 1 个启用候选」时生效 */
+const parentHistoryHint = '仅「只有 1 个启用候选」时生效：开＝子可继承父会话历史，关＝硬隔离只看用户原问。'
+
+/** 子数上限 Tooltip：按模板说明上限是否真的生效 */
+const maxChildrenHint = computed(() => {
+  if (isRouterThenSequence.value) {
+    return '路由后串行：判定条数超过上限时只跑判定顺序前 N 个，其余标「已跳过」；串行执行不并行扇出。'
+  }
+  if (isSequenceTemplate.value) {
+    return '固定串行按顺序跑全部候选，不受此上限限制。'
+  }
+  if (isCriticTemplate.value) {
+    return '评审环只跑 1 个执行者，不受此上限影响。'
+  }
+  if (isFixedParallelTemplate.value) {
+    return '固定并行：超过上限的候选按排序标「已跳过」，不参与执行。'
+  }
+  return '路由并行：判路由最多返回这么多个意图；1～5，后端夹紧。'
+})
+
+/** 子 Agent 运行模式 Tooltip：ReAct 恒可用，P&E 需双向开关同时打开 */
+const childModesHint = 'ReAct 恒可用；勾选「计划执行」后，可把 P&E 子挂为候选并真跑。子仍需自身开启「允许被编排调用」；子若开启「规划确认」，试跑会暂停等待批准（同时仅一个待批）。'
+
+/** 协作深度 Tooltip：一期硬限制一层 */
+const depthHint = '一期只允许一层：子不得为 ROUTER，禁嵌套。'
 
 /** 关系图与顶部标签用的模板名 */
 const templateLabel = computed(() => {
@@ -574,6 +725,22 @@ const templateLabel = computed(() => {
 
 /** 参与判路由的启用候选数 */
 const enabledCount = computed(() => props.routes.filter((row) => row.status === 1).length)
+
+/**
+ * 汇流线宽度：由子节点数量与子卡尺寸算出「首子中心 → 末子中心」的直角干线长度。
+ *
+ * <p>不写死像素：卡片宽与间距统一由 CSS 变量 --map-child-w / --map-child-gap 提供，
+ * 这里只乘「子节点数 - 1」段；单一子节点时为 0，等同于「根直连子卡」，不会多出一条横线。
+ * 子多换行时由 CSS 的 max-width 收敛，避免横线溢出画布。
+ *
+ * @return 直接绑到 .map-children 的 style，只注入 --fork-bus-w 这一个自定义属性
+ */
+const forkBusStyle = computed<Record<string, string>>(() => {
+  const spans = Math.max(0, props.routes.length - 1)
+  return {
+    '--fork-bus-w': `calc(${spans} * (var(--map-child-w) + var(--map-child-gap)))`
+  }
+})
 
 /**
  * 评审环执行者：启用候选里排除评审者后的第 1 个（sort_order、同序 id 与服务端同口径）。
@@ -605,7 +772,7 @@ const criticLabel = computed(() => {
 })
 
 /**
- * 本编排允许的子运行模式（归一后恒含 ReAct）。
+ * 本编排允许的子 Agent 运行模式（归一后恒含 ReAct）。
  * 页面上的多选与校验、候选过滤、关系图灰显都读这一份，避免三处口径漂移。
  */
 const allowedChildRunModes = computed(() => normalizeChildRunModes(props.config.maChildRunModesAllowed))
@@ -630,7 +797,7 @@ function onChildModesChange(values: (string | number | boolean)[]) {
 /**
  * 加载评审专家候选：与「添加候选」同一套门闩（启用 / 非 ROUTER / 运行模式获允许 / 允许被编排）。
  *
- * <p>只在评审环模板下按需加载一次；切换「允许的子运行模式」后需要重载，
+ * <p>只在评审环模板下按需加载一次；切换「子 Agent 运行模式」后需要重载，
  * 否则下拉里会残留已经不获允许的 P&E 评审专家。
  */
 async function loadCriticOptions() {
@@ -669,6 +836,13 @@ const canOperate = computed(() => props.canBind && props.savedRouter)
 
 /** 正在提交启停的路由行 id；空表示没有请求在飞 */
 const rowBusy = ref<number | null>(null)
+
+/**
+ * 「候选与策略」区块的当前 Tab。
+ * 默认停在候选列表（日常最高频）；策略改动走页面底栏保存，切 Tab 不丢草稿、不触发请求。
+ * 用 string 而非字面量联合：el-tabs 的 v-model 回写类型是 string | number，收窄会与组件签名冲突。
+ */
+const activeTab = ref<string>('routes')
 
 /** 候选编辑弹窗 */
 const routeOpen = ref(false)
@@ -720,7 +894,7 @@ function patchConfig(patch: Partial<AgentRuntimeConfig>) {
 }
 
 /**
- * 模板切换：五值都可保存；切到串行模板（固定串行 / 路由后串行）时把上下文策略默认成
+ * 模板切换：五值都可保存；切到串行模板（固定串行 / 路由后串行）时把上下文共享默认成
  * 「前置摘要」，切走时收敛回隔离（服务端保存同口径），避免配置写着摘要继承却按并行隔离跑。
  *
  * @param value 下拉值
@@ -740,7 +914,7 @@ function onTemplateChange(value: string) {
 }
 
 /**
- * 上下文策略切换：三值都收；前置摘要仍只对串行模板开放（非串行选了也收敛回隔离）。
+ * 上下文共享切换：三值都收；前置摘要仍只对串行模板开放（非串行选了也收敛回隔离）。
  *
  * @param value 单选值
  */
@@ -896,7 +1070,7 @@ watch(
   }
 )
 
-// 评审环下拉按需加载；切换允许的子运行模式后要重载，避免残留已不获允许的候选
+// 评审环下拉按需加载；切换子 Agent 运行模式后要重载，避免残留已不获允许的候选
 watch(
   isCriticTemplate,
   (on) => {
@@ -917,7 +1091,7 @@ watch(
   }
 )
 
-// 上下文策略只允许三值白名单；非法 / 模板不兼容的值按模板默认回落，
+// 上下文共享只允许三值白名单；非法 / 模板不兼容的值按模板默认回落，
 // 避免历史脏值让页面显示与执行不一致。注意：共享草稿区对五种模板都合法，不能被收敛回隔离。
 watch(
   () => [props.config.maContextPolicy, templateCode.value],
@@ -933,7 +1107,7 @@ watch(
   { immediate: true }
 )
 
-// 汇总策略只允许 CONCAT / SUMMARIZE；未知值回落 CONCAT，避免页面显示空白
+// 结果合成只允许 CONCAT / SUMMARIZE；未知值回落 CONCAT，避免页面显示空白
 watch(
   () => props.config.answerMode,
   (value) => {
@@ -1017,6 +1191,9 @@ watch(
 
 /* 静态关系树：根居中，子节点横排；连接线用伪元素画，不引入图库 */
 .map {
+  /* 子卡宽与间距集中在此：汇流线长度按这两个值 + 子节点数量算，避免把坐标写死 */
+  --map-child-w: 176px;
+  --map-child-gap: 12px;
   padding: 4px 8px 0;
 }
 
@@ -1047,6 +1224,7 @@ watch(
   border-color: #e5e7eb;
 }
 
+/* 直角折线第一段：根节点底部中心 → 汇流线，始终竖直 */
 .map-stem {
   width: 2px;
   height: 18px;
@@ -1059,18 +1237,25 @@ watch(
   display: flex;
   flex-wrap: wrap;
   justify-content: center;
-  gap: 12px;
+  gap: var(--map-child-gap);
   padding-top: 18px;
 }
 
-/* 横向汇流线；子多换行时仍能看出「同属一个根」 */
+/*
+ * 直角折线第二段：一条水平汇流线，左右端点正好落在首/末子卡的中心线上。
+ * 长度 = (子节点数 - 1) × (卡宽 + 间距)，由 forkBusStyle 注入 --fork-bus-w；
+ * 单子时为 0（干线直接落到子卡），换行时用 max-width 收敛，不溢出画布。
+ * 这里不画箭头：画布只表达主从分发，不表达流转方向。
+ */
 .map-children::before {
   content: '';
   position: absolute;
   top: 0;
-  left: 8%;
-  right: 8%;
+  left: 50%;
+  width: var(--fork-bus-w, 0px);
+  max-width: 84%;
   height: 2px;
+  transform: translateX(-50%);
   background: #d9dbe7;
 }
 
@@ -1079,13 +1264,14 @@ watch(
   display: flex;
   flex-direction: column;
   gap: 2px;
-  width: 176px;
+  width: var(--map-child-w);
   padding: 10px 12px;
   background: #fff;
   border: 1px solid var(--ah-border, #e8e9ef);
   border-radius: 10px;
 }
 
+/* 直角折线第三段：汇流线 → 子节点顶部中心；每个子节点各画一条，天然随节点动态生成 */
 .child-node::before {
   content: '';
   position: absolute;
@@ -1111,27 +1297,6 @@ watch(
 /* 子被关掉「允许被编排调用」：边框提示但不整块变灰，仍能看到它的其它状态 */
 .child-node.blocked {
   border-color: #f0c78a;
-}
-
-/* 串行模板：一条横向链路而非汇流；箭头提示有先后顺序 */
-.map-children.is-sequence {
-  align-items: center;
-  gap: 8px;
-}
-
-.map-children.is-sequence::before {
-  display: none;
-}
-
-.map-children.is-sequence .child-node::before {
-  display: none;
-}
-
-.seq-arrow {
-  color: #8b84ff;
-  font-size: 16px;
-  font-weight: 700;
-  line-height: 1;
 }
 
 /* 评审环轻量示意：执行者 → 评审专家 → 虚线回修；只用静态节点，不引入 X6 */
@@ -1193,10 +1358,19 @@ watch(
   margin-top: 4px;
 }
 
-.orch-grid {
-  display: grid;
-  grid-template-columns: minmax(0, 1.35fr) minmax(320px, 0.9fr);
-  gap: 16px;
+/* Tab 切换：两个页签都占满全宽，不再左右分栏 */
+.orch-tabs :deep(.el-tabs__header) {
+  margin-bottom: 12px;
+}
+
+/* Tab 顶部工具条：说明与「+ 添加候选」分列两端，新建入口不回到页头 */
+.pane-toolbar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  margin-bottom: 10px;
 }
 
 .cand-table {
@@ -1206,6 +1380,14 @@ watch(
 .cand-key {
   font-family: ui-monospace, Consolas, monospace;
   font-size: 12px;
+}
+
+/* 意图列吃掉剩余宽度：过长由列自身 show-overflow-tooltip 截断，不撑破表格 */
+.cand-intent {
+  display: block;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .cand-name {
@@ -1225,20 +1407,64 @@ watch(
   color: #b45309;
 }
 
+/*
+ * 策略表单：两列栅格横向展开，Label 在左、控件在右。
+ * 间距由 grid gap 统一控制，清掉 el-form-item 自带的 margin，避免栅格内出现双倍留白。
+ */
 .strategy-form :deep(.el-form-item) {
-  margin-bottom: 14px;
+  margin-bottom: 0;
 }
 
-.field-hint {
-  margin-top: 4px;
-  color: var(--ah-text-secondary, #8b90a0);
+.strategy-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 18px 24px;
+  align-items: start;
+}
+
+/* 整行字段（上下文共享、开关行）：跨满两列 */
+.strategy-grid > .span-2 {
+  grid-column: 1 / -1;
+}
+
+/* 开关项：独占一行，Label 在左、Switch 在右，与上方栅格字段用细线分隔 */
+.switch-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  min-height: 32px;
+  padding-top: 14px;
+  border-top: 1px solid var(--ah-border, #e8e9ef);
+}
+
+.switch-row__label {
+  font-size: 14px;
+  color: var(--el-text-color-regular, #606266);
+}
+
+/* Label 旁问号：解释性长文只在悬浮时出现，界面保持干净 */
+.label-with-tip {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.tip-icon {
+  color: var(--el-text-color-placeholder, #a8abb2);
+  font-size: 13px;
+  cursor: help;
+}
+
+/* Tooltip 正文：限制宽度并按行折行，避免超长单行撑成一条 */
+.field-tip {
+  max-width: 340px;
   font-size: 12px;
-  line-height: 1.5;
+  line-height: 1.6;
 }
 
-/* 串行 + 共享草稿的黄色提示：字段单选，前置摘要不会同时生效 */
 .field-warn {
-  margin-top: 4px;
+  margin-left: 8px;
   color: #b45309;
   font-size: 12px;
   line-height: 1.5;
@@ -1298,8 +1524,17 @@ watch(
   background: #fafbfc;
 }
 
-@media (max-width: 1100px) {
-  .orch-grid {
+/* 底栏右侧两个按钮成组，窄屏换行时不散开 */
+.orch-foot__ops {
+  display: flex;
+  flex: none;
+  align-items: center;
+  gap: 8px;
+}
+
+/* 窄屏：策略栅格退化为单列，长文案已经收进 Tooltip，不会再把页面撑长 */
+@media (max-width: 900px) {
+  .strategy-grid {
     grid-template-columns: 1fr;
   }
 }

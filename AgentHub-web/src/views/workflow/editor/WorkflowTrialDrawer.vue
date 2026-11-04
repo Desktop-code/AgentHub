@@ -318,6 +318,7 @@ import {
   startWorkflowTrial
 } from '@/api/workflow'
 import { useUserStore } from '@/stores/user'
+import { compareNodeRunExecOrder } from '@/utils/executionOrder'
 import { describeAssigneeRule, matchesAssigneeRule } from '@/utils/workflowAssignee'
 import { renderSimpleMarkdown } from '@/utils/simpleMarkdown'
 import type {
@@ -508,6 +509,16 @@ const traceJson = computed(() => {
 })
 
 /**
+ * 节点运行行按真实执行序排好。
+ * <p>后端 `workflow_node_run` 在开跑前按「图数组顺序」批量预建，主键 id 是图顺序而非执行顺序；
+ * 画布若把 END 排在 AGENT 前，直接渲染就会得到「开始 → 结束 → Agent」。
+ * 这里统一按 start_time → end_time → id 排，未开工节点（PENDING / SKIPPED）排最后。
+ */
+const orderedNodeRuns = computed<NodeRunRow[]>(() =>
+  ((runDetail.value?.nodeRuns ?? []) as NodeRunRow[]).slice().sort(compareNodeRunExecOrder)
+)
+
+/**
  * 把后端 nodeRuns 映射成时间轴视图模型。
  * <p>入参/出参优先取节点级可选字段；拿不到时降级：
  * START 用 run 级 input，END 用 run 级 output（后端目前只回这两处），其余给空态文案。
@@ -517,7 +528,7 @@ const timelineNodes = computed<TimelineNode[]>(() => {
   if (!detail) {
     return []
   }
-  const rows = (detail.nodeRuns ?? []) as NodeRunRow[]
+  const rows = orderedNodeRuns.value
   return rows.map((row) => {
     const nodeInput =
       prettyJson(row.inputJson ?? row.input) ||
@@ -1010,7 +1021,8 @@ function diffNodes() {
     statusSnapshot.clear()
     snapshotRunId = detail.id
   }
-  const rows = detail.nodeRuns ?? []
+  // 与时间轴同源：按真实执行序找「最后一个」节点，避免图上 END 靠后导致自动展开错位
+  const rows = orderedNodeRuns.value
   if (!rows.length) {
     return
   }

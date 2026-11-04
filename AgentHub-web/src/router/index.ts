@@ -165,6 +165,17 @@ const router = createRouter({
           component: () => import('@/views/ma/list/index.vue'),
           meta: { title: '多智能体', cacheName: 'MaList' }
         },
+        /*
+         * 编排 → 多智能体 → 独立试跑页（MA-UI 刀2）。
+         * 全屏对话壳，复用试跑面板与对话流内的编排调度卡；不是第二套执行引擎，
+         * 服务端仍走 RouterTrialExecutor。同一 cacheName 只占一个页签，
+         * 换 agentId 由页面内 watch 重新载入（TrialPanel 按 agentId 重挂）。
+         */
+        {
+          path: 'orchestration/multi-agent/:agentId/trial',
+          component: () => import('@/views/ma/trial/index.vue'),
+          meta: { title: '多智能体试跑', cacheName: 'MaTrial' }
+        },
         {
           path: 'agent/memory',
           component: () => import('@/views/memory/index.vue'),

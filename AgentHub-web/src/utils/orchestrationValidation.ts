@@ -235,12 +235,12 @@ export function validateOrchestration(input: OrchestrationValidationInput): Orch
   const serialTemplate = isSerialTemplate(template)
   if (input.template && input.template !== template) {
     errors.push(
-      `未知编排模板「${input.template}」，只能是 ROUTER_PARALLEL / FIXED_SEQUENCE / FIXED_PARALLEL / CRITIC_LOOP / ROUTER_THEN_SEQUENCE`
+      `未知协作模式「${input.template}」，只能是 ROUTER_PARALLEL / FIXED_SEQUENCE / FIXED_PARALLEL / CRITIC_LOOP / ROUTER_THEN_SEQUENCE`
     )
   }
   const aggregate = input.aggregate || MA_AGGREGATE_CONCAT
   if (aggregate !== MA_AGGREGATE_CONCAT && aggregate !== MA_AGGREGATE_SUMMARIZE) {
-    errors.push(`未知汇总策略「${aggregate}」，只能是 CONCAT 或 SUMMARIZE`)
+    errors.push(`未知结果合成「${aggregate}」，只能是 CONCAT 或 SUMMARIZE`)
   }
   const context = normalizeContextPolicy(input.context, template)
   if (!serialTemplate && input.context === MA_CONTEXT_PRIOR_SUMMARY_ONLY) {
@@ -249,7 +249,7 @@ export function validateOrchestration(input: OrchestrationValidationInput): Orch
   }
   if (input.context && !(MA_CONTEXT_POLICIES as readonly string[]).includes(input.context)) {
     // 未知策略服务端会按模板默认回落；这里只提醒，避免用户以为保存了什么特殊策略
-    warnings.push(`未知上下文策略「${input.context}」，保存后按模板默认回落为 ${context}`)
+    warnings.push(`未知上下文共享「${input.context}」，保存后按模板默认回落为 ${context}`)
   }
   if (!serialTemplate && context === MA_CONTEXT_SHARED_SCRATCH) {
     // 并行多子是共享草稿区的主场景：说明工具口径，避免用户以为会自动共享完整对话
@@ -265,7 +265,7 @@ export function validateOrchestration(input: OrchestrationValidationInput): Orch
   }
   const maxParallel = input.maxParallelChildren ?? 3
   if (maxParallel < 1 || maxParallel > 5) {
-    errors.push(`最大并行子数必须在 1～5 之间，当前 ${maxParallel}`)
+    errors.push(`并行上限必须在 1～5 之间，当前 ${maxParallel}`)
   }
 
   // M4：零候选不允许；全部停用同样等于没有可用子
@@ -362,25 +362,25 @@ export function validateOrchestration(input: OrchestrationValidationInput): Orch
   // SUMMARIZE 依赖父 ROUTER 文本模型；这里拿不到模型绑定，只能提醒用户确认
   if (aggregate === MA_AGGREGATE_SUMMARIZE) {
     warnings.push(
-      '汇总策略为 SUMMARIZE：请确认父 Agent 已在「模型配置」绑定 ROUTER 用途的文本模型；未绑定时会降级为 CONCAT'
+      '结果合成为 SUMMARIZE：请确认父 Agent 已在「模型配置」绑定 ROUTER 用途的文本模型；未绑定时会降级为 CONCAT'
     )
   }
   if (!isCriticTemplate && enabled.length > maxParallel) {
     if (template === MA_TEMPLATE_FIXED_PARALLEL) {
       // 固定并行没有判路由兜底：超上限的候选直接不跑，必须让用户看到会少几个
       warnings.push(
-        `启用候选 ${enabled.length} 个，超过最大并行 ${maxParallel}：只跑 sort_order 前 ${maxParallel} 个，其余标「已跳过」`
+        `启用候选 ${enabled.length} 个，超过并行上限 ${maxParallel}：只跑 sort_order 前 ${maxParallel} 个，其余标「已跳过」`
       )
     } else if (template === MA_TEMPLATE_ROUTER_THEN_SEQUENCE) {
       // 路由后串行：并行上限复用为「串行步数上限」，超出的按判定序标「已跳过」
       warnings.push(
-        `启用候选 ${enabled.length} 个，超过最大并行 ${maxParallel}：只跑判定顺序前 ${maxParallel} 个，其余标「已跳过」`
+        `启用候选 ${enabled.length} 个，超过并行上限 ${maxParallel}：只跑判定顺序前 ${maxParallel} 个，其余标「已跳过」`
       )
     } else if (template === MA_TEMPLATE_ROUTER_PARALLEL) {
-      warnings.push(`启用候选 ${enabled.length} 个，超过最大并行 ${maxParallel}：超出的意图不会同时执行`)
+      warnings.push(`启用候选 ${enabled.length} 个，超过并行上限 ${maxParallel}：超出的意图不会同时执行`)
     } else {
       // 固定串行不设并行上限：全部候选按顺序跑完
-      warnings.push(`固定串行按顺序执行全部 ${enabled.length} 个启用候选，不受最大并行上限限制`)
+      warnings.push(`固定串行按顺序执行全部 ${enabled.length} 个启用候选，不受并行上限限制`)
     }
   }
   // 串行模板提醒：后步可见前置终答摘要，但不带工具原文

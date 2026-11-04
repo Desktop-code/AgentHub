@@ -15,7 +15,7 @@
         </template>
       </el-dropdown>
     </header>
-    <div class="body">
+    <div class="body" :class="{ 'is-editor-focus': focusActive }">
       <aside class="aside" :class="{ 'is-collapsed': collapsed }">
         <nav class="nav">
           <!-- 工作台顶层入口，不包在「概览」目录下 -->
@@ -140,7 +140,8 @@
       </aside>
       <!-- 右侧内容列：页签条与主区上下排列，避免 TagsView 变成 .body 横向 flex 的第三个子项 -->
       <div class="content">
-        <TagsView />
+        <!-- 编辑页专注模式：页签条也让位，主区高度全给画布 -->
+        <TagsView v-if="!focusActive" />
         <main class="main">
           <!--
             缓存策略：include 用 store 派生的 cachedViews（组件名），关页签即移出、组件被销毁。
@@ -187,6 +188,7 @@ import AgentTrialDrawer from '@/components/agent/AgentTrialDrawer.vue'
 import { resolveMenuIcon } from '@/components/menu/menuIcons'
 import { openAgentTrial, TRIAL_MENU_PATH, useAgentTrial } from '@/composables/agentTrial'
 import { useSessionKeepAlive } from '@/composables/sessionKeepAlive'
+import { useWorkflowFocus } from '@/composables/workflowFocus'
 import { useTagsViewStore } from '@/stores/tagsView'
 import { useUserStore } from '@/stores/user'
 import TagsView from './components/TagsView.vue'
@@ -194,6 +196,9 @@ import type { MenuNode } from '@/types'
 
 /** 长页面（试跑等）可见时每 10min 打 /me，配合后端滑动续期；401 仍清票跳登录 */
 useSessionKeepAlive()
+
+/** 工作流编辑页专注模式：为 true 时收起左侧主导航与页签条，把高度让给画布 */
+const { focusActive } = useWorkflowFocus()
 
 /** 只记侧栏收起，和登录 token 无关。 */
 const COLLAPSE_KEY = 'agenthub_sidebar_collapsed'
@@ -572,6 +577,21 @@ async function onAccountCommand(command: string | number) {
 
 .aside.is-collapsed {
   width: var(--ah-sidebar-collapsed);
+}
+
+/*
+ * 工作流编辑专注模式：左侧主导航宽度归零（沿用 .aside 的宽度过渡），
+ * 主区留白同步压缩，让画布贴着窗口边缘。
+ */
+.body.is-editor-focus .aside {
+  width: 0;
+  overflow: hidden;
+  border-right-color: transparent;
+}
+
+.body.is-editor-focus .main {
+  padding: 8px 10px;
+  scrollbar-gutter: auto;
 }
 
 .nav {

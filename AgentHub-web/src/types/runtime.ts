@@ -1,6 +1,9 @@
 /**
  * 试跑页契约。所属域：runtime。摘要已经在服务端截断。
  */
+import type { ObsSpan } from '@/types/obs'
+import type { OrchestrationLaneEvent, OrchestrationLaneModel } from '@/utils/orchestrationLane'
+
 export interface TrialAgent {
   id: number
   name: string
@@ -65,6 +68,11 @@ export interface AssistantBlock {
     | 'error'
     | 'vision'
     | 'file'
+    /**
+     * 前端态：Router 试跑的编排调度卡。
+     * 只存在于本地时间线与刷新快照，禁止当业务消息落库、禁止从 agent_run_event 回放。
+     */
+    | 'ROUTER_TRACE'
   text: string
   /** 工具结果。和调用行相同或为空时不展示 */
   detail?: string
@@ -129,4 +137,25 @@ export interface ChatTurn {
   planPending?: boolean
   /** 该轮对应计划的 planId；批准时用它定位要续跑的计划 */
   planId?: string
+}
+
+/**
+ * 对话流内 Router 编排卡的数据。
+ * 来源是 obs span 树（只读），不是试跑业务消息；不写库、不回放进 agent_run_event。
+ */
+export interface RouterTraceView {
+  /** 泳道模型；null 表示本轮追踪数据还没出现 */
+  model: OrchestrationLaneModel | null
+  /** 中文事件列表（与泳道联动高亮）；无数据时为空数组 */
+  events: OrchestrationLaneEvent[]
+  /** 原始步骤：仅用于包络修正父区间，不参与泳道行 */
+  spans: ObsSpan[]
+  /** 最近一轮 trace 主键；用于「完整链路」 */
+  traceId: string
+  /** 试跑会话主键；链路抽屉的兜底展示 */
+  sessionId: number | null
+  /** 加载失败说明；空串表示正常 */
+  error: string
+  /** 是否正在加载 */
+  loading: boolean
 }

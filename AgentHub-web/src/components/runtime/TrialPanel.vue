@@ -80,17 +80,6 @@
       <section class="chat-col">
         <el-alert v-if="pageError" :title="pageError" type="error" show-icon :closable="false" class="block-alert" />
         <!--
-          Router 试跑：编排泳道（只读）。非 ROUTER 不出现；临时草稿 / 无 trace 由组件给中文空态。
-          与下方思考分块并存：泳道看拓扑，思考看内容，不互相改写。
-        -->
-        <OrchestrationLane
-          v-if="shown.runMode === 'ROUTER' && canViewLane"
-          :session-id="session?.id ?? null"
-          :active="sending || resuming"
-          :paused-route-key="childPending?.routeKey || ''"
-          :paused-agent-id="childPending?.childAgentId ?? null"
-        />
-        <!--
           子专家计划待批准：根试跑暂停时由 SSE ma_child_plan_pending / 刷新恢复接口驱动。
           同时仅一个待批（后端单批准槽），因此这里只渲染一条，不排队多张卡片。
         -->
@@ -133,12 +122,39 @@
           :can-approve="canRun"
           :approving="approving"
           :vision-enabled="visionEnabled"
+          :router-trace="routerTrace"
           @send="send"
           @approve="approvePlan"
           @reject="rejectPlan"
+          @refresh-router="reloadRouterTrace"
+          @open-gantt="ganttVisible = true"
         />
       </section>
     </div>
+
+    <!--
+      详细甘特图抽屉：由对话流内紧凑时间线底部的「查看详细甘特图」触发。
+      复用既有泳道正文（RouterExecutionCard），数据仍是同一份 obs span 树；
+      未来要接「深色日志」时，在这里加第二个 Tab 即可，不必再改时间线。
+    -->
+    <el-drawer v-model="ganttVisible" title="编排详细 · 甘特图" size="680px" append-to-body>
+      <RouterExecutionCard
+        v-if="routerTrace?.model?.hasRouterTrace"
+        :trace-data="routerTrace.model"
+        :events="routerTrace.events"
+        :spans="routerTrace.spans"
+        :status="routerTraceActive ? 'running' : 'done'"
+        :error="routerTrace?.error ?? ''"
+        :loading="routerTrace?.loading === true"
+        :trace-id="routerTrace?.traceId ?? ''"
+        :session-id="routerTrace?.sessionId != null ? String(routerTrace.sessionId) : null"
+        :now="now"
+        :default-expanded="true"
+        :auto-collapse="false"
+        @refresh="reloadRouterTrace"
+      />
+      <el-empty v-else description="本轮还没有可展示的编排追踪数据" />
+    </el-drawer>
   </div>
 </template>
 
@@ -172,7 +188,7 @@ import {
   type TrialChildPlanPendingChunk
 } from '@/api/runtime'
 import ChatPanel from '@/components/runtime/ChatPanel.vue'
-import OrchestrationLane from '@/components/runtime/OrchestrationLane.vue'
+import RouterExecutionCard from '@/components/runtime/RouterExecutionCard.vue'
 import {
   advancePlanState,
   appendFile,
@@ -184,6 +200,7 @@ import {
   formatRelativeTime,
   hasOpenTurn,
   markLiveTail,
+  markRouterTrace,
   openTurnStale,
   parseFile,
   parsePlan,
@@ -207,6 +224,7 @@ import {
   saveSnapshot
 } from '@/components/runtime/trialStream'
 import { runModeLabel } from '@/composables/agentViewFlip'
+import { useRouterLane } from '@/composables/useRouterLane'
 import { useUserStore } from '@/stores/user'
 import type { ChatTurn, TrialAgent, TrialEvent, TrialPlanView, TrialSession } from '@/types/runtime'
 
@@ -230,8 +248,6 @@ const props = withDefaults(
 const user = useUserStore()
 const canRun = computed(() => user.hasPerm('runtime:trial:run'))
 const canList = computed(() => user.hasPerm('runtime:trial:list'))
-/** 编排泳道的数据来自调用追踪；两个读权限缺一就不渲染，避免在试跑里塞一块灰块 */
-const canViewLane = computed(() => user.hasPerm('obs:trace:list') && user.hasPerm('obs:span:list'))
 
 const agents = ref<TrialAgent[]>([])
 const pickedId = ref<number>()
@@ -327,6 +343,32 @@ const shown = computed(() => {
   }
   const found = agents.value.find((item) => item.id === pickedId.value)
   return { runMode: found?.runMode || '' }
+})
+
+/**
+ * 对话流内编排卡的数据源。
+ * 只有 Router 且已落库的会话才取 trace：临时草稿没会话、P&E/ReAct 没有编排泳道。
+ */
+const routerSessionId = computed(() => {
+  const current = session.value
+  if (!current || current.id <= 0 || shown.value.runMode !== 'ROUTER') {
+    return null
+  }
+  return current.id
+})
+/** 本轮是否还在跑：决定编排卡是否轮询 obs trace */
+const routerTraceActive = computed(() => sending.value || resuming.value)
+const { view: routerTrace, reload: reloadRouterTrace } = useRouterLane(routerSessionId, routerTraceActive)
+
+/**
+ * 右侧「详细甘特图」抽屉。
+ * 时间线只 emit 一个打开意图，抽屉归属页面层，后续接深色日志或拖拽联动都不用改卡片。
+ */
+const ganttVisible = ref(false)
+
+// 切会话即关抽屉：旧会话的甘特图不能挂在新会话上，避免用户以为在看当前轮
+watch(routerSessionId, () => {
+  ganttVisible.value = false
 })
 
 /** 本地草稿，或未取消的落库会话，均可续聊。仅 CANCELLED 禁发。 */
@@ -628,6 +670,28 @@ function stopTitleRefresh() {
     window.clearTimeout(titleTimer)
     titleTimer = undefined
   }
+}
+
+/**
+ * 给最后一轮助手卡挂上「编排调度卡」前端标记（ROUTER_TRACE）。
+ *
+ * 只在 ROUTER 试跑里挂：ReAct / 计划执行没有编排泳道，多出一张卡只会误导。
+ * 标记仅存在于本地时间线与刷新快照，不写库、不参与事件回放。
+ *
+ * @param list 时间线（就地修改）
+ * @return 同一个数组，便于链式赋值
+ */
+function attachRouterTrace(list: ChatTurn[]) {
+  if (shown.value.runMode !== 'ROUTER') {
+    return list
+  }
+  for (let i = list.length - 1; i >= 0; i -= 1) {
+    if (list[i].role === 'assistant') {
+      markRouterTrace(list[i])
+      break
+    }
+  }
+  return list
 }
 
 function resetConversation() {
@@ -1066,7 +1130,7 @@ async function openHistory(id: number, force = false) {
       return
     }
     // 本轮已落库收尾：以服务端事件为准，快照完成使命
-    turns.value = turnsFromEvents(events)
+    turns.value = attachRouterTrace(turnsFromEvents(events))
     clearSnapshot(id)
     dropLive(id)
     // 计划停在待批准时不会再有后续事件，按钮只能靠专用接口恢复
@@ -1382,14 +1446,14 @@ function applyResumeEvents(id: number, events: TrialEvent[], live = false) {
   if (!events.length) {
     const placeholder = assistantTurn('live-tail', 'streaming')
     placeholder.phase = 'planning'
-    turns.value = [placeholder]
+    turns.value = attachRouterTrace([placeholder])
     bindLiveTurns(id, turns.value)
     return
   }
-  turns.value = turnsFromEvents(events)
+  turns.value = attachRouterTrace(turnsFromEvents(events))
   // live 的 assistant 是流式中间态，hasOpenTurn 会误判成已收尾，故用显式标志
   if (live || hasOpenTurn(events)) {
-    turns.value = markLiveTail(turns.value, events)
+    turns.value = attachRouterTrace(markLiveTail(turns.value, events))
   }
   // 续订期间数组会被整体替换；同步回模块级登记项，
   // 否则「切走再切回」拿到的还是旧的、已废弃的数组
@@ -1610,6 +1674,8 @@ async function send(content: string, images?: string[]) {
         live.phase = phase
       },
       onRoute: (summary) => {
+        // judge 首个路由事件到达：先插编排调度卡（前端态），再记路由正文
+        markRouterTrace(live)
         appendRoute(live, summary)
         touchSnapshot()
       },

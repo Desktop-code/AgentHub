@@ -3,18 +3,38 @@
     <PageHeader
       title="调用追踪"
       :description="pageDescription"
-    />
-
-    <!-- 工作流入口：从「运行记录」跳进来时显示当前定义，避免用户误以为是全量列表 -->
-    <div v-if="workflowMode" class="wf-bar">
-      <span class="wf-label">工作流</span>
-      <el-tag effect="plain">{{ workflowName || `#${workflowId}` }}</el-tag>
-      <span class="wf-hint">只显示该工作流最近的运行记录</span>
-      <el-button link type="primary" @click="exitWorkflow">退出筛选</el-button>
-    </div>
+    >
+      <!-- 入口类型：Agent 保持会话三栏；工作流复用既有按 workflowId 查询，不新造表 -->
+      <template #extra>
+        <el-segmented
+          :model-value="traceType"
+          :options="traceTypeOptions"
+          class="type-switch"
+          @change="onTypeChange"
+        />
+      </template>
+    </PageHeader>
 
     <div class="filter-bar">
       <el-form class="filter-form" inline @submit.prevent="onSearch">
+        <!-- 工作流入口：与「标题」同属筛选条件，放在前面；未选择定义时按全部运行记录查询 -->
+        <el-form-item v-if="workflowMode" label="工作流">
+          <el-select
+            v-if="workflowOptions.length > 0 || workflowLoading"
+            :model-value="workflowId ?? undefined"
+            class="wf-select"
+            filterable
+            clearable
+            placeholder="全部"
+            :loading="workflowLoading"
+            @change="onWorkflowSelect"
+          >
+            <el-option v-for="item in workflowOptions" :key="item.id" :label="item.label" :value="item.id" />
+          </el-select>
+          <!-- 无 workflow:def:view 时下拉拿不到选项：至少回显跳转带来的定义名，避免只看到裸 id -->
+          <el-tag v-else-if="workflowId != null" effect="plain">{{ workflowName || `#${workflowId}` }}</el-tag>
+          <el-tag v-else effect="plain">全部</el-tag>
+        </el-form-item>
         <el-form-item v-if="!workflowMode" label="智能体">
           <el-select
             v-model="agentId"
@@ -53,6 +73,8 @@
           </el-button>
         </el-form-item>
       </el-form>
+      <!-- 工作流入口说明：未选择定义时提示当前查询范围是全部工作流运行记录 -->
+      <span v-if="workflowMode" class="wf-hint">{{ workflowHint }}</span>
     </div>
 
     <!-- 三栏：会话 25% / 问题 25% / 执行链路 50%；工作流入口下会话列无意义，退化为两栏 -->
@@ -124,7 +146,13 @@
             :class="{ active: row.traceId === selectedTraceId }"
             @click="pickTrace(row)"
           >
-            <span class="item-title">{{ row.title || '（无问题文本）' }}</span>
+            <!-- 问题标题：只露 2 行，超长截断；悬浮弹深色框看全文（限宽限高） -->
+            <ClampText
+              :text="row.title"
+              placeholder="（无问题文本）"
+              :lines="2"
+              placement="top"
+            />
             <span class="item-meta">
               <el-tag size="small" :type="statusType(row.status)">{{ statusLabel(row.status) }}</el-tag>
               {{ row.startTime || '—' }}
@@ -137,7 +165,13 @@
           </button>
           <p v-if="!canQueryTraces" class="empty">先选择左侧会话</p>
           <p v-else-if="!traceLoading && traces.length === 0" class="empty">
-            {{ workflowMode ? '该工作流还没有运行记录' : '没有问题' }}
+            {{
+              workflowMode
+                ? workflowActive
+                  ? '该工作流还没有运行记录'
+                  : '还没有工作流运行记录'
+                : '没有问题'
+            }}
           </p>
         </div>
         <div class="col-pager">
@@ -262,7 +296,9 @@
 /** KeepAlive 的 include 比对组件名；必须与 router meta.cacheName 一致，改名即失去缓存。 */
 defineOptions({ name: 'CallTrace' })
 /**
- * 调用追踪三栏。所属域：obs。
+ * 调用追踪。所属域：obs。
+ * 顶部 Agent / 工作流切换：Agent 保持会话三栏；工作流按定义看 Run / 节点 TASK（复用既有 workflowId 查询），
+ * 未选定义时默认分页查询全部工作流运行记录。
  * 右栏瀑布流常驻；顶部拓扑仅在放大抽屉中展示。
  */
 import { computed, onActivated, onMounted, reactive, ref, watch } from 'vue'
@@ -272,22 +308,39 @@ import { FullScreen, RefreshRight, Search } from '@element-plus/icons-vue'
 import { pageAgents } from '@/api/agent'
 import { pageEvalSuites, promoteFromTrace } from '@/api/eval'
 import { listObsSpans, pageObsSessions, pageObsTraces, pageObsTracesByWorkflow } from '@/api/obs'
+import { pageWorkflowDefs } from '@/api/workflow'
 import type { AgentCard } from '@/types/agent'
 import type { EvalSuiteRow } from '@/types/eval'
 import type { ObsSession, ObsSpan, ObsTrace } from '@/types/obs'
+import type { WorkflowDefRow } from '@/types/workflow'
 import { useUserStore } from '@/stores/user'
 import PageHeader from '@/components/PageHeader.vue'
+import ClampText from '@/components/common/ClampText.vue'
 import TraceLinkDrawer from '@/components/obs/TraceLinkDrawer.vue'
 import TraceSpanFlow from '@/components/obs/TraceSpanFlow.vue'
+import {
+  buildTraceQuery,
+  firstQueryValue,
+  parseWorkflowId,
+  resolveTraceType,
+  TRACE_TYPE_AGENT,
+  TRACE_TYPE_WORKFLOW,
+  type TraceType
+} from './traceQuery'
 
 const user = useUserStore()
 const route = useRoute()
 const router = useRouter()
-/** 工作流定义 id；非空即「运行记录」入口，隐藏会话列、改查 /api/obs/traces */
+/** 入口类型；以路由 query.type 为准，缺省按有无 workflowId 推断 */
+const traceType = ref<TraceType>(TRACE_TYPE_AGENT)
+/** 工作流定义 id；工作流类型下非空才发起查询 */
 const workflowId = ref<number | null>(null)
 const workflowName = ref('')
+/** 工作流下拉选项：从工作流定义分页接口懒加载，无权限时退化为「从列表进入」提示 */
+const workflows = ref<WorkflowDefRow[]>([])
+const workflowLoading = ref(false)
 /** 已应用的路由条件快照：KeepAlive 下再次从列表跳转时据此判断是否需要重拉 */
-let appliedWorkflowKey: string | null = null
+let appliedQueryKey: string | null = null
 
 const agents = ref<AgentCard[]>([])
 const agentId = ref<number | undefined>()
@@ -329,13 +382,43 @@ const canExpandSpans = computed(
   () => !!selectedTraceId.value && user.hasPerm('obs:span:list') && spans.value.length > 0
 )
 
-/** 工作流入口：会话列无意义，列表按定义过滤 */
-const workflowMode = computed(() => workflowId.value != null)
-/** 中栏是否具备查询条件：对话要选会话，工作流只要带 defId */
+/** 顶部类型切换选项 */
+const traceTypeOptions = [
+  { label: 'Agent', value: TRACE_TYPE_AGENT },
+  { label: '工作流', value: TRACE_TYPE_WORKFLOW }
+]
+
+/** 工作流入口：会话列无意义，退化为「运行记录 + 链路」两栏 */
+const workflowMode = computed(() => traceType.value === TRACE_TYPE_WORKFLOW)
+/** 工作流类型下是否已选中具体定义；未选中时查询全部工作流运行记录 */
+const workflowActive = computed(() => workflowMode.value && workflowId.value != null)
+/** 工作流入口未选定义也查全部；Agent 入口仍需先选会话 */
 const canQueryTraces = computed(() => workflowMode.value || selectedSessionId.value != null)
+
+/** 下拉选项：当前 def 不在前 100 条（如已删除的历史定义）时补一个占位，避免只显示裸 id */
+const workflowOptions = computed(() => {
+  const options = workflows.value.map((item) => ({ id: item.id, label: item.name }))
+  if (workflowId.value != null && !options.some((item) => item.id === workflowId.value)) {
+    options.unshift({ id: workflowId.value, label: workflowName.value || `#${workflowId.value}` })
+  }
+  return options
+})
+
+/** 工作流侧的说明文案：有定义看该定义的 Run，无定义时明确当前是全部运行记录 */
+const workflowHint = computed(() => {
+  if (workflowActive.value) {
+    return '按工作流定义查看 Run / 节点 TASK'
+  }
+  // 无 workflow:def:view 时下拉不可用，这里说明「全部」范围，避免误以为查询条件未生效
+  if (workflowOptions.value.length === 0) {
+    return '全部工作流运行记录（无定义查看权限）'
+  }
+  return '未选择定义时查看全部工作流运行记录'
+})
+
 const pageDescription = computed(() =>
   workflowMode.value
-    ? '按工作流查看每次试跑 / 执行：一次 run 一条记录，右栏按节点展开步骤树。'
+    ? '按工作流定义查看 Run / 节点 TASK：一次 run 一条记录，右栏按节点展开步骤树。'
     : '按会话查看每次问题和执行步骤。一次问题一条记录，路由按父子步骤展开，不计入 Token 用量。'
 )
 
@@ -357,40 +440,104 @@ watch(
 )
 
 /**
- * 读取路由上的工作流条件。返回 true 表示条件变化、需要重新拉取列表。
- * workflowId 非法（空串 / NaN / ≤0）按「无过滤」处理，页面行为与旧版一致。
+ * 读取路由上的入口类型与工作流条件。返回 true 表示条件变化、需要重新拉取列表。
+ * <p>type 优先；缺省时有 workflowId 进工作流，否则维持 Agent 三栏。
+ * workflowId 非法（空串 / NaN / ≤0）按「无过滤」处理；type=agent 时忽略 workflowId。
  */
-function applyWorkflowQuery(): boolean {
-  const rawId = Array.isArray(route.query.workflowId) ? route.query.workflowId[0] : route.query.workflowId
-  const rawName = Array.isArray(route.query.workflowName) ? route.query.workflowName[0] : route.query.workflowName
-  const parsed = rawId == null || String(rawId).trim() === '' ? null : Number(rawId)
-  const id = parsed != null && Number.isFinite(parsed) && parsed > 0 ? Math.trunc(parsed) : null
-  const key = id == null ? '' : String(id)
-  if (appliedWorkflowKey === key) {
+function applyRouteQuery(): boolean {
+  const id = parseWorkflowId(route.query.workflowId)
+  const type = resolveTraceType(route.query.type, id)
+  const effectiveId = type === TRACE_TYPE_WORKFLOW ? id : null
+  const name = firstQueryValue(route.query.workflowName)
+  const key = `${type}|${effectiveId == null ? '' : effectiveId}`
+  if (appliedQueryKey === key) {
     return false
   }
-  appliedWorkflowKey = key
-  workflowId.value = id
-  workflowName.value = typeof rawName === 'string' ? rawName : ''
+  appliedQueryKey = key
+  traceType.value = type
+  workflowId.value = effectiveId
+  workflowName.value = effectiveId != null ? name : ''
   return true
 }
 
-/** 条件变化后的统一收口：清空选中与步骤，按当前模式重新查 */
-function reloadForWorkflowChange() {
+/** 条件变化后的统一收口：清空选中与步骤，按当前类型重新查 */
+function reloadForRouteChange() {
   selectedSessionId.value = null
   traceQ.value = ''
   traceQuery.current = 1
   resetDetail()
   if (workflowMode.value) {
+    // 定义下拉与运行记录并行加载：未选定义时照样查全部，下拉失败也不影响列表
+    void ensureWorkflowOptions()
     loadTraces()
-  } else {
-    reloadSessions()
+    return
   }
+  reloadSessions()
 }
 
-/** 退出工作流筛选：清掉 query 后回到普通会话视角 */
-function exitWorkflow() {
-  void router.replace({ path: route.path, query: {} })
+/**
+ * 切换入口类型：写回路由 query，由 watch 统一触发重查。
+ * <p>进入工作流时清掉 Agent 侧不兼容筛选；回到 Agent 时丢弃 workflowId / workflowName。
+ *
+ * @param value el-segmented 回传的选项值
+ */
+function onTypeChange(value: string | number | boolean) {
+  const next: TraceType = value === TRACE_TYPE_WORKFLOW ? TRACE_TYPE_WORKFLOW : TRACE_TYPE_AGENT
+  if (next === TRACE_TYPE_AGENT) {
+    agentId.value = undefined
+    sessionQ.value = ''
+    void router.replace({ path: route.path, query: buildTraceQuery({ type: TRACE_TYPE_AGENT }) })
+    return
+  }
+  agentId.value = undefined
+  sessionQ.value = ''
+  // 从 Agent 切进来时 workflowId 已被清空：工作流侧默认查全部运行记录，用户可再选定义收窄
+  void router.replace({ path: route.path, query: buildTraceQuery({ type: TRACE_TYPE_WORKFLOW }) })
+}
+
+/**
+ * 下拉选择工作流定义：写回 workflowId / workflowName，另存定义名便于刷新后回显。
+ *
+ * @param value 定义 id；清空下拉时为 undefined
+ */
+function onWorkflowSelect(value: number | string | undefined) {
+  const id = parseWorkflowId(value)
+  if (id == null) {
+    void router.replace({ path: route.path, query: buildTraceQuery({ type: TRACE_TYPE_WORKFLOW }) })
+    return
+  }
+  const picked = workflows.value.find((item) => item.id === id)
+  void router.replace({
+    path: route.path,
+    query: buildTraceQuery({
+      type: TRACE_TYPE_WORKFLOW,
+      workflowId: id,
+      workflowName: picked?.name ?? (id === workflowId.value ? workflowName.value : '')
+    })
+  })
+}
+
+/**
+ * 懒加载工作流定义下拉（最多 100 条）。
+ * <p>调用追踪权限与 workflow:def:view 可能不同；失败时不阻塞页面，只保留「从列表进入」提示。
+ */
+async function ensureWorkflowOptions() {
+  // 没有定义查看权限时直接跳过：避免必然 403 的提示，页面保留「从工作流列表进入」引导
+  if (!user.hasPerm('workflow:def:view')) {
+    return
+  }
+  if (workflows.value.length > 0 || workflowLoading.value) {
+    return
+  }
+  workflowLoading.value = true
+  try {
+    const { data } = await pageWorkflowDefs({ current: 1, size: 100 })
+    workflows.value = data.data.records
+  } catch {
+    workflows.value = []
+  } finally {
+    workflowLoading.value = false
+  }
 }
 
 /** 有名称用名称，解析失败或缺失时用 #id。 */
@@ -571,9 +718,9 @@ async function loadTraces() {
         size: traceQuery.size,
         q: traceQ.value.trim() || undefined
       }
-      // 工作流模式走 defId 过滤；对话模式仍按会话，二者互斥
+      // 工作流模式：选了定义按 defId 过滤，未选则查全部工作流运行记录；对话模式仍按会话
       const { data } = workflowMode.value
-        ? await pageObsTracesByWorkflow({ ...params, workflowId: workflowId.value as number })
+        ? await pageObsTracesByWorkflow({ ...params, workflowId: workflowId.value ?? undefined })
         : await pageObsTraces(selectedSessionId.value as number, params)
       traces.value = data.data.records
       traceTotal.value = data.data.total
@@ -678,9 +825,14 @@ async function loadAgents() {
 
 onMounted(async () => {
   await loadAgents()
-  // 首次进入先读 query：带 workflowId 时直接查运行记录，否则维持旧的三栏会话视角
-  applyWorkflowQuery()
+  // 首次进入先读 query：带 workflowId 或缺省 type 的旧链接直接进工作流，否则维持三栏会话视角
+  // onActivated 在 KeepAlive 首挂载时也会先跑一次；已按同一条件处理过就不重复拉列表
+  if (!applyRouteQuery()) {
+    return
+  }
   if (workflowMode.value) {
+    // 工作流入口默认查全部运行记录，不等用户先选定义
+    void ensureWorkflowOptions()
     await loadTraces()
   } else {
     await loadSessions()
@@ -689,20 +841,20 @@ onMounted(async () => {
 
 // KeepAlive 下再次从工作流列表跳转可能复用本组件，条件变化才重拉
 onActivated(() => {
-  if (applyWorkflowQuery()) {
-    reloadForWorkflowChange()
+  if (applyRouteQuery()) {
+    reloadForRouteChange()
   }
 })
 
 watch(
-  () => [route.query.workflowId, route.query.workflowName],
+  () => [route.query.type, route.query.workflowId, route.query.workflowName],
   () => {
     // 离开本页时 query 被清空也会触发，跳过避免后台空拉一次列表
     if (route.path !== '/ops/traces') {
       return
     }
-    if (applyWorkflowQuery()) {
-      reloadForWorkflowChange()
+    if (applyRouteQuery()) {
+      reloadForRouteChange()
     }
   }
 )
@@ -741,30 +893,20 @@ watch(
   grid-template-columns: 35% 65%;
 }
 
-.wf-bar {
-  display: flex;
-  flex: none;
-  align-items: center;
-  gap: 8px;
-  margin-bottom: 12px;
-  padding: 10px 12px;
-  background: var(--ah-surface);
-  border: 1px solid var(--ah-border);
-  border-radius: var(--ah-radius-lg);
-}
-
-.wf-label {
-  color: var(--ah-text-secondary);
-  font-size: 13px;
+.wf-select {
+  width: 220px;
 }
 
 .wf-hint {
+  flex: none;
+  margin-left: auto;
   color: var(--ah-text-secondary);
   font-size: 12px;
+  white-space: nowrap;
 }
 
-.wf-bar .el-button {
-  margin-left: auto;
+.type-switch {
+  flex: none;
 }
 
 .col {

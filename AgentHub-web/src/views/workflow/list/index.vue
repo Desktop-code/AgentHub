@@ -455,15 +455,15 @@ function openTrial(row: WorkflowDefRow) {
 }
 
 /**
- * 跳到调用追踪页，并把工作流 id 作为查询条件带上。
- * <p>路由参数先约定为 workflowId；追踪页后续接工作流过滤时无需再改入口。
+ * 跳到调用追踪页，并把入口类型与工作流 id 作为查询条件带上。
+ * <p>type=workflow 让追踪页直接进「工作流」类型；workflowId 供后端反查该定义的 run。
  *
  * @param row 当前定义行
  */
 function openRunRecords(row: WorkflowDefRow) {
   void router.push({
     path: '/ops/traces',
-    query: { workflowId: String(row.id), workflowName: row.name }
+    query: { type: 'workflow', workflowId: String(row.id), workflowName: row.name }
   })
 }
 

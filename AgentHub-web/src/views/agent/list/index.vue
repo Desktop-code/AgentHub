@@ -297,6 +297,7 @@ import { runModeLabel, snapFromCard, useAgentViewFlip } from '@/composables/agen
 import { confirmLeaveDraft } from '@/composables/draftGuard'
 import { CARD_HEIGHT_NORMAL, lastPage, useGridPageSize } from '@/composables/gridPageSize'
 import { useUserStore } from '@/stores/user'
+import { maTrialPathOrEmpty } from '@/utils/maTrial'
 import type { AgentCard, AgentCardPatch, AgentSave } from '@/types/agent'
 
 /** 三横线列表图标。 */
@@ -1140,7 +1141,23 @@ async function saveCreate(payload: AgentSave, done: () => void) {
   }
 }
 
+/**
+ * 打开试跑。路由依据落点不同：
+ * - Router 编排根 → 独立全屏试跑页（/orchestration/multi-agent/:id/trial），
+ *   消息流内带编排调度卡；不再开右侧抽屉；
+ * - ReAct / 计划执行 → 维持原任务抽屉，行为不变。
+ *
+ * <p>都只做导航，不预置会话：会话的创建/续订仍由试跑面板自己完成。
+ *
+ * @param payload 详情回传的 agentId / 名称 / 运行模式（取已保存值）
+ */
 function onTrial(payload: { agentId: number; name: string; runMode: string }) {
+  // 只有 Router 编排根去独立页；其余模式保持原抽屉，行为不变
+  const trialPath = maTrialPathOrEmpty(payload.agentId, payload.runMode)
+  if (trialPath) {
+    void router.push(trialPath)
+    return
+  }
   openAgentTrial(payload)
   router.replace({ path: route.path, query: { ...route.query, trial: '1' } })
 }

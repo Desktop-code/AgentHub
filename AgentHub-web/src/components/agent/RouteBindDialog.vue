@@ -33,13 +33,13 @@
         </el-collapse-item>
       </el-collapse>
     </el-form>
-    <el-empty v-if="loaded && !options.length" description="没有可添加的子 Agent（受允许的子运行模式约束）" />
+    <el-empty v-if="loaded && !options.length" description="没有可添加的子 Agent（受子 Agent 运行模式约束）" />
     <!-- 被「允许被编排调用」挡下的 Agent 直接从下拉移除，并说明数量，避免用户以为列表漏数据 -->
     <p v-if="hiddenByAllow > 0" class="hidden-hint">
       另有 {{ hiddenByAllow }} 个 Agent 未允许被编排调用，已从候选列表隐藏
     </p>
     <p v-if="hiddenByMode > 0" class="hidden-hint">
-      另有 {{ hiddenByMode }} 个 Agent 的运行模式不在「允许的子运行模式」内，已隐藏（可在策略区勾选）
+      另有 {{ hiddenByMode }} 个 Agent 的运行模式不在「子 Agent 运行模式」内，已隐藏（可在策略区勾选）
     </p>
     <template #footer>
       <el-button @click="emit('update:modelValue', false)">取消</el-button>

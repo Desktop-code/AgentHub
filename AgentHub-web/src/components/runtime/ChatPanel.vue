@@ -20,6 +20,17 @@
 
         <!-- 计划执行模式：顺序钉死（计划思考 → 计划卡 → 按步执行 → 终答） -->
         <article v-else-if="row.flow" class="card">
+          <!-- Router 试跑的编排调度卡：在用户气泡之后、思考与终答之前，数据只读不落库 -->
+          <RouterTimeline
+            v-if="showRouterCard(row.turn)"
+            :trace-data="routerTrace?.model ?? null"
+            :status="routerCardStatus(row.turn)"
+            :error="routerTrace?.error ?? ''"
+            :loading="routerTrace?.loading === true"
+            :trace-id="routerTrace?.traceId ?? ''"
+            @refresh="emit('refresh-router')"
+            @open-gantt="emit('open-gantt')"
+          />
           <!-- 1. 计划阶段的思考（可折叠）。出计划本身也有推理，不能只给执行阶段留思考位 -->
           <div v-if="row.flow.planPhase.length" class="think-block">
             <button
@@ -126,6 +137,17 @@
 
         <!-- 非计划流程（REACT / ROUTER）：保持原有「思考过程 + 块顺序」渲染 -->
         <article v-else class="card">
+          <!-- Router 试跑的编排调度卡：在用户气泡之后、思考与终答之前，数据只读不落库 -->
+          <RouterTimeline
+            v-if="showRouterCard(row.turn)"
+            :trace-data="routerTrace?.model ?? null"
+            :status="routerCardStatus(row.turn)"
+            :error="routerTrace?.error ?? ''"
+            :loading="routerTrace?.loading === true"
+            :trace-id="routerTrace?.traceId ?? ''"
+            @refresh="emit('refresh-router')"
+            @open-gantt="emit('open-gantt')"
+          />
           <!-- 思考过程：多路由按子 Agent 分块，收束后仍保持分块不拍扁 -->
           <div v-if="hasProcess(row.turn)" class="think-block">
             <button
@@ -305,9 +327,10 @@
  */
 import { computed, nextTick, reactive, ref, watch } from 'vue'
 import { Picture } from '@element-plus/icons-vue'
-import type { ChatTurn } from '@/types/runtime'
+import type { ChatTurn, RouterTraceView } from '@/types/runtime'
 import { ElMessage } from 'element-plus'
 import {
+  hasRouterTrace,
   isPlanFlow,
   planStateText,
   processLanes,
@@ -316,6 +339,7 @@ import {
 } from '@/components/runtime/trialMessages'
 import type { TurnSections } from '@/components/runtime/trialMessages'
 import ProcessTimeline from '@/components/runtime/ProcessTimeline.vue'
+import RouterTimeline from '@/components/runtime/RouterTimeline.vue'
 import FileCard from '@/components/runtime/FileCard.vue'
 import { renderSimpleMarkdown, renderStreamingMarkdown } from '@/utils/simpleMarkdown'
 
@@ -342,6 +366,11 @@ const props = defineProps<{
    * false 时上传图片按钮置灰并给出 Hover 提示——后端也会拒，但让用户先看到原因体验更好。
    */
   visionEnabled?: boolean
+  /**
+   * Router 试跑的编排卡数据（obs span 树归纳，只读且仅前端态）。
+   * null 表示不展示：非 Router、无追踪权限或还没拿到数据时都由外层传 null。
+   */
+  routerTrace?: RouterTraceView | null
 }>()
 
 const emit = defineEmits<{
@@ -350,6 +379,10 @@ const emit = defineEmits<{
   approve: [planId?: string]
   /** 取消待执行计划 */
   reject: [planId?: string]
+  /** 编排卡点了「刷新」；数据源在外层，本组件不自己请求 */
+  'refresh-router': []
+  /** 紧凑时间线点了「查看详细甘特图」；抽屉由外层页面持有 */
+  'open-gantt': []
 }>()
 
 /** 待发送的图片。id 只用于列表 key 与删除定位 */
@@ -472,6 +505,39 @@ const liveTurn = computed(() => {
   }
   return null
 })
+
+/**
+ * 最后一张助手轮的 key。
+ * 编排数据只取「最近一轮 trace」，因此只挂在最后一轮上，避免把新一轮的泳道画进旧轮。
+ */
+const lastAssistantKey = computed(() => {
+  for (let i = props.turns.length - 1; i >= 0; i -= 1) {
+    if (props.turns[i].role === 'assistant') {
+      return props.turns[i].key
+    }
+  }
+  return ''
+})
+
+/**
+ * 该轮是否渲染编排调度卡。
+ * 条件：外层给了数据（无权限 / 非 Router 为 null）、是最后一轮、且带前端态标记。
+ * @param item 助手轮
+ */
+function showRouterCard(item: ChatTurn) {
+  return !!props.routerTrace && item.key === lastAssistantKey.value && hasRouterTrace(item)
+}
+
+/**
+ * 编排卡状态：流式中＝正在调度，失败＝调度失败，其余＝完成。
+ * @param item 助手轮
+ */
+function routerCardStatus(item: ChatTurn): 'running' | 'done' | 'error' {
+  if (item.status === 'streaming') {
+    return 'running'
+  }
+  return item.status === 'error' ? 'error' : 'done'
+}
 
 watch(
   () => props.turns,

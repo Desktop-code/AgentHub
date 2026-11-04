@@ -29,7 +29,7 @@ export const MA_LIST_TEMPLATES = [
   MA_LIST_TEMPLATE_ROUTER_THEN_SEQUENCE
 ] as const
 
-/** 编排模板中文名；未知值按默认模板展示，避免列表出现空标签 */
+/** 协作模式中文名；未知值按默认模板展示，避免列表出现空标签 */
 export const MA_TEMPLATE_LABELS: Record<string, string> = {
   [MA_LIST_TEMPLATE_ROUTER_PARALLEL]: '路由并行',
   [MA_LIST_TEMPLATE_FIXED_SEQUENCE]: '固定串行',
