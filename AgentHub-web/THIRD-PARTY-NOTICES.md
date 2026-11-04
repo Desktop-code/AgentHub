@@ -5,10 +5,10 @@
 
 ---
 
-## VueFlow 画布（@vue-flow/core、@vue-flow/background、@vue-flow/controls）
+## VueFlow 画布（@vue-flow/core、@vue-flow/background）
 
-- 用途：工作流画布（节点、连线、视口、缩放控件、栅格背景）
-- 版本：`@vue-flow/core@1.48.2`、`@vue-flow/background@1.3.2`、`@vue-flow/controls@1.1.3`
+- 用途：工作流画布（节点、连线、视口、栅格背景）
+- 版本：`@vue-flow/core@1.48.2`、`@vue-flow/background@1.3.2`
 - 许可证：MIT
 - 上游：https://github.com/bcakmakoglu/vue-flow
 
