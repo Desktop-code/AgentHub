@@ -91,9 +91,22 @@
         row-class-name="daily-row"
         @row-click="onDailyRowClick"
       >
+        <el-table-column v-bind="dailyIndexColumnProps" />
         <el-table-column prop="bizDate" label="日期" width="120" align="center" />
         <el-table-column label="Agent 名称" min-width="180" align="center" show-overflow-tooltip>
-          <template #default="{ row }">{{ agentLabel(row) }}</template>
+          <template #default="{ row }">
+            <span class="agent-cell">
+              <span class="agent-name">{{ agentLabel(row) }}</span>
+              <el-tag
+                v-if="agentStatusTag(row)"
+                size="small"
+                effect="plain"
+                :class="agentTagClass(row)"
+              >
+                {{ agentStatusTag(row) }}
+              </el-tag>
+            </span>
+          </template>
         </el-table-column>
         <el-table-column label="模型名称" min-width="240" align="center" show-overflow-tooltip>
           <template #default="{ row }">
@@ -145,9 +158,22 @@
         </div>
       </div>
       <el-table v-loading="ledgerLoading" :data="ledgerRows" empty-text="没有流水">
+        <el-table-column v-bind="ledgerIndexColumnProps" />
         <el-table-column prop="createTime" label="时间" min-width="170" align="center" />
         <el-table-column label="Agent 名称" min-width="180" align="center" show-overflow-tooltip>
-          <template #default="{ row }">{{ agentLabel(row) }}</template>
+          <template #default="{ row }">
+            <span class="agent-cell">
+              <span class="agent-name">{{ agentLabel(row) }}</span>
+              <el-tag
+                v-if="agentStatusTag(row)"
+                size="small"
+                effect="plain"
+                :class="agentTagClass(row)"
+              >
+                {{ agentStatusTag(row) }}
+              </el-tag>
+            </span>
+          </template>
         </el-table-column>
         <el-table-column label="模型名称" min-width="240" align="center" show-overflow-tooltip>
           <template #default="{ row }">
@@ -257,7 +283,7 @@ defineOptions({ name: 'BillingUsage' })
 import { onMounted, reactive, ref } from 'vue'
 import { RefreshRight, Search } from '@element-plus/icons-vue'
 import { ElMessage } from 'element-plus'
-import { getAgent, pageAgents } from '@/api/agent'
+import { pageAgents } from '@/api/agent'
 import {
   changePriceStatus,
   createPrice,
@@ -272,6 +298,7 @@ import {
 import { getInstance, pageInstances } from '@/api/model'
 import PageHeader from '@/components/PageHeader.vue'
 import TablePager from '@/components/TablePager.vue'
+import { useListIndexColumn } from '@/composables/listIndex'
 import PriceFormDialog from '@/components/billing/PriceFormDialog.vue'
 import TokenTrendChart from '@/components/billing/TokenTrendChart.vue'
 import { useUserStore } from '@/stores/user'
@@ -325,6 +352,10 @@ const priceTotal = ref(0)
 const dailyQuery = reactive({ current: 1, size: 10 })
 const ledgerQuery = reactive({ current: 1, size: 10 })
 const priceQuery = reactive({ current: 1, size: 10 })
+/** 日汇总表最左「序号」列；跨页连续，仅前端展示 */
+const { indexColumnProps: dailyIndexColumnProps } = useListIndexColumn(() => dailyQuery.current, () => dailyQuery.size)
+/** 流水表最左「序号」列；跨页连续，仅前端展示 */
+const { indexColumnProps: ledgerIndexColumnProps } = useListIndexColumn(() => ledgerQuery.current, () => ledgerQuery.size)
 const priceOpen = ref(false)
 const editing = ref<PriceRow | null>(null)
 
@@ -402,6 +433,8 @@ const DELETED_MODEL_NAME = '已删除模型'
 type NamedRef = {
   agentId?: number | null
   agentName?: string | null
+  agentDeleted?: boolean | null
+  agentDisabled?: boolean | null
   modelInstanceId?: number | null
   modelInstanceName?: string | null
   providerName?: string | null
@@ -411,6 +444,7 @@ type NamedRef = {
 
 /**
  * Agent 列文案：接口 → 缓存 → 「未知 Agent」。
+ * 软删/停用也保留真名；只有真查无行（硬删/脏数据）才落到「未知 Agent」。
  * 绝不回退原始 id：id 对使用者没有业务含义。
  */
 function agentLabel(row: NamedRef) {
@@ -422,6 +456,34 @@ function agentLabel(row: NamedRef) {
     return fromRow
   }
   return agentNameMap.value.get(Number(row.agentId)) || '未知 Agent'
+}
+
+/**
+ * Agent 列旁挂 Tag：删除 > 停用。
+ * 无真名（整格「未知 Agent」）时不叠 Tag，避免误导成仅停用。
+ *
+ * @return 「已删除」|「已停用」| null
+ */
+function agentStatusTag(row: NamedRef): '已删除' | '已停用' | null {
+  if (row.agentId == null) {
+    return null
+  }
+  const hasName = Boolean(row.agentName?.trim() || agentNameMap.value.get(Number(row.agentId)))
+  if (!hasName) {
+    return null
+  }
+  if (row.agentDeleted) {
+    return '已删除'
+  }
+  if (row.agentDisabled) {
+    return '已停用'
+  }
+  return null
+}
+
+/** Agent Tag 样式类：已删除红底，已停用灰底（与模型列共用样式）。 */
+function agentTagClass(row: NamedRef) {
+  return agentStatusTag(row) === '已删除' ? 'tag-deleted' : 'tag-disabled'
 }
 
 /**
@@ -507,8 +569,9 @@ function money(amount?: number | null, currency?: string | null) {
 }
 
 /**
- * 用列表行和选项种子缓存，缺的再按 id 拉详情。
- * 后端已 enrich 的删/停行禁止再 getInstance（会触发全局错误 toast）。
+ * 用列表行和选项种子缓存名称，供筛选下拉与单价表复用。
+ * Agent 名称后端已按「含删」解析：查无行时不做 getAgent 补拉，
+ * 否则已硬删的历史 id 会触发全局错误 toast（本次修复的报错来源）。
  */
 async function rememberNames(rows: NamedRef[]) {
   for (const row of rows) {
@@ -529,14 +592,6 @@ async function rememberNames(rows: NamedRef[]) {
     }
   }
 
-  const missingAgents = [
-    ...new Set(
-      rows
-        .map((row) => row.agentId)
-        .filter((id): id is number => id != null && !agentNameMap.value.has(Number(id)))
-        .map(Number)
-    )
-  ]
   // 已有后端名称（含删/停真名）或占位的不再补拉；筛选下拉仍只来自未删列表
   const missingModels = [
     ...new Set(
@@ -548,19 +603,8 @@ async function rememberNames(rows: NamedRef[]) {
     )
   ]
 
-  await Promise.all([
-    ...missingAgents.map(async (id) => {
-      try {
-        const { data } = await getAgent(id)
-        const name = data.data.name?.trim()
-        if (name) {
-          agentNameMap.value.set(id, name)
-        }
-      } catch {
-        // 无权限或已删除：展示层用「未知 Agent」兜底，不暴露 id
-      }
-    }),
-    ...missingModels.map(async (id) => {
+  await Promise.all(
+    missingModels.map(async (id) => {
       try {
         const { data } = await getInstance(id)
         modelNameMap.value.set(id, instanceOptionLabel(data.data))
@@ -569,7 +613,7 @@ async function rememberNames(rows: NamedRef[]) {
         modelNameMap.value.set(id, DELETED_MODEL_NAME)
       }
     })
-  ])
+  )
 }
 
 function seedMapsFromOptions() {
@@ -882,8 +926,9 @@ async function loadOptions<T>(load: () => Promise<{ data: { data: { records: T[]
   max-width: 360px;
 }
 
-/* 模型列：真名 + 旁挂删/停 Tag */
-.model-cell {
+/* Agent / 模型列：真名 + 旁挂删/停 Tag */
+.model-cell,
+.agent-cell {
   display: inline-flex;
   align-items: center;
   justify-content: center;
@@ -891,7 +936,8 @@ async function loadOptions<T>(load: () => Promise<{ data: { data: { records: T[]
   max-width: 100%;
 }
 
-.model-name {
+.model-name,
+.agent-name {
   min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
