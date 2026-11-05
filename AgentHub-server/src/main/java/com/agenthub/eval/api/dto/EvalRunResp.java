@@ -31,6 +31,8 @@ public class EvalRunResp {
     private Integer skipped;
     /** 1 本次启用 OpenJudge / 0 关闭 */
     private Integer openjudgeEnabled;
+    /** 本 run 的打分模型实例 id；null 表示不打分（从配置快照回显，前端免解析 JSON） */
+    private Long judgeModelInstanceId;
     /** 合并后的配置快照（解析后的 JSON，空为 null） */
     private JsonNode config;
     private String reportPath;

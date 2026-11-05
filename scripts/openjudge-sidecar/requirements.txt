@@ -1,0 +1,6 @@
+# AgentHub 评测 OpenJudge sidecar —— 运行期依赖
+# Python >= 3.10（py-openjudge 要求）；本项目验证于 3.12
+fastapi>=0.115,<1.0
+uvicorn>=0.30,<1.0
+# 固定上游版本，避免 grader 行为漂移（升级前先回归 tests/）
+py-openjudge==0.2.4

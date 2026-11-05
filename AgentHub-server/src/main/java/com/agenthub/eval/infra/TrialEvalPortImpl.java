@@ -18,6 +18,8 @@ import com.agenthub.runtime.domain.model.EventType;
 import com.agenthub.runtime.domain.model.RunStatus;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.stereotype.Component;
+import org.springframework.transaction.annotation.Propagation;
+import org.springframework.transaction.annotation.Transactional;
 import org.springframework.web.context.request.RequestAttributes;
 
 import java.util.ArrayList;
@@ -138,8 +140,18 @@ public class TrialEvalPortImpl implements TrialEvalPort {
         }
     }
 
-    /** {@inheritDoc} */
+    /**
+     * {@inheritDoc}
+     * <p><b>事务边界（必看）</b>：本方法必须运行在调用方事务之外。评测取消是
+     * {@code EvalRunAppService.cancel} 里的 {@code @Transactional} 事务，而试跑会话
+     * {@code TrialSessionAppService.cancel} 是 REQUIRED 事务；会话「本轮正在执行」抛
+     * {@code BizException} 时，Spring 会把<b>外层</b>事务标记 rollback-only。
+     * 即便这里 catch 掉异常，外层 commit 仍会抛 {@code UnexpectedRollbackException}（前端看到「系统繁忙」）。
+     * 因此用 {@code NOT_SUPPORTED} 挂起外层事务，让会话取消失败只回滚它自己的事务，
+     * 评测侧仍可正常把 run 收尾为 FAILED / PARTIAL。
+     */
     @Override
+    @Transactional(propagation = Propagation.NOT_SUPPORTED)
     public void cancelSession(String sessionId) {
         safeCancel(sessionId);
     }

@@ -25,6 +25,9 @@ import com.agenthub.eval.domain.service.EvalRunStateMachine;
 import com.agenthub.eval.domain.service.EvalSpecs;
 import com.agenthub.eval.domain.service.EvalTenantProvider;
 import com.agenthub.eval.infra.EvalProperties;
+import com.agenthub.model.domain.model.ModelCapability;
+import com.agenthub.model.domain.model.ModelInstance;
+import com.agenthub.model.domain.repository.ModelInstanceRepository;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ArrayNode;
@@ -61,6 +64,7 @@ public class EvalRunAppService {
     private final ObjectMapper json;
     private final EvalRunnerAppService runner;
     private final EvalProperties properties;
+    private final ModelInstanceRepository modelInstances;
 
     /**
      * @param suites          套件仓储（校验套件归属与启用）
@@ -74,12 +78,13 @@ public class EvalRunAppService {
      * @param json            JSON 序列化器
      * @param runner          Runner（cancel 级联 in-flight trial；execute 不经本类）
      * @param properties      全局缺省（openjudge/report 基线）
+     * @param modelInstances  模型实例只读（校验打分模型是否存在且启用）
      */
     public EvalRunAppService(EvalSuiteRepository suites, EvalCaseRepository cases, EvalRunRepository runs,
                              EvalResultRepository results, EvalAssembler assembler,
                              EvalTenantProvider tenantProvider, OperatorContext operatorContext,
                              OperLogWriter operLogWriter, ObjectMapper json, EvalRunnerAppService runner,
-                             EvalProperties properties) {
+                             EvalProperties properties, ModelInstanceRepository modelInstances) {
         this.suites = suites;
         this.cases = cases;
         this.runs = runs;
@@ -91,6 +96,7 @@ public class EvalRunAppService {
         this.json = json;
         this.runner = runner;
         this.properties = properties;
+        this.modelInstances = modelInstances;
     }
 
     /**
@@ -101,8 +107,11 @@ public class EvalRunAppService {
      *   <li>套件被停用 → 400；平台只读样例可跑（它是用例来源，不是租户数据修改）；</li>
      *   <li>指定版本超出 [1, current_version] → 400；</li>
      *   <li>该版本没有启用用例 → 400「无可跑用例」（N=0 不建空 run，避免空跑刷出无意义的绿）；</li>
+     *   <li>打分模型不存在 / 已停用 / 用途不是 CHAT → 400，不静默换成别的模型；</li>
      *   <li>并发插入撞 result 唯一键 → 事务回滚，不残留 run。</li>
      * </ul>
+     * <p>打分模型口径：本 run 显式选择才启用软评分；不选（含传 null）即关闭，
+     * 并把该决定钉进配置快照，覆盖 suite default_config 与全局 yml。
      *
      * @param req 建跑请求
      * @return 新跑批的只读出参（status=PENDING）
@@ -129,10 +138,21 @@ public class EvalRunAppService {
             throw new BizException(ErrorCode.BAD_REQUEST, "单个套件最多 " + EvalSpecs.CASES_MAX + " 条用例");
         }
 
-        // 三级覆盖：全局 YAML 基线 → suite default_config → 本次 override
-        JsonNode mergedConfig = EvalRunConfig.merge(
-                EvalRunConfig.merge(globalConfigBaseline(), assembler.readNode(suite.getDefaultConfigJson())),
-                req.getConfigOverride());
+        // 打分模型：顶层 judge_model_instance_id 优先于 config_override 同名键；
+        // 两者都没有非空值 = 本 run 明确不打分（不是「交给下层默认」）
+        Long judgeModelInstanceId = resolveJudgeModelInstanceId(req);
+        if (judgeModelInstanceId != null) {
+            requireChatJudgeModel(judgeModelInstanceId);
+        }
+
+        // 三级覆盖：全局 YAML 基线 → suite default_config → 本次 override；
+        // 再把本 run 的打分模型选择钉在最上层（不选 → enabled=false 且清空 id）
+        JsonNode mergedConfig = EvalRunConfig.pinJudgeSelection(
+                EvalRunConfig.merge(
+                        EvalRunConfig.merge(globalConfigBaseline(),
+                                assembler.readNode(suite.getDefaultConfigJson())),
+                        req.getConfigOverride()),
+                judgeModelInstanceId);
         Long operatorId = operatorContext.requireUserId();
 
         EvalRun run = new EvalRun();
@@ -145,7 +165,8 @@ public class EvalRunAppService {
         run.setStatus(EvalRunStatus.PENDING);
         run.setGatePassed(null);
         run.setTotalCases(enabledCases.size());
-        run.setOpenjudgeEnabled(EvalRunConfig.openjudgeEnabled(mergedConfig) ? 1 : 0);
+        // 软评分开关只认本 run 的选择；无模型即 0（RuleScorer 不受影响）
+        run.setOpenjudgeEnabled(judgeModelInstanceId != null ? 1 : 0);
         run.setConfigJson(EvalSpecs.writeJson(json, mergedConfig));
         run.setTriggerUserId(operatorId);
         Long runId = runs.insert(run, operatorId);
@@ -154,7 +175,8 @@ public class EvalRunAppService {
 
         operLogWriter.write("eval", "createRun", "eval_run", String.valueOf(runId),
                 "建评测跑批：套件 " + suite.getSuiteKey() + " v" + version
-                        + "，Agent " + req.getAgentId() + "，计划 " + enabledCases.size() + " 条");
+                        + "，Agent " + req.getAgentId() + "，计划 " + enabledCases.size() + " 条"
+                        + "，打分模型 " + (judgeModelInstanceId == null ? "不打分" : judgeModelInstanceId));
         log.info("评测跑批已建单 run={} suite={} v{} cases={}", runId, suite.getSuiteKey(), version,
                 enabledCases.size());
         return getRun(runId);
@@ -231,7 +253,9 @@ public class EvalRunAppService {
         Long operatorId = operatorContext.requireUserId();
         long tenantId = run.getTenantId();
 
-        // RUNNING 时先级联取消 in-flight trial（经 TrialEvalPort → 现网 cancel 门面）
+        // RUNNING 时先级联取消 in-flight trial（经 TrialEvalPort → 现网 cancel 门面）。
+        // 注意：Port 实现把该调用标记为 NOT_SUPPORTED，挂起本方法的事务；否则会话「本轮正在执行」
+        // 的 BizException 会把当前事务标成 rollback-only，导致收尾成功但 commit 抛 UnexpectedRollbackException。
         if (run.getStatus() == EvalRunStatus.RUNNING || run.getStatus() == EvalRunStatus.CANCELING) {
             runner.cancelInFlightTrial(run.getId());
         }
@@ -316,6 +340,44 @@ public class EvalRunAppService {
         report.put("write_workspace", properties.getReport().isWriteWorkspace());
         report.put("markdown", properties.getReport().isMarkdown());
         return root;
+    }
+
+    /**
+     * 解析本 run 的打分模型：顶层字段优先，其次 {@code config_override.openjudge.judge_model_instance_id}。
+     * <p>两处都没有非空值 → 返回 null（本 run 不打分）。<b>不回落到</b> suite default 或全局 yml，
+     * 避免「没选模型却被默认配置拉去打分」。
+     *
+     * @param req 建跑请求
+     * @return 选中的实例 id；未选择为 null
+     */
+    private Long resolveJudgeModelInstanceId(EvalRunCreateReq req) {
+        if (req.getJudgeModelInstanceId() != null) {
+            return req.getJudgeModelInstanceId();
+        }
+        return EvalRunConfig.judgeModelInstanceId(req.getConfigOverride());
+    }
+
+    /**
+     * 校验打分模型：必须存在（未逻辑删除）、启用、用途为 CHAT。
+     * <p>模型实例是平台级资产（现表无 tenant_id），不存在「跨租户实例」；
+     * 其余非法情形统一 400，禁止静默改用不相关模型。
+     *
+     * @param instanceId 选中的模型实例 id
+     * @throws BizException 不存在 / 已停用 / 用途不符
+     */
+    private void requireChatJudgeModel(Long instanceId) {
+        ModelInstance instance = modelInstances.findById(instanceId)
+                .orElseThrow(() -> new BizException(ErrorCode.BAD_REQUEST,
+                        "打分模型不存在或已删除：" + instanceId));
+        if (!Integer.valueOf(1).equals(instance.getStatus())) {
+            throw new BizException(ErrorCode.BAD_REQUEST, "打分模型已停用：" + instanceId);
+        }
+        ModelCapability capability = ModelCapability.tryParse(instance.getCapability()).orElse(null);
+        if (capability != ModelCapability.CHAT) {
+            throw new BizException(ErrorCode.BAD_REQUEST,
+                    "打分模型用途必须为 CHAT，当前："
+                            + (instance.getCapability() == null ? "未配置" : instance.getCapability()));
+        }
     }
 
     // ------------------------------------------------------------------

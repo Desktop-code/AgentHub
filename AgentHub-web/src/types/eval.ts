@@ -51,6 +51,8 @@ export interface EvalRunRow {
   errored?: number
   skipped?: number
   openjudgeEnabled?: number
+  /** 本 run 的打分模型实例 id；null 表示只跑规则门禁 */
+  judgeModelInstanceId?: number | null
   reportPath?: string | null
   report?: EvalJson
   errorMessage?: string | null

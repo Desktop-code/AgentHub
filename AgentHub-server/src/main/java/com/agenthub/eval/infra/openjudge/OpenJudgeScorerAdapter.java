@@ -1,6 +1,7 @@
 package com.agenthub.eval.infra.openjudge;
 
 import com.agenthub.eval.domain.model.EvalArtifact;
+import com.agenthub.eval.domain.model.OpenJudgeJudge;
 import com.agenthub.eval.domain.model.OpenJudgeRequest;
 import com.agenthub.eval.domain.model.OpenJudgeScoreResult;
 import com.agenthub.eval.domain.model.OpenJudgeStatus;
@@ -18,6 +19,8 @@ import org.springframework.stereotype.Component;
  * OpenJudge HTTP sidecar 适配器。所属域：eval 的 infra。
  * <p>实现 {@link OpenJudgeScorerPort}：健康失败 → SKIPPED；超时/5xx → ERROR；200 → OK。
  * <p>P0 graders 请求字段：RelevanceGrader / CorrectnessGrader / ToolSelectionGrader（由调用方解析列表）。
+ * <p><b>凭据</b>：本 run 选了打分模型时，请求体额外带 {@code model} / {@code base_url} /
+ * {@code api_key}（本机环回透传）；无论成功失败，返回的 reason / rawJson 都会把 Key 抹成 {@code ***}。
  * <p>禁止：JVM 内 LLM、同进程 Python、改写 verdict/gate。
  */
 @Slf4j
@@ -56,18 +59,20 @@ public class OpenJudgeScorerAdapter implements OpenJudgeScorerPort {
 
         try {
             HttpJsonResponse response = client.evaluate(baseUrl, timeoutMs, buildBody(request));
-            return mapOk(response);
+            return mapOk(response, mask(request));
         } catch (OpenJudgeHttpException ex) {
             OpenJudgeStatus status = ex.isTimeout() ? OpenJudgeStatus.ERROR : OpenJudgeStatus.ERROR;
             // 5xx / 超时 / 协议错误一律 ERROR；连接类在 health 已拦，evaluate 阶段仍可能掉线
-            OpenJudgeScoreResult result = OpenJudgeScoreResult.of(status, clip(ex.getMessage(), 512));
-            result.setRawJson(clip(ex.getRawBody(), RAW_MAX_CHARS));
-            log.info("OpenJudge 评分失败 case={}：{}", request.getCaseKey(), ex.getMessage());
+            // 错误体来自 sidecar 原文，先抹 Key 再落 reason / rawJson（防 sidecar 回显请求体）
+            String maskedMessage = redact(ex.getMessage(), mask(request));
+            OpenJudgeScoreResult result = OpenJudgeScoreResult.of(status, clip(maskedMessage, 512));
+            result.setRawJson(clip(redact(ex.getRawBody(), mask(request)), RAW_MAX_CHARS));
+            log.info("OpenJudge 评分失败 case={}：{}", request.getCaseKey(), maskedMessage);
             return result;
         } catch (RuntimeException ex) {
             OpenJudgeScoreResult result = OpenJudgeScoreResult.of(OpenJudgeStatus.ERROR,
                     clip("OpenJudge 异常：" + ex.getClass().getSimpleName(), 512));
-            log.warn("OpenJudge 未预期异常 case={}：{}", request.getCaseKey(), ex.toString());
+            log.warn("OpenJudge 未预期异常 case={}：{}", request.getCaseKey(), ex.getClass().getSimpleName());
             return result;
         }
     }
@@ -107,10 +112,79 @@ public class OpenJudgeScorerAdapter implements OpenJudgeScorerPort {
                 }
             }
         }
+        // 指定 Judge 模型：只有本 run 显式选了模型才会走到这里；sidecar 按该实例评分
+        if (request.getJudgeModelInstanceId() != null) {
+            body.put("judge_model_instance_id", request.getJudgeModelInstanceId());
+        }
+        // 环回透传凭据：字段名与 sidecar EvaluateRequest 对齐（model / base_url / api_key）。
+        // 仅本机 sidecar 可见，不落库、不返回前端；缺失时 sidecar 回落自身环境变量。
+        OpenJudgeJudge judge = request.getJudge();
+        if (judge != null) {
+            if (judge.getModel() != null && !judge.getModel().isBlank()) {
+                body.put("model", judge.getModel().trim());
+            }
+            if (judge.getBaseUrl() != null && !judge.getBaseUrl().isBlank()) {
+                body.put("base_url", judge.getBaseUrl().trim());
+            }
+            if (judge.getApiKey() != null && !judge.getApiKey().isBlank()) {
+                body.put("api_key", judge.getApiKey());
+            }
+        }
         return body;
     }
 
-    private OpenJudgeScoreResult mapOk(HttpJsonResponse response) {
+    /**
+     * 取出本次请求的明文 Key，用于响应脱敏。
+     *
+     * @param request 请求
+     * @return Key；没有则空串
+     */
+    private static String mask(OpenJudgeRequest request) {
+        OpenJudgeJudge judge = request == null ? null : request.getJudge();
+        String key = judge == null ? null : judge.getApiKey();
+        return key == null ? "" : key;
+    }
+
+    /**
+     * 把文本里出现的明文 Key 换成 {@code ***}。
+     * <p>sidecar 若把请求体回显进错误体，rawJson 会落库；这里做最后一道闸。
+     *
+     * @param text 原始文本，可空
+     * @param key  明文 Key，空则原样返回
+     * @return 脱敏后的文本
+     */
+    public static String redact(String text, String key) {
+        if (text == null || text.isEmpty() || key == null || key.isBlank()) {
+            return text;
+        }
+        return text.replace(key, "***");
+    }
+
+    /**
+     * 递归脱敏 metadata：sidecar 若把请求体塞进 metadata，Key 也会一并抹掉。
+     *
+     * @param node   sidecar 返回的 metadata
+     * @param apiKey 明文 Key
+     * @return 脱敏后的节点；序列化异常时返回省略说明（宁可少字段也不泄 Key）
+     */
+    private JsonNode redactNode(JsonNode node, String apiKey) {
+        if (node == null || apiKey == null || apiKey.isBlank()) {
+            return node;
+        }
+        try {
+            String text = json.writeValueAsString(node);
+            if (!text.contains(apiKey)) {
+                return node;
+            }
+            return json.readTree(redact(text, apiKey));
+        } catch (Exception ex) {
+            ObjectNode fallback = json.createObjectNode();
+            fallback.put("note", "metadata 已省略（含敏感字段）");
+            return fallback;
+        }
+    }
+
+    private OpenJudgeScoreResult mapOk(HttpJsonResponse response, String apiKey) {
         JsonNode body = response.getBody() == null ? json.createObjectNode() : response.getBody();
         OpenJudgeScoreResult result = new OpenJudgeScoreResult();
         result.setStatus(OpenJudgeStatus.OK);
@@ -118,18 +192,18 @@ public class OpenJudgeScorerAdapter implements OpenJudgeScorerPort {
             result.setScore(body.get("score").asDouble());
         }
         if (body.has("reason") && body.get("reason").isTextual()) {
-            result.setReason(body.get("reason").asText());
+            result.setReason(clip(redact(body.get("reason").asText(), apiKey), 512));
         } else {
             result.setReason("OpenJudge 评分成功");
         }
         if (body.has("metadata")) {
-            result.setMetadata(body.get("metadata"));
+            result.setMetadata(redactNode(body.get("metadata"), apiKey));
         } else if (body.has("graders")) {
             ObjectNode meta = json.createObjectNode();
             meta.set("graders", body.get("graders"));
             result.setMetadata(meta);
         }
-        result.setRawJson(clip(response.getRaw(), RAW_MAX_CHARS));
+        result.setRawJson(clip(redact(response.getRaw(), apiKey), RAW_MAX_CHARS));
         return result;
     }
 

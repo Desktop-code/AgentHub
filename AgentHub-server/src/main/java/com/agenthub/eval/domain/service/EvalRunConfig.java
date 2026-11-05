@@ -1,6 +1,7 @@
 package com.agenthub.eval.domain.service;
 
 import com.fasterxml.jackson.databind.JsonNode;
+import com.fasterxml.jackson.databind.node.JsonNodeFactory;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 
 import java.util.Iterator;
@@ -10,10 +11,14 @@ import java.util.Map;
  * 跑批配置快照的合并与取值。所属域：eval 的 domain。**纯函数**，无 Spring / 无 IO。
  * <p>来源三层：全局 YAML 基线 → 套件 {@code default_config_json} → 建跑 {@code config_override}。
  * 合并规则：对象逐层深合并（覆盖方优先），数组与标量整体替换 —— 与定稿 §5.3 一致。
- * <p>已消费字段：{@code openjudge.*}、{@code report.*}、{@code evalscope.*}、
- * {@code case_timeout_ms}、{@code continue_on_case_error}。线程：无状态，可并发调用。
+ * <p>已消费字段：{@code openjudge.*}（含 {@code judge_model_instance_id}）、{@code report.*}、
+ * {@code evalscope.*}、{@code case_timeout_ms}、{@code continue_on_case_error}。
+ * 线程：无状态，可并发调用。
  */
 public final class EvalRunConfig {
+
+    /** openjudge 里指定 Judge 模型实例的字段名（定稿 §5.3）。 */
+    public static final String JUDGE_MODEL_FIELD = "judge_model_instance_id";
 
     private EvalRunConfig() {
     }
@@ -45,6 +50,89 @@ public final class EvalRunConfig {
      */
     public static boolean openjudgeEnabled(JsonNode config) {
         return boolAt(objectAt(config, "openjudge"), "enabled", false);
+    }
+
+    /**
+     * 读取 {@code openjudge.judge_model_instance_id}。
+     * <p>只有数字或数字字符串才算有效；缺失、null、空串、乱码一律返回 null（= 本 run 不打分），
+     * 不做「猜一个默认模型」的兜底 —— 打分模型必须来自显式选择。
+     *
+     * @param config 合并后的配置，可空
+     * @return 模型实例 id；未配置返回 null
+     */
+    public static Long judgeModelInstanceId(JsonNode config) {
+        JsonNode openjudge = objectAt(config, "openjudge");
+        if (openjudge == null) {
+            return null;
+        }
+        JsonNode node = openjudge.get(JUDGE_MODEL_FIELD);
+        if (node == null || node.isNull()) {
+            return null;
+        }
+        if (node.isIntegralNumber()) {
+            long value = node.asLong();
+            return value > 0 ? value : null;
+        }
+        if (node.isTextual()) {
+            String raw = node.asText() == null ? "" : node.asText().trim();
+            if (raw.isEmpty()) {
+                return null;
+            }
+            try {
+                long value = Long.parseLong(raw);
+                return value > 0 ? value : null;
+            } catch (NumberFormatException ignored) {
+                return null;
+            }
+        }
+        return null;
+    }
+
+    /**
+     * 本 run 是否真的会调用软评分：{@code enabled=true} <b>且</b> 有非空 Judge 实例 id。
+     * <p>只有开关没有模型（历史行、套件默认开但建跑未选模型）时同样按关闭处理，
+     * 保证「无模型 → 零 Judge 出站」。
+     *
+     * @param config 合并后的配置，可空
+     * @return true 表示允许调 OpenJudge
+     */
+    public static boolean judgeEnabled(JsonNode config) {
+        return openjudgeEnabled(config) && judgeModelInstanceId(config) != null;
+    }
+
+    /**
+     * 把「本次建跑的打分模型选择」钉进配置快照（run 级覆盖，优先级高于 suite default 与全局 yml）。
+     * <p><b>不选即关闭</b>：{@code judgeModelInstanceId == null} 时强制 {@code enabled=false} 且清空 id，
+     * 避免套件默认配置或全局 yml 把打分重新打开（禁止默认偷用全局模型）。
+     * <p><b>选了即启用</b>：写入选中的 id 并置 {@code enabled=true}，同样覆盖下层配置。
+     *
+     * @param config               已合并的配置，可空（为空时新建根对象）
+     * @param judgeModelInstanceId 本 run 选中的实例 id；null 表示不打分
+     * @return 新的配置节点（不修改入参）
+     */
+    public static ObjectNode pinJudgeSelection(JsonNode config, Long judgeModelInstanceId) {
+        ObjectNode root;
+        if (config != null && config.isObject()) {
+            root = ((ObjectNode) config).deepCopy();
+        } else {
+            root = JsonNodeFactory.instance.objectNode();
+        }
+        ObjectNode openjudge;
+        JsonNode current = root.get("openjudge");
+        if (current != null && current.isObject()) {
+            openjudge = (ObjectNode) current;
+        } else {
+            openjudge = root.putObject("openjudge");
+        }
+        if (judgeModelInstanceId == null) {
+            // 显式置 null 而不是删字段：快照要能被读出「本 run 选择了不打分」
+            openjudge.putNull(JUDGE_MODEL_FIELD);
+            openjudge.put("enabled", false);
+        } else {
+            openjudge.put(JUDGE_MODEL_FIELD, judgeModelInstanceId);
+            openjudge.put("enabled", true);
+        }
+        return root;
     }
 
     /**
@@ -125,21 +213,19 @@ public final class EvalRunConfig {
     }
 
     /**
-     * case 级开关：{@code scoring.openjudge.enabled}；缺省跟随 run 级。
+     * case 级是否发 OpenJudge：**只认 run 级开关**。
+     * <p>为什么不再看 {@code scoring.openjudge.enabled}：控制台没有 case 级打分开关，
+     * 套件多由样例/历史 JSON 导入，case 上常带着复制来的 {@code enabled=false}；
+     * 若让它否决，就会出现「建跑时明明选了打分模型，结果 Judge 列全部未启用」。
+     * run 级已由 {@link #pinJudgeSelection} 钉死为「选了模型才 true」，
+     * 因此只需跟随 run 级即可；case 级 scoring 仍用于覆盖 graders / threshold 等参数。
      *
-     * @param scoringJson case.scoring_json 节点，可空
-     * @param runEnabled  run 级是否启用
+     * @param scoringJson case.scoring_json 节点，可空（保留入参以便将来恢复细粒度开关）
+     * @param runEnabled  run 级是否启用（已含「有打分模型」校验）
      * @return 本 case 是否发 OpenJudge HTTP
      */
     public static boolean caseOpenjudgeEnabled(JsonNode scoringJson, boolean runEnabled) {
-        if (!runEnabled) {
-            return false;
-        }
-        JsonNode openjudge = objectAt(scoringJson, "openjudge");
-        if (openjudge == null) {
-            return true;
-        }
-        return boolAt(openjudge, "enabled", true);
+        return runEnabled;
     }
 
     /**

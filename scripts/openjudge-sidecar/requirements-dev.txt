@@ -1,0 +1,5 @@
+# 窄测依赖（不参与运行）
+-r requirements.txt
+pytest>=8.0,<9.0
+# fastapi.testclient 需要
+httpx>=0.27,<1.0
