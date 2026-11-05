@@ -338,6 +338,8 @@
                 empty-text="没有工具项"
                 table-layout="fixed"
               >
+                <!-- 内容列都短：等分宽度、表头与单元格居中；最左序号列固定窄宽 -->
+                <el-table-column v-bind="indexColumnProps" />
                 <el-table-column prop="name" label="名称" min-width="1" align="center" header-align="center" show-overflow-tooltip />
                 <el-table-column prop="title" label="展示名" min-width="1" align="center" header-align="center" show-overflow-tooltip />
                 <el-table-column label="来源类型" min-width="1" align="center" header-align="center">
@@ -426,6 +428,7 @@ import SourceFormDialog from '@/components/tool/SourceFormDialog.vue'
 import SyncResultDialog from '@/components/tool/SyncResultDialog.vue'
 import { useViewFlip, type FlipCardSnap } from '@/composables/viewFlip'
 import { CARD_HEIGHT_NORMAL, lastPage, useGridPageSize } from '@/composables/gridPageSize'
+import { useListIndexColumn } from '@/composables/listIndex'
 import { useUserStore } from '@/stores/user'
 import type { SyncResult, ToolItemRow, ToolSource } from '@/types/tool'
 
@@ -454,6 +457,8 @@ const total = ref(0)
 const builtinStatsBySource = ref<Record<number, { total: number; enabled: number }>>({})
 /** 右栏工具项查询条件；size 默认 10，与全站列表默认一致。 */
 const query = reactive({ current: 1, size: 10, type: '', status: undefined as number | undefined, keyword: '' })
+/** 工具项表最左「序号」列；跨页连续，仅前端展示，不改工具项分页接口 */
+const { indexColumnProps } = useListIndexColumn(() => query.current, () => query.size)
 const sourceDialog = reactive({ open: false, editing: null as ToolSource | null })
 const itemDialog = reactive({ open: false, editing: null as ToolItemRow | null })
 const syncDialog = reactive({ open: false, result: null as SyncResult | null })

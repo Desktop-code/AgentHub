@@ -45,6 +45,8 @@
 
     <el-card class="table-card" shadow="never">
       <el-table v-loading="loading" :data="rows" empty-text="还没有知识库">
+        <!-- 最左序号列：跨页连续，纯展示，不参与接口排序 -->
+        <el-table-column v-bind="indexColumnProps" />
         <el-table-column label="名称" min-width="160" show-overflow-tooltip>
           <template #default="{ row }">
             <!-- 名称本身就是进入该库文档管理页的入口，比只靠「操作」列更符合直觉 -->
@@ -243,6 +245,7 @@ import { createKb, deleteKb, pageKbs, rebuildKb, updateKb } from '@/api/rag'
 import { pageInstances } from '@/api/model'
 import PageHeader from '@/components/PageHeader.vue'
 import TablePager from '@/components/TablePager.vue'
+import { useListIndexColumn } from '@/composables/listIndex'
 import { useObjectDirty } from '@/composables/useFormDirty'
 import { useUserStore } from '@/stores/user'
 import type { InstanceRow } from '@/types/model'
@@ -273,6 +276,8 @@ const query = reactive({
   status: undefined as string | undefined,
   visibility: undefined as string | undefined
 })
+/** 知识库表最左「序号」列；跨页连续，仅前端展示 */
+const { indexColumnProps } = useListIndexColumn(() => query.current, () => query.size)
 
 /** Embedding / Rerank 候选只在打开弹窗时拉一次，模型中心变更后重新打开即可刷新 */
 const embeddingOptions = ref<InstanceRow[]>([])

@@ -93,6 +93,8 @@
 
     <el-card class="table-card" shadow="never">
       <el-table v-loading="loading" :data="rows" empty-text="请先选择 Agent 和记忆范围后查询">
+        <!-- 最左序号列：跨页连续（本页分页字段为 pageNum/pageSize），纯展示 -->
+        <el-table-column v-bind="indexColumnProps" />
         <el-table-column prop="title" label="标题" min-width="120" show-overflow-tooltip />
         <el-table-column prop="factKey" label="事实键" min-width="120" show-overflow-tooltip>
           <template #default="{ row }">{{ row.factKey || '—' }}</template>
@@ -161,6 +163,7 @@ import { deleteMemoryItem, pageMemoryItems } from '@/api/memory'
 import { pageUsers } from '@/api/user'
 import PageHeader from '@/components/PageHeader.vue'
 import TablePager from '@/components/TablePager.vue'
+import { useListIndexColumn } from '@/composables/listIndex'
 import { useUserStore } from '@/stores/user'
 import type { AgentCard } from '@/types/agent'
 import type { UserRow } from '@/types'
@@ -180,6 +183,8 @@ const searched = ref(false)
 
 /** 分页：对外请求用 pageNum / pageSize，与后端别名对齐。 */
 const query = reactive({ pageNum: 1, pageSize: 10 })
+/** 记忆表最左「序号」列；分页字段是 pageNum/pageSize，序号仍按跨页连续计算 */
+const { indexColumnProps } = useListIndexColumn(() => query.pageNum, () => query.pageSize)
 
 /**
  * 筛选：status 用展示码 0/1/2，请求时映射 lifeStatus。

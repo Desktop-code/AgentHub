@@ -59,6 +59,8 @@
 
     <section class="panel">
       <el-table v-loading="loading" :data="rows" empty-text="还没有工作流" class="wf-table">
+        <!-- 最左序号列：跨页连续，纯展示，不参与接口排序 -->
+        <el-table-column v-bind="indexColumnProps" />
         <!-- 名称双行：主行名称 + 副行简介，信息密度接近企业级中台列表 -->
         <el-table-column label="名称" min-width="220">
           <template #default="{ row }">
@@ -243,6 +245,7 @@ import { ArrowDown, MoreFilled, Plus, RefreshRight, Search } from '@element-plus
 import { ElMessage, ElMessageBox, type FormInstance, type FormRules } from 'element-plus'
 import PageHeader from '@/components/PageHeader.vue'
 import TablePager from '@/components/TablePager.vue'
+import { useListIndexColumn } from '@/composables/listIndex'
 import WorkflowTrialDrawer from '@/views/workflow/editor/WorkflowTrialDrawer.vue'
 import {
   createWorkflowDef,
@@ -283,6 +286,8 @@ const query = reactive({
   keyword: '',
   status: undefined as string | undefined
 })
+/** 工作流表最左「序号」列；跨页连续，仅前端展示 */
+const { indexColumnProps } = useListIndexColumn(() => query.current, () => query.size)
 
 const createOpen = ref(false)
 /** 应用触发说明弹窗；本页不代调 OpenAPI */

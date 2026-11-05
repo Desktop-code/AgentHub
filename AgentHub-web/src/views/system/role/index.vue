@@ -31,6 +31,8 @@
     </div>
     <el-card class="table-card" shadow="never">
       <el-table v-loading="loading" :data="rows" empty-text="没有角色">
+        <!-- 最左序号列：跨页连续，纯展示，不参与接口排序 -->
+        <el-table-column v-bind="indexColumnProps" />
         <el-table-column prop="code" label="编码" min-width="160" show-overflow-tooltip align="center" />
         <el-table-column prop="name" label="名称" min-width="180" show-overflow-tooltip align="center" />
         <el-table-column prop="dataScopeLabel" label="数据范围" min-width="160" align="center" />
@@ -131,6 +133,7 @@ import { menuTree } from '@/api/menu'
 import { deptTree } from '@/api/dept'
 import PageHeader from '@/components/PageHeader.vue'
 import TablePager from '@/components/TablePager.vue'
+import { useListIndexColumn } from '@/composables/listIndex'
 import { useObjectDirty } from '@/composables/useFormDirty'
 import { useUserStore } from '@/stores/user'
 import type { DeptRow, MenuRow, RoleRow } from '@/types'
@@ -143,6 +146,8 @@ const menus = ref<MenuRow[]>([])
 const depts = ref<DeptRow[]>([])
 const menuTreeRef = ref<InstanceType<typeof ElTree>>()
 const query = reactive({ current: 1, size: 10, code: '', name: '' })
+/** 表格最左「序号」列；跨页连续，仅前端展示 */
+const { indexColumnProps } = useListIndexColumn(() => query.current, () => query.size)
 const scopes = [
   { value: 1, label: '仅本人' },
   { value: 2, label: '本部门' },

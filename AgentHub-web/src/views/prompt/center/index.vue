@@ -126,6 +126,7 @@
             :empty-text="emptyText"
             @row-click="onRowClick"
           >
+            <el-table-column v-bind="indexColumnProps" />
             <el-table-column label="版本" width="90" align="center">
               <template #default="{ row }">v{{ row.version }}</template>
             </el-table-column>
@@ -375,6 +376,7 @@ import {
   saveTemplateDraft
 } from '@/api/prompt'
 import PageHeader from '@/components/PageHeader.vue'
+import { useRowIndexColumn } from '@/composables/listIndex'
 import { useFormDirty } from '@/composables/useFormDirty'
 import { confirmDiscardUnsaved } from '@/utils/unsavedConfirm'
 import { useUserStore } from '@/stores/user'
@@ -447,6 +449,8 @@ const selectedPurpose = ref('')
 const currentVersionId = ref(0)
 
 const versions = ref<VersionRow[]>([])
+/** 中栏版本表最左「序号」列；该列表按对象整体返回、不分页，故序号 = 行号 + 1 */
+const { indexColumnProps } = useRowIndexColumn()
 
 const drawer = reactive({ open: false, readonly: false })
 

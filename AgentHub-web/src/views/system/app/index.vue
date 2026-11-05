@@ -28,6 +28,8 @@
     </div>
     <el-card class="table-card" shadow="never">
       <el-table v-loading="loading" :data="rows" empty-text="没有应用">
+        <!-- 最左序号列：跨页连续，纯展示，不参与接口排序 -->
+        <el-table-column v-bind="indexColumnProps" />
         <el-table-column prop="name" label="名称" min-width="140" align="center" />
         <el-table-column prop="appKey" label="AppId" min-width="180" align="center" />
         <el-table-column prop="deptName" label="部门" min-width="120" align="center" />
@@ -140,6 +142,7 @@ import { deptTree } from '@/api/dept'
 import { listAppWorkflowGrants, listPublishedWorkflows, saveAppWorkflowGrants } from '@/api/workflow'
 import PageHeader from '@/components/PageHeader.vue'
 import TablePager from '@/components/TablePager.vue'
+import { useListIndexColumn } from '@/composables/listIndex'
 import { useObjectDirty } from '@/composables/useFormDirty'
 import { useUserStore } from '@/stores/user'
 import type { AppRow, DeptRow } from '@/types'
@@ -151,6 +154,8 @@ const rows = ref<AppRow[]>([])
 const total = ref(0)
 const depts = ref<DeptRow[]>([])
 const query = reactive({ current: 1, size: 10, name: '' })
+/** 表格最左「序号」列；跨页连续，仅前端展示 */
+const { indexColumnProps } = useListIndexColumn(() => query.current, () => query.size)
 const editor = reactive({
   open: false,
   id: 0,
