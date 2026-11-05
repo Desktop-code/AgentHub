@@ -11,7 +11,7 @@
  Target Server Version : 50733
  File Encoding         : 65001
 
- Date: 01/11/2026 01:30:53
+ Date: 05/11/2026 16:16:16
 */
 
 SET NAMES utf8mb4;
@@ -43,6 +43,7 @@ CREATE TABLE `agent_def`  (
   `tool_result_max_chars` int(11) NULL DEFAULT NULL COMMENT '工具结果回灌上限字符，空=跟YAML',
   `runtime_config_json` text CHARACTER SET utf8mb4 COLLATE utf8mb4_general_ci NULL COMMENT '运行配置JSON：multiIntentEnabled/answerMode/maxRouteChildren等',
   `status` tinyint(4) NOT NULL DEFAULT 1 COMMENT '1正常 0停用',
+  `allow_orchestrated` tinyint(4) NOT NULL DEFAULT 1 COMMENT '1允许被编排挂为子 0禁止',
   `remark` varchar(500) CHARACTER SET utf8mb4 COLLATE utf8mb4_general_ci NULL DEFAULT NULL COMMENT '备注',
   `deleted` tinyint(4) NOT NULL DEFAULT 0 COMMENT '0未删 1已删',
   `created_by` bigint(20) NULL DEFAULT NULL COMMENT '创建人用户ID',
@@ -53,8 +54,9 @@ CREATE TABLE `agent_def`  (
   INDEX `idx_code`(`code`) USING BTREE,
   INDEX `idx_run_mode`(`run_mode`) USING BTREE,
   INDEX `idx_status`(`status`) USING BTREE,
-  INDEX `idx_deleted`(`deleted`) USING BTREE
-) ENGINE = InnoDB AUTO_INCREMENT = 29 CHARACTER SET = utf8mb4 COLLATE = utf8mb4_general_ci COMMENT = 'Agent 定义' ROW_FORMAT = Dynamic;
+  INDEX `idx_deleted`(`deleted`) USING BTREE,
+  INDEX `idx_allow_orchestrated`(`allow_orchestrated`) USING BTREE
+) ENGINE = InnoDB AUTO_INCREMENT = 37 CHARACTER SET = utf8mb4 COLLATE = utf8mb4_general_ci COMMENT = 'Agent 定义' ROW_FORMAT = Dynamic;
 
 -- ----------------------------
 -- Table structure for agent_kb_bind
@@ -75,7 +77,7 @@ CREATE TABLE `agent_kb_bind`  (
   PRIMARY KEY (`id`) USING BTREE,
   INDEX `idx_agent`(`agent_id`) USING BTREE,
   INDEX `idx_kb`(`kb_id`) USING BTREE
-) ENGINE = InnoDB AUTO_INCREMENT = 4 CHARACTER SET = utf8mb4 COLLATE = utf8mb4_general_ci COMMENT = 'Agent 知识库绑定' ROW_FORMAT = Dynamic;
+) ENGINE = InnoDB AUTO_INCREMENT = 6 CHARACTER SET = utf8mb4 COLLATE = utf8mb4_general_ci COMMENT = 'Agent 知识库绑定' ROW_FORMAT = Dynamic;
 
 -- ----------------------------
 -- Table structure for agent_model_bind
@@ -102,7 +104,7 @@ CREATE TABLE `agent_model_bind`  (
   INDEX `idx_model_instance_id`(`model_instance_id`) USING BTREE,
   INDEX `idx_status`(`status`) USING BTREE,
   INDEX `idx_deleted`(`deleted`) USING BTREE
-) ENGINE = InnoDB AUTO_INCREMENT = 25 CHARACTER SET = utf8mb4 COLLATE = utf8mb4_general_ci COMMENT = 'Agent 模型绑定' ROW_FORMAT = Dynamic;
+) ENGINE = InnoDB AUTO_INCREMENT = 39 CHARACTER SET = utf8mb4 COLLATE = utf8mb4_general_ci COMMENT = 'Agent 模型绑定' ROW_FORMAT = Dynamic;
 
 -- ----------------------------
 -- Table structure for agent_route
@@ -126,7 +128,7 @@ CREATE TABLE `agent_route`  (
   INDEX `idx_child_agent_id`(`child_agent_id`) USING BTREE,
   INDEX `idx_status`(`status`) USING BTREE,
   INDEX `idx_deleted`(`deleted`) USING BTREE
-) ENGINE = InnoDB AUTO_INCREMENT = 11 CHARACTER SET = utf8mb4 COLLATE = utf8mb4_general_ci COMMENT = 'Router 子 Agent 路由配置' ROW_FORMAT = Dynamic;
+) ENGINE = InnoDB AUTO_INCREMENT = 7 CHARACTER SET = utf8mb4 COLLATE = utf8mb4_general_ci COMMENT = 'Router 子 Agent 路由配置' ROW_FORMAT = Dynamic;
 
 -- ----------------------------
 -- Table structure for agent_run_event
@@ -146,7 +148,7 @@ CREATE TABLE `agent_run_event`  (
   INDEX `idx_session_id`(`session_id`) USING BTREE,
   INDEX `idx_session_seq`(`session_id`, `seq`) USING BTREE,
   INDEX `idx_event_type`(`event_type`) USING BTREE
-) ENGINE = InnoDB AUTO_INCREMENT = 1098 CHARACTER SET = utf8mb4 COLLATE = utf8mb4_general_ci COMMENT = 'Agent 试跑步骤事件摘要' ROW_FORMAT = Dynamic;
+) ENGINE = InnoDB AUTO_INCREMENT = 790 CHARACTER SET = utf8mb4 COLLATE = utf8mb4_general_ci COMMENT = 'Agent 试跑步骤事件摘要' ROW_FORMAT = DYNAMIC;
 
 -- ----------------------------
 -- Table structure for agent_run_session
@@ -154,7 +156,8 @@ CREATE TABLE `agent_run_event`  (
 DROP TABLE IF EXISTS `agent_run_session`;
 CREATE TABLE `agent_run_session`  (
   `id` bigint(20) NOT NULL AUTO_INCREMENT COMMENT '主键',
-  `agent_id` bigint(20) NOT NULL COMMENT 'agent_def.id（开跑时）',
+  `agent_id` bigint(20) NULL DEFAULT NULL COMMENT 'agent_def.id（开跑时快照）；虚拟根试跑为空',
+  `ma_def_id` bigint(20) NULL DEFAULT NULL COMMENT 'ma_def.id；虚拟根试跑归属（绑根会话可空）',
   `run_mode` varchar(32) CHARACTER SET utf8mb4 COLLATE utf8mb4_general_ci NOT NULL COMMENT '开跑时快照：REACT / ROUTER',
   `user_id` bigint(20) NOT NULL COMMENT '平台用户 sys_user.id',
   `status` varchar(32) CHARACTER SET utf8mb4 COLLATE utf8mb4_general_ci NOT NULL DEFAULT 'RUNNING' COMMENT 'RUNNING / SUCCESS / FAILED / CANCELLED',
@@ -175,8 +178,9 @@ CREATE TABLE `agent_run_session`  (
   INDEX `idx_user_id`(`user_id`) USING BTREE,
   INDEX `idx_status`(`status`) USING BTREE,
   INDEX `idx_start_time`(`start_time`) USING BTREE,
-  INDEX `idx_deleted`(`deleted`) USING BTREE
-) ENGINE = InnoDB AUTO_INCREMENT = 202 CHARACTER SET = utf8mb4 COLLATE = utf8mb4_general_ci COMMENT = 'Agent 试跑会话元数据' ROW_FORMAT = Dynamic;
+  INDEX `idx_deleted`(`deleted`) USING BTREE,
+  INDEX `idx_run_session_ma`(`ma_def_id`, `start_time`) USING BTREE
+) ENGINE = InnoDB AUTO_INCREMENT = 360 CHARACTER SET = utf8mb4 COLLATE = utf8mb4_general_ci COMMENT = 'Agent 试跑会话元数据' ROW_FORMAT = Dynamic;
 
 -- ----------------------------
 -- Table structure for agent_skill_bind
@@ -197,7 +201,7 @@ CREATE TABLE `agent_skill_bind`  (
   INDEX `idx_skill_id`(`skill_id`) USING BTREE,
   INDEX `idx_status`(`status`) USING BTREE,
   INDEX `idx_deleted`(`deleted`) USING BTREE
-) ENGINE = InnoDB AUTO_INCREMENT = 7 CHARACTER SET = utf8mb4 COLLATE = utf8mb4_general_ci COMMENT = 'Agent Skill 绑定' ROW_FORMAT = Dynamic;
+) ENGINE = InnoDB AUTO_INCREMENT = 16 CHARACTER SET = utf8mb4 COLLATE = utf8mb4_general_ci COMMENT = 'Agent Skill 绑定' ROW_FORMAT = Dynamic;
 
 -- ----------------------------
 -- Table structure for agent_tool_bind
@@ -218,7 +222,26 @@ CREATE TABLE `agent_tool_bind`  (
   INDEX `idx_tool_item_id`(`tool_item_id`) USING BTREE,
   INDEX `idx_status`(`status`) USING BTREE,
   INDEX `idx_deleted`(`deleted`) USING BTREE
-) ENGINE = InnoDB AUTO_INCREMENT = 28 CHARACTER SET = utf8mb4 COLLATE = utf8mb4_general_ci COMMENT = 'Agent 工具绑定' ROW_FORMAT = Dynamic;
+) ENGINE = InnoDB AUTO_INCREMENT = 41 CHARACTER SET = utf8mb4 COLLATE = utf8mb4_general_ci COMMENT = 'Agent 工具绑定' ROW_FORMAT = Dynamic;
+
+-- ----------------------------
+-- Table structure for app_workflow_grant
+-- ----------------------------
+DROP TABLE IF EXISTS `app_workflow_grant`;
+CREATE TABLE `app_workflow_grant`  (
+  `id` bigint(20) NOT NULL AUTO_INCREMENT COMMENT '主键',
+  `app_id` bigint(20) NOT NULL COMMENT 'sys_app.id',
+  `workflow_def_id` bigint(20) NOT NULL COMMENT 'workflow_def.id',
+  `release_id` bigint(20) NULL DEFAULT NULL COMMENT '空=跟随默认发布指针；非空=钉死该版本',
+  `status` tinyint(4) NOT NULL DEFAULT 1 COMMENT '1启用 0停用（停用后入站拒绝）',
+  `created_by` bigint(20) NULL DEFAULT NULL COMMENT '创建人',
+  `create_time` datetime NOT NULL DEFAULT CURRENT_TIMESTAMP COMMENT '创建时间',
+  `updated_by` bigint(20) NULL DEFAULT NULL COMMENT '更新人',
+  `update_time` datetime NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP COMMENT '更新时间',
+  PRIMARY KEY (`id`) USING BTREE,
+  UNIQUE INDEX `uk_app_workflow`(`app_id`, `workflow_def_id`) USING BTREE,
+  INDEX `idx_workflow`(`workflow_def_id`) USING BTREE
+) ENGINE = InnoDB AUTO_INCREMENT = 1 CHARACTER SET = utf8mb4 COLLATE = utf8mb4_general_ci COMMENT = '应用-工作流触发授权' ROW_FORMAT = Dynamic;
 
 -- ----------------------------
 -- Table structure for billing_price_rule
@@ -244,7 +267,7 @@ CREATE TABLE `billing_price_rule`  (
   INDEX `idx_model_instance_id`(`model_instance_id`) USING BTREE,
   INDEX `idx_status`(`status`) USING BTREE,
   INDEX `idx_deleted`(`deleted`) USING BTREE
-) ENGINE = InnoDB AUTO_INCREMENT = 10 CHARACTER SET = utf8mb4 COLLATE = utf8mb4_general_ci COMMENT = 'Token 单价规则' ROW_FORMAT = Dynamic;
+) ENGINE = InnoDB AUTO_INCREMENT = 1 CHARACTER SET = utf8mb4 COLLATE = utf8mb4_general_ci COMMENT = 'Token 单价规则' ROW_FORMAT = Dynamic;
 
 -- ----------------------------
 -- Table structure for billing_token_daily
@@ -273,7 +296,7 @@ CREATE TABLE `billing_token_daily`  (
   INDEX `idx_agent_model`(`agent_id`, `model_instance_id`) USING BTREE,
   INDEX `idx_app_id`(`app_id`) USING BTREE,
   INDEX `idx_deleted`(`deleted`) USING BTREE
-) ENGINE = InnoDB AUTO_INCREMENT = 21 CHARACTER SET = utf8mb4 COLLATE = utf8mb4_general_ci COMMENT = 'Token 日汇总' ROW_FORMAT = Dynamic;
+) ENGINE = InnoDB AUTO_INCREMENT = 18 CHARACTER SET = utf8mb4 COLLATE = utf8mb4_general_ci COMMENT = 'Token 日汇总' ROW_FORMAT = Dynamic;
 
 -- ----------------------------
 -- Table structure for billing_token_ledger
@@ -309,7 +332,181 @@ CREATE TABLE `billing_token_ledger`  (
   INDEX `idx_session_id`(`session_id`) USING BTREE,
   INDEX `idx_channel`(`channel`) USING BTREE,
   INDEX `idx_deleted`(`deleted`) USING BTREE
-) ENGINE = InnoDB AUTO_INCREMENT = 24113 CHARACTER SET = utf8mb4 COLLATE = utf8mb4_general_ci COMMENT = 'Token 计量流水' ROW_FORMAT = Dynamic;
+) ENGINE = InnoDB AUTO_INCREMENT = 24459 CHARACTER SET = utf8mb4 COLLATE = utf8mb4_general_ci COMMENT = 'Token 计量流水' ROW_FORMAT = Dynamic;
+
+-- ----------------------------
+-- Table structure for eval_case
+-- ----------------------------
+DROP TABLE IF EXISTS `eval_case`;
+CREATE TABLE `eval_case`  (
+  `id` bigint(20) NOT NULL AUTO_INCREMENT COMMENT '主键',
+  `suite_id` bigint(20) NOT NULL COMMENT 'eval_suite.id',
+  `suite_version` int(11) NOT NULL COMMENT '钉死的套件版本',
+  `case_key` varchar(64) CHARACTER SET utf8mb4 COLLATE utf8mb4_general_ci NOT NULL COMMENT '套件版本内用例键',
+  `title` varchar(256) CHARACTER SET utf8mb4 COLLATE utf8mb4_general_ci NOT NULL COMMENT '标题',
+  `tags_json` json NULL COMMENT '标签数组',
+  `input_json` json NOT NULL COMMENT '输入：message/locale/cache_policy 等',
+  `expect_json` json NULL COMMENT '期望：reference/expect_tools 等',
+  `assertions_json` json NULL COMMENT 'RuleScorer 断言列表',
+  `scoring_json` json NULL COMMENT 'OpenJudge 等打分覆盖',
+  `enabled` tinyint(4) NOT NULL DEFAULT 1 COMMENT '1启用 0停用',
+  `sort_order` int(11) NOT NULL DEFAULT 0 COMMENT '展示与执行序，越小越前',
+  `deleted` tinyint(4) NOT NULL DEFAULT 0 COMMENT '0未删 1已删',
+  `create_by` bigint(20) NULL DEFAULT NULL COMMENT '创建人',
+  `update_by` bigint(20) NULL DEFAULT NULL COMMENT '更新人',
+  `create_time` datetime NOT NULL DEFAULT CURRENT_TIMESTAMP COMMENT '创建时间',
+  `update_time` datetime NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP COMMENT '更新时间',
+  PRIMARY KEY (`id`) USING BTREE,
+  UNIQUE INDEX `uk_suite_ver_case`(`suite_id`, `suite_version`, `case_key`) USING BTREE,
+  INDEX `idx_suite_id`(`suite_id`) USING BTREE,
+  INDEX `idx_suite_ver`(`suite_id`, `suite_version`) USING BTREE,
+  INDEX `idx_enabled`(`enabled`, `deleted`) USING BTREE,
+  INDEX `idx_deleted`(`deleted`) USING BTREE
+) ENGINE = InnoDB AUTO_INCREMENT = 53 CHARACTER SET = utf8mb4 COLLATE = utf8mb4_general_ci COMMENT = '评测用例（按 suite_version 钉死）' ROW_FORMAT = Dynamic;
+
+-- ----------------------------
+-- Table structure for eval_result
+-- ----------------------------
+DROP TABLE IF EXISTS `eval_result`;
+CREATE TABLE `eval_result`  (
+  `id` bigint(20) NOT NULL AUTO_INCREMENT COMMENT '主键',
+  `tenant_id` bigint(20) NOT NULL COMMENT '租户（冗余便于隔离查询）',
+  `run_id` bigint(20) NOT NULL COMMENT 'eval_run.id',
+  `case_key` varchar(64) CHARACTER SET utf8mb4 COLLATE utf8mb4_general_ci NOT NULL COMMENT '对应 eval_case.case_key',
+  `case_id` bigint(20) NULL DEFAULT NULL COMMENT '可选钉死 eval_case.id',
+  `sort_order` int(11) NOT NULL DEFAULT 0,
+  `verdict` varchar(16) CHARACTER SET utf8mb4 COLLATE utf8mb4_general_ci NULL DEFAULT NULL COMMENT 'PASS|FAIL|ERROR|SKIPPED；未跑完可空',
+  `rule_passed` tinyint(4) NULL DEFAULT NULL,
+  `openjudge_status` varchar(16) CHARACTER SET utf8mb4 COLLATE utf8mb4_general_ci NULL DEFAULT NULL COMMENT 'OK|SKIPPED|ERROR|DISABLED',
+  `scores_json` json NULL COMMENT '规则明细 + openjudge',
+  `artifact_summary_json` json NULL COMMENT '终答摘要/工具/usage',
+  `session_id` varchar(64) CHARACTER SET utf8mb4 COLLATE utf8mb4_general_ci NULL DEFAULT NULL COMMENT '现网试跑会话 id',
+  `trace_id` varchar(64) CHARACTER SET utf8mb4 COLLATE utf8mb4_general_ci NULL DEFAULT NULL,
+  `cache_hit` tinyint(4) NULL DEFAULT NULL,
+  `prompt_breakdown_json` json NULL,
+  `latency_ms` int(11) NULL DEFAULT NULL,
+  `assertion_details_json` json NULL,
+  `openjudge_raw_json` json NULL COMMENT '原始 grader；可截断',
+  `error_message` varchar(1024) CHARACTER SET utf8mb4 COLLATE utf8mb4_general_ci NULL DEFAULT NULL,
+  `deleted` tinyint(4) NOT NULL DEFAULT 0,
+  `started_time` datetime NULL DEFAULT NULL,
+  `finished_time` datetime NULL DEFAULT NULL,
+  `create_time` datetime NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  `update_time` datetime NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+  PRIMARY KEY (`id`) USING BTREE,
+  UNIQUE INDEX `uk_run_case`(`run_id`, `case_key`) USING BTREE,
+  INDEX `idx_tenant_run`(`tenant_id`, `run_id`) USING BTREE,
+  INDEX `idx_run_verdict`(`run_id`, `verdict`) USING BTREE,
+  INDEX `idx_session`(`session_id`) USING BTREE,
+  INDEX `idx_deleted`(`deleted`) USING BTREE
+) ENGINE = InnoDB AUTO_INCREMENT = 144 CHARACTER SET = utf8mb4 COLLATE = utf8mb4_general_ci COMMENT = '评测单 case 结果' ROW_FORMAT = Dynamic;
+
+-- ----------------------------
+-- Table structure for eval_run
+-- ----------------------------
+DROP TABLE IF EXISTS `eval_run`;
+CREATE TABLE `eval_run`  (
+  `id` bigint(20) NOT NULL AUTO_INCREMENT COMMENT '主键',
+  `tenant_id` bigint(20) NOT NULL COMMENT '租户',
+  `suite_id` bigint(20) NOT NULL COMMENT 'eval_suite.id',
+  `suite_version` int(11) NOT NULL COMMENT '钉死的套件版本',
+  `agent_id` bigint(20) NOT NULL COMMENT '被测 Agent',
+  `agent_snapshot_hash` varchar(64) CHARACTER SET utf8mb4 COLLATE utf8mb4_general_ci NULL DEFAULT NULL COMMENT '绑定/L3/runtime/模型槽指纹',
+  `status` varchar(32) CHARACTER SET utf8mb4 COLLATE utf8mb4_general_ci NOT NULL DEFAULT 'PENDING' COMMENT 'PENDING|RUNNING|CANCELING|SUCCEEDED|FAILED|PARTIAL',
+  `gate_passed` tinyint(4) NULL DEFAULT NULL COMMENT '规则门禁总结果；跑完前可空',
+  `total_cases` int(11) NOT NULL DEFAULT 0 COMMENT '计划用例数',
+  `passed` int(11) NOT NULL DEFAULT 0,
+  `failed` int(11) NOT NULL DEFAULT 0,
+  `errored` int(11) NOT NULL DEFAULT 0,
+  `skipped` int(11) NOT NULL DEFAULT 0,
+  `openjudge_enabled` tinyint(4) NOT NULL DEFAULT 0 COMMENT '本次是否启用 OpenJudge',
+  `config_json` json NULL COMMENT '本次覆盖配置快照',
+  `report_path` varchar(512) CHARACTER SET utf8mb4 COLLATE utf8mb4_general_ci NULL DEFAULT NULL COMMENT '报告落盘路径',
+  `report_json` json NULL COMMENT '机读报告（可后写）',
+  `trigger_user_id` bigint(20) NULL DEFAULT NULL COMMENT '触发人',
+  `error_message` varchar(1024) CHARACTER SET utf8mb4 COLLATE utf8mb4_general_ci NULL DEFAULT NULL COMMENT '基础设施级错误',
+  `deleted` tinyint(4) NOT NULL DEFAULT 0 COMMENT '0未删 1已删',
+  `create_by` bigint(20) NULL DEFAULT NULL,
+  `update_by` bigint(20) NULL DEFAULT NULL,
+  `started_time` datetime NULL DEFAULT NULL COMMENT '进入 RUNNING 时间',
+  `finished_time` datetime NULL DEFAULT NULL COMMENT '终态时间',
+  `create_time` datetime NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  `update_time` datetime NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+  PRIMARY KEY (`id`) USING BTREE,
+  INDEX `idx_tenant_status`(`tenant_id`, `status`, `deleted`) USING BTREE,
+  INDEX `idx_suite_ver`(`suite_id`, `suite_version`) USING BTREE,
+  INDEX `idx_agent`(`agent_id`) USING BTREE,
+  INDEX `idx_create_time`(`create_time`) USING BTREE,
+  INDEX `idx_deleted`(`deleted`) USING BTREE
+) ENGINE = InnoDB AUTO_INCREMENT = 23 CHARACTER SET = utf8mb4 COLLATE = utf8mb4_general_ci COMMENT = '评测批跑' ROW_FORMAT = Dynamic;
+
+-- ----------------------------
+-- Table structure for eval_suite
+-- ----------------------------
+DROP TABLE IF EXISTS `eval_suite`;
+CREATE TABLE `eval_suite`  (
+  `id` bigint(20) NOT NULL AUTO_INCREMENT COMMENT '主键',
+  `tenant_id` bigint(20) NOT NULL COMMENT '租户；平台内置样例可用 0（只读语义由应用保证）',
+  `suite_key` varchar(64) CHARACTER SET utf8mb4 COLLATE utf8mb4_general_ci NOT NULL COMMENT '租户内逻辑键',
+  `name` varchar(128) CHARACTER SET utf8mb4 COLLATE utf8mb4_general_ci NOT NULL COMMENT '中文名',
+  `description` varchar(512) CHARACTER SET utf8mb4 COLLATE utf8mb4_general_ci NULL DEFAULT NULL COMMENT '说明',
+  `current_version` int(11) NOT NULL DEFAULT 1 COMMENT '当前版本号',
+  `default_config_json` json NULL COMMENT '默认 scorer/并发/超时等',
+  `enabled` tinyint(4) NOT NULL DEFAULT 1 COMMENT '1启用 0停用',
+  `deleted` tinyint(4) NOT NULL DEFAULT 0 COMMENT '0未删 1已删',
+  `create_by` bigint(20) NULL DEFAULT NULL COMMENT '创建人',
+  `update_by` bigint(20) NULL DEFAULT NULL COMMENT '更新人',
+  `create_time` datetime NOT NULL DEFAULT CURRENT_TIMESTAMP COMMENT '创建时间',
+  `update_time` datetime NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP COMMENT '更新时间',
+  PRIMARY KEY (`id`) USING BTREE,
+  UNIQUE INDEX `uk_tenant_suite_key`(`tenant_id`, `suite_key`) USING BTREE,
+  INDEX `idx_tenant_enabled`(`tenant_id`, `enabled`, `deleted`) USING BTREE,
+  INDEX `idx_deleted`(`deleted`) USING BTREE
+) ENGINE = InnoDB AUTO_INCREMENT = 5 CHARACTER SET = utf8mb4 COLLATE = utf8mb4_general_ci COMMENT = '评测套件' ROW_FORMAT = Dynamic;
+
+-- ----------------------------
+-- Table structure for ma_candidate
+-- ----------------------------
+DROP TABLE IF EXISTS `ma_candidate`;
+CREATE TABLE `ma_candidate`  (
+  `id` bigint(20) NOT NULL AUTO_INCREMENT COMMENT '主键',
+  `ma_id` bigint(20) NOT NULL COMMENT 'ma_def.id',
+  `agent_id` bigint(20) NOT NULL COMMENT '候选子 agent_def.id',
+  `route_key` varchar(64) CHARACTER SET utf8mb4 COLLATE utf8mb4_general_ci NOT NULL COMMENT '方案内唯一的路由键/意图标签',
+  `intent_desc` varchar(512) CHARACTER SET utf8mb4 COLLATE utf8mb4_general_ci NOT NULL COMMENT '意图说明，喂给判路由或作为串行步骤说明',
+  `sort_no` int(11) NOT NULL DEFAULT 0 COMMENT '排序，越小越靠前',
+  `enabled` tinyint(4) NOT NULL DEFAULT 1 COMMENT '1启用 0停用',
+  `create_time` datetime NOT NULL DEFAULT CURRENT_TIMESTAMP COMMENT '创建时间',
+  `update_time` datetime NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP COMMENT '更新时间',
+  PRIMARY KEY (`id`) USING BTREE,
+  UNIQUE INDEX `uk_ma_candidate_ma_route`(`ma_id`, `route_key`) USING BTREE,
+  INDEX `idx_ma_candidate_ma_sort`(`ma_id`, `sort_no`) USING BTREE,
+  INDEX `idx_ma_candidate_agent`(`agent_id`) USING BTREE
+) ENGINE = InnoDB AUTO_INCREMENT = 16 CHARACTER SET = utf8mb4 COLLATE = utf8mb4_general_ci COMMENT = '多智能体方案候选（MA-P2 刀1）' ROW_FORMAT = Dynamic;
+
+-- ----------------------------
+-- Table structure for ma_def
+-- ----------------------------
+DROP TABLE IF EXISTS `ma_def`;
+CREATE TABLE `ma_def`  (
+  `id` bigint(20) NOT NULL AUTO_INCREMENT COMMENT '主键',
+  `tenant_id` bigint(20) NOT NULL DEFAULT 1 COMMENT '租户；一期由配置项提供',
+  `code` varchar(64) CHARACTER SET utf8mb4 COLLATE utf8mb4_general_ci NOT NULL COMMENT '方案编码，租户内唯一',
+  `name` varchar(128) CHARACTER SET utf8mb4 COLLATE utf8mb4_general_ci NOT NULL COMMENT '方案名称',
+  `template` varchar(32) CHARACTER SET utf8mb4 COLLATE utf8mb4_general_ci NOT NULL DEFAULT 'ROUTER_PARALLEL' COMMENT '编排模板：ROUTER_PARALLEL/FIXED_SEQUENCE/FIXED_PARALLEL/CRITIC_LOOP/ROUTER_THEN_SEQUENCE',
+  `config_json` text CHARACTER SET utf8mb4 COLLATE utf8mb4_general_ci NULL COMMENT '与 agent_def.runtime_config_json 同构的编排配置',
+  `root_agent_id` bigint(20) NULL DEFAULT NULL COMMENT '绑定的 ROUTER；NULL=虚拟根（本刀不可试跑）',
+  `enabled` tinyint(4) NOT NULL DEFAULT 1 COMMENT '1启用 0停用；同一 root_agent_id 最多一条启用中',
+  `version` int(11) NOT NULL DEFAULT 1 COMMENT '方案版本，每次保存 +1',
+  `created_by` bigint(20) NULL DEFAULT NULL COMMENT '创建人用户ID',
+  `create_time` datetime NOT NULL DEFAULT CURRENT_TIMESTAMP COMMENT '创建时间',
+  `updated_by` bigint(20) NULL DEFAULT NULL COMMENT '更新人用户ID',
+  `update_time` datetime NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP COMMENT '更新时间',
+  PRIMARY KEY (`id`) USING BTREE,
+  UNIQUE INDEX `uk_ma_def_tenant_code`(`tenant_id`, `code`) USING BTREE,
+  INDEX `idx_ma_def_tenant_root`(`tenant_id`, `root_agent_id`) USING BTREE,
+  INDEX `idx_ma_def_tenant_enabled`(`tenant_id`, `enabled`) USING BTREE
+) ENGINE = InnoDB AUTO_INCREMENT = 3 CHARACTER SET = utf8mb4 COLLATE = utf8mb4_general_ci COMMENT = '多智能体方案（MA-P2 刀1）' ROW_FORMAT = Dynamic;
 
 -- ----------------------------
 -- Table structure for memory_agent_policy
@@ -342,7 +539,7 @@ CREATE TABLE `memory_agent_policy`  (
   INDEX `idx_agent_id`(`agent_id`) USING BTREE,
   INDEX `idx_status`(`status`) USING BTREE,
   INDEX `idx_deleted`(`deleted`) USING BTREE
-) ENGINE = InnoDB AUTO_INCREMENT = 4 CHARACTER SET = utf8mb4 COLLATE = utf8mb4_general_ci COMMENT = 'Agent 记忆与上下文窗口策略' ROW_FORMAT = Dynamic;
+) ENGINE = InnoDB AUTO_INCREMENT = 1 CHARACTER SET = utf8mb4 COLLATE = utf8mb4_general_ci COMMENT = 'Agent 记忆与上下文窗口策略' ROW_FORMAT = Dynamic;
 
 -- ----------------------------
 -- Table structure for memory_item
@@ -377,7 +574,7 @@ CREATE TABLE `memory_item`  (
   INDEX `idx_expired_time`(`expired_time`) USING BTREE,
   INDEX `idx_deleted`(`deleted`) USING BTREE,
   INDEX `idx_long_fact`(`scope`, `agent_id`, `user_id`, `fact_key`, `deleted`) USING BTREE
-) ENGINE = InnoDB AUTO_INCREMENT = 1776 CHARACTER SET = utf8mb4 COLLATE = utf8mb4_general_ci COMMENT = '记忆条目' ROW_FORMAT = Dynamic;
+) ENGINE = InnoDB AUTO_INCREMENT = 1 CHARACTER SET = utf8mb4 COLLATE = utf8mb4_general_ci COMMENT = '记忆条目' ROW_FORMAT = Dynamic;
 
 -- ----------------------------
 -- Table structure for memory_session_extract
@@ -441,7 +638,7 @@ CREATE TABLE `model_instance`  (
   INDEX `idx_capability`(`capability`) USING BTREE,
   INDEX `idx_status`(`status`) USING BTREE,
   INDEX `idx_deleted`(`deleted`) USING BTREE
-) ENGINE = InnoDB AUTO_INCREMENT = 16 CHARACTER SET = utf8mb4 COLLATE = utf8mb4_general_ci COMMENT = '模型实例' ROW_FORMAT = Dynamic;
+) ENGINE = InnoDB AUTO_INCREMENT = 18 CHARACTER SET = utf8mb4 COLLATE = utf8mb4_general_ci COMMENT = '模型实例' ROW_FORMAT = Dynamic;
 
 -- ----------------------------
 -- Table structure for model_provider
@@ -463,7 +660,7 @@ CREATE TABLE `model_provider`  (
   INDEX `idx_protocol`(`protocol`) USING BTREE,
   INDEX `idx_status`(`status`) USING BTREE,
   INDEX `idx_deleted`(`deleted`) USING BTREE
-) ENGINE = InnoDB AUTO_INCREMENT = 7 CHARACTER SET = utf8mb4 COLLATE = utf8mb4_general_ci COMMENT = '模型供应商' ROW_FORMAT = Dynamic;
+) ENGINE = InnoDB AUTO_INCREMENT = 8 CHARACTER SET = utf8mb4 COLLATE = utf8mb4_general_ci COMMENT = '模型供应商' ROW_FORMAT = Dynamic;
 
 -- ----------------------------
 -- Table structure for obs_span
@@ -520,7 +717,7 @@ CREATE TABLE `obs_span`  (
   INDEX `idx_tool_name`(`tool_name`) USING BTREE,
   INDEX `idx_billing_ledger_id`(`billing_ledger_id`) USING BTREE,
   INDEX `idx_parent_id`(`parent_id`) USING BTREE
-) ENGINE = InnoDB AUTO_INCREMENT = 1009 CHARACTER SET = utf8mb4 COLLATE = utf8mb4_general_ci COMMENT = 'Trace Span：执行链路一步（含路由树）' ROW_FORMAT = Dynamic;
+) ENGINE = InnoDB AUTO_INCREMENT = 1711 CHARACTER SET = utf8mb4 COLLATE = utf8mb4_general_ci COMMENT = 'Trace Span：执行链路一步（含路由树）' ROW_FORMAT = Dynamic;
 
 -- ----------------------------
 -- Table structure for obs_trace
@@ -571,7 +768,7 @@ CREATE TABLE `obs_trace`  (
   INDEX `idx_task_node_id`(`task_node_id`) USING BTREE,
   INDEX `idx_root_trace_id`(`root_trace_id`) USING BTREE,
   INDEX `idx_deleted`(`deleted`) USING BTREE
-) ENGINE = InnoDB AUTO_INCREMENT = 279 CHARACTER SET = utf8mb4 COLLATE = utf8mb4_general_ci COMMENT = '调用 Trace：一次用户提问' ROW_FORMAT = Dynamic;
+) ENGINE = InnoDB AUTO_INCREMENT = 438 CHARACTER SET = utf8mb4 COLLATE = utf8mb4_general_ci COMMENT = '调用 Trace：一次用户提问' ROW_FORMAT = Dynamic;
 
 -- ----------------------------
 -- Table structure for prompt_global_constraint
@@ -625,7 +822,7 @@ CREATE TABLE `prompt_template`  (
   INDEX `idx_deleted`(`deleted`) USING BTREE,
   INDEX `idx_purpose_active`(`purpose`, `locale`, `is_active`, `status`, `deleted`) USING BTREE,
   INDEX `idx_key_ver_deleted`(`template_key`, `locale`, `version`, `deleted`) USING BTREE
-) ENGINE = InnoDB AUTO_INCREMENT = 9 CHARACTER SET = utf8mb4 COLLATE = utf8mb4_general_ci COMMENT = '提示词 L2 用途模板' ROW_FORMAT = Dynamic;
+) ENGINE = InnoDB AUTO_INCREMENT = 6 CHARACTER SET = utf8mb4 COLLATE = utf8mb4_general_ci COMMENT = '提示词 L2 用途模板' ROW_FORMAT = Dynamic;
 
 -- ----------------------------
 -- Table structure for prompt_template_segment
@@ -677,7 +874,7 @@ CREATE TABLE `rag_chunk`  (
   INDEX `idx_kb_doc`(`kb_id`, `doc_id`) USING BTREE,
   INDEX `idx_doc_chunk`(`doc_id`, `chunk_index`) USING BTREE,
   FULLTEXT INDEX `ft_rag_chunk_content`(`content`) WITH PARSER `ngram`
-) ENGINE = InnoDB AUTO_INCREMENT = 123 CHARACTER SET = utf8mb4 COLLATE = utf8mb4_general_ci COMMENT = 'RAG 切片表（② 使用）' ROW_FORMAT = Dynamic;
+) ENGINE = InnoDB AUTO_INCREMENT = 138 CHARACTER SET = utf8mb4 COLLATE = utf8mb4_general_ci COMMENT = 'RAG 切片表（② 使用）' ROW_FORMAT = Dynamic;
 
 -- ----------------------------
 -- Table structure for rag_document
@@ -703,7 +900,7 @@ CREATE TABLE `rag_document`  (
   PRIMARY KEY (`id`) USING BTREE,
   INDEX `idx_kb_status`(`kb_id`, `status`) USING BTREE,
   INDEX `idx_deleted`(`deleted`) USING BTREE
-) ENGINE = InnoDB AUTO_INCREMENT = 34 CHARACTER SET = utf8mb4 COLLATE = utf8mb4_general_ci COMMENT = 'RAG 文档表（② 使用）' ROW_FORMAT = Dynamic;
+) ENGINE = InnoDB AUTO_INCREMENT = 35 CHARACTER SET = utf8mb4 COLLATE = utf8mb4_general_ci COMMENT = 'RAG 文档表（② 使用）' ROW_FORMAT = Dynamic;
 
 -- ----------------------------
 -- Table structure for rag_ingest_task
@@ -728,7 +925,7 @@ CREATE TABLE `rag_ingest_task`  (
   PRIMARY KEY (`id`) USING BTREE,
   INDEX `idx_doc`(`doc_id`) USING BTREE,
   INDEX `idx_kb_status`(`kb_id`, `status`) USING BTREE
-) ENGINE = InnoDB AUTO_INCREMENT = 34 CHARACTER SET = utf8mb4 COLLATE = utf8mb4_general_ci COMMENT = 'RAG 异步入库任务' ROW_FORMAT = Dynamic;
+) ENGINE = InnoDB AUTO_INCREMENT = 35 CHARACTER SET = utf8mb4 COLLATE = utf8mb4_general_ci COMMENT = 'RAG 异步入库任务' ROW_FORMAT = Dynamic;
 
 -- ----------------------------
 -- Table structure for rag_kb_grant
@@ -778,7 +975,7 @@ CREATE TABLE `rag_knowledge_base`  (
   INDEX `idx_tenant_name`(`tenant_id`, `name`) USING BTREE,
   INDEX `idx_status`(`status`) USING BTREE,
   INDEX `idx_deleted`(`deleted`) USING BTREE
-) ENGINE = InnoDB AUTO_INCREMENT = 6 CHARACTER SET = utf8mb4 COLLATE = utf8mb4_general_ci COMMENT = 'RAG 知识库主表' ROW_FORMAT = Dynamic;
+) ENGINE = InnoDB AUTO_INCREMENT = 7 CHARACTER SET = utf8mb4 COLLATE = utf8mb4_general_ci COMMENT = 'RAG 知识库主表' ROW_FORMAT = Dynamic;
 
 -- ----------------------------
 -- Table structure for skill_def
@@ -803,7 +1000,31 @@ CREATE TABLE `skill_def`  (
   INDEX `idx_name`(`name`) USING BTREE,
   INDEX `idx_status`(`status`) USING BTREE,
   INDEX `idx_deleted`(`deleted`) USING BTREE
-) ENGINE = InnoDB AUTO_INCREMENT = 8 CHARACTER SET = utf8mb4 COLLATE = utf8mb4_general_ci COMMENT = 'Skill 定义（一期单表 skill_def）' ROW_FORMAT = Dynamic;
+) ENGINE = InnoDB AUTO_INCREMENT = 15 CHARACTER SET = utf8mb4 COLLATE = utf8mb4_general_ci COMMENT = 'Skill 定义（一期单表 skill_def）' ROW_FORMAT = Dynamic;
+
+-- ----------------------------
+-- Table structure for skill_version
+-- ----------------------------
+DROP TABLE IF EXISTS `skill_version`;
+CREATE TABLE `skill_version`  (
+  `id` bigint(20) NOT NULL AUTO_INCREMENT COMMENT '主键',
+  `skill_id` bigint(20) NOT NULL COMMENT 'skill_def.id',
+  `version_no` int(11) NOT NULL COMMENT '版本号，从 1 递增；同 Skill 唯一',
+  `content_md` mediumtext CHARACTER SET utf8mb4 COLLATE utf8mb4_general_ci NULL COMMENT '该版本 Markdown 正文快照',
+  `description` varchar(1000) CHARACTER SET utf8mb4 COLLATE utf8mb4_general_ci NULL DEFAULT NULL COMMENT '该版本简介；生效时镜像到 skill_def.description',
+  `publish_status` tinyint(4) NOT NULL DEFAULT 0 COMMENT '0草稿 1已发布',
+  `is_active` tinyint(4) NOT NULL DEFAULT 0 COMMENT '同 Skill 至多一条=1，且必须已发布',
+  `published_at` datetime NULL DEFAULT NULL COMMENT '发布时间',
+  `published_by` bigint(20) NULL DEFAULT NULL COMMENT '发布人',
+  `create_time` datetime NOT NULL DEFAULT CURRENT_TIMESTAMP COMMENT '创建时间',
+  `update_time` datetime NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP COMMENT '更新时间',
+  `active_flag` tinyint(4) GENERATED ALWAYS AS (if((`is_active` = 1),1,NULL)) STORED COMMENT '生效位生成列（唯一索引兜底）' NULL,
+  PRIMARY KEY (`id`) USING BTREE,
+  UNIQUE INDEX `uk_skill_ver`(`skill_id`, `version_no`) USING BTREE,
+  UNIQUE INDEX `uk_skill_active`(`skill_id`, `active_flag`) USING BTREE,
+  INDEX `idx_skill_status`(`skill_id`, `publish_status`) USING BTREE,
+  INDEX `idx_published_at`(`published_at`) USING BTREE
+) ENGINE = InnoDB AUTO_INCREMENT = 20 CHARACTER SET = utf8mb4 COLLATE = utf8mb4_general_ci COMMENT = 'Skill 版本（正文快照，草稿/已发布/唯一生效）' ROW_FORMAT = Dynamic;
 
 -- ----------------------------
 -- Table structure for sys_app
@@ -879,7 +1100,7 @@ CREATE TABLE `sys_login_log`  (
   PRIMARY KEY (`id`) USING BTREE,
   INDEX `idx_user_time`(`user_id`, `create_time`) USING BTREE,
   INDEX `idx_username_time`(`username`, `create_time`) USING BTREE
-) ENGINE = InnoDB AUTO_INCREMENT = 342 CHARACTER SET = utf8mb4 COLLATE = utf8mb4_unicode_ci COMMENT = '登录日志' ROW_FORMAT = Dynamic;
+) ENGINE = InnoDB AUTO_INCREMENT = 395 CHARACTER SET = utf8mb4 COLLATE = utf8mb4_unicode_ci COMMENT = '登录日志' ROW_FORMAT = Dynamic;
 
 -- ----------------------------
 -- Table structure for sys_menu
@@ -907,7 +1128,7 @@ CREATE TABLE `sys_menu`  (
   PRIMARY KEY (`id`) USING BTREE,
   INDEX `idx_parent`(`parent_id`) USING BTREE,
   INDEX `idx_permission`(`permission`) USING BTREE
-) ENGINE = InnoDB AUTO_INCREMENT = 110 CHARACTER SET = utf8mb4 COLLATE = utf8mb4_unicode_ci COMMENT = '菜单与权限码' ROW_FORMAT = Dynamic;
+) ENGINE = InnoDB AUTO_INCREMENT = 133 CHARACTER SET = utf8mb4 COLLATE = utf8mb4_unicode_ci COMMENT = '菜单与权限码' ROW_FORMAT = Dynamic;
 
 -- ----------------------------
 -- Table structure for sys_oper_log
@@ -934,7 +1155,7 @@ CREATE TABLE `sys_oper_log`  (
   INDEX `idx_user_time`(`user_id`, `create_time`) USING BTREE,
   INDEX `idx_module_time`(`module`, `create_time`) USING BTREE,
   INDEX `idx_target`(`target_type`, `target_id`) USING BTREE
-) ENGINE = InnoDB AUTO_INCREMENT = 1078 CHARACTER SET = utf8mb4 COLLATE = utf8mb4_unicode_ci COMMENT = '平台操作日志' ROW_FORMAT = Dynamic;
+) ENGINE = InnoDB AUTO_INCREMENT = 1735 CHARACTER SET = utf8mb4 COLLATE = utf8mb4_unicode_ci COMMENT = '平台操作日志' ROW_FORMAT = Dynamic;
 
 -- ----------------------------
 -- Table structure for sys_role
@@ -1040,7 +1261,7 @@ CREATE TABLE `tool_item`  (
   INDEX `idx_status`(`status`) USING BTREE,
   INDEX `idx_deleted`(`deleted`) USING BTREE,
   INDEX `idx_name`(`name`) USING BTREE
-) ENGINE = InnoDB AUTO_INCREMENT = 254 CHARACTER SET = utf8mb4 COLLATE = utf8mb4_general_ci COMMENT = '工具项' ROW_FORMAT = Dynamic;
+) ENGINE = InnoDB AUTO_INCREMENT = 268 CHARACTER SET = utf8mb4 COLLATE = utf8mb4_general_ci COMMENT = '工具项' ROW_FORMAT = Dynamic;
 
 -- ----------------------------
 -- Table structure for tool_source
@@ -1069,5 +1290,148 @@ CREATE TABLE `tool_source`  (
   INDEX `idx_status`(`status`) USING BTREE,
   INDEX `idx_deleted`(`deleted`) USING BTREE
 ) ENGINE = InnoDB AUTO_INCREMENT = 10 CHARACTER SET = utf8mb4 COLLATE = utf8mb4_general_ci COMMENT = '工具源' ROW_FORMAT = Dynamic;
+
+-- ----------------------------
+-- Table structure for workflow_def
+-- ----------------------------
+DROP TABLE IF EXISTS `workflow_def`;
+CREATE TABLE `workflow_def`  (
+  `id` bigint(20) NOT NULL AUTO_INCREMENT COMMENT '主键',
+  `tenant_id` bigint(20) NOT NULL COMMENT '租户',
+  `code` varchar(64) CHARACTER SET utf8mb4 COLLATE utf8mb4_general_ci NOT NULL COMMENT '租户内逻辑编码，创建后冻结',
+  `name` varchar(128) CHARACTER SET utf8mb4 COLLATE utf8mb4_general_ci NOT NULL COMMENT '中文名',
+  `description` varchar(512) CHARACTER SET utf8mb4 COLLATE utf8mb4_general_ci NULL DEFAULT NULL COMMENT '说明',
+  `status` varchar(32) CHARACTER SET utf8mb4 COLLATE utf8mb4_general_ci NOT NULL DEFAULT 'DRAFT_ONLY' COMMENT 'DRAFT_ONLY / HAS_RELEASE',
+  `default_release_id` bigint(20) NULL DEFAULT NULL COMMENT '默认发布指针；空=尚未发布',
+  `deleted` tinyint(4) NOT NULL DEFAULT 0 COMMENT '0未删 1已删',
+  `created_by` bigint(20) NULL DEFAULT NULL COMMENT '创建人',
+  `create_time` datetime NOT NULL DEFAULT CURRENT_TIMESTAMP COMMENT '创建时间',
+  `updated_by` bigint(20) NULL DEFAULT NULL COMMENT '更新人',
+  `update_time` datetime NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP COMMENT '更新时间',
+  PRIMARY KEY (`id`) USING BTREE,
+  UNIQUE INDEX `uk_tenant_code`(`tenant_id`, `code`) USING BTREE,
+  INDEX `idx_tenant_status`(`tenant_id`, `status`, `deleted`) USING BTREE,
+  INDEX `idx_deleted`(`deleted`) USING BTREE
+) ENGINE = InnoDB AUTO_INCREMENT = 2 CHARACTER SET = utf8mb4 COLLATE = utf8mb4_general_ci COMMENT = '工作流定义' ROW_FORMAT = Dynamic;
+
+-- ----------------------------
+-- Table structure for workflow_def_draft
+-- ----------------------------
+DROP TABLE IF EXISTS `workflow_def_draft`;
+CREATE TABLE `workflow_def_draft`  (
+  `workflow_id` bigint(20) NOT NULL COMMENT 'workflow_def.id，一对一',
+  `graph_json` json NOT NULL COMMENT '草稿图快照：nodes / edges / viewport',
+  `created_by` bigint(20) NULL DEFAULT NULL COMMENT '创建人',
+  `create_time` datetime NOT NULL DEFAULT CURRENT_TIMESTAMP COMMENT '创建时间',
+  `updated_by` bigint(20) NULL DEFAULT NULL COMMENT '更新人',
+  `update_time` datetime NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP COMMENT '更新时间（乐观锁口径）',
+  PRIMARY KEY (`workflow_id`) USING BTREE,
+  INDEX `idx_update_time`(`update_time`) USING BTREE
+) ENGINE = InnoDB CHARACTER SET = utf8mb4 COLLATE = utf8mb4_general_ci COMMENT = '工作流草稿（1:1 定义）' ROW_FORMAT = Dynamic;
+
+-- ----------------------------
+-- Table structure for workflow_human_task
+-- ----------------------------
+DROP TABLE IF EXISTS `workflow_human_task`;
+CREATE TABLE `workflow_human_task`  (
+  `id` bigint(20) NOT NULL AUTO_INCREMENT COMMENT '主键',
+  `tenant_id` bigint(20) NOT NULL COMMENT '租户',
+  `run_id` bigint(20) NOT NULL COMMENT 'workflow_run.id',
+  `node_run_id` bigint(20) NOT NULL COMMENT 'workflow_node_run.id',
+  `node_code` varchar(64) CHARACTER SET utf8mb4 COLLATE utf8mb4_general_ci NOT NULL COMMENT '节点编码，便于展示',
+  `status` varchar(32) CHARACTER SET utf8mb4 COLLATE utf8mb4_general_ci NOT NULL DEFAULT 'OPEN' COMMENT 'OPEN/DONE/EXPIRED',
+  `assignee_rule` varchar(128) CHARACTER SET utf8mb4 COLLATE utf8mb4_general_ci NULL DEFAULT NULL COMMENT '处理人规则；空=有 human:act 权限即可',
+  `timeout_policy` varchar(32) CHARACTER SET utf8mb4 COLLATE utf8mb4_general_ci NOT NULL COMMENT 'AUTO_REJECT/AUTO_APPROVE/ESCALATE',
+  `form_json` json NULL COMMENT '表单 schema / 上下文快照（本刀简化）',
+  `result_json` json NULL COMMENT '决定结果：approved / note / 来源',
+  `expire_time` datetime NULL DEFAULT NULL COMMENT '超时时间',
+  `decided_by` bigint(20) NULL DEFAULT NULL COMMENT '处理人',
+  `decided_time` datetime NULL DEFAULT NULL COMMENT '处理时间',
+  `created_by` bigint(20) NULL DEFAULT NULL COMMENT '创建人',
+  `create_time` datetime NOT NULL DEFAULT CURRENT_TIMESTAMP COMMENT '创建时间',
+  `updated_by` bigint(20) NULL DEFAULT NULL COMMENT '更新人',
+  `update_time` datetime NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP COMMENT '更新时间',
+  PRIMARY KEY (`id`) USING BTREE,
+  UNIQUE INDEX `uk_human_node_run`(`node_run_id`) USING BTREE,
+  INDEX `idx_run_status`(`run_id`, `status`) USING BTREE,
+  INDEX `idx_status_expire`(`status`, `expire_time`) USING BTREE
+) ENGINE = InnoDB AUTO_INCREMENT = 1 CHARACTER SET = utf8mb4 COLLATE = utf8mb4_general_ci COMMENT = '工作流人工待办' ROW_FORMAT = Dynamic;
+
+-- ----------------------------
+-- Table structure for workflow_node_run
+-- ----------------------------
+DROP TABLE IF EXISTS `workflow_node_run`;
+CREATE TABLE `workflow_node_run`  (
+  `id` bigint(20) NOT NULL AUTO_INCREMENT COMMENT '主键',
+  `run_id` bigint(20) NOT NULL COMMENT 'workflow_run.id',
+  `node_id` varchar(64) CHARACTER SET utf8mb4 COLLATE utf8mb4_general_ci NOT NULL COMMENT '画布节点 id',
+  `node_code` varchar(64) CHARACTER SET utf8mb4 COLLATE utf8mb4_general_ci NOT NULL COMMENT '节点编码',
+  `node_type` varchar(32) CHARACTER SET utf8mb4 COLLATE utf8mb4_general_ci NOT NULL COMMENT '节点类型码',
+  `attempt` int(11) NOT NULL DEFAULT 1 COMMENT '尝试序号；本刀恒为 1',
+  `status` varchar(32) CHARACTER SET utf8mb4 COLLATE utf8mb4_general_ci NOT NULL DEFAULT 'PENDING' COMMENT 'PENDING/RUNNING/SUCCESS/FAILED/SKIPPED/WAITING_HUMAN/CANCELLED',
+  `input_json` json NULL COMMENT '节点实参',
+  `output_json` json NULL COMMENT '节点产出',
+  `error_summary` varchar(512) CHARACTER SET utf8mb4 COLLATE utf8mb4_general_ci NULL DEFAULT NULL COMMENT '失败摘要',
+  `selected_edges` varchar(1024) CHARACTER SET utf8mb4 COLLATE utf8mb4_general_ci NULL DEFAULT NULL COMMENT '本次选中的出边 id，逗号分隔',
+  `start_time` datetime NULL DEFAULT NULL COMMENT '开始时间',
+  `end_time` datetime NULL DEFAULT NULL COMMENT '结束时间',
+  PRIMARY KEY (`id`) USING BTREE,
+  UNIQUE INDEX `uk_run_node_attempt`(`run_id`, `node_id`, `attempt`) USING BTREE,
+  INDEX `idx_run_status`(`run_id`, `status`) USING BTREE
+) ENGINE = InnoDB AUTO_INCREMENT = 25 CHARACTER SET = utf8mb4 COLLATE = utf8mb4_general_ci COMMENT = '工作流节点运行态' ROW_FORMAT = Dynamic;
+
+-- ----------------------------
+-- Table structure for workflow_release
+-- ----------------------------
+DROP TABLE IF EXISTS `workflow_release`;
+CREATE TABLE `workflow_release`  (
+  `id` bigint(20) NOT NULL AUTO_INCREMENT COMMENT '主键',
+  `workflow_id` bigint(20) NOT NULL COMMENT 'workflow_def.id',
+  `version` int(11) NOT NULL COMMENT '版本号，从 1 递增',
+  `graph_json` json NOT NULL COMMENT '发布时的不可变图快照',
+  `fingerprint` varchar(64) CHARACTER SET utf8mb4 COLLATE utf8mb4_general_ci NOT NULL COMMENT '依赖指纹（SHA-256 十六进制）',
+  `publish_note` varchar(512) CHARACTER SET utf8mb4 COLLATE utf8mb4_general_ci NULL DEFAULT NULL COMMENT '发布说明',
+  `published_by` bigint(20) NOT NULL COMMENT '发布人',
+  `publish_time` datetime NOT NULL COMMENT '发布时间',
+  `created_by` bigint(20) NULL DEFAULT NULL COMMENT '创建人（等同发布人）',
+  `create_time` datetime NOT NULL DEFAULT CURRENT_TIMESTAMP COMMENT '创建时间',
+  PRIMARY KEY (`id`) USING BTREE,
+  UNIQUE INDEX `uk_wf_ver`(`workflow_id`, `version`) USING BTREE,
+  INDEX `idx_workflow_id`(`workflow_id`) USING BTREE,
+  INDEX `idx_publish_time`(`publish_time`) USING BTREE
+) ENGINE = InnoDB AUTO_INCREMENT = 2 CHARACTER SET = utf8mb4 COLLATE = utf8mb4_general_ci COMMENT = '工作流发布版本（不可变）' ROW_FORMAT = Dynamic;
+
+-- ----------------------------
+-- Table structure for workflow_run
+-- ----------------------------
+DROP TABLE IF EXISTS `workflow_run`;
+CREATE TABLE `workflow_run`  (
+  `id` bigint(20) NOT NULL AUTO_INCREMENT COMMENT '主键',
+  `tenant_id` bigint(20) NOT NULL COMMENT '租户',
+  `workflow_id` bigint(20) NOT NULL COMMENT 'workflow_def.id',
+  `release_id` bigint(20) NOT NULL COMMENT 'workflow_release.id（不可变快照）',
+  `release_version` int(11) NOT NULL DEFAULT 1 COMMENT '发布版本号，冗余便于排障',
+  `fingerprint` varchar(64) CHARACTER SET utf8mb4 COLLATE utf8mb4_general_ci NULL DEFAULT NULL COMMENT '发布时的依赖指纹',
+  `trace_id` varchar(64) CHARACTER SET utf8mb4 COLLATE utf8mb4_general_ci NULL DEFAULT NULL COMMENT '预留：一 run 一 trace（本刀画布高亮，不写 obs）',
+  `status` varchar(32) CHARACTER SET utf8mb4 COLLATE utf8mb4_general_ci NOT NULL DEFAULT 'CREATED' COMMENT 'CREATED/RUNNING/PAUSED_HUMAN/SUCCESS/FAILED/CANCELLED',
+  `trigger_type` varchar(32) CHARACTER SET utf8mb4 COLLATE utf8mb4_general_ci NOT NULL DEFAULT 'TRIAL' COMMENT 'TRIAL/API/MANUAL；本刀只产出 TRIAL',
+  `triggered_by` bigint(20) NULL DEFAULT NULL COMMENT '发起人',
+  `app_id` bigint(20) NULL DEFAULT NULL COMMENT 'sys_app.id；应用触发时写入，试跑为空',
+  `client_request_id` varchar(64) CHARACTER SET utf8mb4 COLLATE utf8mb4_general_ci NULL DEFAULT NULL COMMENT '调用方幂等键；同 app 下唯一',
+  `input_json` json NULL COMMENT '试跑输入样例（ctx.input）',
+  `output_json` json NULL COMMENT 'END 节点汇总输出',
+  `error_summary` varchar(512) CHARACTER SET utf8mb4 COLLATE utf8mb4_general_ci NULL DEFAULT NULL COMMENT '失败 / 取消中文摘要',
+  `graph_json` json NOT NULL COMMENT '建 run 时从 release 拷贝的不可变图',
+  `start_time` datetime NULL DEFAULT NULL COMMENT '进入 RUNNING 的时间',
+  `end_time` datetime NULL DEFAULT NULL COMMENT '终态时间',
+  `created_by` bigint(20) NULL DEFAULT NULL COMMENT '创建人',
+  `create_time` datetime NOT NULL DEFAULT CURRENT_TIMESTAMP COMMENT '创建时间',
+  `updated_by` bigint(20) NULL DEFAULT NULL COMMENT '更新人',
+  `update_time` datetime NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP COMMENT '更新时间',
+  PRIMARY KEY (`id`) USING BTREE,
+  UNIQUE INDEX `uk_app_request`(`app_id`, `client_request_id`) USING BTREE,
+  INDEX `idx_tenant_wf`(`tenant_id`, `workflow_id`, `id`) USING BTREE,
+  INDEX `idx_status`(`status`) USING BTREE
+) ENGINE = InnoDB AUTO_INCREMENT = 9 CHARACTER SET = utf8mb4 COLLATE = utf8mb4_general_ci COMMENT = '工作流运行实例' ROW_FORMAT = Dynamic;
 
 SET FOREIGN_KEY_CHECKS = 1;
