@@ -140,6 +140,8 @@ public class AgentSkillBindAppService {
             resp.setName(skill.getName());
             resp.setTitle(skill.getTitle());
             resp.setTargetStatus(skill.getStatus());
+            // 生效版本号只用于展示与选择时提示，不参与绑定主键
+            resp.setActiveVersionNo(skill.getActiveVersionNo());
         });
         return resp;
     }

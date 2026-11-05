@@ -3,33 +3,36 @@
     :visible="modelValue"
     :model-value="pickedIds"
     :data-source="groups"
-    :title="`添加 Skill · ${boundIds.length ? `已绑定 ${boundIds.length} 个` : '从 Skill 库选择'}`"
-    search-placeholder="搜索 Skill 标题、编码或触发关键词"
+    :title="`添加技能 · ${boundIds.length ? `已绑定 ${boundIds.length} 个` : '从技能库选择'}`"
+    search-placeholder="搜索技能标题、编码或触发关键词"
     :loading="loading"
     :confirming="saving"
-    empty-text="Skill 库里还没有可绑定的技能"
+    empty-text="技能库里还没有可绑定的技能"
     @update:model-value="pickedIds = $event"
     @update:visible="emit('update:modelValue', $event)"
     @confirm="submit"
   >
-    <!-- 左侧选项：标题（加粗）+ 编码（灰小字）+ 简介（两行截断）+ 触发关键词 Tag -->
+    <!-- 左侧选项：标题（加粗）+ 编码（灰小字）+ 简介（两行截断）+ 触发关键词 Tag；右上角标出生效版本 -->
     <template #item="{ item }">
-      <div class="skill-title" :title="item.name">{{ item.name }}</div>
-      <div class="skill-code" :title="item.code">{{ item.code }}</div>
-      <div v-if="item.description" class="skill-desc" :title="item.description">{{ item.description }}</div>
-      <!-- 关键词只显示前 3 个：再多会把选项撑高，搜索框仍可按全部关键词命中 -->
-      <div v-if="item.tags?.length" class="skill-tags">
-        <el-tag
-          v-for="word in item.tags.slice(0, 3)"
-          :key="word"
-          size="small"
-          effect="plain"
-          type="info"
-          class="skill-tag"
-        >
-          {{ word }}
-        </el-tag>
-        <span v-if="item.tags.length > 3" class="skill-tag-more">+{{ item.tags.length - 3 }}</span>
+      <div class="skill-option">
+        <span class="skill-version" :class="{ 'is-unpublished': !item.extra }">{{ item.extra || '未发布' }}</span>
+        <div class="skill-title" :title="item.name">{{ item.name }}</div>
+        <div class="skill-code" :title="item.code">{{ item.code }}</div>
+        <div v-if="item.description" class="skill-desc" :title="item.description">{{ item.description }}</div>
+        <!-- 关键词只显示前 3 个：再多会把选项撑高，搜索框仍可按全部关键词命中 -->
+        <div v-if="item.tags?.length" class="skill-tags">
+          <el-tag
+            v-for="word in item.tags.slice(0, 3)"
+            :key="word"
+            size="small"
+            effect="plain"
+            type="info"
+            class="skill-tag"
+          >
+            {{ word }}
+          </el-tag>
+          <span v-if="item.tags.length > 3" class="skill-tag-more">+{{ item.tags.length - 3 }}</span>
+        </div>
       </div>
     </template>
 
@@ -43,15 +46,15 @@
 
 <script setup lang="ts">
 /**
- * Skill 绑定选择器（双栏穿梭）。所属域：agent。
+ * 技能绑定选择器（双栏穿梭）。所属域：agent。
  *
  * 职责边界：弹窗壳复用通用 {@link ResourceSelector}，这里只负责
- * 「拉 Skill 卡片 → 映射成单个「Skill 库」分组 → 提交绑定」。
+ * 「拉技能卡片 → 映射成单个「技能库」分组 → 提交绑定」。
  *
  * 数据口径：
- * - 卡片接口（不含正文）足够展示标题 / 简介 / 触发关键词；
- * - 全部 Skill 归入一组：当前 Skill 没有二级分类，硬分组只会制造空标题；
- * - 停用 Skill 置 `disabled`，可见但不可新勾选；已绑定的不进候选。
+ * - 卡片接口（不含正文）足够展示标题 / 简介 / 触发关键词 / 生效版本；
+ * - 全部技能归入一组：当前技能没有二级分类，硬分组只会制造空标题；
+ * - 停用技能置 `disabled`，可见但不可新勾选；已绑定的不进候选。
  */
 import { ref, watch } from 'vue'
 import { listAllSkills } from '@/api/skill'
@@ -134,6 +137,33 @@ function submit(ids: (number | string)[]): void {
 </script>
 
 <style scoped>
+/* 左栏选项外层：作为版本角标的定位参照 */
+.skill-option {
+  position: relative;
+  padding-right: 52px;
+}
+
+/* 生效版本角标：卡片右上角，未发布用灰底 */
+.skill-version {
+  position: absolute;
+  top: 0;
+  right: 0;
+  padding: 0 6px;
+  border: 1px solid #d1fae5;
+  border-radius: 999px;
+  background: #ecfdf5;
+  color: #047857;
+  font-size: 11px;
+  font-weight: 600;
+  line-height: 16px;
+}
+
+.skill-version.is-unpublished {
+  border-color: #e5e7eb;
+  background: #f9fafb;
+  color: #9ca3af;
+}
+
 /* 左栏选项：标题 / 编码 / 简介 / 关键词，信息比工具多一行 */
 .skill-title {
   overflow: hidden;

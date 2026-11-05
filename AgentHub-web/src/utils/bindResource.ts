@@ -62,10 +62,10 @@ export function buildToolGroups(rows: ToolItemRow[], boundIds: number[]): Resour
 }
 
 /**
- * Skill 卡片 → 选择器选项。
+ * 技能卡片 → 选择器选项。
  *
- * @param card Skill 卡片（含 triggerKeywords，不含正文）
- * @return 选择器选项
+ * @param card 技能卡片（含 triggerKeywords，不含正文）
+ * @return 选择器选项；extra 放生效版本角标文案（未发布过为「未发布」）
  */
 export function toSkillOption(card: SkillCard): ResourceOption {
   return {
@@ -75,21 +75,23 @@ export function toSkillOption(card: SkillCard): ResourceOption {
     code: card.name,
     description: card.description?.trim() || '',
     tags: card.triggerKeywords || [],
+    // 角标由业务插槽渲染在卡片右上角：有生效版显示 v{n}，否则「未发布」
+    extra: card.activeVersionNo ? `v${card.activeVersionNo}` : '未发布',
     disabled: card.status !== 1
   }
 }
 
 /**
- * Skill 全量 → 分组数据源。
+ * 技能全量 → 分组数据源。
  * <p>
- * 当前 Skill 没有二级分类，硬分组只会造出空标题，因此统一归入「Skill 库」一组。
+ * 当前技能没有二级分类，硬分组只会造出空标题，因此统一归入「技能库」一组。
  *
- * @param cards    全量 Skill 卡片（含已停用）
- * @param boundIds 当前 Agent 已绑定的 Skill id
+ * @param cards    全量技能卡片（含已停用）
+ * @param boundIds 当前 Agent 已绑定的技能 id
  * @return 供 ResourceSelector 使用的分组；无候选时返回空数组
  */
 export function buildSkillGroups(cards: SkillCard[], boundIds: number[]): ResourceGroup[] {
   const bound = new Set(boundIds)
   const items = cards.filter((card) => !bound.has(card.id)).map(toSkillOption)
-  return items.length ? [{ groupName: 'Skill 库', items }] : []
+  return items.length ? [{ groupName: '技能库', items }] : []
 }
