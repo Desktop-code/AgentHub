@@ -14,8 +14,12 @@ public class DailyResp {
     private Long id;
     private LocalDate bizDate;
     private Long agentId;
-    /** 展示用；Agent 已删或不存在时为空，前端回退 #id */
+    /** 展示用；软删也会带回真名；真的查无行时为空，前端显示「未知 Agent」 */
     private String agentName;
+    /** true：Agent 已软删；有真名时旁挂「已删除」，与 agentDisabled 互斥（删优先） */
+    private Boolean agentDeleted;
+    /** true：Agent 未删且 status=0；前端打「已停用」Tag */
+    private Boolean agentDisabled;
     private Long modelInstanceId;
     /**
      * 模型实例展示名。有行用真名；查无行时为「已删除模型」。

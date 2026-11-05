@@ -32,7 +32,8 @@ import java.util.Set;
 
 /**
  * 流水和日汇总查询。所属域：billing。只读，不作废。
- * 列表附带 Agent / 模型可读名称；含删查名保留真名，并标记 modelDeleted / modelDisabled（删优先于停）。
+ * 列表附带 Agent / 模型可读名称；含删查名保留真名，并标记 agentDeleted / agentDisabled、
+ * modelDeleted / modelDisabled（删优先于停）。真的查无行时只留占位/空名，不抛业务异常。
  */
 @Service
 public class BillingQueryAppService {
@@ -135,18 +136,34 @@ public class BillingQueryAppService {
 
     /**
      * 本页去重后批量解析名称。
-     * 含删查名：有行保留真名；deleted=1 → modelDeleted；未删且停用 → modelDisabled；无行 → 占位。
+     * Agent / 模型均含删查名：有行保留真名；deleted=1 → xxxDeleted；未删且停用 → xxxDisabled。
+     * 真的查无行（硬删）时不写名称，前端统一显示占位文案。
      * 优先级：删除 &gt; 停用（已删不叠停用标记）。
      */
     private NameLookup loadNames(List<Long> agentIds, List<Long> modelIds) {
         Map<Long, String> agentNames = new HashMap<>();
+        Set<Long> deletedAgents = new HashSet<>();
+        Set<Long> disabledAgents = new HashSet<>();
         Set<Long> seenAgents = new HashSet<>();
         for (Long id : agentIds) {
             if (id == null || !seenAgents.add(id)) {
                 continue;
             }
-            agents.findById(id).map(AgentDef::getName).filter(n -> n != null && !n.isBlank())
-                    .ifPresent(name -> agentNames.put(id, name));
+            // 含删一次：账本保留历史 agent_id，软删后仍要拼出真名
+            AgentDef agent = agents.findByIdIncludingDeleted(id).orElse(null);
+            if (agent == null) {
+                // 硬删/脏数据：不回名称，由前端显示「未知 Agent」，且不打删/停标记
+                continue;
+            }
+            if (agent.getName() != null && !agent.getName().isBlank()) {
+                agentNames.put(id, agent.getName());
+            }
+            // 删优先于停：已删只打 deleted，不叠 disabled
+            if (isDeleted(agent.getDeleted())) {
+                deletedAgents.add(id);
+            } else if (!RecordStatus.isEnabled(agent.getStatus())) {
+                disabledAgents.add(id);
+            }
         }
 
         Map<Long, String> instanceNames = new HashMap<>();
@@ -170,7 +187,7 @@ public class BillingQueryAppService {
                 instanceNames.put(id, instance.getDisplayName());
             }
             // 删优先于停：已删只打 deleted，不叠 disabled
-            if (isDeleted(instance)) {
+            if (isDeleted(instance.getDeleted())) {
                 deletedModels.add(id);
             } else if (!RecordStatus.isEnabled(instance.getStatus())) {
                 disabledModels.add(id);
@@ -185,15 +202,15 @@ public class BillingQueryAppService {
                 providerNames.put(id, providerName);
             }
         }
-        return new NameLookup(agentNames, instanceNames, providerNames, deletedModels, disabledModels);
+        return new NameLookup(agentNames, instanceNames, providerNames,
+                deletedAgents, disabledAgents, deletedModels, disabledModels);
     }
 
     /**
-     * @param instance 含删查找结果
+     * @param deleted 逻辑删除标记（0 未删，非 0 已删，可空）
      * @return true 表示已软删
      */
-    private static boolean isDeleted(ModelInstance instance) {
-        Integer deleted = instance.getDeleted();
+    private static boolean isDeleted(Integer deleted) {
         return deleted != null && deleted != 0;
     }
 
@@ -204,6 +221,8 @@ public class BillingQueryAppService {
         resp.setCreateTime(ledger.getCreateTime());
         resp.setAgentId(ledger.getAgentId());
         resp.setAgentName(names.agentName(ledger.getAgentId()));
+        resp.setAgentDeleted(names.agentDeleted(ledger.getAgentId()));
+        resp.setAgentDisabled(names.agentDisabled(ledger.getAgentId()));
         resp.setModelInstanceId(ledger.getModelInstanceId());
         resp.setModelInstanceName(names.instanceName(ledger.getModelInstanceId()));
         resp.setProviderName(names.providerName(ledger.getModelInstanceId()));
@@ -228,6 +247,8 @@ public class BillingQueryAppService {
         resp.setBizDate(row.getBizDate());
         resp.setAgentId(row.getAgentId());
         resp.setAgentName(names.agentName(row.getAgentId()));
+        resp.setAgentDeleted(names.agentDeleted(row.getAgentId()));
+        resp.setAgentDisabled(names.agentDisabled(row.getAgentId()));
         resp.setModelInstanceId(row.getModelInstanceId());
         resp.setModelInstanceName(names.instanceName(row.getModelInstanceId()));
         resp.setProviderName(names.providerName(row.getModelInstanceId()));
@@ -251,6 +272,8 @@ public class BillingQueryAppService {
         private final Map<Long, String> agentNames;
         private final Map<Long, String> instanceNames;
         private final Map<Long, String> providerNames;
+        private final Set<Long> deletedAgents;
+        private final Set<Long> disabledAgents;
         private final Set<Long> deletedModels;
         private final Set<Long> disabledModels;
 
@@ -258,17 +281,43 @@ public class BillingQueryAppService {
                 Map<Long, String> agentNames,
                 Map<Long, String> instanceNames,
                 Map<Long, String> providerNames,
+                Set<Long> deletedAgents,
+                Set<Long> disabledAgents,
                 Set<Long> deletedModels,
                 Set<Long> disabledModels) {
             this.agentNames = agentNames;
             this.instanceNames = instanceNames;
             this.providerNames = providerNames;
+            this.deletedAgents = deletedAgents;
+            this.disabledAgents = disabledAgents;
             this.deletedModels = deletedModels;
             this.disabledModels = disabledModels;
         }
 
         private String agentName(Long id) {
             return id == null ? null : agentNames.get(id);
+        }
+
+        /**
+         * @param id Agent id；空 id 不当作已删
+         * @return 已软删时为 true，否则 null（JSON 省略）
+         */
+        private Boolean agentDeleted(Long id) {
+            if (id == null) {
+                return null;
+            }
+            return deletedAgents.contains(id) ? Boolean.TRUE : null;
+        }
+
+        /**
+         * @param id Agent id
+         * @return 未删且停用时为 true；已删不返回（删优先于停）
+         */
+        private Boolean agentDisabled(Long id) {
+            if (id == null) {
+                return null;
+            }
+            return disabledAgents.contains(id) ? Boolean.TRUE : null;
         }
 
         private String instanceName(Long id) {

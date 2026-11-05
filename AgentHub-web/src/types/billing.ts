@@ -7,8 +7,12 @@ export interface LedgerRow {
   bizDate: string
   createTime?: string
   agentId?: number | null
-  /** 列表接口带回；缺失时前端按字典补名称，不显示原始 id */
+  /** 列表接口带回；软删也会带回真名，真的查无行时才为空 */
   agentName?: string | null
+  /** Agent 已软删；有真名时旁挂「已删除」（删优先于停用） */
+  agentDeleted?: boolean | null
+  /** Agent 未删且停用；旁挂「已停用」（已删时不返回） */
+  agentDisabled?: boolean | null
   modelInstanceId?: number | null
   modelInstanceName?: string | null
   providerName?: string | null
@@ -30,8 +34,12 @@ export interface DailyRow {
   id: number
   bizDate: string
   agentId?: number | null
-  /** 列表接口带回；缺失时前端按字典补名称，不显示原始 id */
+  /** 列表接口带回；软删也会带回真名，真的查无行时才为空 */
   agentName?: string | null
+  /** Agent 已软删；有真名时旁挂「已删除」（删优先于停用） */
+  agentDeleted?: boolean | null
+  /** Agent 未删且停用；旁挂「已停用」（已删时不返回） */
+  agentDisabled?: boolean | null
   modelInstanceId?: number | null
   modelInstanceName?: string | null
   providerName?: string | null
