@@ -51,9 +51,14 @@ test-results/
 # code-review-graph
 .code-review-graph/
 
-# ========== 测试源码==========
+# ========== 测试与自测源码：不进仓 ==========
+# 口径：单元测试 / 自测守卫只在本地跑，不随仓库分发（干净克隆不含任何用例）
 **/src/test/
 AgentHub-web/tests/
+# 前端自测守卫脚本（*.guard.mjs / *.selftest.ts|mjs）；仅本地执行，不入库
+AgentHub-web/scripts/*.guard.mjs
+AgentHub-web/scripts/*.selftest.ts
+AgentHub-web/scripts/*.selftest.mjs
 
 # 本地知识图谱与编辑器配置
 .cursor/mcp.json
