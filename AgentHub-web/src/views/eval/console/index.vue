@@ -39,13 +39,24 @@
             empty-text="暂无评测套件"
             class="eval-table"
           >
+            <el-table-column v-bind="indexColumnProps" />
             <el-table-column prop="suiteKey" label="键" min-width="140" align="center" show-overflow-tooltip />
             <el-table-column prop="name" label="名称" min-width="160" align="center" show-overflow-tooltip />
             <el-table-column prop="currentVersion" label="版本" min-width="80" align="center" />
-            <el-table-column label="状态" min-width="90" align="center">
+            <!-- 状态直接用开关：点击即调 PUT 元数据接口启停，不升版、不改 cases -->
+            <el-table-column label="状态" min-width="110" align="center">
               <template #default="{ row }">
-                <span class="status-dot" :class="row.enabled === 1 ? 'ok' : 'off'" />
-                {{ row.enabled === 1 ? '启用' : '停用' }}
+                <el-tooltip :content="suiteSwitchTip(row)" placement="top">
+                  <span class="switch-cell">
+                    <el-switch
+                      :model-value="row.enabled === 1"
+                      :loading="suiteTogglingId === row.id"
+                      :disabled="row.readOnly || !user.hasPerm('eval:suite:edit')"
+                      @change="onToggleSuiteEnabled(row, $event)"
+                    />
+                    <span class="switch-text">{{ row.enabled === 1 ? '启用' : '停用' }}</span>
+                  </span>
+                </el-tooltip>
               </template>
             </el-table-column>
             <el-table-column prop="updateTime" label="更新时间" min-width="170" align="center" />
@@ -104,7 +115,7 @@
         </div>
         <section class="panel">
           <el-table v-loading="runLoading" :data="runs" empty-text="暂无跑批" class="eval-table">
-            <el-table-column prop="id" label="ID" min-width="80" align="center" />
+            <el-table-column prop="id" label="ID" min-width="40" align="center" />
             <el-table-column label="套件" min-width="260" align="center" show-overflow-tooltip>
               <template #default="{ row }">
                 <!-- 单行：名称 + 版本 Tag，避免换行叠字 -->
@@ -130,6 +141,16 @@
                 </el-tooltip>
               </template>
             </el-table-column>
+            <!-- 打分模型：只影响软评分，不影响门禁；空 = 仅规则门禁 -->
+            <el-table-column label="打分模型" min-width="150" align="center" show-overflow-tooltip>
+              <template #default="{ row }">
+                <el-tooltip :content="judgeModelTooltip(row)" placement="top">
+                  <span :class="{ 'judge-off': !row.judgeModelInstanceId }">
+                    {{ judgeModelLabel(row) }}
+                  </span>
+                </el-tooltip>
+              </template>
+            </el-table-column>
             <el-table-column label="状态" min-width="120" align="center">
               <template #default="{ row }">
                 <el-tooltip :content="statusTip(row)" placement="top">
@@ -149,7 +170,7 @@
             <el-table-column label="通过率" min-width="120" align="center">
               <template #default="{ row }">{{ passRate(row) }}</template>
             </el-table-column>
-            <el-table-column prop="createTime" label="创建时间" min-width="170" align="center" />
+            <el-table-column prop="createTime" label="创建时间" min-width="180" align="center" />
             <el-table-column label="操作" width="140" align="center" fixed="right">
               <template #default="{ row }">
                 <el-button
@@ -290,6 +311,7 @@
           {{ runDetail.status }}
         </el-tag>
         <span>门禁 {{ gateText(runDetail.gatePassed) }}</span>
+        <span>打分模型 {{ judgeModelLabel(runDetail) }}</span>
         <span>{{ passRate(runDetail) }}</span>
         <span v-if="runDetail.createTime" class="meta-muted">{{ runDetail.createTime }}</span>
         <el-button v-if="user.hasPerm('eval:run:view')" size="small" @click="loadReport">刷新报告</el-button>
@@ -301,13 +323,16 @@
         empty-text="暂无结果"
         class="eval-table"
       >
-        <el-table-column prop="caseKey" label="case" min-width="120" align="center" />
-        <el-table-column prop="verdict" label="判定" min-width="90" align="center" />
-        <el-table-column prop="rulePassed" label="规则" min-width="70" align="center" />
+        <el-table-column prop="caseKey" label="case" min-width="200" align="center" />
+        <el-table-column prop="verdict" label="判定" min-width="60" align="center" />
+        <el-table-column prop="rulePassed" label="规则" min-width="60" align="center" />
         <el-table-column label="Judge" min-width="100" align="center">
           <template #default="{ row }">{{ ojStatusText(row.openjudgeStatus) }}</template>
         </el-table-column>
-        <el-table-column prop="latencyMs" label="耗时ms" min-width="90" align="center" />
+        <el-table-column label="分数" min-width="60" align="center">
+          <template #default="{ row }">{{ row.scores.openjudge.score }}</template>
+        </el-table-column>
+        <el-table-column prop="latencyMs" label="耗时ms" min-width="60" align="center" />
         <el-table-column label="执行链路" min-width="100" align="center">
           <template #default="{ row }">
             <el-button
@@ -415,6 +440,27 @@
             <el-option v-for="a in agents" :key="a.id" :label="a.name" :value="a.id" />
           </el-select>
         </el-form-item>
+        <!-- 可选打分模型：清空 = 只跑规则门禁；选择 = 用该 CHAT 实例做软评分 -->
+        <el-form-item label="打分模型">
+          <el-select
+            v-model="runForm.judgeModelInstanceId"
+            filterable
+            clearable
+            class="full"
+            placeholder="不打分（仅规则门禁）"
+          >
+            <el-option
+              v-for="m in judgeOptions"
+              :key="m.id"
+              :label="`${m.displayName} · ${m.modelId}`"
+              :value="m.id"
+            />
+          </el-select>
+          <p class="field-tip">
+            不选则只跑规则门禁；选择后用该模型做软评分（不影响门禁通过与否）。
+            <span v-if="judgeOptions.length === 0">当前没有可用的 CHAT 模型实例。</span>
+          </p>
+        </el-form-item>
         <el-form-item label="创建后执行">
           <el-switch v-model="runForm.executeNow" />
         </el-form-item>
@@ -477,6 +523,7 @@ import { ElMessage, ElMessageBox } from 'element-plus'
 import { Search } from '@element-plus/icons-vue'
 import PageHeader from '@/components/PageHeader.vue'
 import TablePager from '@/components/TablePager.vue'
+import { useListIndexColumn } from '@/composables/listIndex'
 import TraceLinkDrawer from '@/components/obs/TraceLinkDrawer.vue'
 import {
   cancelEvalRun,
@@ -492,11 +539,15 @@ import {
   pageEvalRunResults,
   pageEvalRuns,
   pageEvalSuites,
-  promoteFromResult
+  promoteFromResult,
+  updateEvalSuite
 } from '@/api/eval'
 import { pageAgents } from '@/api/agent'
+import { pageInstances } from '@/api/model'
 import { useUserStore } from '@/stores/user'
 import type { AgentCard } from '@/types/agent'
+import type { InstanceRow } from '@/types/model'
+import { normalizeCapability } from '@/types/model'
 import type {
   EvalBadCaseRow,
   EvalCaseRow,
@@ -515,8 +566,12 @@ const RUN_STATUS = ['PENDING', 'RUNNING', 'SUCCEEDED', 'FAILED', 'PARTIAL', 'CAN
 const suiteLoading = ref(false)
 const suites = ref<EvalSuiteRow[]>([])
 const suiteTotal = ref(0)
+/** 正在切换启停的套件 id；用于单行 loading，避免整表转圈 */
+const suiteTogglingId = ref<number | null>(null)
 /** 默认每页 10；可选 10/20/50/100 由 TablePager 统一提供 */
 const suiteQ = reactive({ current: 1, size: 10, keyword: '' })
+/** 套件表最左「序号」列；跨页连续，仅前端展示（跑批 / 坏案表不在本刀范围） */
+const { indexColumnProps } = useListIndexColumn(() => suiteQ.current, () => suiteQ.size)
 const suiteOptions = ref<EvalSuiteRow[]>([])
 
 const runLoading = ref(false)
@@ -564,9 +619,14 @@ const runCreating = ref(false)
 const runForm = reactive({
   suiteId: undefined as number | undefined,
   agentId: undefined as number | undefined,
+  /** 可选打分模型；undefined / null = 不打分（仅规则门禁） */
+  judgeModelInstanceId: undefined as number | undefined,
   executeNow: true
 })
 const agents = ref<AgentCard[]>([])
+/** 可打分模型候选：仅启用中的 CHAT 实例（含历史 LLM 旧码归一） */
+const judgeOptions = ref<InstanceRow[]>([])
+let judgeOptionsLoaded = false
 
 const promoteOpen = ref(false)
 const promoteSaving = ref(false)
@@ -630,6 +690,48 @@ function mergeSuiteDict(prev: EvalSuiteRow[], next: EvalSuiteRow[]) {
   return Array.from(map.values())
 }
 
+/**
+ * 套件状态开关的悬浮说明：解释只读样例/无权限为何不可点。
+ *
+ * @param row 套件行
+ * @return 提示文案
+ */
+function suiteSwitchTip(row: EvalSuiteRow) {
+  if (row.readOnly) return '平台内置样例只读，不能启停'
+  if (!user.hasPerm('eval:suite:edit')) return '无启停权限'
+  return row.enabled === 1 ? '点击停用（停用后不能创建跑批）' : '点击启用'
+}
+
+/**
+ * 启停套件：复用「更新元数据」接口，只改 enabled，不升版、不改 cases。
+ * <p>开关用 `:model-value` 受控；请求失败时本地值保持不变（提示由 request 拦截器统一弹出），
+ * 成功后同步列表行与跑批下拉字典，保证「创建跑批」里的可选状态立即生效。
+ *
+ * @param row   套件行
+ * @param value el-switch 的 change 值（布尔或 'true'/'false'）
+ */
+async function onToggleSuiteEnabled(row: EvalSuiteRow, value: string | number | boolean) {
+  const next = value ? 1 : 0
+  if (row.enabled === next) return
+  suiteTogglingId.value = row.id
+  try {
+    const { data } = await updateEvalSuite(row.id, {
+      name: row.name,
+      description: row.description,
+      defaultConfig: row.defaultConfig,
+      enabled: next
+    })
+    const saved = data.data.enabled ?? next
+    row.enabled = saved
+    // 跑批弹窗用的是独立字典数组，这里同步，避免停用后仍可选
+    const dict = suiteOptions.value.find((item) => item.id === row.id)
+    if (dict) dict.enabled = saved
+    ElMessage.success(saved === 1 ? '套件已启用' : '套件已停用')
+  } finally {
+    suiteTogglingId.value = null
+  }
+}
+
 async function loadRuns() {
   if (!user.hasPerm('eval:run:view')) return
   runLoading.value = true
@@ -668,6 +770,7 @@ function onTabChange(name: string | number) {
   if (name === 'runs') {
     void loadSuiteOptions()
     void ensureAgents()
+    void ensureJudgeOptions()
     loadRuns()
   }
   if (name === 'bad') {
@@ -849,9 +952,36 @@ async function ensureAgents() {
   agents.value = data.data.records
 }
 
+/**
+ * 拉取可打分模型：复用现网实例分页 API，只要启用中的 CHAT 实例。
+ * 无 model:instance:list 权限或接口失败时降级为空列表（仍可建「不打分」跑批）。
+ */
+async function loadJudgeOptions() {
+  if (!user.hasPerm('model:instance:list')) {
+    judgeOptions.value = []
+    return
+  }
+  try {
+    const { data } = await pageInstances({ current: 1, size: 100, capability: 'CHAT' })
+    judgeOptions.value = (data.data?.records || []).filter(
+      (item) => item.status === 1 && normalizeCapability(item.capability) === 'CHAT'
+    )
+  } catch {
+    judgeOptions.value = []
+  }
+}
+
+/** 首次打开弹窗时加载打分模型；已加载则复用，避免每次重复请求 */
+async function ensureJudgeOptions() {
+  if (judgeOptionsLoaded) return
+  await loadJudgeOptions()
+  judgeOptionsLoaded = true
+}
+
 async function openRunCreate() {
   await ensureSuiteOptions()
   await ensureAgents()
+  await ensureJudgeOptions()
   resetRunForm()
   runCreateOpen.value = true
 }
@@ -860,6 +990,7 @@ async function openRunCreate() {
 function resetRunForm() {
   runForm.suiteId = undefined
   runForm.agentId = undefined
+  runForm.judgeModelInstanceId = undefined
   runForm.executeNow = true
 }
 
@@ -872,8 +1003,15 @@ async function onCreateRun() {
   const shouldExecute = runForm.executeNow && user.hasPerm('eval:run:trigger')
   runCreating.value = true
   try {
-    const { data } = await createEvalRun({ suiteId: runForm.suiteId, agentId: runForm.agentId })
-    ElMessage.success(`已建跑批 #${data.data.id}`)
+    const { data } = await createEvalRun({
+      suiteId: runForm.suiteId,
+      agentId: runForm.agentId,
+      // 不选 = 显式 null：后端按「本 run 关闭打分」处理，不会回落全局默认模型
+      judgeModelInstanceId: runForm.judgeModelInstanceId ?? null
+    })
+    ElMessage.success(
+      `已建跑批 #${data.data.id}（${runForm.judgeModelInstanceId ? '含软评分' : '仅规则门禁'}）`
+    )
     runCreateOpen.value = false
     // 创建后立刻刷列表（勿等 execute 结束，否则长时间无新行）
     await loadRuns()
@@ -890,12 +1028,16 @@ async function onExecute(row: EvalRunRow) {
   try {
     const { data } = await executeEvalRun(row.id)
     ElMessage.success(`执行结束：${data.data.status}`)
-    await loadRuns()
     if (runDetailOpen.value && runDetail.value?.id === row.id) {
       await openRunDetail(data.data)
     }
+  } catch {
+    // 错误提示由 request 拦截器统一弹出；这里只负责收尾，不重复提示
   } finally {
+    // 关键：转圈结束（成功 / 业务失败 / 前端超时）都要刷新列表。
+    // 否则该行还停在旧快照 PENDING，会重新露出可点的「执行」按钮，与后端真实状态不一致。
     executingId.value = null
+    await loadRuns()
   }
 }
 
@@ -949,6 +1091,11 @@ async function refreshRunDetail(id: number) {
   }
 }
 
+/**
+ * 手动刷新报告 JSON。
+ * <p>报告未生成时后端返回业务错「报告尚未生成」，提示由 request 拦截器统一弹出；
+ * 这里<b>不再</b>二次 toast，否则点一次会连出两个弹窗。
+ */
 async function loadReport() {
   if (!runDetail.value) return
   try {
@@ -956,7 +1103,7 @@ async function loadReport() {
     reportJson.value = data.data
     reportText.value = JSON.stringify(data.data, null, 2)
   } catch {
-    ElMessage.info('报告尚未生成')
+    // 失败提示已由拦截器给出，此处只保留失败即不覆盖现有报告的语义
   }
 }
 
@@ -1065,6 +1212,33 @@ function agentPrimary(agentId: number) {
   const a = agents.value.find((x) => x.id === agentId)
   if (a?.name) return a.name
   return `Agent #${agentId}`
+}
+
+/**
+ * 打分模型文案：字典名优先；未选显示「不打分」；历史行/已删实例回落 #id。
+ *
+ * @param row 跑批行（或详情行）
+ * @return 展示文本
+ */
+function judgeModelLabel(row?: { judgeModelInstanceId?: number | null } | null) {
+  const id = row?.judgeModelInstanceId
+  if (!id) return '不打分'
+  const m = judgeOptions.value.find((x) => x.id === id)
+  if (m?.displayName) return m.displayName
+  return `模型 #${id}`
+}
+
+/**
+ * 打分模型悬浮说明：把 id 与「不影响门禁」写在 tooltip 上。
+ *
+ * @param row 跑批行
+ * @return 提示文本
+ */
+function judgeModelTooltip(row: EvalRunRow) {
+  if (!row.judgeModelInstanceId) {
+    return '未选打分模型：仅规则门禁，OpenJudge 关闭（DISABLED）'
+  }
+  return `judgeModelInstanceId=${row.judgeModelInstanceId} · 软评分，不改 gate_passed`
 }
 
 function passRate(row: EvalRunRow) {
@@ -1202,19 +1376,18 @@ void loadSuiteOptions()
 .cell-tag {
   flex: none;
 }
-.status-dot {
-  display: inline-block;
-  width: 8px;
-  height: 8px;
-  border-radius: 50%;
-  margin-right: 6px;
-  background: #94a3b8;
+/* 状态开关：开关与文案同一行，避免表格行高被撑开 */
+.switch-cell {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
 }
-.status-dot.ok {
-  background: #22c55e;
+.switch-text {
+  font-size: 12px;
+  color: #64748b;
 }
-.status-dot.off {
-  background: #cbd5e1;
+.judge-off {
+  color: #94a3b8;
 }
 .gate-ok {
   color: #16a34a;

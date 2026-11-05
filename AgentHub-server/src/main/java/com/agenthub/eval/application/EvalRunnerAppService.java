@@ -15,6 +15,7 @@ import com.agenthub.eval.domain.model.EvalRun;
 import com.agenthub.eval.domain.model.EvalRunStatus;
 import com.agenthub.eval.domain.model.EvalTrialRequest;
 import com.agenthub.eval.domain.model.EvalVerdict;
+import com.agenthub.eval.domain.model.OpenJudgeJudge;
 import com.agenthub.eval.domain.model.OpenJudgeRequest;
 import com.agenthub.eval.domain.model.OpenJudgeScoreResult;
 import com.agenthub.eval.domain.model.OpenJudgeStatus;
@@ -27,6 +28,8 @@ import com.agenthub.eval.domain.service.EvalRunConfig;
 import com.agenthub.eval.domain.service.EvalRunStateMachine;
 import com.agenthub.eval.domain.service.EvalSpecs;
 import com.agenthub.eval.domain.service.EvalTenantProvider;
+import com.agenthub.eval.domain.service.JudgeModelResolver;
+import com.agenthub.eval.domain.service.JudgeModelUnavailableException;
 import com.agenthub.eval.domain.service.OpenJudgeScorerPort;
 import com.agenthub.eval.domain.service.RuleScorer;
 import com.agenthub.eval.domain.service.TrialEvalPort;
@@ -53,6 +56,8 @@ import java.util.Set;
  * → 收束终态写 {@code gate_passed} → {@link ReportBuilder}。
  * <p><b>verdict / gate</b>：只由规则（及 trial 基础设施 ERROR）决定；OpenJudge <b>绝不</b>翻转 gate_passed，
  * 也绝不把 case 打成 FAIL。
+ * <p><b>软评分开关</b>：只有本 run 快照里有非空 {@code judge_model_instance_id} 才出站（且 enabled=true）；
+ * 没有模型一律 DISABLED，不发 HTTP、不调 LLM。
  * <p>幂等：仅允许一次 PENDING→RUNNING CAS。刻意不做：SSE、菜单、EvalScope、UI。
  */
 @Slf4j
@@ -73,6 +78,7 @@ public class EvalRunnerAppService {
     private final OperLogWriter operLogWriter;
     private final EvalProperties properties;
     private final ObjectMapper json;
+    private final JudgeModelResolver judgeModelResolver;
 
     /**
      * @param runs            跑批仓储
@@ -89,13 +95,15 @@ public class EvalRunnerAppService {
      * @param operLogWriter   操作日志
      * @param properties      全局缺省
      * @param json            JSON
+     * @param judgeModelResolver 打分模型凭据解析（本机环回透传给 sidecar）
      */
     public EvalRunnerAppService(EvalRunRepository runs, EvalResultRepository results, EvalCaseRepository cases,
                                 AgentDefRepository agents, TrialEvalPort trialPort,
                                 OpenJudgeScorerPort openJudgePort, ReportBuilder reportBuilder,
                                 EvalRunFlight flight, EvalAssembler assembler, EvalTenantProvider tenantProvider,
                                 OperatorContext operatorContext, OperLogWriter operLogWriter,
-                                EvalProperties properties, ObjectMapper json) {
+                                EvalProperties properties, ObjectMapper json,
+                                JudgeModelResolver judgeModelResolver) {
         this.runs = runs;
         this.results = results;
         this.cases = cases;
@@ -110,6 +118,7 @@ public class EvalRunnerAppService {
         this.operLogWriter = operLogWriter;
         this.properties = properties;
         this.json = json;
+        this.judgeModelResolver = judgeModelResolver;
     }
 
     /**
@@ -318,14 +327,36 @@ public class EvalRunnerAppService {
     }
 
     /**
-     * 软评分：enabled=false → DISABLED；否则调 Port；合并 scores.openjudge；永不改 verdict。
+     * 软评分：本 run 有 Judge 模型且开关未显式关 → 解凭据 → 调 Port；否则 DISABLED。
+     * <p>开关口径钉死为 {@link EvalRunConfig#judgeEnabled(JsonNode)}：{@code enabled=true}
+     * <b>且</b> {@code judge_model_instance_id} 非空才调用。只有开关没有模型（历史行、
+     * 套件默认开但建跑未选模型）一律 DISABLED，<b>零</b> Judge 出站。
+     * <p>凭据口径：按实例 id 从模型中心解密后<b>环回透传</b>给本机 sidecar；
+     * 解不出（实例停用 / 凭证缺失 / 解密失败）→ 本 case {@code ERROR}，
+     * <b>不</b>退回 sidecar 环境变量 Key 冒充所选实例。
+     * <p>合并 scores.openjudge；永不改 verdict / gate。
      */
     private void applyOpenJudge(EvalResult stub, EvalArtifact artifact, EvalCase caseRow,
                                 JsonNode config, ObjectNode scoresRoot) {
         JsonNode scoring = parseScoring(caseRow);
-        boolean runEnabled = EvalRunConfig.openjudgeEnabled(config);
-        if (!EvalRunConfig.caseOpenjudgeEnabled(scoring, runEnabled)) {
+        boolean runEnabled = EvalRunConfig.judgeEnabled(config);
+        Long judgeModelInstanceId = EvalRunConfig.judgeModelInstanceId(config);
+        if (!EvalRunConfig.caseOpenjudgeEnabled(scoring, runEnabled) || judgeModelInstanceId == null) {
             stub.setOpenjudgeStatus(OpenJudgeStatus.DISABLED.name());
+            return;
+        }
+
+        // 先解凭据：失败即本 case ERROR（软通道），不再出站、不改 verdict/gate
+        OpenJudgeJudge judge;
+        try {
+            judge = judgeModelResolver.resolve(judgeModelInstanceId);
+        } catch (JudgeModelUnavailableException ex) {
+            writeJudgeUnavailable(stub, scoresRoot, judgeModelInstanceId, ex.getMessage(), config);
+            return;
+        } catch (RuntimeException ex) {
+            // 兜底：任何实现异常都按「凭据不可用」处理，消息只留异常类型
+            writeJudgeUnavailable(stub, scoresRoot, judgeModelInstanceId,
+                    "打分模型凭据不可用：" + ex.getClass().getSimpleName(), config);
             return;
         }
 
@@ -335,6 +366,9 @@ public class EvalRunnerAppService {
         request.setReference(extractReference(caseRow));
         request.setExpectTools(extractExpectTools(caseRow));
         request.setGraders(resolveGraders(config, scoring, request.getReference(), request.getExpectTools()));
+        request.setJudgeModelInstanceId(judgeModelInstanceId);
+        // 凭据只进请求体（本机环回），不写日志、不入库
+        request.setJudge(judge);
         request.setBaseUrl(EvalRunConfig.openjudgeBaseUrl(config, properties.getOpenjudge().getBaseUrl()));
         request.setTimeoutMs(EvalRunConfig.openjudgeTimeoutMs(config, properties.getOpenjudge().getTimeoutMs()));
 
@@ -344,15 +378,20 @@ public class EvalRunnerAppService {
         }
         OpenJudgeStatus status = oj.getStatus() == null ? OpenJudgeStatus.ERROR : oj.getStatus();
         stub.setOpenjudgeStatus(status.name());
-        stub.setOpenjudgeRawJson(clip(oj.getRawJson(), OpenJudgeScorerAdapter.RAW_MAX_CHARS));
+        // 第二道闸：即使 Adapter 漏抹，落库前再按 Key 脱敏
+        stub.setOpenjudgeRawJson(clip(OpenJudgeScorerAdapter.redact(oj.getRawJson(), judge.getApiKey()),
+                OpenJudgeScorerAdapter.RAW_MAX_CHARS));
 
         ObjectNode ojNode = scoresRoot.putObject("openjudge");
         ojNode.put("status", status.name());
+        // 记下本 case 实际使用的 Judge 实例，便于报告/排障对账（只记 id，不记 Key）
+        ojNode.put("judge_model_instance_id", judgeModelInstanceId);
+        ojNode.put("judge_model", judge.getModel());
         if (oj.getScore() != null) {
             ojNode.put("score", oj.getScore());
         }
         if (oj.getReason() != null) {
-            ojNode.put("reason", oj.getReason());
+            ojNode.put("reason", OpenJudgeScorerAdapter.redact(oj.getReason(), judge.getApiKey()));
         }
         if (oj.getMetadata() != null) {
             ojNode.set("metadata", oj.getMetadata());
@@ -360,6 +399,32 @@ public class EvalRunnerAppService {
         // required=true：本刀只记标志，不改 verdict / gate（交付钉死）
         if (EvalRunConfig.openjudgeRequired(config)
                 && (status == OpenJudgeStatus.ERROR || status == OpenJudgeStatus.SKIPPED)) {
+            ojNode.put("required_missed", true);
+        }
+    }
+
+    /**
+     * 凭据不可用时的收尾：status=ERROR、不出站、不改 verdict / gate。
+     * <p>故意不写 rawJson（可能是解密细节），只写可读原因与实例 id。
+     *
+     * @param stub                结果行
+     * @param scoresRoot          scores 根
+     * @param judgeModelInstanceId 选中的实例 id
+     * @param reason              中文原因（不含密钥）
+     * @param config              合并配置（用于 required 标记）
+     */
+    private void writeJudgeUnavailable(EvalResult stub, ObjectNode scoresRoot, Long judgeModelInstanceId,
+                                       String reason, JsonNode config) {
+        String safeReason = reason == null || reason.isBlank() ? "打分模型凭据不可用" : reason;
+        stub.setOpenjudgeStatus(OpenJudgeStatus.ERROR.name());
+        log.warn("打分模型凭据不可用，本 case 跳过评分 case={} judgeModelInstanceId={}：{}",
+                stub.getCaseKey(), judgeModelInstanceId, safeReason);
+        ObjectNode ojNode = scoresRoot.putObject("openjudge");
+        ojNode.put("status", OpenJudgeStatus.ERROR.name());
+        ojNode.put("judge_model_instance_id", judgeModelInstanceId);
+        ojNode.put("reason", safeReason);
+        ojNode.put("error", "JUDGE_CREDENTIAL_UNAVAILABLE");
+        if (EvalRunConfig.openjudgeRequired(config)) {
             ojNode.put("required_missed", true);
         }
     }

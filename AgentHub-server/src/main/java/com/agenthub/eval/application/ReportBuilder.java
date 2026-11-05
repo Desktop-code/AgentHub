@@ -143,10 +143,17 @@ public class ReportBuilder {
 
     private ObjectNode buildOpenjudgeBlock(List<EvalResult> rows, JsonNode config) {
         ObjectNode block = json.createObjectNode();
-        boolean enabled = EvalRunConfig.openjudgeEnabled(config);
+        // 与 Runner 同口径：开关开 + 有 Judge 模型实例才算启用；只开开关不算
+        boolean enabled = EvalRunConfig.judgeEnabled(config);
+        Long judgeModelInstanceId = EvalRunConfig.judgeModelInstanceId(config);
         block.put("enabled", enabled);
+        if (judgeModelInstanceId != null) {
+            block.put("judge_model_instance_id", judgeModelInstanceId);
+        } else {
+            block.putNull("judge_model_instance_id");
+        }
         if (!enabled) {
-            block.put("note", "OpenJudge 未启用（DISABLED）");
+            block.put("note", "OpenJudge 未启用（未选择打分模型或开关关闭，DISABLED）");
         }
         int ok = 0;
         int skipped = 0;

@@ -9,6 +9,7 @@ import com.agenthub.eval.domain.model.EvalCase;
 import com.agenthub.eval.domain.model.EvalResult;
 import com.agenthub.eval.domain.model.EvalRun;
 import com.agenthub.eval.domain.model.EvalSuite;
+import com.agenthub.eval.domain.service.EvalRunConfig;
 import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
@@ -164,7 +165,10 @@ public class EvalAssembler {
         resp.setErrored(run.getErrored());
         resp.setSkipped(run.getSkipped());
         resp.setOpenjudgeEnabled(run.getOpenjudgeEnabled());
-        resp.setConfig(readNode(run.getConfigJson()));
+        JsonNode configNode = readNode(run.getConfigJson());
+        resp.setConfig(configNode);
+        // 打分模型 id 从快照回显；历史行没有该字段时为 null（= 不打分）
+        resp.setJudgeModelInstanceId(EvalRunConfig.judgeModelInstanceId(configNode));
         resp.setReportPath(run.getReportPath());
         resp.setReport(readNode(run.getReportJson()));
         resp.setTriggerUserId(run.getTriggerUserId());
