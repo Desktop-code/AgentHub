@@ -1,8 +1,12 @@
 /**
  * 助手回复的轻量 Markdown。所属域：runtime 展示。
- * 先抽出 HTML/围栏里的表转成安全表格，再转义其余正文，最后排标题、列表、代码、加粗和 GFM 管道表。
+ * 先抽出 HTML/围栏里的表转成安全表格，再转义其余正文，最后排标题、引用、分隔线、列表、代码、
+ * 链接、加粗/斜体、GFM 管道表。
  * 普通代码围栏内仍保持原文；不执行模型带来的脚本标签。
  * 流式过程用 {@link renderStreamingMarkdown}（安全前缀 + 缓冲尾）；流结束后改回本函数终渲。
+ *
+ * 调用方：ChatPanel（Agent 对话）、MaRunFlow（多智能体运行）、ProcessTimeline、WorkflowTrialDrawer。
+ * 改这里等于同时改这几个页面的正文口径，保持同一套语法与样式约定。
  */
 
 type ColumnAlign = 'left' | 'center' | 'right'
@@ -12,13 +16,29 @@ const TABLE_PENDING = '<p class="md-table-pending">表格生成中…</p>'
 
 /**
  * 转义后再排版。空串原样返回。
- * 支持：GFM 管道表、裸 `<table>`、```html``` / 围栏内的管道表（避免页面上露出一堆标签字）。
+ * 支持：h1~h6、`>` 引用、`---` 分隔线、有序/无序列表、围栏代码、
+ * GFM 管道表、裸 `<table>`、`[文本](链接)`、`**加粗**`、`*斜体*`、`` `行内代码` ``。
+ *
+ * @param source Markdown 原文
+ * @return 可直接 v-html 的 HTML；原文里的 HTML 标签已被转义，只有白名单链接会还原成 `<a>`
  */
 export function renderSimpleMarkdown(source: string): string {
   const normalized = normalizePipes(source || '').replace(/\r\n/g, '\n').replace(/\r/g, '\n')
   const prepared = preprocessTables(normalized)
-  const escaped = escapeHtml(prepared.text)
-  const lines = escaped.split('\n')
+  return renderBlocks(escapeHtml(prepared.text).split('\n'), prepared.slots)
+}
+
+/**
+ * 逐行扫块级语法并输出 HTML。
+ *
+ * <p>引用块会剥掉一层 `&gt;` 后递归回本函数，所以嵌套引用、引用内列表/代码块都能正确成形。
+ * 传入的是**已转义**的行，故所有标记判断都基于实体形式（`>` 写作 `&gt;`）。
+ *
+ * @param lines 已转义源码行
+ * @param slots 预处理阶段抽出的表格 HTML 槽位，按 `@@TABLEi@@` 占位回填
+ * @return 块级 HTML 片段
+ */
+function renderBlocks(lines: string[], slots: string[]): string {
   const html: string[] = []
   let list: 'ul' | 'ol' | null = null
   let paragraph: string[] = []
@@ -67,19 +87,44 @@ export function renderSimpleMarkdown(source: string): string {
     if (slot) {
       flushParagraph()
       closeList()
-      const piece = prepared.slots[Number(slot[1])]
+      const piece = slots[Number(slot[1])]
       if (piece) {
         html.push(piece)
       }
       index += 1
       continue
     }
-    const heading = /^(#{1,3}) (.+)$/.exec(line)
+    // 标题：1~6 级都认，避免 `####` 原样漏到正文
+    const heading = /^(#{1,6}) (.+)$/.exec(line)
     if (heading) {
       flushParagraph()
       closeList()
       const level = heading[1].length
       html.push(`<h${level}>${inline(heading[2])}</h${level}>`)
+      index += 1
+      continue
+    }
+    // 引用块：连续 `>` 行整体进 blockquote；剥一层标记后递归，嵌套/列表/代码块自然成立
+    if (/^\s{0,3}&gt;/.test(line)) {
+      flushParagraph()
+      closeList()
+      const inner: string[] = []
+      while (index < lines.length) {
+        const quoted = /^\s{0,3}&gt;\s?(.*)$/.exec(lines[index])
+        if (!quoted) {
+          break
+        }
+        inner.push(quoted[1])
+        index += 1
+      }
+      html.push(`<blockquote>${renderBlocks(inner, slots)}</blockquote>`)
+      continue
+    }
+    // 分隔线：--- / *** / ___（允许字符间留空格），必须在表格与列表之前判断
+    if (/^\s{0,3}(?:(?:-\s*){3,}|(?:\*\s*){3,}|(?:_\s*){3,})$/.test(line)) {
+      flushParagraph()
+      closeList()
+      html.push('<hr>')
       index += 1
       continue
     }
@@ -667,11 +712,83 @@ function alignAttr(align: ColumnAlign): string {
   return ` class="align-${align}"`
 }
 
+/**
+ * 行内语法：先抽出代码片段与反斜杠转义（避免内部的 `*`/`_` 被当成强调），
+ * 再排图片、链接、加粗、斜体。
+ *
+ * @param text 已转义的单个文本片段
+ * @return 行内 HTML；不合法链接/图片退回原文
+ */
 function inline(text: string): string {
-  return text
-    .replace(/`([^`]+)`/g, '<code>$1</code>')
+  const codes: string[] = []
+  // 行内代码用占位符暂存，防止代码里的 `*` `_` 触发强调替换
+  let out = text.replace(/`([^`]+)`/g, (_full, code: string) => {
+    codes.push(`<code>${code}</code>`)
+    return `\u0000C${codes.length - 1}\u0000`
+  })
+  // 反斜杠转义也先暂存，否则 `\*` 会先被去掉反斜杠再当成斜体
+  const escapes: string[] = []
+  out = out.replace(/\\([\\`*_[\]()~#>+\-.!])/g, (_full, ch: string) => {
+    escapes.push(ch)
+    return `\u0001E${escapes.length - 1}\u0001`
+  })
+  // 图片先于链接处理，否则 `![alt](src)` 会被链接语法吃掉、留下一个 `!`
+  out = out.replace(/!\[([^\]\n]*)\]\(([^)\s]+)\)/g, (full: string, alt: string, url: string) => {
+    const src = safeImageSrc(url)
+    return src
+      ? `<img src="${src}" alt="${alt}" loading="lazy" referrerpolicy="no-referrer">`
+      : full
+  })
+  // 链接只放行白名单协议，防止模型输出 javascript: / data: 之类的可执行地址；不合格时原样退回文本
+  out = out.replace(/\[([^\]\n]+)\]\(([^)\s]+)\)/g, (full: string, label: string, url: string) => {
+    const href = safeHref(url)
+    return href
+      ? `<a href="${href}" target="_blank" rel="noopener noreferrer">${label}</a>`
+      : full
+  })
+  out = out
     .replace(/\*\*([^*]+)\*\*/g, '<strong>$1</strong>')
     .replace(/__([^_]+)__/g, '<strong>$1</strong>')
+    .replace(/\*([^*\n]+)\*/g, '<em>$1</em>')
+    // 下划线斜体只在词边界生效，避免把 sys_user 这类标识符当强调
+    .replace(/(^|[^\w_])_([^_\n]+)_(?![\w_])/g, '$1<em>$2</em>')
+  // 还原转义字符（只留字符本身），再还原行内代码
+  out = out.replace(/\u0001E(\d+)\u0001/g, (_full, index: string) => escapes[Number(index)] ?? '')
+  return out.replace(/\u0000C(\d+)\u0000/g, (_full, index: string) => codes[Number(index)] ?? '')
+}
+
+/**
+ * 链接地址白名单：只放行 http(s)、mailto、站点相对路径与锚点。
+ *
+ * @param url Markdown 括号里的地址（已转义实体）
+ * @return 可安全写入 href 的原值；协议不合格返回空串（调用方退回纯文本）
+ */
+function safeHref(url: string): string {
+  const value = url.trim()
+  if (!value) {
+    return ''
+  }
+  // 地址里可能带 &amp; 实体，判断协议前先解一层
+  const probe = decodeBasicEntities(value).trim().toLowerCase()
+  if (probe.startsWith('http://') || probe.startsWith('https://') || probe.startsWith('mailto:')) {
+    return value
+  }
+  // 相对路径、锚点、协议相对写法（//host）都按站内处理
+  if (probe.startsWith('/') || probe.startsWith('#') || probe.startsWith('./') || probe.startsWith('../')) {
+    return value
+  }
+  return ''
+}
+
+/**
+ * 图片地址白名单：复用 {@link safeHref}，但排除 mailto（对 img 无意义）。
+ *
+ * @param url Markdown 图片括号里的地址
+ * @return 可安全写入 src 的原值；不合格返回空串
+ */
+function safeImageSrc(url: string): string {
+  const href = safeHref(url)
+  return href.toLowerCase().startsWith('mailto:') ? '' : href
 }
 
 function escapeHtml(source: string): string {

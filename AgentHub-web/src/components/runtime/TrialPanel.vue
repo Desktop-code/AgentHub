@@ -16,7 +16,11 @@
 
     <el-empty v-if="variant === 'drawer' && !ownerId" description="请先选择一个 Agent" />
 
-    <div v-else class="split">
+    <!--
+      MA 运行页走三栏：左会话 / 中协作流 / 右执行链路；
+      其余入口仍是原来的「左会话 + 右对话」两栏，不做任何视觉改动。
+    -->
+    <div v-else class="split" :class="{ 'split--ma': variant === 'ma' }">
       <aside class="sessions">
         <div class="sessions-title">历史会话</div>
         <div class="session-ops">
@@ -77,7 +81,56 @@
         </div>
       </aside>
 
-      <section class="chat-col">
+      <!--
+        MA 运行页中栏：业务协作流。每轮固定「路由 → 子 Agent → 结论」，
+        子 Agent 卡只给名/状态/耗时，思维链与工具明细留在右栏。
+      -->
+      <section v-if="variant === 'ma'" class="ma-center">
+        <el-alert v-if="pageError" :title="pageError" type="error" show-icon :closable="false" class="block-alert" />
+        <!-- 子专家计划待批准：与对话页同一套状态与按钮，只换宿主列 -->
+        <section v-if="childPending && canRun" class="child-approval">
+          <div class="child-approval-head">
+            <div class="child-approval-main">
+              <div class="section-label">子专家计划待批准</div>
+              <p class="child-approval-title">
+                子专家「{{ childPending.childAgentName || '子 Agent' }}」计划待批准
+              </p>
+              <p class="child-approval-sub">
+                根运行已暂停（等待子计划批准）；同时仅允许一个待批子。批准后该子继续执行，拒绝则该子记为失败、其它子继续。
+              </p>
+            </div>
+            <div class="child-approval-actions">
+              <el-button type="primary" size="small" :loading="childDeciding" @click="decideChildPlan(true)">
+                批准
+              </el-button>
+              <el-button size="small" :disabled="childDeciding" @click="decideChildPlan(false)">拒绝</el-button>
+            </div>
+          </div>
+          <ol v-if="childPending.steps?.length" class="child-plan-steps">
+            <li v-for="step in childPending.steps" :key="step.seq">
+              <span class="child-plan-seq">{{ step.seq }}</span>
+              <span class="child-plan-text">
+                <strong>{{ step.title }}</strong>
+                <span v-if="step.detail" class="child-plan-detail">{{ step.detail }}</span>
+              </span>
+            </li>
+          </ol>
+        </section>
+        <MaRunFlow
+          :groups="maGroups"
+          :selected-key="selectedMaTurn"
+          :sending="sending || resuming"
+          :can-send="canRun"
+          :session-ready="sessionReady"
+          :blocked-hint="blockedHint"
+          :detached="detached"
+          :now="now"
+          @select="selectedMaTurn = $event"
+          @send="send"
+        />
+      </section>
+
+      <section v-else class="chat-col">
         <el-alert v-if="pageError" :title="pageError" type="error" show-icon :closable="false" class="block-alert" />
         <!--
           子专家计划待批准：根试跑暂停时由 SSE ma_child_plan_pending / 刷新恢复接口驱动。
@@ -130,6 +183,17 @@
           @open-gantt="ganttVisible = true"
         />
       </section>
+
+      <!-- MA 运行页右栏：固定约 500px，跟随中间选中的轮次；不折叠、不进抽屉 -->
+      <aside v-if="variant === 'ma'" class="ma-chain-col">
+        <MaRunChain
+          :group="selectedMaGroup"
+          :now="now"
+          :error="maTraceError"
+          :loading="maTraceLoading"
+          :can-view="maCanView"
+        />
+      </aside>
     </div>
 
     <!--
@@ -137,7 +201,7 @@
       复用既有泳道正文（RouterExecutionCard），数据仍是同一份 obs span 树；
       未来要接「深色日志」时，在这里加第二个 Tab 即可，不必再改时间线。
     -->
-    <el-drawer v-model="ganttVisible" title="编排详细 · 甘特图" size="680px" append-to-body>
+    <el-drawer v-if="variant !== 'ma'" v-model="ganttVisible" title="编排详细 · 甘特图" size="680px" append-to-body>
       <RouterExecutionCard
         v-if="routerTrace?.model?.hasRouterTrace"
         :trace-data="routerTrace.model"
@@ -190,6 +254,9 @@ import {
 } from '@/api/runtime'
 import ChatPanel from '@/components/runtime/ChatPanel.vue'
 import RouterExecutionCard from '@/components/runtime/RouterExecutionCard.vue'
+import MaRunFlow from '@/components/runtime/ma/MaRunFlow.vue'
+import MaRunChain from '@/components/runtime/ma/MaRunChain.vue'
+import { buildMaRunGroups } from '@/components/runtime/ma/maRunView'
 import {
   advancePlanState,
   appendFile,
@@ -226,6 +293,7 @@ import {
 } from '@/components/runtime/trialStream'
 import { runModeLabel } from '@/composables/agentViewFlip'
 import { useRouterLane } from '@/composables/useRouterLane'
+import { useMaTurnTraces } from '@/composables/useMaTurnTraces'
 import { useUserStore } from '@/stores/user'
 import type { ChatTurn, TrialAgent, TrialEvent, TrialPlanView, TrialSession } from '@/types/runtime'
 
@@ -237,8 +305,8 @@ interface SessionGroup {
 
 const props = withDefaults(
   defineProps<{
-    /** page：整页试跑；drawer：管理页右侧抽屉 */
-    variant?: 'page' | 'drawer'
+    /** page：整页试跑；drawer：管理页右侧抽屉；ma：多智能体运行页三栏 */
+    variant?: 'page' | 'drawer' | 'ma'
     /** 抽屉由外部指定当前 Agent；整页只当作初始选中 */
     agentId?: number
     runMode?: string
@@ -341,7 +409,9 @@ const TITLE_REFRESH_DELAYS = [3000, 8000] as const
 /** 打开会话的请求令牌：连点两个会话时丢弃迟到的响应，避免串台。 */
 let openToken = 0
 
-const activeId = computed(() => (props.variant === 'drawer' ? props.agentId : pickedId.value))
+const activeId = computed(() =>
+  props.variant === 'drawer' || props.variant === 'ma' ? props.agentId : pickedId.value
+)
 /** 虚拟根模式：有 maId 就按方案归属会话，不再依赖 Agent */
 const maMode = computed(() => (props.maId ?? 0) > 0)
 /**
@@ -355,7 +425,7 @@ const shown = computed(() => {
   if (maMode.value) {
     return { runMode: 'ROUTER' }
   }
-  if (props.variant === 'drawer') {
+  if (props.variant === 'drawer' || props.variant === 'ma') {
     return { runMode: props.runMode || '' }
   }
   const found = agents.value.find((item) => item.id === pickedId.value)
@@ -375,7 +445,48 @@ const routerSessionId = computed(() => {
 })
 /** 本轮是否还在跑：决定编排卡是否轮询 obs trace */
 const routerTraceActive = computed(() => sending.value || resuming.value)
-const { view: routerTrace, reload: reloadRouterTrace } = useRouterLane(routerSessionId, routerTraceActive)
+
+/**
+ * MA 运行页三栏数据：
+ * - 右栏跟轮：按会话拉全部轮次的 trace，再按用户提问对齐（useMaTurnTraces）；
+ * - 中栏协作流：由 turns + 逐轮 trace 归纳，禁止把思维链塞进卡片；
+ * - Agent 管理里的试跑仍走原来的 useRouterLane，传 null 避免重复请求。
+ */
+const maEnabled = computed(() => props.variant === 'ma' && shown.value.runMode === 'ROUTER')
+const laneSessionId = computed(() => (props.variant === 'ma' ? null : routerSessionId.value))
+const { view: routerTrace, reload: reloadRouterTrace } = useRouterLane(laneSessionId, routerTraceActive)
+const {
+  traces: maTraces,
+  canView: maCanView,
+  loading: maTraceLoading,
+  error: maTraceError
+} = useMaTurnTraces(routerSessionId, routerTraceActive, maEnabled)
+/** 中栏运行轮次：一条用户提问 + 本轮协作卡 */
+const maGroups = computed(() => buildMaRunGroups(turns.value, maTraces.value, now.value))
+/** 右栏绑定的轮次 key；进入页 / 新增一轮时跟到最后 */
+const selectedMaTurn = ref('')
+let maKnownGroupCount = 0
+watch(
+  () => maGroups.value.map((group) => group.key).join('|'),
+  () => {
+    const groups = maGroups.value
+    if (!groups.length) {
+      selectedMaTurn.value = ''
+      maKnownGroupCount = 0
+      return
+    }
+    const exists = groups.some((group) => group.key === selectedMaTurn.value)
+    // 用户手动回看旧轮时保持选中；新轮出现（发送新问题）则跟到最新一轮
+    if (!exists || groups.length > maKnownGroupCount) {
+      selectedMaTurn.value = groups[groups.length - 1].key
+    }
+    maKnownGroupCount = groups.length
+  },
+  { immediate: true }
+)
+const selectedMaGroup = computed(
+  () => maGroups.value.find((group) => group.key === selectedMaTurn.value) ?? maGroups.value[maGroups.value.length - 1]
+)
 
 /**
  * 右侧「详细甘特图」抽屉。
@@ -548,8 +659,8 @@ async function loadAgents() {
  * @param agentId 当前 Agent；为空表示还没选
  */
 async function loadVisionCapability(agentId?: number) {
-  // 虚拟根没有 Agent，也就没有视觉槽：直接关掉上传，避免用户白传一次再被后端拒
-  if (maMode.value || !agentId) {
+  // 虚拟根没有 Agent，也就没有视觉槽；MA 三栏页不提供图片上传，同样直接关掉
+  if (maMode.value || props.variant === 'ma' || !agentId) {
     visionEnabled.value = false
     return
   }
@@ -2214,8 +2325,10 @@ function stopClock() {
 </script>
 
 <style scoped>
+/* 三种宿主（抽屉 / 独立页 / MA 运行页）都要撑满父容器，否则下方 split 的 flex:1 失效 */
 .trial.drawer,
-.trial.page {
+.trial.page,
+.trial.ma {
   display: flex;
   flex-direction: column;
   height: 100%;
@@ -2385,6 +2498,42 @@ function stopClock() {
   flex-direction: column;
   min-width: 0;
   min-height: 0;
+}
+
+/* MA 运行页三栏：中栏主宽、右栏固定约 460px 且不可折叠 */
+.ma-center {
+  display: flex;
+  flex: 1;
+  flex-direction: column;
+  min-width: 0;
+  min-height: 0;
+}
+
+/* 右栏固定 460 时，左栏让出一点宽度，避免把中栏协作流挤得过窄 */
+.split--ma .sessions {
+  width: 200px;
+}
+
+.ma-chain-col {
+  display: flex;
+  flex: 0 0 460px;
+  width: 460px;
+  max-width: 460px;
+  min-width: 0;
+  min-height: 0;
+  overflow: hidden;
+  /* 整页统一白底：右栏只留一条分隔线，不再铺灰面板 */
+  background: #fff;
+  border-left: 1px solid var(--ah-border);
+}
+
+/* 窄屏仍保留右栏，只收窄一点；不做折叠，避免「点了才出现」的第二套交互 */
+@media (max-width: 1200px) {
+  .ma-chain-col {
+    flex-basis: 400px;
+    width: 400px;
+    max-width: 400px;
+  }
 }
 
 .block-alert {

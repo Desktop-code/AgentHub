@@ -1,11 +1,11 @@
 <template>
   <!--
-    多智能体独立试跑页（MA-UI 刀2 / MA-P2 刀2）。所属域：runtime（展示层）。
+    多智能体运行页（三栏：左会话 / 中协作流 / 右执行链路）。所属域：runtime（展示层）。
     两条入口共用同一个壳：
     - 绑根：/orchestration/multi-agent/:agentId/trial，页头读 Agent 名；
     - 虚拟根：/orchestration/multi-agent/def/:maId/trial，页头读方案 name / code。
-    正文直接复用试跑面板；编排调度由对话流内的紧凑时间线（RouterTimeline）渲染，
-    详细甘特图在右侧抽屉。
+    正文复用试跑面板的数据与执行能力，只把展示换成三栏：中栏只出协作卡摘要，
+    右栏固定展示当前选中轮次的 Agent → LLM → Tool 执行链路，不再用甘特图抽屉。
   -->
   <div class="ma-trial">
     <PageHeader :title="pageTitle" :description="headerDesc">
@@ -36,14 +36,14 @@
 
     <div v-loading="loading" class="ma-trial__body">
       <!--
-        variant=drawer：不渲染 Agent 下拉，归属由本页钉死；
+        variant=ma：不渲染 Agent 下拉，归属由本页钉死；布局切成三栏（会话 / 协作流 / 执行链路）。
         绑根传 agentId，虚拟根传 maId（二者互斥，TrialPanel 内部优先 maId）。
-        历史会话列表、发送、续订、批准等能力与抽屉里完全同一套。
+        历史会话列表、发送、续订、批准等能力与抽屉里完全同一套，只换展示层。
       -->
       <TrialPanel
         v-if="ready"
         :key="panelKey"
-        variant="drawer"
+        variant="ma"
         :agent-id="agentId || undefined"
         :ma-id="maId || undefined"
         :run-mode="shownRunMode"
@@ -59,7 +59,8 @@ defineOptions({ name: 'MaTrial' })
 /**
  * 多智能体独立试跑页。所属域：runtime（前端）。
  *
- * <p>职责：给多智能体开一个全屏对话壳，让试跑不挤在列表旁的小抽屉里。
+ * <p>职责：给多智能体开一个全屏三栏运行页，让运行过程不挤在列表旁的小抽屉里：
+ * 左栏会话、中栏业务协作流、右栏当前轮次的执行链路。
  * 数据与执行全部复用现网：会话/事件走 runtime 接口，编排泳道走 obs span 树，
  * 引擎仍是 RouterTrialExecutor —— 本页不新增任何执行语义。
  *
@@ -158,7 +159,7 @@ const headerDesc = computed(() => {
   if (maMode.value) {
     const def = maDef.value
     if (!def) {
-      return '全屏运行：对话在下方，编排调度卡在消息流内'
+      return '三栏运行：左侧会话 · 中间协作流 · 右侧执行明细'
     }
     const parts = [`方案 ${def.code || def.id}`, runModeLabel('ROUTER'), maTemplateLabel(def.template)]
     if (typeof def.candidates?.length === 'number') {
@@ -169,7 +170,7 @@ const headerDesc = computed(() => {
   }
   const detail = agent.value
   if (!detail) {
-    return '全屏运行：对话在下方，编排调度卡在消息流内'
+    return '三栏运行：左侧会话 · 中间协作流 · 右侧执行明细'
   }
   const template = detail.runtimeConfig?.maTemplate
   const parts = [runModeLabel(detail.runMode), maTemplateLabel(template)]
@@ -322,13 +323,17 @@ watch(
 </script>
 
 <style scoped>
-/* 撑满主区：页头固定，对话区自己滚，不让整页跟着消息长短上下抖 */
+/* 撑满主区：页头固定，中栏 / 右栏各自滚动，不让整页跟着消息长短上下抖 */
 .ma-trial {
   display: flex;
   flex-direction: column;
   height: 100%;
   min-height: 480px;
   min-width: 0;
+  /* 运行页统一白底：三栏与页头共用一块白色工作区，不再让灰底从栏间漏出 */
+  padding: 16px 18px 18px;
+  background: #fff;
+  border-radius: 12px;
 }
 
 .ma-trial__body {
