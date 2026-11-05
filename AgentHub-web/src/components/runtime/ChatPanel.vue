@@ -1326,14 +1326,57 @@ function removeAttachment(index: number) {
 
 .md :deep(h1),
 .md :deep(h2),
-.md :deep(h3) {
+.md :deep(h3),
+.md :deep(h4),
+.md :deep(h5),
+.md :deep(h6) {
   margin: 0.4em 0 0.25em;
   font-weight: 650;
   line-height: 1.35;
 }
 
+.answer :deep(h1) {
+  font-size: 17px;
+}
+
 .answer :deep(h2) {
   font-size: 16px;
+}
+
+.answer :deep(h3) {
+  font-size: 15px;
+}
+
+.answer :deep(h4) {
+  font-size: 14px;
+}
+
+.md :deep(blockquote) {
+  margin: 0.45em 0;
+  padding: 2px 0 2px 10px;
+  border-left: 3px solid #d8dce8;
+  color: var(--ah-text-secondary, #6b7280);
+}
+
+.md :deep(hr) {
+  margin: 0.8em 0;
+  border: none;
+  border-top: 1px solid #e5e7ef;
+}
+
+.md :deep(a) {
+  color: #635bff;
+  text-decoration: none;
+}
+
+.md :deep(a:hover) {
+  text-decoration: underline;
+}
+
+.md :deep(img) {
+  max-width: 100%;
+  height: auto;
+  border-radius: 8px;
 }
 
 .md :deep(p) {

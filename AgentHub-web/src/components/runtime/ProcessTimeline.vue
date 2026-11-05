@@ -205,12 +205,44 @@ function toggle(index: number) {
 
 .md :deep(h1),
 .md :deep(h2),
-.md :deep(h3) {
+.md :deep(h3),
+.md :deep(h4),
+.md :deep(h5),
+.md :deep(h6) {
   margin: 0.35em 0 0.2em;
   color: #a3a3a3;
   font-size: 1.05em;
   font-weight: 650;
   line-height: 1.35;
+}
+
+/* 思考流里的引用/分隔线同样弱化，保持「过程信息」的灰调 */
+.md :deep(blockquote) {
+  margin: 0.4em 0;
+  padding: 2px 0 2px 10px;
+  border-left: 3px solid #e0e0e0;
+  color: #a3a3a3;
+}
+
+.md :deep(hr) {
+  margin: 0.7em 0;
+  border: none;
+  border-top: 1px solid #e8e8e8;
+}
+
+.md :deep(a) {
+  color: #635bff;
+  text-decoration: none;
+}
+
+.md :deep(a:hover) {
+  text-decoration: underline;
+}
+
+.md :deep(img) {
+  max-width: 100%;
+  height: auto;
+  border-radius: 8px;
 }
 
 .md :deep(p) {
