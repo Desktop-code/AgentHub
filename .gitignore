@@ -35,6 +35,12 @@ logs/
 **/target/
 **/dist/
 
+# Python 本地环境与字节码（scripts/openjudge-sidecar 等）
+**/.venv/
+**/__pycache__/
+.pytest_cache/
+*.py[cod]
+
 # TS 增量编译信息、测试/覆盖率报告、编译中间产物
 *.tsbuildinfo
 coverage/
