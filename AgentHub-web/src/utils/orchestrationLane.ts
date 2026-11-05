@@ -9,9 +9,11 @@
  * 约束：
  * - 纯函数、零运行时依赖，便于 node:test 直接跑；时间条百分比由组件复用 traceParallel 计算；
  * - 只读，不改 RouterTrialExecutor 的任何执行语义；
- * - 五种模板：ROUTER_PARALLEL 有判路由 LLM；FIXED_SEQUENCE / FIXED_PARALLEL 无判路由 LLM，
+ * - 六种模板：ROUTER_PARALLEL 有判路由 LLM；FIXED_SEQUENCE / FIXED_PARALLEL 无判路由 LLM，
  *   总控行只显示「无判路由 + 参与者」短条；CRITIC_LOOP 也无判路由，执行者 / 评审专家串行兄弟；
- *   ROUTER_THEN_SEQUENCE 有 JUDGE，但命中子按判定序串行，子块时间窗天然不重叠。
+ *   ROUTER_THEN_SEQUENCE 有 JUDGE，但命中子按判定序串行，子块时间窗天然不重叠；
+ *   COMPETE 无判路由，多个候选同一问题并行，结束后按策略选优取 1 份终答（不拼接）；
+ *   汇总策略 VOTE 不改模板拓扑，只在汇总行显示 winner（票池＝各成功子终答，失败降级 CONCAT）。
  */
 import type { ObsSpan } from '@/types/obs'
 
@@ -25,6 +27,8 @@ export const LANE_TEMPLATE_FIXED_PARALLEL = 'FIXED_PARALLEL'
 export const LANE_TEMPLATE_CRITIC_LOOP = 'CRITIC_LOOP'
 /** 路由后串行模板：有 JUDGE，命中子按判定序串行（不是「无判路由」） */
 export const LANE_TEMPLATE_ROUTER_THEN_SEQUENCE = 'ROUTER_THEN_SEQUENCE'
+/** 竞争选优模板：无判路由；多候选同题并行，结束后按策略只取 1 份终答 */
+export const LANE_TEMPLATE_COMPETE = 'COMPETE'
 /** 固定模板集合：用于决定总控行是否画「判路由」 */
 export const LANE_FIXED_TEMPLATES = [LANE_TEMPLATE_FIXED_SEQUENCE, LANE_TEMPLATE_FIXED_PARALLEL]
 /** 汇总：按序拼接 */
@@ -33,6 +37,10 @@ export const LANE_AGGREGATE_CONCAT = 'CONCAT'
 export const LANE_AGGREGATE_SUMMARIZE = 'SUMMARIZE'
 /** 汇总：评审环无汇总步骤（终答＝最后一版执行稿） */
 export const LANE_AGGREGATE_NONE = 'NONE'
+/** 汇总：竞争选优选优（不是拼接也不是模型汇总；终答＝winner 子终答） */
+export const LANE_AGGREGATE_PICK = 'PICK'
+/** 汇总：投票选优（评选模型在成功子终答里选 1 路原文；失败降级 CONCAT） */
+export const LANE_AGGREGATE_VOTE = 'VOTE'
 /** 上下文策略：本轮子 Agent 共享键控草稿区（由 ROUTE attrs ma.context 识别） */
 export const LANE_CONTEXT_SHARED_SCRATCH = 'SHARED_SCRATCH'
 
@@ -77,6 +85,16 @@ export interface OrchestrationLaneModel {
   template: string
   /** 汇总策略；来源 attrs，缺失按是否出现汇总 LLM 推断 */
   aggregate: string
+  /** 竞争选优赢家 route_key；仅 COMPETE 且已选优时有值，其余为空串 */
+  competeWinner: string
+  /** 竞争选优实际生效策略（可能已降级为 FIRST_SUCCESS）；非 COMPETE 为空串 */
+  competeStrategy: string
+  /** 竞争选优是否发生过降级（评选模型不可用 / 未给合法赢家） */
+  competeDegraded: boolean
+  /** 投票选优赢家 route_key；仅 aggregate=VOTE 且选中时有值，其余为空串 */
+  voteWinner: string
+  /** 投票选优是否发生过降级（评选失败 → CONCAT） */
+  voteDegraded: boolean
   /** 上下文策略；来源 ROUTE attrs 的 ma.context，缺失为空串（旧 trace 不回填） */
   contextPolicy: string
   /** 共享草稿区已写入的键数；只有本轮选了 SHARED_SCRATCH 且后端打过点才有值 */
@@ -91,7 +109,7 @@ export interface OrchestrationLaneModel {
   childCount: number
   /** 汇总说明，直接展示 */
   aggregateNote: string
-  /** 判路由给出的 route_key，按判定顺序 */
+  /** 判路由给出的 route_key，按判定顺序（COMPETE 为参赛候选顺序） */
   routeKeys: string[]
 }
 
@@ -245,6 +263,11 @@ export function buildOrchestrationLane(
     routeSpan: null,
     template: LANE_TEMPLATE_ROUTER_PARALLEL,
     aggregate: LANE_AGGREGATE_CONCAT,
+    competeWinner: '',
+    competeStrategy: '',
+    competeDegraded: false,
+    voteWinner: '',
+    voteDegraded: false,
     contextPolicy: '',
     scratchKeyCount: null,
     scratchConflictCount: null,
@@ -285,6 +308,8 @@ export function buildOrchestrationLane(
   const fixedTemplate = LANE_FIXED_TEMPLATES.includes(template as (typeof LANE_FIXED_TEMPLATES)[number])
   const criticTemplate = template === LANE_TEMPLATE_CRITIC_LOOP
   const fixedParallel = template === LANE_TEMPLATE_FIXED_PARALLEL
+  // 竞争选优：无判路由、多候选同题并行，收尾是「选优」而不是拼接 / 模型汇总
+  const competeTemplate = template === LANE_TEMPLATE_COMPETE
   // 路由后串行：有 JUDGE，但扇出是串行；既不能走固定模板的「无判路由」文案，也不是并行
   const routerThenSequence = template === LANE_TEMPLATE_ROUTER_THEN_SEQUENCE
 
@@ -318,6 +343,23 @@ export function buildOrchestrationLane(
       ? (attrs['ma.aggregate'] as string)
       : (aggregateRows.length ? LANE_AGGREGATE_SUMMARIZE : LANE_AGGREGATE_CONCAT)
   const summarize = aggregate === LANE_AGGREGATE_SUMMARIZE
+  // 竞争选优：终答只取赢家子正文，没有拼接也没有模型汇总调用
+  const pick = aggregate === LANE_AGGREGATE_PICK
+  // 投票选优：汇总策略 VOTE，票池是各成功子终答，winner 只在选举成功时有值
+  const vote = aggregate === LANE_AGGREGATE_VOTE
+  const voteWinner = vote && typeof attrs['ma.vote.winner'] === 'string'
+    ? (attrs['ma.vote.winner'] as string).trim()
+    : ''
+  const voteDegraded = vote && attrs['ma.vote.degraded'] === 'true'
+  const voteFailed = vote ? (nullableInt(attrs['ma.vote.fail']) ?? 0) : 0
+  const competeWinner = competeTemplate && typeof attrs['ma.compete.winner'] === 'string'
+    ? (attrs['ma.compete.winner'] as string).trim()
+    : ''
+  const competeStrategy = competeTemplate && typeof attrs['ma.compete.strategy_used'] === 'string'
+    ? (attrs['ma.compete.strategy_used'] as string).trim()
+    : ''
+  const competeDegraded = competeTemplate && attrs['ma.compete.degraded'] === 'true'
+  const competeFailed = competeTemplate ? (nullableInt(attrs['ma.compete.fail']) ?? 0) : 0
 
   // route_key：优先用 sub_query 与子 AGENT span 的 inputText 精确对齐；对齐不上再按判定顺序兜底
   const keyBySub = new Map<string, string>()
@@ -327,8 +369,9 @@ export function buildOrchestrationLane(
     }
   }
   const keyOf = (span: ObsSpan, index: number): string => {
-    // 固定模板的所有子吃同一份用户原问，按 sub_query 对齐会全部命中同一条，必须按序对齐
-    if (fixedTemplate) {
+    // 固定模板的所有子吃同一份用户原问，按 sub_query 对齐会全部命中同一条，必须按序对齐；
+    // 竞争选优同理（同题竞争，sub_query 全等），也只能按候选顺序对齐
+    if (fixedTemplate || competeTemplate) {
       return decision[index]?.routeKey || ''
     }
     const matched = keyBySub.get((span.inputText || '').trim())
@@ -352,7 +395,9 @@ export function buildOrchestrationLane(
         ? `${fixedParallel ? '固定并行' : '固定串行'} · 无判路由`
         : routerThenSequence
           ? '路由后串行 · JUDGE 后串行'
-          : 'JUDGE · 判路由',
+          : competeTemplate
+            ? '竞争选优 · 无判路由'
+            : 'JUDGE · 判路由',
     spans: [route, ...judgeRows],
     running: [route, ...judgeRows].some(isRunning),
     failed: [route, ...judgeRows].some(isFailed)
@@ -370,7 +415,11 @@ export function buildOrchestrationLane(
           }`
           : routerThenSequence
             ? `路由后串行：JUDGE 判定 → ${routeKeys.length ? routeKeys.join(' → ') : `${childSpans.length} 个子`}（按判定序串行）`
-            : `路由判定 → ${routeKeys.length ? routeKeys.join('、') : (shortText(route.outputText, 48) || '—')}`,
+            : competeTemplate
+              ? `竞争选优：跳过判路由，${routeKeys.length || childSpans.length} 个候选同题并行（策略：${
+                competeStrategy === 'FIRST_SUCCESS' ? '首个成功子' : '评选模型选优'
+              }）`
+              : `路由判定 → ${routeKeys.length ? routeKeys.join('、') : (shortText(route.outputText, 48) || '—')}`,
     tone: route.status === 'ERROR' ? 'danger' : 'info',
     spanIds: [route.id]
   })
@@ -391,9 +440,19 @@ export function buildOrchestrationLane(
     const criticRole = criticTemplate ? criticRoleText(attrs) : ''
     // 路由后串行：把「判定序第几步」写进副标题，和并行模板的并排观感明确区分
     const serialStepText = routerThenSequence ? ` · 串行第 ${index + 1}/${childSpans.length} 步` : ''
+    // 竞争选优 / 投票选优：winner 加星标，一眼看出终答取自哪一位候选
+    const winnerMark = routeKey && (
+      (competeTemplate && !!competeWinner && routeKey === competeWinner)
+      || (vote && !!voteWinner && routeKey === voteWinner)
+    ) ? '★ 选中' : ''
     const subtitle = criticTemplate && criticRole
       ? `${criticRole}${paused ? ' · 待批准' : ''}`
-      : `${routeKey ? `${routeKey} · ` : ''}${runMode}${serialStepText}${paused ? ' · 待批准' : ''}`
+      : [
+        winnerMark,
+        routeKey ? `${routeKey}` : '',
+        `${runMode}${serialStepText}`,
+        paused ? '待批准' : ''
+      ].filter(Boolean).join(' · ')
     rows.push({
       key: `child-${span.id}`,
       kind: 'child',
@@ -430,7 +489,7 @@ export function buildOrchestrationLane(
     events.push({
       key: `child-end-${span.id}`,
       atMs: msOf(span.endTime),
-      text: `子「${label}」成功${latency}`,
+      text: `子「${label}」成功${latency}${winnerMark ? ` · ${winnerMark}` : ''}`,
       tone: 'ok',
       spanIds: [span.id]
     })
@@ -440,23 +499,66 @@ export function buildOrchestrationLane(
   // 评审环没有汇总步骤：终答＝最后一版执行稿，评审意见默认只进时间线
   const aggregateNote = criticTemplate
     ? '评审环不做多段拼接：终答＝最后一版执行稿'
-    : summarize
-      ? (aggregateRows.length ? '父模型汇总' : '未找到汇总调用，可能已降级为拼接')
-      : routerThenSequence
-        ? '按判定顺序串行拼接，无模型调用'
-        : '按顺序拼接，无模型调用'
+    : pick
+      ? `竞争选优只取 1 份终答：winner=${competeWinner || '未标注'}${
+        competeDegraded ? '（评选模型不可用，已降级为第一个成功子）' : ''
+      }${competeFailed > 0 ? `；${competeFailed} 位候选失败不影响终答` : ''}`
+      : vote
+        ? `投票选优只取 1 份终答：winner=${voteWinner || '未标注'}${
+          voteDegraded ? '（评选失败，已降级为拼接）' : ''
+        }${voteFailed > 0 ? `；${voteFailed} 位子失败不进票池` : ''}`
+        : summarize
+          ? (aggregateRows.length ? '父模型汇总' : '未找到汇总调用，可能已降级为拼接')
+          : routerThenSequence
+            ? '按判定顺序串行拼接，无模型调用'
+            : '按顺序拼接，无模型调用'
   rows.push({
     key: 'aggregate',
     kind: 'aggregate',
-    title: criticTemplate ? '终答（最后一版执行稿）' : summarize ? '汇总（SUMMARIZE）' : '汇总（CONCAT）',
-    subtitle: criticTemplate ? '评审环' : summarize ? 'AGGREGATE' : '拼接',
+    title: criticTemplate
+      ? '终答（最后一版执行稿）'
+      : pick
+        ? `选优（PICK${competeWinner ? ` · ${competeWinner}` : ''}）`
+        : vote
+          ? `投票（VOTE${voteWinner ? ` · ${voteWinner}` : ''}${voteDegraded ? ' · 降级拼接' : ''}）`
+          : summarize ? '汇总（SUMMARIZE）' : '汇总（CONCAT）',
+    subtitle: criticTemplate
+      ? '评审环'
+      : pick ? '选优' : vote ? (voteDegraded ? 'VOTE · 降级' : 'VOTE') : summarize ? 'AGGREGATE' : '拼接',
     spans: aggregateRows,
     running: aggregateRows.some(isRunning),
     failed: aggregateRows.some(isFailed)
   })
   const lastAggregate = aggregateRows[aggregateRows.length - 1]
   const lastChild = childSpans[childSpans.length - 1]
-  if (lastAggregate) {
+  if (pick) {
+    // 竞争选优：评选 LLM（JUDGE_PICK）挂在汇总行；FIRST_SUCCESS 没有调用，只留一行结论
+    events.push({
+      key: 'compete-pick',
+      atMs: msOf(lastAggregate?.endTime) ?? msOf(lastChild?.endTime) ?? msOf(route.endTime),
+      text: competeDegraded
+        ? `选优降级：评选模型不可用，已按首个成功子出终答（winner=${competeWinner || '—'}）`
+        : `选优：策略 ${competeStrategy === 'FIRST_SUCCESS' ? '首个成功子' : '评选模型选优'}，winner=${
+          competeWinner || '—'
+        }`,
+      tone: competeDegraded ? 'warn' : (isFailed(lastAggregate ?? route) ? 'danger' : 'ok'),
+      spanIds: lastAggregate ? [lastAggregate.id] : (lastChild ? [lastChild.id] : [])
+    })
+  } else if (vote) {
+    // 投票选优：选票 LLM 挂汇总行；只有 1 路成功时没有调用，只留一行「跳过投票」
+    const skipped = voteWinner && !aggregateRows.length
+    events.push({
+      key: 'vote-pick',
+      atMs: msOf(lastAggregate?.endTime) ?? msOf(lastChild?.endTime) ?? msOf(route.endTime),
+      text: voteDegraded
+        ? `投票降级：评选失败，已按分段拼接出终答（选中=${voteWinner || '—'}）`
+        : skipped
+          ? `投票：仅 1 个成功子（winner=${voteWinner || '—'}），跳过投票直接出终答`
+          : `投票：winner=${voteWinner || '—'}（终答＝该子原文，不做二次改写）`,
+      tone: voteDegraded ? 'warn' : (isFailed(lastAggregate ?? route) ? 'danger' : 'ok'),
+      spanIds: lastAggregate ? [lastAggregate.id] : (lastChild ? [lastChild.id] : [])
+    })
+  } else if (lastAggregate) {
     events.push({
       key: `aggregate-${lastAggregate.id}`,
       atMs: msOf(lastAggregate.endTime) ?? msOf(lastAggregate.startTime),
@@ -513,6 +615,11 @@ export function buildOrchestrationLane(
     routeSpan: route,
     template,
     aggregate,
+    competeWinner,
+    competeStrategy,
+    competeDegraded,
+    voteWinner,
+    voteDegraded,
     contextPolicy: typeof attrs['ma.context'] === 'string' ? (attrs['ma.context'] as string) : '',
     scratchKeyCount: nullableInt(attrs['ma.scratch.key_count']),
     scratchConflictCount: nullableInt(attrs['ma.scratch.conflict_count']),

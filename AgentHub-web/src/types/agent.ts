@@ -66,15 +66,15 @@ export interface AgentDetail {
 export interface AgentRuntimeConfig {
   /** 允许多意图路由；新建 ROUTER 默认 true */
   multiIntentEnabled?: boolean
-  /** CONCAT | SUMMARIZE；默认 CONCAT；编排 Tab 的「结果合成」 */
+  /** CONCAT | SUMMARIZE | VOTE；默认 CONCAT；VOTE 仅路由并行 / 固定并行 / 路由后串行可用 */
   answerMode?: 'CONCAT' | 'SUMMARIZE' | string
   /** 每轮最多子数；默认 3，硬顶 5；编排 Tab 的「并行上限」 */
   maxRouteChildren?: number
-  /** 协作模式；ROUTER_PARALLEL | FIXED_SEQUENCE | FIXED_PARALLEL | CRITIC_LOOP | ROUTER_THEN_SEQUENCE，非法/空回显 ROUTER_PARALLEL */
+  /** 协作模式；ROUTER_PARALLEL | FIXED_SEQUENCE | FIXED_PARALLEL | CRITIC_LOOP | ROUTER_THEN_SEQUENCE | COMPETE，非法/空回显 ROUTER_PARALLEL */
   maTemplate?: string
   /**
    * 上下文共享；ISOLATED（默认）| PRIOR_SUMMARY_ONLY（仅串行模板：固定串行 / 路由后串行）|
-   * SHARED_SCRATCH（共享草稿区，五值模板都可选；与本字段单选的前置摘要互斥）。
+   * SHARED_SCRATCH（共享草稿区，六值模板都可选；与本字段单选的前置摘要互斥）。
    */
   maContextPolicy?: string
   /** 单任务时是否继承父会话历史；默认 true */
@@ -100,6 +100,11 @@ export interface AgentRuntimeConfig {
    * 非评审环模板也保留该值，切回时可直接复用。
    */
   maCriticAgentId?: number | null
+  /**
+   * 竞争选优（COMPETE）：JUDGE_PICK（默认，评选模型选优）| FIRST_SUCCESS（第一个成功子）。
+   * 非竞争模板也保留该值，切回时可直接复用。
+   */
+  competeStrategy?: string
 }
 
 /** 平台运行限制默认与硬顶 */
@@ -257,6 +262,8 @@ export interface SkillBind {
   title?: string
   status: number
   targetStatus?: number
+  /** 技能当前生效的已发布版本号；未发布过为 null */
+  activeVersionNo?: number | null
   /** ROUTER 绑过多时的保存警告 */
   warning?: string
 }

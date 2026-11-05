@@ -54,6 +54,23 @@ public class AgentRuntimeConfig {
      */
     public static final String TEMPLATE_ROUTER_THEN_SEQUENCE = "ROUTER_THEN_SEQUENCE";
 
+    /**
+     * 竞争选优模板：同一份用户原问并发派给多个启用候选（不做判路由切分），
+     * 等齐后按 {@link #competeStrategyOrDefault()} 选优，只取 1 个子终答作为终稿。
+     * <p>与 {@link #TEMPLATE_FIXED_PARALLEL} 的唯一区别：不做多段拼接，而是「选一个赢家」。
+     * <p>最少参与候选数见 {@link #MIN_COMPETE_CANDIDATES}；不做多轮辩论 / 投票委员会（后续）。
+     */
+    public static final String TEMPLATE_COMPETE = "COMPETE";
+
+    /** 竞争选优策略：评选模型选优（默认）。产出 winner + 短理由，失败降级 FIRST_SUCCESS */
+    public static final String COMPETE_STRATEGY_JUDGE_PICK = "JUDGE_PICK";
+
+    /** 竞争选优策略：第一个成功子的终答（按候选 sort_order，不按完成先后），不做评选调用 */
+    public static final String COMPETE_STRATEGY_FIRST_SUCCESS = "FIRST_SUCCESS";
+
+    /** 竞争选优最少参与候选数：1 个候选谈不上「竞争」，保存与运行都按此拦 */
+    public static final int MIN_COMPETE_CANDIDATES = 2;
+
     /** 上下文策略：子 Agent 互相隔离，只吃 sub_query / 用户原问（现网多意图硬规则） */
     public static final String CONTEXT_ISOLATED = "ISOLATED";
 
@@ -101,8 +118,8 @@ public class AgentRuntimeConfig {
     public static final int MAX_CRITIC_ROUNDS_CAP = 3;
 
     /**
-     * 编排模板；五值可持久：ROUTER_PARALLEL | FIXED_SEQUENCE | FIXED_PARALLEL | CRITIC_LOOP |
-     * ROUTER_THEN_SEQUENCE。
+     * 编排模板；六值可持久：ROUTER_PARALLEL | FIXED_SEQUENCE | FIXED_PARALLEL | CRITIC_LOOP |
+     * ROUTER_THEN_SEQUENCE | COMPETE。
      * <p>非法/缺失值在归一化时回落 {@link #TEMPLATE_ROUTER_PARALLEL}，保证旧数据（无此字段）
      * 读出来仍是合法且可执行的模板。
      */
@@ -125,7 +142,11 @@ public class AgentRuntimeConfig {
     /** 允许多意图路由；新建 ROUTER 默认 true */
     private Boolean multiIntentEnabled;
 
-    /** CONCAT / SUMMARIZE；默认 CONCAT */
+    /**
+     * CONCAT / SUMMARIZE / VOTE；默认 CONCAT。
+     * <p>VOTE（投票选优）只对「有末段汇总」的模板成立，见 {@link #supportsVote(String)}；
+     * 其它模板归一化时回落 CONCAT，避免配置写着投票、执行却是串行直出。
+     */
     private String answerMode;
 
     /** 每轮最多 N 个子；空则默认 3，写入时夹到 1～硬顶 */
@@ -166,6 +187,28 @@ public class AgentRuntimeConfig {
     private Long maCriticAgentId;
 
     /**
+     * 判路由 / 终答汇总用的模型实例；MA-P2 刀2 起执行器从 {@code ma_def.config_json} 读它。
+     * <p>虚拟根（{@code root_agent_id IS NULL}）没有 Agent 模型槽，必须靠它才能判路由；
+     * 绑根方案为空时回落该 ROUTER Agent 的 ROUTER / CHAT 槽，保持旧行为。
+     * <p>值语义：{@code model_instance.id}；不写库内密码、不参与出站凭证解析。
+     */
+    private Long maJudgeModelInstanceId;
+
+    /**
+     * 判路由模型的兼容别名（配置文件 / 脚本可直接写模型名）。
+     * <p>纯数字按 {@link #maJudgeModelInstanceId} 解释；其它值按启用中实例的
+     * {@code model_id} 或展示名大小写不敏感匹配。两者同时存在时以 id 为准。
+     */
+    private String maJudgeModel;
+
+    /**
+     * 竞争选优（{@link #TEMPLATE_COMPETE}）的选优策略：JUDGE_PICK | FIRST_SUCCESS。
+     * <p>缺省 / 非法回落 {@link #COMPETE_STRATEGY_JUDGE_PICK}；非竞争模板也保留该值，
+     * 便于用户在模板之间来回切换时恢复上一次选择（执行侧只在模板=COMPETE 时读取）。
+     */
+    private String competeStrategy;
+
+    /**
      * 按运行模式给出默认配置。三种模式都返回完整对象，便于前端统一绑定。
      *
      * @param runMode REACT / ROUTER / PLAN_AND_EXECUTE
@@ -191,6 +234,8 @@ public class AgentRuntimeConfig {
         // 评审环默认 1 轮、未选评审者：显式选评审环但没选人时由保存校验报中文 error
         config.setMaCriticMaxRounds(DEFAULT_CRITIC_MAX_ROUNDS);
         config.setMaCriticAgentId(null);
+        // 竞争选优默认「评选模型选优」：不选策略时也必须是可执行且企业向的默认值
+        config.setCompeteStrategy(COMPETE_STRATEGY_JUDGE_PICK);
         return config;
     }
 
@@ -248,7 +293,7 @@ public class AgentRuntimeConfig {
     }
 
     /**
-     * @return 归一化后的编排模板；五值白名单之外一律回落 ROUTER_PARALLEL
+     * @return 归一化后的编排模板；六值白名单之外一律回落 ROUTER_PARALLEL
      */
     public String maTemplateOrDefault() {
         return validTemplate(maTemplate) ? maTemplate : TEMPLATE_ROUTER_PARALLEL;
@@ -332,15 +377,67 @@ public class AgentRuntimeConfig {
     }
 
     /**
+     * @return 是否竞争选优模板（同题并行 → 选优，只取 1 个子终答）
+     */
+    public boolean isCompete() {
+        return TEMPLATE_COMPETE.equals(maTemplateOrDefault());
+    }
+
+    /**
+     * @return 归一化后的选优策略；白名单外（含空）回落 {@link #COMPETE_STRATEGY_JUDGE_PICK}
+     */
+    public String competeStrategyOrDefault() {
+        return COMPETE_STRATEGY_FIRST_SUCCESS.equals(competeStrategy)
+                ? COMPETE_STRATEGY_FIRST_SUCCESS
+                : COMPETE_STRATEGY_JUDGE_PICK;
+    }
+
+    /**
+     * @param strategy 策略码
+     * @return true 表示是竞争选优白名单内的策略
+     */
+    public static boolean validCompeteStrategy(String strategy) {
+        return COMPETE_STRATEGY_JUDGE_PICK.equals(strategy) || COMPETE_STRATEGY_FIRST_SUCCESS.equals(strategy);
+    }
+
+    /**
      * @param template 模板码
-     * @return 是否是五值白名单内的合法模板
+     * @return 是否是六值白名单内的合法模板
      */
     public static boolean validTemplate(String template) {
         return TEMPLATE_ROUTER_PARALLEL.equals(template)
                 || TEMPLATE_FIXED_SEQUENCE.equals(template)
                 || TEMPLATE_FIXED_PARALLEL.equals(template)
                 || TEMPLATE_CRITIC_LOOP.equals(template)
+                || TEMPLATE_ROUTER_THEN_SEQUENCE.equals(template)
+                || TEMPLATE_COMPETE.equals(template);
+    }
+
+    /**
+     * 该模板是否支持「投票选优」（{@link RouterAnswerMode#VOTE}）作为终答汇总方式。
+     *
+     * <p>白名单只放「等齐后统一出终答」的模板：
+     * <ul>
+     *   <li>ROUTER_PARALLEL / FIXED_PARALLEL：多子并行，票池天然 ≥1；</li>
+     *   <li>ROUTER_THEN_SEQUENCE：判路由后串行，末段仍有汇总点。</li>
+     * </ul>
+     * COMPETE 的选优由模板自身（PICK）负责、CRITIC_LOOP 不拼接、FIXED_SEQUENCE 串行主语义保持不变，
+     * 三者都不接受 VOTE。
+     *
+     * @param template 已归一的模板码
+     * @return true＝可配 VOTE
+     */
+    public static boolean supportsVote(String template) {
+        return TEMPLATE_ROUTER_PARALLEL.equals(template)
+                || TEMPLATE_FIXED_PARALLEL.equals(template)
                 || TEMPLATE_ROUTER_THEN_SEQUENCE.equals(template);
+    }
+
+    /**
+     * @return 本方案是否启用投票选优（模板合法且汇总码为 VOTE）
+     */
+    public boolean voteModeOn() {
+        return answerModeEnum() == RouterAnswerMode.VOTE;
     }
 
     /**
@@ -351,10 +448,10 @@ public class AgentRuntimeConfig {
     }
 
     /**
-     * @return 终答模式枚举
+     * @return 终答模式枚举；VOTE 只在支持投票的模板上生效，其它模板按 CONCAT（与归一化同口径）
      */
     public RouterAnswerMode answerModeEnum() {
-        return RouterAnswerMode.from(answerMode);
+        return answerModeFor(maTemplateOrDefault(), answerMode);
     }
 
     /**
@@ -470,6 +567,24 @@ public class AgentRuntimeConfig {
         return Math.min(n, MAX_CRITIC_ROUNDS_CAP);
     }
 
+    /**
+     * 终答模式归一：先按枚举解析，再按模板能力收敛。
+     *
+     * <p>VOTE 只保留在支持投票的模板上；其它模板回落 CONCAT。缺省仍是 CONCAT，
+     * 因此旧配置读出来行为不变。
+     *
+     * @param template 已归一的模板码
+     * @param raw      raw 配置值，可空
+     * @return 可执行且与模板自洽的终答模式
+     */
+    private static RouterAnswerMode answerModeFor(String template, String raw) {
+        RouterAnswerMode mode = RouterAnswerMode.from(raw);
+        if (mode == RouterAnswerMode.VOTE && !supportsVote(template)) {
+            return RouterAnswerMode.CONCAT;
+        }
+        return mode;
+    }
+
     private static AgentRuntimeConfig normalize(AgentRuntimeConfig source, AgentRuntimeConfig defaults) {
         AgentRuntimeConfig out = new AgentRuntimeConfig();
         // 模板五值可持久：显式选了固定/评审/路由后串行模板就原样落库，非法/空才回落 ROUTER_PARALLEL
@@ -496,8 +611,9 @@ public class AgentRuntimeConfig {
         out.setMultiIntentEnabled(source.getMultiIntentEnabled() == null
                 ? defaults.getMultiIntentEnabled()
                 : source.getMultiIntentEnabled());
-        out.setAnswerMode(RouterAnswerMode.from(
-                source.getAnswerMode() == null ? defaults.getAnswerMode() : source.getAnswerMode()).name());
+        out.setAnswerMode(answerModeFor(template, source.getAnswerMode() == null
+                ? defaults.getAnswerMode()
+                : source.getAnswerMode()).name());
         Integer max = source.getMaxRouteChildren() == null
                 ? defaults.getMaxRouteChildren()
                 : source.getMaxRouteChildren();
@@ -528,6 +644,13 @@ public class AgentRuntimeConfig {
         }
         out.setMaCriticMaxRounds(Math.min(criticRounds, MAX_CRITIC_ROUNDS_CAP));
         out.setMaCriticAgentId(source.getMaCriticAgentId());
+        // 判路由模型：只做原样透传，是否可用在开跑时按实例启停与凭证校验，避免保存即锁死
+        out.setMaJudgeModelInstanceId(source.getMaJudgeModelInstanceId());
+        out.setMaJudgeModel(source.getMaJudgeModel() == null ? null : source.getMaJudgeModel().trim());
+        // 竞争选优策略：白名单外（含空）回落 JUDGE_PICK；非竞争模板也保留，便于切回时恢复选择
+        out.setCompeteStrategy(validCompeteStrategy(source.getCompeteStrategy())
+                ? source.getCompeteStrategy()
+                : COMPETE_STRATEGY_JUDGE_PICK);
         // 子运行模式：无论请求里给没给，都按白名单清洗并补 REACT；不存在「空集合」这种落库值
         out.setMaChildRunModesAllowed(new ArrayList<>(normalizeChildRunModes(source.getMaChildRunModesAllowed())));
         return out;

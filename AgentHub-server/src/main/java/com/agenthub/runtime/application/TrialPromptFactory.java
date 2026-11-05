@@ -39,6 +39,8 @@ import java.util.Set;
  * <p>
  * Skill 目录始终带 title + description（场景），供模型判断何时加载；正文只在预算内灌入。
  * 触发关键词命中时改为强制注入：该 Skill 全文带固定前缀直接进上下文，不经模型决定。
+ * 正文字段来自「当前生效的已发布版本」（由仓储派生），草稿不会进提示词；
+ * 从未发布过（无生效版）则只留标题 + 场景，不做硬触发，避免注入一条空规则。
  * 可调用工具要么完整 schema 进预算并注册，要么本轮不暴露；禁止「仅留名当可调用」。
  * BUILTIN 的 schema 以 Java {@code @Tool} 为准，库表空或旧文不削弱约束；Java 没有实现时才退回库表。
  * MCP 与 BUILTIN 同一套 tools-schema 预算、同一绑定序；MCP 用库表 input_schema_json（可空占位）。
@@ -179,9 +181,10 @@ public class TrialPromptFactory {
      *   <li>常规：进目录，永远带 title + description（场景），供模型按需判断；
      *       description 为空时退回 name，绝不把 remark 当场景。</li>
      *   <li>强制：{@code trigger_keywords} 任一非空词出现在本轮用户输入里，
-     *       直接标记 triggered=true，由 Composer 拼接固定前缀 + 正文，不再等模型决定。</li>
+     *       直接标记 triggered=true，由 Composer 拼接固定前缀 + 生效版正文，不再等模型决定。</li>
      * </ul>
      * 停用或绑定关闭的 Skill 在这里就被剔除，因此既不会进目录也不会硬触发。
+     * 正文与简介来自当前生效的已发布版本；无生效版时只是不进强制块，目录仍可显示标题。
      *
      * @param agentId   Agent
      * @param userQuery 本轮用户原文，可空；为空时不会有任何硬触发
@@ -202,10 +205,15 @@ public class TrialPromptFactory {
             }
             SkillDef one = skill.get();
             String title = one.getTitle() == null || one.getTitle().isBlank() ? one.getName() : one.getTitle();
-            // 场景取 description（简介），供模型判断何时加载；remark 是内部备注，永不注入
+            // 场景取 description（简介），供模型判断何时加载；remark 是内部备注，永不注入。
+            // 真版本口径：仓储已把 description / contentMd 填成「当前生效已发布版」，
+            // 因此草稿内容不会进提示词；没有发布过时 contentMd 为空。
             String scene = one.getDescription() == null ? "" : one.getDescription();
-            boolean triggered = SkillTriggerMatcher.matches(userQuery, one.getTriggerKeywords());
-            rows.add(new PromptInjectionComposer.SkillInput(title, scene, one.getContentMd(), triggered));
+            String body = one.getContentMd();
+            // 无生效已发布正文时不做硬触发：只留目录项（标题 + 场景），避免注入一条空规则
+            boolean triggered = body != null && !body.isBlank()
+                    && SkillTriggerMatcher.matches(userQuery, one.getTriggerKeywords());
+            rows.add(new PromptInjectionComposer.SkillInput(title, scene, body, triggered));
         }
         return rows;
     }

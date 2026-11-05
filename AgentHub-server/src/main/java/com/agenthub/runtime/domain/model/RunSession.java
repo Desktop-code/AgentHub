@@ -14,6 +14,8 @@ public class RunSession {
 
     private Long id;
     private Long agentId;
+    /** ma_def.id；虚拟根试跑归属，绑根会话为空（执行按启用方案实时解析） */
+    private Long maDefId;
     private String runMode;
     private Long userId;
     private String status;

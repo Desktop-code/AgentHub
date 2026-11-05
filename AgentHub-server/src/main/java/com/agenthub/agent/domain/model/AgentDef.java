@@ -47,6 +47,11 @@ public class AgentDef {
      */
     private String runtimeConfigJson;
     private Integer status;
+    /**
+     * 逻辑删除标记：0 未删，1 已删。
+     * 普通 findById 恒为未删；仅 findByIdIncludingDeleted 可能带回 1，供用量历史拼名。
+     */
+    private Integer deleted;
     private String remark;
     private Long createdBy;
     private LocalDateTime createTime;

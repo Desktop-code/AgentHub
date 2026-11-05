@@ -6,6 +6,7 @@ import com.agenthub.obs.domain.model.SpanDraft;
 import com.agenthub.obs.domain.model.SpanType;
 import com.agenthub.obs.domain.service.StepNoAllocator;
 
+import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicReference;
@@ -210,6 +211,21 @@ public final class ObsTraceScope {
      */
     public void close(Long spanId, SpanClose close) {
         recorder.closeSpan(this, spanId, close);
+    }
+
+    /**
+     * 给已结束的步骤补写 attrs 字段（如投票 winner / 降级标记）。
+     *
+     * <p>只加不删；spanId 为空或 trace 未启用时静默跳过，埋点失败不影响主流程。
+     *
+     * @param spanId 行主键
+     * @param fields 追加字段；空则忽略
+     */
+    public void amendAttrs(Long spanId, Map<String, Object> fields) {
+        if (spanId == null || fields == null || fields.isEmpty()) {
+            return;
+        }
+        recorder.amendAttrs(this, spanId, fields);
     }
 
     /**

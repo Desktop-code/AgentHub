@@ -15,9 +15,17 @@
         <el-tag
           size="small"
           effect="plain"
-          :type="model.aggregate === LANE_AGGREGATE_SUMMARIZE ? 'warning' : 'info'"
+          :type="model.aggregate === LANE_AGGREGATE_SUMMARIZE || model.aggregate === LANE_AGGREGATE_VOTE
+            ? (model.voteDegraded ? 'warning' : 'success')
+            : 'info'"
         >
-          {{ model.aggregate === LANE_AGGREGATE_NONE ? '终答 · 执行稿' : `汇总 · ${model.aggregate}` }}
+          {{ model.aggregate === LANE_AGGREGATE_NONE
+            ? '终答 · 执行稿'
+            : model.aggregate === LANE_AGGREGATE_PICK
+              ? '选优 · PICK'
+              : model.aggregate === LANE_AGGREGATE_VOTE
+                ? `投票 · VOTE${model.voteDegraded ? ' · 降级' : ''}`
+                : `汇总 · ${model.aggregate}` }}
         </el-tag>
         <el-tag size="small" effect="plain" type="info">{{ model.childCount }} 个子</el-tag>
         <!-- 共享草稿区：只标徽标与键数 / 冲突数；完整草稿看板属 P2，这里不展开 -->
@@ -39,7 +47,7 @@
 
     <div v-if="expanded" class="lane__body">
       <!-- 无会话：还没试跑过（临时草稿也走这里） -->
-      <p v-if="!session" class="lane__empty">试跑后可查看编排泳道</p>
+      <p v-if="!session" class="lane__empty">运行后可查看编排泳道</p>
       <!-- 权限不足：给出中文说明，不弹全局错误 -->
       <p v-else-if="!canView" class="lane__empty">没有调用追踪权限，无法查看编排泳道</p>
       <el-alert v-else-if="error" :title="error" type="error" show-icon :closable="false" class="lane__alert">
@@ -77,8 +85,11 @@ import { useUserStore } from '@/stores/user'
 import type { ObsSpan, ObsTrace } from '@/types/obs'
 import {
   LANE_AGGREGATE_NONE,
+  LANE_AGGREGATE_PICK,
   LANE_AGGREGATE_SUMMARIZE,
+  LANE_AGGREGATE_VOTE,
   LANE_CONTEXT_SHARED_SCRATCH,
+  LANE_TEMPLATE_COMPETE,
   LANE_TEMPLATE_CRITIC_LOOP,
   LANE_TEMPLATE_FIXED_PARALLEL,
   LANE_TEMPLATE_FIXED_SEQUENCE,
@@ -142,6 +153,9 @@ const templateLabel = computed(() => {
   }
   if (model.value.template === LANE_TEMPLATE_ROUTER_THEN_SEQUENCE) {
     return '路由后串行'
+  }
+  if (model.value.template === LANE_TEMPLATE_COMPETE) {
+    return '竞争选优'
   }
   return '路由并行'
 })

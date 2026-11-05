@@ -14,7 +14,7 @@
       </el-tag>
     </section>
 
-    <el-empty v-if="variant === 'drawer' && !activeId" description="请先选择一个 Agent" />
+    <el-empty v-if="variant === 'drawer' && !ownerId" description="请先选择一个 Agent" />
 
     <div v-else class="split">
       <aside class="sessions">
@@ -24,7 +24,7 @@
             v-if="canRun"
             size="small"
             type="primary"
-            :disabled="!activeId || sending || resuming"
+            :disabled="!ownerId || sending || resuming"
             @click="createSession"
           >
             + 新会话
@@ -91,7 +91,7 @@
                 子专家「{{ childPending.childAgentName || '子 Agent' }}」计划待批准
               </p>
               <p class="child-approval-sub">
-                根试跑已暂停（等待子计划批准）；同时仅允许一个待批子。批准后该子继续执行，拒绝则该子记为失败、其它子继续。
+                根运行已暂停（等待子计划批准）；同时仅允许一个待批子。批准后该子继续执行，拒绝则该子记为失败、其它子继续。
               </p>
             </div>
             <div class="child-approval-actions">
@@ -172,6 +172,7 @@ import { MoreFilled, Loading } from '@element-plus/icons-vue'
 import {
   approveTrialPlan,
   clearTrialSession,
+  createMaTrialSession,
   createTrialSession,
   deleteTrialSession,
   getPendingChildPlan,
@@ -241,6 +242,11 @@ const props = withDefaults(
     /** 抽屉由外部指定当前 Agent；整页只当作初始选中 */
     agentId?: number
     runMode?: string
+    /**
+     * 虚拟根试跑归属的方案（MA-P2 刀2）。
+     * 有它时不再按 agentId 建会话/拉列表，改走方案入口；与 agentId 互斥，优先 maId。
+     */
+    maId?: number
   }>(),
   { variant: 'drawer' }
 )
@@ -328,16 +334,27 @@ const PENDING_FIRST_EVENT_MS = 2 * 60_000
 const RESUME_EMPTY_MS = 45_000
 /**
  * 首轮标题补拉的延迟点（毫秒）。
- * 标题由后端异步生成，SSE 结束那一刻通常还没写库；这里按两次延迟重拉列表，
- * 命中即停（标题已有值），避免一直轮询。
+ * 标题在本轮请求内同步写库，正常情况 done 之后立刻拉一次就能拿到；
+ * 这里按两次延迟重拉兜底（服务端列表缓存 / 写读时序异常），命中即停，避免一直轮询。
  */
 const TITLE_REFRESH_DELAYS = [3000, 8000] as const
 /** 打开会话的请求令牌：连点两个会话时丢弃迟到的响应，避免串台。 */
 let openToken = 0
 
 const activeId = computed(() => (props.variant === 'drawer' ? props.agentId : pickedId.value))
+/** 虚拟根模式：有 maId 就按方案归属会话，不再依赖 Agent */
+const maMode = computed(() => (props.maId ?? 0) > 0)
+/**
+ * 会话归属键：虚拟根＝方案 id，否则＝Agent id。
+ * 左栏记忆、草稿壳、创建会话都只认这一个键，避免两条入口各写一套分支。
+ */
+const ownerId = computed(() => (maMode.value ? props.maId : activeId.value))
 
 const shown = computed(() => {
+  // 虚拟根恒为 ROUTER：方案只承载一层编排，没有其它运行模式
+  if (maMode.value) {
+    return { runMode: 'ROUTER' }
+  }
   if (props.variant === 'drawer') {
     return { runMode: props.runMode || '' }
   }
@@ -475,7 +492,8 @@ watch(
   { immediate: true }
 )
 
-watch(activeId, (id, prev) => {
+// 切 Agent / 切方案都要重来一轮：两条入口的会话空间互不相通
+watch(ownerId, (id, prev) => {
   if (restoring) {
     restoring = false
     return
@@ -493,7 +511,7 @@ watch(activeId, (id, prev) => {
 
 onMounted(async () => {
   await loadAgents()
-  await loadVisionCapability(activeId.value)
+  await loadVisionCapability(ownerId.value)
   await loadHistory(true)
 })
 
@@ -530,7 +548,8 @@ async function loadAgents() {
  * @param agentId 当前 Agent；为空表示还没选
  */
 async function loadVisionCapability(agentId?: number) {
-  if (!agentId) {
+  // 虚拟根没有 Agent，也就没有视觉槽：直接关掉上传，避免用户白传一次再被后端拒
+  if (maMode.value || !agentId) {
     visionEnabled.value = false
     return
   }
@@ -558,20 +577,24 @@ async function loadVisionCapability(agentId?: number) {
  * @param selectLatest 首次挂载时选中上次会话或最近一条，方便续聊
  */
 async function loadHistory(selectLatest = false) {
-  const agentId = activeId.value
-  if (!canList.value || !agentId) {
+  const owner = ownerId.value
+  if (!canList.value || !owner) {
     history.value = []
     return
   }
   // 上次看的会话（重进 / 刷新后用来回到本轮，而不是落到空白草稿）
-  const resumedId = recallTrialSession(agentId)
+  const resumedId = recallTrialSession(owner, maMode.value ? 'ma' : 'agent')
   // 首次挂载且已有记忆：立刻并行拉 events、不等列表接口，右栏不留空屏。
   // 列表接口稍后只用来补左栏标题与分组，不参与「先渲染谁」。
   const eager = selectLatest && !!resumedId && !session.value && !draftReady.value
   const eagerTask = eager ? openHistory(resumedId as number) : undefined
   historyLoading.value = true
   try {
-    const { data } = await pageTrialSessions({ current: 1, size: 100, agentId })
+    // 两条入口参数互斥：虚拟根按 maId，绑根按 agentId；后端也拒绝同时携带
+    const pageParams = maMode.value
+      ? { current: 1, size: 100, maId: owner }
+      : { current: 1, size: 100, agentId: owner }
+    const { data } = await pageTrialSessions(pageParams)
     const records = data.data?.records || []
     const kept: TrialSession[] = []
     const empties: TrialSession[] = []
@@ -630,11 +653,43 @@ async function loadHistory(selectLatest = false) {
 }
 
 /**
+ * 首轮结束后把服务端刚写入的标题补进左栏（只改这一行的标题列）。
+ *
+ * <p>为什么不用 loadHistory：那会整表替换左栏，接口抖一下就被清空；
+ * 标题只涉及某一行的两列，按会话单查更稳，也不触发空壳清理之类的副作用。
+ * 失败静默：标题是锦上添花，不能因为补标题把本轮成功的结果弄成报错。
+ *
+ * @param id 会话主键
+ * @returns true 表示确实拿到了标题并已写回左栏
+ */
+async function refreshSessionTitle(id: number) {
+  try {
+    const { data } = await getTrialSession(id)
+    const fresh = data.data
+    const title = (fresh?.sessionTitle || '').trim()
+    if (!title) {
+      return false
+    }
+    const row = history.value.find((item) => item.id === id)
+    if (row) {
+      row.sessionTitle = title
+      row.titleSource = fresh.titleSource
+    }
+    if (session.value?.id === id) {
+      session.value = { ...session.value, sessionTitle: title, titleSource: fresh.titleSource }
+    }
+    return true
+  } catch {
+    return false
+  }
+}
+
+/**
  * 首轮结束后补拉左栏标题。
  *
- * <p>为什么需要：标题由后端在整轮落库之后异步生成，SSE 的 done 帧到达时标题多半还没写库，
- * 紧接着那次 loadHistory 只能拿到空标题。「新对话」会一直挂到用户手动刷新，
- * 体验上像是标题功能没生效；这里按 {@link TITLE_REFRESH_DELAYS} 补两次并提前命中即停。
+ * <p>为什么还需要：标题在本轮请求内同步写库，done 之后已按会话单查补过一次左栏；
+ * 这里保留两次列表补拉兜底，防止单查与列表接口的可见性时序差让「新对话」一直挂着。
+ * 命中即停，不做常驻轮询。
  *
  * <p>为什么只补首轮：标题只由首轮生成，后续轮次不会再变，补拉纯属浪费一次请求。
  *
@@ -715,7 +770,7 @@ function resetConversation() {
  * 「新建后不提问就刷新」不会留下任何记录：临时条只有负 id，从不写记忆、从不入库。
  */
 async function createSession() {
-  if (!activeId.value || !canRun.value || sending.value || resuming.value) {
+  if (!ownerId.value || !canRun.value || sending.value || resuming.value) {
     return
   }
   pageError.value = ''
@@ -736,7 +791,8 @@ function sessionStub(id: number, startTimeMs: number): TrialSession {
   const stamp = formatLocalStamp(new Date(startTimeMs || Date.now()))
   return {
     id,
-    agentId: activeId.value as number,
+    agentId: activeId.value ?? null,
+    maId: maMode.value ? props.maId : undefined,
     runMode: shown.value.runMode || '',
     userId: 0,
     status: 'RUNNING',
@@ -751,7 +807,7 @@ function sessionStub(id: number, startTimeMs: number): TrialSession {
 
 /** 挂上仅前端的临时会话；右栏可输入，左栏由 historyGroups 钉在最前。 */
 function beginLocalDraft() {
-  if (!activeId.value) {
+  if (!ownerId.value) {
     return
   }
   // 新草稿不再代表上次那个落库会话，停掉续订免得把旧会话的进行态写进来
@@ -841,11 +897,11 @@ async function purgeUnaskedSessions(items: TrialSession[]) {
 }
 
 /**
- * 主标题：只认 session_title（自动生成 ≤10 汉字，或用户手改）。
+ * 主标题：只认 session_title（首轮后自动写入的首句截断，或用户手改）。
  *
  * <p>为什么不用 lastMsgPreview 兜底：那是用户第一句话的截断，直接当标题会让左栏变成
  * 一长串问句，和真标题混在一起分不清。没有标题就固定显示「新对话」，
- * 等后端异步生成后再自然替换；预览一律交给副标题展示。
+ * 等后端写入后自然替换；预览一律交给副标题展示。
  *
  * @param item 会话
  */
@@ -1067,7 +1123,7 @@ async function openHistory(id: number, force = false) {
     knownSessions.value.get(id) ??
     (live ? sessionStub(id, live.startTime) : undefined)
   if (found) {
-    if (props.variant === 'page' && pickedId.value !== found.agentId) {
+    if (props.variant === 'page' && found.agentId != null && pickedId.value !== found.agentId) {
       restoring = true
       pickedId.value = found.agentId
     }
@@ -1075,7 +1131,7 @@ async function openHistory(id: number, force = false) {
   }
   // 先登记，后面 syncSessionFromEvents 才能把补齐后的标题写回这一行
   rememberKnown(session.value)
-  rememberTrialSession(activeId.value as number, id)
+  rememberTrialSession(ownerId.value as number, id, maMode.value ? 'ma' : 'agent')
   // 刷新后可能正停在「子计划待批准」：SSE 已断，按钮只能靠专用接口恢复；不阻塞主时间线加载
   childPending.value = null
   void refreshChildPending(id)
@@ -1609,7 +1665,7 @@ async function send(content: string, images?: string[]) {
   if (sending.value || (!session.value && !draftReady.value)) {
     return
   }
-  if ((!session.value || isTempSession(session.value)) && !activeId.value) {
+  if ((!session.value || isTempSession(session.value)) && !ownerId.value) {
     return
   }
   sending.value = true
@@ -1645,7 +1701,10 @@ async function send(content: string, images?: string[]) {
     // 临时条 / 纯草稿：首问才落库；失败仍留临时态可再发
     if (sessionId == null) {
       try {
-        const { data } = await createTrialSession(activeId.value as number)
+        // 入口决定建会话的接口：虚拟根走方案，绑根仍按 agentId
+        const { data } = maMode.value
+          ? await createMaTrialSession(ownerId.value as number)
+          : await createTrialSession(ownerId.value as number)
         const created = data.data
         const preview = content.trim().slice(0, 80)
         session.value = {
@@ -1656,7 +1715,7 @@ async function send(content: string, images?: string[]) {
         sessionId = created.id
         draftReady.value = false
         // 立刻记住：这之后关掉面板 / 刷新，重进也要能回到本轮（此时库里还没有预览和轮次）
-        rememberTrialSession(activeId.value as number, created.id)
+        rememberTrialSession(ownerId.value as number, created.id, maMode.value ? 'ma' : 'agent')
         // 临时转正：立刻出现在左栏（loadHistory 稍后对齐服务端）
         history.value = [session.value, ...history.value.filter((row) => row.id !== created.id && !isTempSession(row))]
         rememberKnown(session.value)
@@ -1779,8 +1838,10 @@ async function send(content: string, images?: string[]) {
       } else {
         dropLive(sessionId)
       }
-      // 只有首轮才由后端异步生成标题：此时拉列表多半还没有，稍后补两次
+      // 首轮标题由后端在本次请求内同步写库（首句截断）：先按会话单查补进左栏，
+      // 「新对话」立刻变成首句摘要；延迟补拉保留为「服务端暂时不可见」时的兜底
       if ((session.value?.messageCount ?? 0) <= 1) {
+        await refreshSessionTitle(sessionId)
         scheduleTitleRefresh(sessionId)
       }
     } else if (live.status === 'streaming') {

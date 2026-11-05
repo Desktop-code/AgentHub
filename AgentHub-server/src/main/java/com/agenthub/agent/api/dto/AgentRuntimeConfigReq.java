@@ -16,8 +16,8 @@ import java.util.List;
 public class AgentRuntimeConfigReq {
 
     /**
-     * 编排模板；五值可持久：ROUTER_PARALLEL | FIXED_SEQUENCE | FIXED_PARALLEL | CRITIC_LOOP |
-     * ROUTER_THEN_SEQUENCE。非法/空值由服务端回落 ROUTER_PARALLEL；显式选的模板不会被洗回路由并行。
+     * 编排模板；六值可持久：ROUTER_PARALLEL | FIXED_SEQUENCE | FIXED_PARALLEL | CRITIC_LOOP |
+     * ROUTER_THEN_SEQUENCE | COMPETE。非法/空值由服务端回落 ROUTER_PARALLEL；显式选的模板不会被洗回路由并行。
      */
     @Size(max = 32, message = "最长 32")
     private String maTemplate;
@@ -36,7 +36,7 @@ public class AgentRuntimeConfigReq {
     /** 允许多意图；新建 ROUTER 默认 true */
     private Boolean multiIntentEnabled;
 
-    /** CONCAT / SUMMARIZE */
+    /** CONCAT / SUMMARIZE / VOTE；VOTE 仅路由并行 / 固定并行 / 路由后串行生效，其它模板归一为 CONCAT */
     @Size(max = 32, message = "最长 32")
     private String answerMode;
 
@@ -75,4 +75,21 @@ public class AgentRuntimeConfigReq {
 
     /** 评审环：评审专家 agentId；模板=CRITIC_LOOP 时必填，且不能与执行者相同 */
     private Long maCriticAgentId;
+
+    /**
+     * 判路由 / 终答汇总模型实例（model_instance.id）；虚拟根方案必填。
+     * <p>空时绑根回落 ROUTER / CHAT 槽；虚拟根开跑会明确报「未配置判路由模型」。
+     */
+    private Long maJudgeModelInstanceId;
+
+    /** 判路由模型兼容别名：数字按实例 id，名称按 model_id / 展示名匹配 */
+    @Size(max = 128, message = "最长 128")
+    private String maJudgeModel;
+
+    /**
+     * 竞争选优（模板=COMPETE）的选优策略：JUDGE_PICK | FIRST_SUCCESS。
+     * <p>缺省回落 JUDGE_PICK（评选模型选优）；非竞争模板也保存该值，便于切回时恢复。
+     */
+    @Size(max = 32, message = "最长 32")
+    private String competeStrategy;
 }

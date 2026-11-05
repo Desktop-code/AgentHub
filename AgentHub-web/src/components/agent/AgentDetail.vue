@@ -237,25 +237,34 @@
         <el-tab-pane v-if="showReactBindTabs" label="技能配置" name="skill">
           <div class="tab-bar">
             <h3>
-              已绑定 Skill
+              已绑定技能
               <span v-if="skills.length" class="tab-count">{{ skills.length }}</span>
             </h3>
             <el-button v-if="canBind" type="primary" @click="skillOpen = true">
               <el-icon class="btn-icon"><Plus /></el-icon>
-              添加 Skill
+              添加技能
             </el-button>
           </div>
-          <el-table class="bind-table" :data="pagedSkills" empty-text="还没有绑定 Skill" table-layout="fixed">
+          <el-table class="bind-table" :data="pagedSkills" empty-text="还没有绑定技能" table-layout="fixed">
             <!-- 标题加粗 + 英文编码灰字；表头也用中文，避免出现 name / title 这类库列名 -->
-            <el-table-column label="Skill" min-width="220" align="left" header-align="left">
+            <el-table-column label="技能" min-width="200" align="left" header-align="left">
               <template #default="{ row }">
                 <div class="bind-name" :title="skillDisplayName(row)">{{ skillDisplayName(row) }}</div>
                 <div v-if="row.name" class="bind-code" :title="row.name">{{ row.name }}</div>
               </template>
             </el-table-column>
-            <el-table-column label="Skill 状态" width="110" align="center" header-align="center">
+            <!-- 生效版本：运行时实际注入的正文版本；未发布过显示「未发布」 -->
+            <el-table-column label="生效版本" width="96" align="center" header-align="center">
               <template #default="{ row }">
-                <el-tag size="small" :type="targetTagType(row)" effect="plain">{{ targetTagText(row, 'Skill') }}</el-tag>
+                <el-tag v-if="row.activeVersionNo" size="small" effect="plain" type="success">
+                  v{{ row.activeVersionNo }}
+                </el-tag>
+                <span v-else class="bind-code">未发布</span>
+              </template>
+            </el-table-column>
+            <el-table-column label="技能状态" width="110" align="center" header-align="center">
+              <template #default="{ row }">
+                <el-tag size="small" :type="targetTagType(row)" effect="plain">{{ targetTagText(row, '技能') }}</el-tag>
               </template>
             </el-table-column>
             <el-table-column label="绑定状态" width="110" align="center" header-align="center">
@@ -328,7 +337,7 @@
                   @change="(on: string | number | boolean) => saveRuntimeSwitch('requirePlanConfirm', on === true)"
                 />
                 <span class="field-hint">
-                  关闭＝规划完自动执行；开启＝规划后停住，试跑页点「批准」才继续，也可「取消」中止。
+                  关闭＝规划完自动执行；开启＝规划后停住，运行页点「批准」才继续，也可「取消」中止。
                 </span>
               </el-form-item>
               <el-form-item label="计划步数上限">
@@ -474,7 +483,8 @@ import {
   normalizeChildRunModes,
   normalizeContextPolicy,
   normalizeCriticMaxRounds,
-  normalizeTemplate
+  normalizeTemplate,
+  supportsVoteTemplate
 } from '@/utils/orchestrationValidation'
 import { useFormDirty } from '@/composables/useFormDirty'
 import { registerDraft } from '@/composables/draftGuard'
@@ -710,7 +720,7 @@ function clampPager(pager: { current: number; size: number }, total: number) {
 }
 
 /**
- * 绑定目标（模型实例 / 工具项 / Skill）自身启停对应的标签类型。
+ * 绑定目标（模型实例 / 工具项 / 技能）自身启停对应的标签类型。
  * targetStatus 为空表示目标已被删除，按警告色提示。
  *
  * @param row 绑定的目标状态
@@ -727,7 +737,7 @@ function targetTagType(row: { targetStatus?: number }): 'success' | 'info' | 'wa
  * 绑定目标自身启停的展示文案。
  *
  * @param row  绑定的目标状态
- * @param noun 目标名词，如「工具」「Skill」
+ * @param noun 目标名词，如「工具」「技能」
  * @return 标签文本
  */
 function targetTagText(row: { targetStatus?: number }, noun: string): string {
@@ -751,13 +761,13 @@ function toolDisplayName(row: { title?: string; name?: string }): string {
 }
 
 /**
- * Skill 绑定行的主展示名。
+ * 技能绑定行的主展示名。
  *
- * @param row Skill 绑定行
+ * @param row 技能绑定行
  * @return 标题；无标题时退回编码；都为空时提示已删除
  */
 function skillDisplayName(row: { title?: string; name?: string }): string {
-  return row.title?.trim() || row.name?.trim() || 'Skill 已删除'
+  return row.title?.trim() || row.name?.trim() || '技能已删除'
 }
 
 /**
@@ -926,7 +936,7 @@ interface DraftSnap {
   toolResultMaxChars: number | null
   /** 编排策略：多意图并行（旧字段，行为生效） */
   multiIntentEnabled: boolean
-  /** 编排策略：汇总 CONCAT / SUMMARIZE，复用 answerMode */
+  /** 编排策略：汇总 CONCAT / SUMMARIZE / VOTE，复用 answerMode */
   answerMode: string
   /** 编排策略：最大并行，复用 maxRouteChildren */
   maxRouteChildren: number
@@ -949,6 +959,27 @@ interface DraftSnap {
 /** 已落库快照 = 草稿字段 + 即时开关值；拼即时保存体时要带上开关，但开关不参与 isDirty。 */
 interface SavedSnap extends DraftSnap {
   requirePlanConfirm: boolean
+}
+
+/**
+ * 结果合成归一：只认 CONCAT / SUMMARIZE / VOTE；VOTE 在模板不支持时回落 CONCAT。
+ *
+ * <p>与服务端 `AgentRuntimeConfig.answerModeEnum` 同口径：历史脏值、或模板已换成不支持投票的，
+ * 都不能让页面显示「投票」却按拼接执行。
+ *
+ * @param raw      库内 answerMode
+ * @param template 库内模板
+ * @return 可回显的 answerMode
+ */
+function normalizeAnswerMode(raw: string | undefined | null, template: string | undefined | null): string {
+  const mode = (raw || '').toUpperCase()
+  if (mode === 'SUMMARIZE') {
+    return 'SUMMARIZE'
+  }
+  if (mode === 'VOTE') {
+    return supportsVoteTemplate(normalizeTemplate(template)) ? 'VOTE' : 'CONCAT'
+  }
+  return 'CONCAT'
 }
 
 /**
@@ -984,7 +1015,7 @@ function draftFromForm(source: AgentDetail | null): DraftSnap | null {
     toolResultMaxChars: source.toolResultMaxChars ?? null,
     // 编排策略：开关也进快照，统一由底栏保存；status / requirePlanConfirm 仍即时落库
     multiIntentEnabled: runtime?.multiIntentEnabled !== false,
-    answerMode: runtime?.answerMode === 'SUMMARIZE' ? 'SUMMARIZE' : 'CONCAT',
+    answerMode: normalizeAnswerMode(runtime?.answerMode, runtime?.maTemplate),
     maxRouteChildren: Math.min(5, Math.max(1, runtime?.maxRouteChildren ?? 3)),
     maTemplate: runtime?.maTemplate || 'ROUTER_PARALLEL',
     maChildRunModesAllowed: normalizeChildRunModes(runtime?.maChildRunModesAllowed),
@@ -1379,7 +1410,7 @@ function normalizeRuntimeConfig(raw?: AgentRuntimeConfig | null): AgentRuntimeCo
   const template = normalizeTemplate(raw?.maTemplate)
   return {
     multiIntentEnabled: raw?.multiIntentEnabled !== false,
-    answerMode: raw?.answerMode === 'SUMMARIZE' ? 'SUMMARIZE' : 'CONCAT',
+    answerMode: normalizeAnswerMode(raw?.answerMode, raw?.maTemplate),
     maxRouteChildren: Math.min(5, Math.max(1, raw?.maxRouteChildren ?? 3)),
     maTemplate: template,
     maContextPolicy: normalizeContextPolicy(raw?.maContextPolicy, template),
@@ -1888,7 +1919,7 @@ async function removeTool(row: ToolBind) {
   emit('changed', changedPatch())
 }
 
-/** 按勾选顺序逐条创建 Skill 绑定。 */
+/** 按勾选顺序逐条创建技能绑定。 */
 async function addSkill(skillIds: number[], done: () => void) {
   try {
     const warnings: string[] = []
@@ -1910,9 +1941,9 @@ async function addSkill(skillIds: number[], done: () => void) {
 }
 
 /**
- * Skill 绑定开关：目标 Skill 停用或已删时开关不可点。
+ * 技能绑定开关：目标技能停用或已删时开关不可点。
  *
- * @param row    Skill 绑定行
+ * @param row    技能绑定行
  * @param enable 目标是否启用
  */
 async function onSkillSwitch(row: SkillBind, enable: boolean) {
@@ -1978,9 +2009,13 @@ async function onRoutesChanged() {
   margin-top: 6px;
 }
 
+/*
+ * 详情壳：外层 .detail-pane 锁高后，这里整块吃满高度并纵向分区。
+ * 高度链路：.detail-pane(flex) → .detail-root(flex:1) → .panel(flex:1) → .tabs(flex:1) → 内容区滚动。
+ */
 .detail-root {
   display: flex;
-  flex: 1 0 auto;
+  flex: 1;
   flex-direction: column;
   width: 100%;
   max-width: none;
@@ -1989,39 +2024,95 @@ async function onRoutesChanged() {
 
 .panel {
   display: flex;
-  flex: 1 0 auto;
+  flex: 1;
   flex-direction: column;
   width: 100%;
   max-width: none;
+  min-height: 0;
   margin-bottom: 0;
   padding: 16px;
+  /* 锁住高度：只允许 Tab 内容区产生滚动条，页面本身不再被撑出全局滚动 */
+  overflow: hidden;
   background: var(--ah-surface);
   border: 1px solid var(--ah-border);
   border-radius: 8px;
   box-shadow: var(--ah-shadow);
 }
 
+/*
+ * 底部操作栏：作为 .panel 的最后一个 flex 项常驻底部（shrink-0），
+ * 不再用 position:sticky 覆盖内容。负外边距让白底/分割线铺满卡片内边距。
+ */
 .sticky-bar {
-  position: sticky;
-  bottom: 0;
-  z-index: 5;
   display: flex;
+  flex: none;
   justify-content: flex-end;
   gap: 8px;
-  margin: auto -16px -16px;
+  margin: 12px -16px -16px;
   padding: 12px 16px;
   background: #fff;
   border-top: 1px solid var(--ah-border);
   border-radius: 0 0 8px 8px;
 }
 
+/* Tab 壳：标题条定高，内容区吃满剩余高度并独立滚动 */
 .tabs {
-  flex: 1 0 auto;
+  display: flex;
+  flex: 1;
+  flex-direction: column;
   width: 100%;
   max-width: none;
+  min-height: 0;
 }
 
-.tabs :deep(.el-tabs__content),
+.tabs :deep(.el-tabs__header) {
+  flex: none;
+}
+
+/*
+ * 只锁定「详情这一层」的 tab 内容区（直接子级）。
+ * 编排 Tab 内部还有一层 el-tabs，若被一并设成滚动容器，会抢走候选表的
+ * sticky 参照，导致表头不再吸顶。
+ */
+.tabs > :deep(.el-tabs__content) {
+  flex: 1;
+  min-height: 0;
+  width: 100%;
+  max-width: none;
+  /* 列表/表单在卡片内局部滚动，鼠标悬停才显细长半透明滚动条 */
+  overflow-x: hidden;
+  overflow-y: auto;
+  padding-right: 4px;
+  scrollbar-width: thin;
+  scrollbar-color: transparent transparent;
+}
+
+.tabs > :deep(.el-tabs__content:hover) {
+  scrollbar-color: rgba(107, 114, 128, 0.35) transparent;
+}
+
+.tabs > :deep(.el-tabs__content)::-webkit-scrollbar {
+  width: 6px;
+  height: 6px;
+}
+
+.tabs > :deep(.el-tabs__content)::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+.tabs > :deep(.el-tabs__content)::-webkit-scrollbar-thumb {
+  border-radius: 999px;
+  background: rgba(107, 114, 128, 0.22);
+}
+
+.tabs > :deep(.el-tabs__content):hover::-webkit-scrollbar-thumb {
+  background: rgba(107, 114, 128, 0.36);
+}
+
+.tabs > :deep(.el-tabs__content)::-webkit-scrollbar-thumb:hover {
+  background: rgba(107, 114, 128, 0.5);
+}
+
 .tabs :deep(.el-tab-pane),
 .tabs :deep(.el-form),
 .tabs :deep(.el-table) {
@@ -2029,8 +2120,10 @@ async function onRoutesChanged() {
   max-width: none;
 }
 
+/* 标题行不参与压缩：Tab 内容区内部滚动时标题始终可见 */
 .detail-title {
   display: flex;
+  flex: none;
   align-items: center;
   justify-content: space-between;
   gap: 12px;

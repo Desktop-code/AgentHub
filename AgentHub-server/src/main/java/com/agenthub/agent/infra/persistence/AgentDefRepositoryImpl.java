@@ -12,6 +12,8 @@ import com.baomidou.mybatisplus.core.metadata.IPage;
 import com.baomidou.mybatisplus.extension.plugins.pagination.Page;
 import org.springframework.stereotype.Repository;
 
+import java.util.Collection;
+import java.util.List;
 import java.util.Optional;
 
 /**
@@ -58,6 +60,26 @@ public class AgentDefRepositoryImpl implements AgentDefRepository {
     public Optional<AgentDef> findById(Long id) {
         AgentDefEntity entity = mapper.selectById(id);
         return entity == null ? Optional.empty() : Optional.of(toDomain(entity));
+    }
+
+    /** {@inheritDoc} */
+    @Override
+    public Optional<AgentDef> findByIdIncludingDeleted(Long id) {
+        if (id == null) {
+            return Optional.empty();
+        }
+        // 走自定义 SQL，绕过 TableLogic，才能拼到已删 Agent 的历史用量
+        AgentDefEntity entity = mapper.selectByIdIncludingDeleted(id);
+        return entity == null ? Optional.empty() : Optional.of(toDomain(entity));
+    }
+
+    /** {@inheritDoc} */
+    @Override
+    public List<AgentDef> findByIds(Collection<Long> ids) {
+        if (ids == null || ids.isEmpty()) {
+            return List.of();
+        }
+        return mapper.selectBatchIds(ids).stream().map(this::toDomain).toList();
     }
 
     /** {@inheritDoc} */
@@ -125,8 +147,16 @@ public class AgentDefRepositoryImpl implements AgentDefRepository {
 
     /** {@inheritDoc} */
     @Override
-    public void updateStatus(Long id, int status, Long operatorId) {
+    public void updateRuntimeConfig(Long id, String runtimeConfigJson, Long operatorId) {
         mapper.update(null, new LambdaUpdateWrapper<AgentDefEntity>()
+                .eq(AgentDefEntity::getId, id)
+                .set(AgentDefEntity::getRuntimeConfigJson, runtimeConfigJson)
+                .set(AgentDefEntity::getUpdatedBy, operatorId));
+    }
+
+    /** {@inheritDoc} */
+    @Override
+    public void updateStatus(Long id, int status, Long operatorId) {        mapper.update(null, new LambdaUpdateWrapper<AgentDefEntity>()
                 .eq(AgentDefEntity::getId, id)
                 .set(AgentDefEntity::getStatus, status)
                 .set(AgentDefEntity::getUpdatedBy, operatorId));
@@ -178,6 +208,8 @@ public class AgentDefRepositoryImpl implements AgentDefRepository {
         agent.setToolResultMaxChars(entity.getToolResultMaxChars());
         agent.setRuntimeConfigJson(entity.getRuntimeConfigJson());
         agent.setStatus(entity.getStatus());
+        // 普通查询走 @TableLogic 只会是 0；含删查询才可能为 1
+        agent.setDeleted(entity.getDeleted());
         agent.setRemark(entity.getRemark());
         agent.setCreatedBy(entity.getCreatedBy());
         // 域/API 仍用 createTime；库列已是 create_time

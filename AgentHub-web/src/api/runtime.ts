@@ -25,8 +25,12 @@ export function getTrialCapability(agentId: number) {
   return request.get<Result<TrialAgent>>(`/api/runtime/trial/agents/${agentId}/capability`)
 }
 
-/** 历史会话。服务端只返回当前用户在该 Agent 下的记录。 */
-export function pageTrialSessions(params: { current: number; size: number; agentId: number }) {
+/**
+ * 历史会话。服务端只返回当前用户在该 Agent 或该方案下的记录。
+ *
+ * <p>agentId / maId 由服务端强制二选一：绑根与虚拟根的会话空间不混在一起。
+ */
+export function pageTrialSessions(params: { current: number; size: number; agentId?: number; maId?: number }) {
   return request.get<Result<PageResult<TrialSession>>>('/api/runtime/trial/sessions', { params })
 }
 
@@ -52,6 +56,16 @@ export function listTrialLiveEvents(id: number) {
 /** 按当前 Agent 新建会话。 */
 export function createTrialSession(agentId: number) {
   return request.post<Result<TrialSession>>('/api/runtime/trial/sessions', { agentId })
+}
+
+/**
+ * 从编排方案新建会话（虚拟根试跑）。
+ *
+ * <p>为什么不复用 createTrialSession：虚拟根没有 agent_def 行，服务端要求 agentId 必填，
+ * 方案入口必须单独带 maId，且由服务端决定是否允许（绑根方案会被拒，仍走 Agent 入口）。
+ */
+export function createMaTrialSession(maId: number) {
+  return request.post<Result<TrialSession>>('/api/runtime/trial/sessions/ma', { maId })
 }
 
 /** 同步跑一轮。超时略大于平台墙钟硬顶（300s）。页面发送走 SSE，这条留给需要整包结果的调用。 */
@@ -283,7 +297,7 @@ function dispatchFrame(frame: string, handlers: TrialStreamHandlers) {
   } else if (event === 'done' && data && typeof data === 'object') {
     handlers.onDone?.(data as TrialDoneChunk)
   } else if (event === 'error') {
-    handlers.onError?.(typeof data === 'string' ? data : '试跑失败')
+    handlers.onError?.(typeof data === 'string' ? data : '运行失败')
   }
 }
 

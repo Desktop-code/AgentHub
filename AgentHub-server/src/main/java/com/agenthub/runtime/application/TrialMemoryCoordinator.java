@@ -94,7 +94,10 @@ public class TrialMemoryCoordinator {
     public Augmented recallDurable(RunSession session) {
         MemoryPolicy policy = policies.effective(session.getAgentId());
         long userId = session.getUserId() == null ? 0L : session.getUserId();
-        MemoryRecallFacade.Durable durable = recall.durable(policy, session.getAgentId(), userId);
+        // 虚拟根没有 Agent：长期记忆按 0 号归属读取（等价「无 Agent 记忆」），
+        // 不能直接拆 Long 导致空指针；会话内热窗口仍按会话 id 独立。
+        long agentId = session.getAgentId() == null ? 0L : session.getAgentId();
+        MemoryRecallFacade.Durable durable = recall.durable(policy, agentId, userId);
         StringBuilder block = new StringBuilder();
         if (!durable.agent().isBlank()) {
             block.append("【工作记忆】\n").append(durable.agent());

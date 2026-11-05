@@ -23,7 +23,11 @@ import java.util.Optional;
 import java.util.concurrent.ThreadPoolExecutor;
 
 /**
- * 首轮对话结束后异步生成会话标题。所属域：runtime。
+ * 首轮对话结束后异步生成会话标题（LLM 兜底）。所属域：runtime。
+ *
+ * <p>与 MA 自动标题的关系：<b>正常路径不经过本类</b>。MA 试跑的首轮成功后由
+ * {@code TrialRunAppService#applyFirstMessageTitle} 用「首条用户消息截断」同步写库；
+ * 只有在原文截不出标题（全空白）时，才由本类花一次模型出站兜底。
  *
  * <p>职责：拿一轮的问答正文，让 SUMMARY 槽模型概括成不超过 {@value SessionTitleTexts#TITLE_LIMIT}
  * 个汉字的短标题，写回 {@code agent_run_session.session_title}，来源标为 AUTO。

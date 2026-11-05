@@ -112,6 +112,7 @@ import type {
 } from '@/utils/orchestrationLane'
 import {
   LANE_TEMPLATE_FIXED_PARALLEL,
+  LANE_TEMPLATE_COMPETE,
   LANE_TEMPLATE_ROUTER_PARALLEL
 } from '@/utils/orchestrationLane'
 import RouterTimelineCard from '@/components/runtime/RouterTimelineCard.vue'
@@ -273,6 +274,8 @@ const parallel = computed(() => {
   }
   const template = props.traceData?.template
   return template === LANE_TEMPLATE_ROUTER_PARALLEL || template === LANE_TEMPLATE_FIXED_PARALLEL
+    // 竞争选优也是同题并行扇出，子卡同样装进并行分组框
+    || template === LANE_TEMPLATE_COMPETE
 })
 
 /** 并行分组标题：任一子仍在跑就是「执行中」，全结束改「执行完成」 */

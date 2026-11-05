@@ -28,6 +28,9 @@ import java.util.Set;
  * Router 子路由用例。所属域：agent。
  * 只保存一层 children。父节点当前不是 ROUTER 时拒绝写入，已有行保留给切回后继续用。
  * route_key / sort 可空由系统按 {@link AgentRouteDefaults} 补全；同父 route_key 唯一。
+ *
+ * <p>MA-P2 刀3 起：本类只维护历史 {@code agent_route} 行，<b>不再</b>把候选镜像到
+ * {@code ma_candidate}；多智能体方案以 ma 侧为唯一写源，路由 Tab 不再作为编辑入口。
  */
 @Service
 public class AgentRouteAppService {
@@ -96,6 +99,7 @@ public class AgentRouteAppService {
         Long id = routes.insert(route, operatorContext.requireUserId());
         // 评审环角色闸：新增候选可能变成「第 2 个执行者」，保存即拦，避免库内出现跑不起来的配置
         assertCriticRoles(parent);
+        // 刀3 起本路径只写 agent_route（历史兼容数据），不再镜像回 ma_def
         operLogWriter.write("agent", "bind", "agent_route", String.valueOf(id), "添加子 Agent " + child.getName());
         return toResp(routes.findById(id).orElseThrow());
     }
@@ -147,6 +151,7 @@ public class AgentRouteAppService {
         routes.update(existing, operatorContext.requireUserId());
         // 重新启用候选同样可能凑出「第 2 个执行者」：与其他保存路径同口径再检查一次
         assertCriticRoles(parent);
+        // 刀3 起只写 agent_route，不再同步方案候选
         operLogWriter.write("agent", "bind", "agent_route", String.valueOf(routeId), "更新子路由 " + child.getName());
         return toResp(routes.findById(routeId).orElseThrow());
     }
@@ -163,6 +168,7 @@ public class AgentRouteAppService {
         assertRouterParent(parent);
         AgentRoute existing = requireOwned(agentId, routeId);
         routes.logicalDelete(routeId, operatorContext.requireUserId());
+        // 刀3 起只动 agent_route，方案候选以 ma_candidate 为唯一真源
         operLogWriter.write("agent", "unbind", "agent_route", String.valueOf(routeId),
                 "移除子路由 " + existing.getChildAgentId());
     }

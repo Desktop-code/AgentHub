@@ -174,7 +174,18 @@ const router = createRouter({
         {
           path: 'orchestration/multi-agent/:agentId/trial',
           component: () => import('@/views/ma/trial/index.vue'),
-          meta: { title: '多智能体试跑', cacheName: 'MaTrial' }
+          meta: { title: '多智能体运行', cacheName: 'MaTrial' }
+        },
+        /*
+         * 编排 → 多智能体 → 虚拟根试跑（MA-P2 刀2）。
+         * 虚拟根在 agent_def 里没有行，路径改用静态 def/ 段 + maId：
+         * 既和「Agent 试跑」区分开，也不会被 :agentId/trial 抢匹配（段数不同）。
+         * 同一组件、同一 cacheName，页面按 params 自行切「读 Agent 还是读方案」。
+         */
+        {
+          path: 'orchestration/multi-agent/def/:maId/trial',
+          component: () => import('@/views/ma/trial/index.vue'),
+          meta: { title: '多智能体运行', cacheName: 'MaTrial' }
         },
         {
           path: 'agent/memory',

@@ -2,14 +2,28 @@ package com.agenthub.runtime.domain.service;
 
 /**
  * 会话标题的清洗与截断。所属域：runtime。
- * <p>为什么单独收口：模型给回来的标题常带引号、书名号、句号，甚至带「标题：」前缀或换行解释；
- * 左栏只有一行宽度，任何标点与空白都会把 10 个汉字挤出去。清洗规则集中在这里，便于单测覆盖。
+ * <p>两条来源共用本类：
+ * <ul>
+ *   <li>{@link #fromFirstMessage}：MA 试跑的默认规则——首条用户消息去空白后直接截断，保留标点；</li>
+ *   <li>{@link #clean}：模型兜底标题的清洗——模型常带引号、书名号、句号或「标题：」前缀，
+ *       左栏只有一行宽度，标点与空白会把汉字挤出去。</li>
+ * </ul>
  * <p>约束：只做纯文本变换，不查库、不调用模型、不抛业务异常（空输入返回空串）。
  */
 public final class SessionTitleTexts {
 
     /** 标题最大汉字数。与 agent_run_session.session_title 的 64 字节容量相比留足余量 */
     public static final int TITLE_LIMIT = 10;
+
+    /**
+     * 「首条用户消息截断」标题的长度上限（MA 试跑自动标题）。
+     * <p>比模型标题宽松：首句截断保留原话，太短会切掉主题；24 个字符约 24 个汉字，
+     * 仍远小于 session_title 的容量。
+     */
+    public static final int FIRST_MESSAGE_LIMIT = 24;
+
+    /** 截断后追加的省略号：明确告诉用户标题被裁过 */
+    public static final String ELLIPSIS = "…";
 
     /**
      * 中日韩标点与全角符号。{@code \p{Punct}} 只覆盖 ASCII，中文全角标点必须单独列出，
@@ -61,6 +75,36 @@ public final class SessionTitleTexts {
             return title;
         }
         return title.substring(0, TITLE_LIMIT);
+    }
+
+    /**
+     * 从首条用户消息直接截出会话标题（MA 试跑自动标题的唯一规则）。
+     *
+     * <p>规则写死（不再调模型）：
+     * <ol>
+     *   <li>先脱敏，避免用户原文里的密钥片段被抄进左栏；</li>
+     *   <li>换行 / 连续空白归一成单个空格，并去掉首尾空白；</li>
+     *   <li>超过 {@link #FIRST_MESSAGE_LIMIT} 个字符时截断并追加「…」；</li>
+     *   <li>与模型标题不同，<b>保留标点</b>：这是用户原话，去掉标点会变得不可读。</li>
+     * </ol>
+     *
+     * @param raw 用户首条消息原文，可空
+     * @return 可直接入库的标题；无有效字符时返回空串（调用方据此决定是否回落 LLM）
+     */
+    public static String fromFirstMessage(String raw) {
+        if (raw == null || raw.isBlank()) {
+            return "";
+        }
+        String normalized = TrialTexts.redact(raw)
+                .replaceAll("\\s+", " ")
+                .trim();
+        if (normalized.isEmpty()) {
+            return "";
+        }
+        if (normalized.length() <= FIRST_MESSAGE_LIMIT) {
+            return normalized;
+        }
+        return normalized.substring(0, FIRST_MESSAGE_LIMIT) + ELLIPSIS;
     }
 
     /**

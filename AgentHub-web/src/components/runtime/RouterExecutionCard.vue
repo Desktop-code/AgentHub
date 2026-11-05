@@ -71,6 +71,7 @@ import { ArrowRight } from '@element-plus/icons-vue'
 import { ElCollapseTransition } from 'element-plus'
 import type { ObsSpan } from '@/types/obs'
 import {
+  LANE_TEMPLATE_COMPETE,
   LANE_TEMPLATE_CRITIC_LOOP,
   LANE_TEMPLATE_FIXED_PARALLEL,
   LANE_TEMPLATE_FIXED_SEQUENCE,
@@ -181,6 +182,9 @@ const templateLabel = computed(() => {
   }
   if (template === LANE_TEMPLATE_ROUTER_THEN_SEQUENCE) {
     return '路由后串行'
+  }
+  if (template === LANE_TEMPLATE_COMPETE) {
+    return '竞争选优'
   }
   return '路由并行'
 })

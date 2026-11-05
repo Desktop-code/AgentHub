@@ -5,6 +5,7 @@ import com.agenthub.obs.domain.model.SpanClose;
 import com.agenthub.obs.domain.model.SpanDraft;
 import com.agenthub.obs.domain.model.TraceStart;
 
+import java.util.Map;
 import java.util.Optional;
 
 /**
@@ -103,6 +104,23 @@ public interface TraceRecorder {
     default void finish(ObsTraceScope scope, ObsStatus status, String errorSummary, String finishReason,
                         String attrsJson) {
         finish(scope, status, errorSummary, finishReason);
+    }
+
+    /**
+     * 合并写入已结束步骤的 attrs_json 字段（只加不删）。
+     *
+     * <p>为什么需要：ROUTE 步骤在扇出阶段就收尾（泳道要尽早出现「判路由」行），
+     * 而投票 / 选优结论只能在子全部跑完后才知道；补写 attrs 比把 ROUTE 拖到最后一刻更安全，
+     * 也不会改动模板的执行拓扑。
+     *
+     * <p>默认空实现：测试桩与既有实现不需要为此改动。
+     *
+     * @param scope  当前 trace
+     * @param spanId 行主键
+     * @param fields 追加字段（已脱敏）；空则不做任何事
+     */
+    default void amendAttrs(ObsTraceScope scope, Long spanId, Map<String, Object> fields) {
+        // 默认不落库：埋点永远不能让主流程失败
     }
 
     /**

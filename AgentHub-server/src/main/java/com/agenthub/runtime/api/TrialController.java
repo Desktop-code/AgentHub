@@ -9,6 +9,7 @@ import com.agenthub.runtime.api.dto.ChildPlanPendingResp;
 import com.agenthub.runtime.api.dto.EventResp;
 import com.agenthub.runtime.api.dto.MessageReq;
 import com.agenthub.runtime.api.dto.MessageResp;
+import com.agenthub.runtime.api.dto.MaSessionCreateReq;
 import com.agenthub.runtime.api.dto.PlanResp;
 import com.agenthub.runtime.api.dto.SessionCreateReq;
 import com.agenthub.runtime.api.dto.SessionPageReq;
@@ -136,6 +137,22 @@ public class TrialController {
     @PostMapping("/sessions")
     public Result<SessionResp> create(@Valid @RequestBody SessionCreateReq req) {
         return Result.ok(sessions.create(req.getAgentId()));
+    }
+
+    /**
+     * 从编排方案新建试跑会话（虚拟根入口）。
+     *
+     * <p>为什么单独开一条：虚拟根在 {@code agent_def} 里没有行，不能塞进
+     * {@link SessionCreateReq} 的必填 agentId。权限沿用试跑权（{@code runtime:trial:run}），
+     * 方案侧不另要 {@code ma:def:*}：能试跑的人本来就要能读方案，读写权在方案页单独控。
+     *
+     * @param req 方案主键
+     * @return 新会话；虚拟根 agentId 为空，绑根方案由服务端回填
+     */
+    @SaCheckPermission(RuntimePermissions.RUN)
+    @PostMapping("/sessions/ma")
+    public Result<SessionResp> createFromMa(@Valid @RequestBody MaSessionCreateReq req) {
+        return Result.ok(sessions.createFromMa(req.getMaId()));
     }
 
     /**

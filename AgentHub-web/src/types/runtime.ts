@@ -15,15 +15,21 @@ export interface TrialAgent {
 
 export interface TrialSession {
   id: number
-  agentId: number
+  /** 绑根会话的 Agent；虚拟根会话为空（没有 root Agent） */
+  agentId: number | null
   agentName?: string
+  /** 虚拟根会话归属的方案；绑根可空 */
+  maId?: number
+  /** 方案编码 / 名称：左栏与页头在虚拟根下用它兜底 */
+  maCode?: string
+  maName?: string
   runMode: string
   userId: number
   status: string
   startTime?: string
   endTime?: string
   messageCount?: number
-  /** 会话标题：自动生成（≤10 汉字）或用户手改。空表示尚未生成 */
+  /** 会话标题：后端在首轮成功后写入（首句截断 ≤24 字符），或用户手改。空表示尚未生成 */
   sessionTitle?: string
   /** 标题来源：AUTO 自动生成 / MANUAL 用户手改 */
   titleSource?: string

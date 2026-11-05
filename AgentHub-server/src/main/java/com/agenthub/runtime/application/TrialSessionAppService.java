@@ -2,8 +2,11 @@ package com.agenthub.runtime.application;
 
 import com.agenthub.agent.domain.model.AgentDef;
 import com.agenthub.agent.domain.model.AgentQuery;
+import com.agenthub.agent.domain.model.AgentRunMode;
 import com.agenthub.agent.domain.model.AgentStatus;
+import com.agenthub.agent.domain.model.MaDef;
 import com.agenthub.agent.domain.repository.AgentDefRepository;
+import com.agenthub.agent.domain.repository.MaDefRepository;
 import com.agenthub.audit.domain.OperLogWriter;
 import com.agenthub.common.api.PageResult;
 import com.agenthub.common.error.BizException;
@@ -14,6 +17,7 @@ import com.agenthub.runtime.api.dto.EventResp;
 import com.agenthub.runtime.api.dto.SessionPageReq;
 import com.agenthub.runtime.api.dto.SessionResp;
 import com.agenthub.runtime.domain.model.RunEvent;
+import com.agenthub.runtime.domain.model.MaRunSpec;
 import com.agenthub.runtime.domain.model.RunSession;
 import com.agenthub.runtime.domain.model.RunStatus;
 import com.agenthub.runtime.domain.model.SessionQuery;
@@ -51,6 +55,9 @@ public class TrialSessionAppService {
     private final PlanPendingRegistry pendingPlans;
     private final ChildPlanApprovalRegistry childApprovals;
     private final TrialBindingLoader loader;
+    /** 方案读源：虚拟根建会话必须校验方案启用；列表回显方案名 */
+    private final MaTrialSpecLoader maSpecs;
+    private final MaDefRepository mas;
 
     /**
      * @param sessions        会话
@@ -68,13 +75,15 @@ public class TrialSessionAppService {
      * @param pendingPlans    待批准计划；清空/取消/删除时一并丢弃，避免批准到已废弃上下文
      * @param childApprovals  编排根下的子计划待批；取消/清空/删除时一并拒绝，避免线程悬挂
      * @param loader          只读模型槽解析，用于判定是否配了 VISION
+     * @param maSpecs         方案读源：虚拟根建会话与执行共用同一套方案校验
+     * @param mas             只读方案，列表回显 maCode / maName
      */
     public TrialSessionAppService(RunSessionRepository sessions, RunEventRepository events, AgentDefRepository agents,
                                   TrialAccess access, OperatorContext operatorContext, OperLogWriter operLogWriter,
                                   TrialFlight flight, TrialProperties properties, ReActTrialExecutor react,
                                   TrialMemoryCoordinator memory, TrialSessionCloser closer, TrialLiveBuffer live,
                                   PlanPendingRegistry pendingPlans, ChildPlanApprovalRegistry childApprovals,
-                                  TrialBindingLoader loader) {
+                                  TrialBindingLoader loader, MaTrialSpecLoader maSpecs, MaDefRepository mas) {
         this.sessions = sessions;
         this.events = events;
         this.agents = agents;
@@ -90,6 +99,8 @@ public class TrialSessionAppService {
         this.pendingPlans = pendingPlans;
         this.childApprovals = childApprovals;
         this.loader = loader;
+        this.maSpecs = maSpecs;
+        this.mas = mas;
     }
 
     /**
@@ -138,26 +149,35 @@ public class TrialSessionAppService {
     }
 
     /**
-     * 只返回当前用户在指定 Agent 下的会话。管理员也不放行别人的试跑。
+     * 只返回当前用户在指定 Agent 或方案下的会话。管理员也不放行别人的试跑。
      *
-     * @param req 必须带 agentId
+     * @param req 必须带 agentId 或 maId（二选一）
      * @return 按开始时间倒序的会话页
-     * @throws BizException 没有 agentId
+     * @throws BizException 两者都没给，或同时给了
      */
     public PageResult<SessionResp> page(SessionPageReq req) {
-        if (req.getAgentId() == null) {
-            throw new BizException(ErrorCode.BAD_REQUEST, "agentId 不能为空");
+        boolean byAgent = req.getAgentId() != null;
+        boolean byMa = req.getMaId() != null;
+        if (!byAgent && !byMa) {
+            throw new BizException(ErrorCode.BAD_REQUEST, "agentId 与 maId 至少填一个");
+        }
+        if (byAgent && byMa) {
+            // 两种入口语义不同（绑根 / 虚拟根），混着查会同时命中绑根会话与方案会话
+            throw new BizException(ErrorCode.BAD_REQUEST, "agentId 与 maId 只能填一个");
         }
         SessionQuery query = new SessionQuery();
         query.setCurrent(req.getCurrent());
         query.setSize(historySize(req.getSize()));
         query.setAgentId(req.getAgentId());
+        query.setMaId(req.getMaId());
         // 过滤键只有当前用户。不按租户，也不因 is_admin 放开。不再懒结案。
         long userId = operatorContext.requireUserId();
         query.setUserId(userId);
         PageResult<RunSession> page = sessions.page(query);
+        // 整页只按需读方案名：虚拟根行需要，绑根行不需要
+        java.util.Map<Long, MaDef> maCache = new java.util.HashMap<>();
         return PageResult.of(page.getTotal(), page.getCurrent(), page.getSize(),
-                page.getRecords().stream().map(this::toResp).toList());
+                page.getRecords().stream().map(item -> toResp(item, maCache)).toList());
     }
 
     /**
@@ -216,6 +236,34 @@ public class TrialSessionAppService {
         Long id = sessions.insert(session, userId);
         operLogWriter.write("runtime", "create", "agent_run_session", String.valueOf(id),
                 "创建试跑会话 " + id + "，Agent " + agent.getId());
+        return toResp(sessions.findById(id).orElseThrow());
+    }
+
+    /**
+     * 从方案新建试跑会话（虚拟根入口）。绑根方案也允许建，但会话同时记 agentId；
+     * 虚拟根保持 agentId 为空，执行时由 {@link MaTrialSpecLoader} 提供模板与候选。
+     *
+     * @param maId 方案主键
+     * @return 新会话，状态 RUNNING
+     * @throws BizException 方案不存在 / 跨租户 / 已停用
+     */
+    @Transactional
+    public SessionResp createFromMa(Long maId) {
+        MaRunSpec spec = maSpecs.requireForCreate(maId);
+        long userId = operatorContext.requireUserId();
+        RunSession session = new RunSession();
+        // 绑根方案回填 rootAgentId；虚拟根保持为空，列表与详情据此区分入口
+        session.setAgentId(spec.rootAgentId());
+        session.setMaDefId(spec.maId());
+        // 方案执行只有一层编排语义：运行模式固定 ROUTER，不跟随 rootAgent 的其它模式
+        session.setRunMode(AgentRunMode.ROUTER.name());
+        session.setUserId(userId);
+        session.setStatus(RunStatus.RUNNING.name());
+        session.setStartTime(LocalDateTime.now());
+        session.setMessageCount(0);
+        Long id = sessions.insert(session, userId);
+        operLogWriter.write("runtime", "create", "agent_run_session", String.valueOf(id),
+                "创建方案试跑会话 " + id + "，方案 " + spec.maId());
         return toResp(sessions.findById(id).orElseThrow());
     }
 
@@ -320,10 +368,33 @@ public class TrialSessionAppService {
     }
 
     private SessionResp toResp(RunSession session) {
+        return toResp(session, new java.util.HashMap<>());
+    }
+
+    /**
+     * 会话 → 接口对象。虚拟根没有 Agent：展示名退回方案名，避免左栏出现空白标题。
+     *
+     * @param session 领域会话
+     * @param maCache 本次请求内的方案缓存；避免整页 N 次主键查询
+     * @return 接口对象
+     */
+    private SessionResp toResp(RunSession session, java.util.Map<Long, MaDef> maCache) {
         SessionResp resp = new SessionResp();
         resp.setId(session.getId());
         resp.setAgentId(session.getAgentId());
-        resp.setAgentName(agents.findById(session.getAgentId()).map(AgentDef::getName).orElse(""));
+        resp.setMaId(session.getMaDefId());
+        String agentName = "";
+        if (session.getAgentId() != null) {
+            agentName = agents.findById(session.getAgentId()).map(AgentDef::getName).orElse("");
+        }
+        MaDef ma = session.getMaDefId() == null ? null
+                : maCache.computeIfAbsent(session.getMaDefId(), key -> mas.findById(key).orElse(null));
+        if (ma != null) {
+            resp.setMaCode(ma.getCode());
+            resp.setMaName(ma.getName());
+        }
+        // 虚拟根：Agent 名留空，由方案名兜底；绑根仍展示 Agent 名（方案名另列）
+        resp.setAgentName(agentName.isBlank() && ma != null ? ma.getName() : agentName);
         resp.setRunMode(session.getRunMode());
         resp.setUserId(session.getUserId());
         resp.setStatus(session.getStatus());
