@@ -111,7 +111,7 @@ AgentHub/
 ├── scripts/
 │   └── openjudge-sidecar/ OpenJudge 本机 HTTP sidecar（Python，软评分）
 ├── sql/
-│   ├── agenthub.sql       全量建表（41 张表）
+│   ├── agenthub.sql       全量建表
 │   └── data-init.sql      菜单、权限、内置工具、L1/L2 提示词等种子
 ├── docs/                  架构设计、各域设计定稿与编码规范
 ├── docker-compose.yml     依赖（MySQL / Redis / Milvus 依赖链）+ 业务容器
@@ -154,7 +154,7 @@ docker compose up -d mysql redis etcd minio milvus
 
 ```bash
 mysql -u root -p -e "CREATE DATABASE IF NOT EXISTS agenthub DEFAULT CHARACTER SET utf8mb4"
-mysql -u root -p agenthub < sql/agenthub.sql     # 全量建表（41 张）
+mysql -u root -p agenthub < sql/agenthub.sql     # 全量建表
 mysql -u root -p agenthub < sql/data-init.sql    # 菜单 / 权限 / 内置工具 / 提示词种子
 ```
 
@@ -234,6 +234,8 @@ npm run dev
 - `scripts/openjudge-sidecar/README.md`：sidecar 契约、启动、排障与进 git 范围。
 
 ## 开源协议与致谢 (License & Acknowledgements)
+
+**本项目以 MIT 许可发布**，Copyright (c) 2026 Desktop-code / AgentHub，完整条款见根目录 [`LICENSE`](LICENSE)。第三方依赖的许可证与版权声明见 [`THIRD-PARTY-NOTICES.md`](THIRD-PARTY-NOTICES.md)、[`AgentHub-web/THIRD-PARTY-NOTICES.md`](AgentHub-web/THIRD-PARTY-NOTICES.md) 与 [`LICENSES/`](LICENSES/) 目录。
 
 本项目的画布编排功能依赖于开源项目 [Vue Flow](https://vueflow.dev/)，遵循 MIT 开源协议。感谢开源社区的贡献。
 

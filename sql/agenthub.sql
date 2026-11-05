@@ -1,18 +1,12 @@
-/*
- Navicat Premium Data Transfer
-
- Source Server         : localhost_3306
- Source Server Type    : MySQL
- Source Server Version : 50733
- Source Host           : localhost:3306
- Source Schema         : agenthub
-
- Target Server Type    : MySQL
- Target Server Version : 50733
- File Encoding         : 65001
-
- Date: 05/11/2026 16:16:16
-*/
+-- AgentHub 数据库结构（全量建表）
+--
+-- 本文件由本地库导出后做过脱敏整理：
+--   * 不保留导出工具标识、导出时间与本机地址/端口；
+--   * 各表 AUTO_INCREMENT 统一归 1，不反映任何真实数据量；
+--   * 只有建表结构，没有任何业务数据 INSERT。
+--
+-- 用途：初始化空库。文件内含 DROP TABLE IF EXISTS，对已有数据的库重复执行会清空表数据，
+-- 只允许用于新库，详见根目录 README「快速开始 / 导入数据库全量脚本」。
 
 SET NAMES utf8mb4;
 SET FOREIGN_KEY_CHECKS = 0;
@@ -56,7 +50,7 @@ CREATE TABLE `agent_def`  (
   INDEX `idx_status`(`status`) USING BTREE,
   INDEX `idx_deleted`(`deleted`) USING BTREE,
   INDEX `idx_allow_orchestrated`(`allow_orchestrated`) USING BTREE
-) ENGINE = InnoDB AUTO_INCREMENT = 37 CHARACTER SET = utf8mb4 COLLATE = utf8mb4_general_ci COMMENT = 'Agent 定义' ROW_FORMAT = Dynamic;
+) ENGINE = InnoDB AUTO_INCREMENT = 1 CHARACTER SET = utf8mb4 COLLATE = utf8mb4_general_ci COMMENT = 'Agent 定义' ROW_FORMAT = Dynamic;
 
 -- ----------------------------
 -- Table structure for agent_kb_bind
@@ -77,7 +71,7 @@ CREATE TABLE `agent_kb_bind`  (
   PRIMARY KEY (`id`) USING BTREE,
   INDEX `idx_agent`(`agent_id`) USING BTREE,
   INDEX `idx_kb`(`kb_id`) USING BTREE
-) ENGINE = InnoDB AUTO_INCREMENT = 6 CHARACTER SET = utf8mb4 COLLATE = utf8mb4_general_ci COMMENT = 'Agent 知识库绑定' ROW_FORMAT = Dynamic;
+) ENGINE = InnoDB AUTO_INCREMENT = 1 CHARACTER SET = utf8mb4 COLLATE = utf8mb4_general_ci COMMENT = 'Agent 知识库绑定' ROW_FORMAT = Dynamic;
 
 -- ----------------------------
 -- Table structure for agent_model_bind
@@ -104,7 +98,7 @@ CREATE TABLE `agent_model_bind`  (
   INDEX `idx_model_instance_id`(`model_instance_id`) USING BTREE,
   INDEX `idx_status`(`status`) USING BTREE,
   INDEX `idx_deleted`(`deleted`) USING BTREE
-) ENGINE = InnoDB AUTO_INCREMENT = 39 CHARACTER SET = utf8mb4 COLLATE = utf8mb4_general_ci COMMENT = 'Agent 模型绑定' ROW_FORMAT = Dynamic;
+) ENGINE = InnoDB AUTO_INCREMENT = 1 CHARACTER SET = utf8mb4 COLLATE = utf8mb4_general_ci COMMENT = 'Agent 模型绑定' ROW_FORMAT = Dynamic;
 
 -- ----------------------------
 -- Table structure for agent_route
@@ -128,7 +122,7 @@ CREATE TABLE `agent_route`  (
   INDEX `idx_child_agent_id`(`child_agent_id`) USING BTREE,
   INDEX `idx_status`(`status`) USING BTREE,
   INDEX `idx_deleted`(`deleted`) USING BTREE
-) ENGINE = InnoDB AUTO_INCREMENT = 7 CHARACTER SET = utf8mb4 COLLATE = utf8mb4_general_ci COMMENT = 'Router 子 Agent 路由配置' ROW_FORMAT = Dynamic;
+) ENGINE = InnoDB AUTO_INCREMENT = 1 CHARACTER SET = utf8mb4 COLLATE = utf8mb4_general_ci COMMENT = 'Router 子 Agent 路由配置' ROW_FORMAT = Dynamic;
 
 -- ----------------------------
 -- Table structure for agent_run_event
@@ -148,7 +142,7 @@ CREATE TABLE `agent_run_event`  (
   INDEX `idx_session_id`(`session_id`) USING BTREE,
   INDEX `idx_session_seq`(`session_id`, `seq`) USING BTREE,
   INDEX `idx_event_type`(`event_type`) USING BTREE
-) ENGINE = InnoDB AUTO_INCREMENT = 790 CHARACTER SET = utf8mb4 COLLATE = utf8mb4_general_ci COMMENT = 'Agent 试跑步骤事件摘要' ROW_FORMAT = DYNAMIC;
+) ENGINE = InnoDB AUTO_INCREMENT = 1 CHARACTER SET = utf8mb4 COLLATE = utf8mb4_general_ci COMMENT = 'Agent 试跑步骤事件摘要' ROW_FORMAT = DYNAMIC;
 
 -- ----------------------------
 -- Table structure for agent_run_session
@@ -180,7 +174,7 @@ CREATE TABLE `agent_run_session`  (
   INDEX `idx_start_time`(`start_time`) USING BTREE,
   INDEX `idx_deleted`(`deleted`) USING BTREE,
   INDEX `idx_run_session_ma`(`ma_def_id`, `start_time`) USING BTREE
-) ENGINE = InnoDB AUTO_INCREMENT = 360 CHARACTER SET = utf8mb4 COLLATE = utf8mb4_general_ci COMMENT = 'Agent 试跑会话元数据' ROW_FORMAT = Dynamic;
+) ENGINE = InnoDB AUTO_INCREMENT = 1 CHARACTER SET = utf8mb4 COLLATE = utf8mb4_general_ci COMMENT = 'Agent 试跑会话元数据' ROW_FORMAT = Dynamic;
 
 -- ----------------------------
 -- Table structure for agent_skill_bind
@@ -201,7 +195,7 @@ CREATE TABLE `agent_skill_bind`  (
   INDEX `idx_skill_id`(`skill_id`) USING BTREE,
   INDEX `idx_status`(`status`) USING BTREE,
   INDEX `idx_deleted`(`deleted`) USING BTREE
-) ENGINE = InnoDB AUTO_INCREMENT = 16 CHARACTER SET = utf8mb4 COLLATE = utf8mb4_general_ci COMMENT = 'Agent Skill 绑定' ROW_FORMAT = Dynamic;
+) ENGINE = InnoDB AUTO_INCREMENT = 1 CHARACTER SET = utf8mb4 COLLATE = utf8mb4_general_ci COMMENT = 'Agent Skill 绑定' ROW_FORMAT = Dynamic;
 
 -- ----------------------------
 -- Table structure for agent_tool_bind
@@ -222,7 +216,7 @@ CREATE TABLE `agent_tool_bind`  (
   INDEX `idx_tool_item_id`(`tool_item_id`) USING BTREE,
   INDEX `idx_status`(`status`) USING BTREE,
   INDEX `idx_deleted`(`deleted`) USING BTREE
-) ENGINE = InnoDB AUTO_INCREMENT = 41 CHARACTER SET = utf8mb4 COLLATE = utf8mb4_general_ci COMMENT = 'Agent 工具绑定' ROW_FORMAT = Dynamic;
+) ENGINE = InnoDB AUTO_INCREMENT = 1 CHARACTER SET = utf8mb4 COLLATE = utf8mb4_general_ci COMMENT = 'Agent 工具绑定' ROW_FORMAT = Dynamic;
 
 -- ----------------------------
 -- Table structure for app_workflow_grant
@@ -296,7 +290,7 @@ CREATE TABLE `billing_token_daily`  (
   INDEX `idx_agent_model`(`agent_id`, `model_instance_id`) USING BTREE,
   INDEX `idx_app_id`(`app_id`) USING BTREE,
   INDEX `idx_deleted`(`deleted`) USING BTREE
-) ENGINE = InnoDB AUTO_INCREMENT = 18 CHARACTER SET = utf8mb4 COLLATE = utf8mb4_general_ci COMMENT = 'Token 日汇总' ROW_FORMAT = Dynamic;
+) ENGINE = InnoDB AUTO_INCREMENT = 1 CHARACTER SET = utf8mb4 COLLATE = utf8mb4_general_ci COMMENT = 'Token 日汇总' ROW_FORMAT = Dynamic;
 
 -- ----------------------------
 -- Table structure for billing_token_ledger
@@ -332,7 +326,7 @@ CREATE TABLE `billing_token_ledger`  (
   INDEX `idx_session_id`(`session_id`) USING BTREE,
   INDEX `idx_channel`(`channel`) USING BTREE,
   INDEX `idx_deleted`(`deleted`) USING BTREE
-) ENGINE = InnoDB AUTO_INCREMENT = 24459 CHARACTER SET = utf8mb4 COLLATE = utf8mb4_general_ci COMMENT = 'Token 计量流水' ROW_FORMAT = Dynamic;
+) ENGINE = InnoDB AUTO_INCREMENT = 1 CHARACTER SET = utf8mb4 COLLATE = utf8mb4_general_ci COMMENT = 'Token 计量流水' ROW_FORMAT = Dynamic;
 
 -- ----------------------------
 -- Table structure for eval_case
@@ -362,7 +356,7 @@ CREATE TABLE `eval_case`  (
   INDEX `idx_suite_ver`(`suite_id`, `suite_version`) USING BTREE,
   INDEX `idx_enabled`(`enabled`, `deleted`) USING BTREE,
   INDEX `idx_deleted`(`deleted`) USING BTREE
-) ENGINE = InnoDB AUTO_INCREMENT = 53 CHARACTER SET = utf8mb4 COLLATE = utf8mb4_general_ci COMMENT = '评测用例（按 suite_version 钉死）' ROW_FORMAT = Dynamic;
+) ENGINE = InnoDB AUTO_INCREMENT = 1 CHARACTER SET = utf8mb4 COLLATE = utf8mb4_general_ci COMMENT = '评测用例（按 suite_version 钉死）' ROW_FORMAT = Dynamic;
 
 -- ----------------------------
 -- Table structure for eval_result
@@ -399,7 +393,7 @@ CREATE TABLE `eval_result`  (
   INDEX `idx_run_verdict`(`run_id`, `verdict`) USING BTREE,
   INDEX `idx_session`(`session_id`) USING BTREE,
   INDEX `idx_deleted`(`deleted`) USING BTREE
-) ENGINE = InnoDB AUTO_INCREMENT = 144 CHARACTER SET = utf8mb4 COLLATE = utf8mb4_general_ci COMMENT = '评测单 case 结果' ROW_FORMAT = Dynamic;
+) ENGINE = InnoDB AUTO_INCREMENT = 1 CHARACTER SET = utf8mb4 COLLATE = utf8mb4_general_ci COMMENT = '评测单 case 结果' ROW_FORMAT = Dynamic;
 
 -- ----------------------------
 -- Table structure for eval_run
@@ -438,7 +432,7 @@ CREATE TABLE `eval_run`  (
   INDEX `idx_agent`(`agent_id`) USING BTREE,
   INDEX `idx_create_time`(`create_time`) USING BTREE,
   INDEX `idx_deleted`(`deleted`) USING BTREE
-) ENGINE = InnoDB AUTO_INCREMENT = 23 CHARACTER SET = utf8mb4 COLLATE = utf8mb4_general_ci COMMENT = '评测批跑' ROW_FORMAT = Dynamic;
+) ENGINE = InnoDB AUTO_INCREMENT = 1 CHARACTER SET = utf8mb4 COLLATE = utf8mb4_general_ci COMMENT = '评测批跑' ROW_FORMAT = Dynamic;
 
 -- ----------------------------
 -- Table structure for eval_suite
@@ -462,7 +456,7 @@ CREATE TABLE `eval_suite`  (
   UNIQUE INDEX `uk_tenant_suite_key`(`tenant_id`, `suite_key`) USING BTREE,
   INDEX `idx_tenant_enabled`(`tenant_id`, `enabled`, `deleted`) USING BTREE,
   INDEX `idx_deleted`(`deleted`) USING BTREE
-) ENGINE = InnoDB AUTO_INCREMENT = 5 CHARACTER SET = utf8mb4 COLLATE = utf8mb4_general_ci COMMENT = '评测套件' ROW_FORMAT = Dynamic;
+) ENGINE = InnoDB AUTO_INCREMENT = 1 CHARACTER SET = utf8mb4 COLLATE = utf8mb4_general_ci COMMENT = '评测套件' ROW_FORMAT = Dynamic;
 
 -- ----------------------------
 -- Table structure for ma_candidate
@@ -482,7 +476,7 @@ CREATE TABLE `ma_candidate`  (
   UNIQUE INDEX `uk_ma_candidate_ma_route`(`ma_id`, `route_key`) USING BTREE,
   INDEX `idx_ma_candidate_ma_sort`(`ma_id`, `sort_no`) USING BTREE,
   INDEX `idx_ma_candidate_agent`(`agent_id`) USING BTREE
-) ENGINE = InnoDB AUTO_INCREMENT = 16 CHARACTER SET = utf8mb4 COLLATE = utf8mb4_general_ci COMMENT = '多智能体方案候选（MA-P2 刀1）' ROW_FORMAT = Dynamic;
+) ENGINE = InnoDB AUTO_INCREMENT = 1 CHARACTER SET = utf8mb4 COLLATE = utf8mb4_general_ci COMMENT = '多智能体方案候选（MA-P2 刀1）' ROW_FORMAT = Dynamic;
 
 -- ----------------------------
 -- Table structure for ma_def
@@ -506,7 +500,7 @@ CREATE TABLE `ma_def`  (
   UNIQUE INDEX `uk_ma_def_tenant_code`(`tenant_id`, `code`) USING BTREE,
   INDEX `idx_ma_def_tenant_root`(`tenant_id`, `root_agent_id`) USING BTREE,
   INDEX `idx_ma_def_tenant_enabled`(`tenant_id`, `enabled`) USING BTREE
-) ENGINE = InnoDB AUTO_INCREMENT = 3 CHARACTER SET = utf8mb4 COLLATE = utf8mb4_general_ci COMMENT = '多智能体方案（MA-P2 刀1）' ROW_FORMAT = Dynamic;
+) ENGINE = InnoDB AUTO_INCREMENT = 1 CHARACTER SET = utf8mb4 COLLATE = utf8mb4_general_ci COMMENT = '多智能体方案（MA-P2 刀1）' ROW_FORMAT = Dynamic;
 
 -- ----------------------------
 -- Table structure for memory_agent_policy
@@ -609,7 +603,7 @@ CREATE TABLE `model_credential`  (
   INDEX `idx_provider_id`(`provider_id`) USING BTREE,
   INDEX `idx_status`(`status`) USING BTREE,
   INDEX `idx_deleted`(`deleted`) USING BTREE
-) ENGINE = InnoDB AUTO_INCREMENT = 11 CHARACTER SET = utf8mb4 COLLATE = utf8mb4_general_ci COMMENT = '模型供应商凭证' ROW_FORMAT = Dynamic;
+) ENGINE = InnoDB AUTO_INCREMENT = 1 CHARACTER SET = utf8mb4 COLLATE = utf8mb4_general_ci COMMENT = '模型供应商凭证' ROW_FORMAT = Dynamic;
 
 -- ----------------------------
 -- Table structure for model_instance
@@ -638,7 +632,7 @@ CREATE TABLE `model_instance`  (
   INDEX `idx_capability`(`capability`) USING BTREE,
   INDEX `idx_status`(`status`) USING BTREE,
   INDEX `idx_deleted`(`deleted`) USING BTREE
-) ENGINE = InnoDB AUTO_INCREMENT = 18 CHARACTER SET = utf8mb4 COLLATE = utf8mb4_general_ci COMMENT = '模型实例' ROW_FORMAT = Dynamic;
+) ENGINE = InnoDB AUTO_INCREMENT = 1 CHARACTER SET = utf8mb4 COLLATE = utf8mb4_general_ci COMMENT = '模型实例' ROW_FORMAT = Dynamic;
 
 -- ----------------------------
 -- Table structure for model_provider
@@ -660,7 +654,7 @@ CREATE TABLE `model_provider`  (
   INDEX `idx_protocol`(`protocol`) USING BTREE,
   INDEX `idx_status`(`status`) USING BTREE,
   INDEX `idx_deleted`(`deleted`) USING BTREE
-) ENGINE = InnoDB AUTO_INCREMENT = 8 CHARACTER SET = utf8mb4 COLLATE = utf8mb4_general_ci COMMENT = '模型供应商' ROW_FORMAT = Dynamic;
+) ENGINE = InnoDB AUTO_INCREMENT = 1 CHARACTER SET = utf8mb4 COLLATE = utf8mb4_general_ci COMMENT = '模型供应商' ROW_FORMAT = Dynamic;
 
 -- ----------------------------
 -- Table structure for obs_span
@@ -717,7 +711,7 @@ CREATE TABLE `obs_span`  (
   INDEX `idx_tool_name`(`tool_name`) USING BTREE,
   INDEX `idx_billing_ledger_id`(`billing_ledger_id`) USING BTREE,
   INDEX `idx_parent_id`(`parent_id`) USING BTREE
-) ENGINE = InnoDB AUTO_INCREMENT = 1711 CHARACTER SET = utf8mb4 COLLATE = utf8mb4_general_ci COMMENT = 'Trace Span：执行链路一步（含路由树）' ROW_FORMAT = Dynamic;
+) ENGINE = InnoDB AUTO_INCREMENT = 1 CHARACTER SET = utf8mb4 COLLATE = utf8mb4_general_ci COMMENT = 'Trace Span：执行链路一步（含路由树）' ROW_FORMAT = Dynamic;
 
 -- ----------------------------
 -- Table structure for obs_trace
@@ -768,7 +762,7 @@ CREATE TABLE `obs_trace`  (
   INDEX `idx_task_node_id`(`task_node_id`) USING BTREE,
   INDEX `idx_root_trace_id`(`root_trace_id`) USING BTREE,
   INDEX `idx_deleted`(`deleted`) USING BTREE
-) ENGINE = InnoDB AUTO_INCREMENT = 438 CHARACTER SET = utf8mb4 COLLATE = utf8mb4_general_ci COMMENT = '调用 Trace：一次用户提问' ROW_FORMAT = Dynamic;
+) ENGINE = InnoDB AUTO_INCREMENT = 1 CHARACTER SET = utf8mb4 COLLATE = utf8mb4_general_ci COMMENT = '调用 Trace：一次用户提问' ROW_FORMAT = Dynamic;
 
 -- ----------------------------
 -- Table structure for prompt_global_constraint
@@ -792,7 +786,7 @@ CREATE TABLE `prompt_global_constraint`  (
   INDEX `idx_status`(`status`) USING BTREE,
   INDEX `idx_deleted`(`deleted`) USING BTREE,
   INDEX `idx_locale_active_status`(`locale`, `is_active`, `status`, `deleted`) USING BTREE
-) ENGINE = InnoDB AUTO_INCREMENT = 2 CHARACTER SET = utf8mb4 COLLATE = utf8mb4_general_ci COMMENT = '提示词 L1 平台约束' ROW_FORMAT = Dynamic;
+) ENGINE = InnoDB AUTO_INCREMENT = 1 CHARACTER SET = utf8mb4 COLLATE = utf8mb4_general_ci COMMENT = '提示词 L1 平台约束' ROW_FORMAT = Dynamic;
 
 -- ----------------------------
 -- Table structure for prompt_template
@@ -822,7 +816,7 @@ CREATE TABLE `prompt_template`  (
   INDEX `idx_deleted`(`deleted`) USING BTREE,
   INDEX `idx_purpose_active`(`purpose`, `locale`, `is_active`, `status`, `deleted`) USING BTREE,
   INDEX `idx_key_ver_deleted`(`template_key`, `locale`, `version`, `deleted`) USING BTREE
-) ENGINE = InnoDB AUTO_INCREMENT = 6 CHARACTER SET = utf8mb4 COLLATE = utf8mb4_general_ci COMMENT = '提示词 L2 用途模板' ROW_FORMAT = Dynamic;
+) ENGINE = InnoDB AUTO_INCREMENT = 1 CHARACTER SET = utf8mb4 COLLATE = utf8mb4_general_ci COMMENT = '提示词 L2 用途模板' ROW_FORMAT = Dynamic;
 
 -- ----------------------------
 -- Table structure for prompt_template_segment
@@ -845,7 +839,7 @@ CREATE TABLE `prompt_template_segment`  (
   INDEX `idx_template_id`(`template_id`) USING BTREE,
   INDEX `idx_deleted`(`deleted`) USING BTREE,
   INDEX `idx_tpl_sort`(`template_id`, `sort_no`, `deleted`) USING BTREE
-) ENGINE = InnoDB AUTO_INCREMENT = 14 CHARACTER SET = utf8mb4 COLLATE = utf8mb4_general_ci COMMENT = '提示词 L2 模板段落' ROW_FORMAT = Dynamic;
+) ENGINE = InnoDB AUTO_INCREMENT = 1 CHARACTER SET = utf8mb4 COLLATE = utf8mb4_general_ci COMMENT = '提示词 L2 模板段落' ROW_FORMAT = Dynamic;
 
 -- ----------------------------
 -- Table structure for rag_chunk
@@ -874,7 +868,7 @@ CREATE TABLE `rag_chunk`  (
   INDEX `idx_kb_doc`(`kb_id`, `doc_id`) USING BTREE,
   INDEX `idx_doc_chunk`(`doc_id`, `chunk_index`) USING BTREE,
   FULLTEXT INDEX `ft_rag_chunk_content`(`content`) WITH PARSER `ngram`
-) ENGINE = InnoDB AUTO_INCREMENT = 138 CHARACTER SET = utf8mb4 COLLATE = utf8mb4_general_ci COMMENT = 'RAG 切片表（② 使用）' ROW_FORMAT = Dynamic;
+) ENGINE = InnoDB AUTO_INCREMENT = 1 CHARACTER SET = utf8mb4 COLLATE = utf8mb4_general_ci COMMENT = 'RAG 切片表（② 使用）' ROW_FORMAT = Dynamic;
 
 -- ----------------------------
 -- Table structure for rag_document
@@ -900,7 +894,7 @@ CREATE TABLE `rag_document`  (
   PRIMARY KEY (`id`) USING BTREE,
   INDEX `idx_kb_status`(`kb_id`, `status`) USING BTREE,
   INDEX `idx_deleted`(`deleted`) USING BTREE
-) ENGINE = InnoDB AUTO_INCREMENT = 35 CHARACTER SET = utf8mb4 COLLATE = utf8mb4_general_ci COMMENT = 'RAG 文档表（② 使用）' ROW_FORMAT = Dynamic;
+) ENGINE = InnoDB AUTO_INCREMENT = 1 CHARACTER SET = utf8mb4 COLLATE = utf8mb4_general_ci COMMENT = 'RAG 文档表（② 使用）' ROW_FORMAT = Dynamic;
 
 -- ----------------------------
 -- Table structure for rag_ingest_task
@@ -925,7 +919,7 @@ CREATE TABLE `rag_ingest_task`  (
   PRIMARY KEY (`id`) USING BTREE,
   INDEX `idx_doc`(`doc_id`) USING BTREE,
   INDEX `idx_kb_status`(`kb_id`, `status`) USING BTREE
-) ENGINE = InnoDB AUTO_INCREMENT = 35 CHARACTER SET = utf8mb4 COLLATE = utf8mb4_general_ci COMMENT = 'RAG 异步入库任务' ROW_FORMAT = Dynamic;
+) ENGINE = InnoDB AUTO_INCREMENT = 1 CHARACTER SET = utf8mb4 COLLATE = utf8mb4_general_ci COMMENT = 'RAG 异步入库任务' ROW_FORMAT = Dynamic;
 
 -- ----------------------------
 -- Table structure for rag_kb_grant
@@ -975,7 +969,7 @@ CREATE TABLE `rag_knowledge_base`  (
   INDEX `idx_tenant_name`(`tenant_id`, `name`) USING BTREE,
   INDEX `idx_status`(`status`) USING BTREE,
   INDEX `idx_deleted`(`deleted`) USING BTREE
-) ENGINE = InnoDB AUTO_INCREMENT = 7 CHARACTER SET = utf8mb4 COLLATE = utf8mb4_general_ci COMMENT = 'RAG 知识库主表' ROW_FORMAT = Dynamic;
+) ENGINE = InnoDB AUTO_INCREMENT = 1 CHARACTER SET = utf8mb4 COLLATE = utf8mb4_general_ci COMMENT = 'RAG 知识库主表' ROW_FORMAT = Dynamic;
 
 -- ----------------------------
 -- Table structure for skill_def
@@ -1000,7 +994,7 @@ CREATE TABLE `skill_def`  (
   INDEX `idx_name`(`name`) USING BTREE,
   INDEX `idx_status`(`status`) USING BTREE,
   INDEX `idx_deleted`(`deleted`) USING BTREE
-) ENGINE = InnoDB AUTO_INCREMENT = 15 CHARACTER SET = utf8mb4 COLLATE = utf8mb4_general_ci COMMENT = 'Skill 定义（一期单表 skill_def）' ROW_FORMAT = Dynamic;
+) ENGINE = InnoDB AUTO_INCREMENT = 1 CHARACTER SET = utf8mb4 COLLATE = utf8mb4_general_ci COMMENT = 'Skill 定义（一期单表 skill_def）' ROW_FORMAT = Dynamic;
 
 -- ----------------------------
 -- Table structure for skill_version
@@ -1024,7 +1018,7 @@ CREATE TABLE `skill_version`  (
   UNIQUE INDEX `uk_skill_active`(`skill_id`, `active_flag`) USING BTREE,
   INDEX `idx_skill_status`(`skill_id`, `publish_status`) USING BTREE,
   INDEX `idx_published_at`(`published_at`) USING BTREE
-) ENGINE = InnoDB AUTO_INCREMENT = 20 CHARACTER SET = utf8mb4 COLLATE = utf8mb4_general_ci COMMENT = 'Skill 版本（正文快照，草稿/已发布/唯一生效）' ROW_FORMAT = Dynamic;
+) ENGINE = InnoDB AUTO_INCREMENT = 1 CHARACTER SET = utf8mb4 COLLATE = utf8mb4_general_ci COMMENT = 'Skill 版本（正文快照，草稿/已发布/唯一生效）' ROW_FORMAT = Dynamic;
 
 -- ----------------------------
 -- Table structure for sys_app
@@ -1081,7 +1075,7 @@ CREATE TABLE `sys_dept`  (
   PRIMARY KEY (`id`) USING BTREE,
   INDEX `idx_parent`(`parent_id`) USING BTREE,
   INDEX `idx_path`(`path`(191)) USING BTREE
-) ENGINE = InnoDB AUTO_INCREMENT = 2 CHARACTER SET = utf8mb4 COLLATE = utf8mb4_unicode_ci COMMENT = '部门' ROW_FORMAT = Dynamic;
+) ENGINE = InnoDB AUTO_INCREMENT = 1 CHARACTER SET = utf8mb4 COLLATE = utf8mb4_unicode_ci COMMENT = '部门' ROW_FORMAT = Dynamic;
 
 -- ----------------------------
 -- Table structure for sys_login_log
@@ -1100,7 +1094,7 @@ CREATE TABLE `sys_login_log`  (
   PRIMARY KEY (`id`) USING BTREE,
   INDEX `idx_user_time`(`user_id`, `create_time`) USING BTREE,
   INDEX `idx_username_time`(`username`, `create_time`) USING BTREE
-) ENGINE = InnoDB AUTO_INCREMENT = 395 CHARACTER SET = utf8mb4 COLLATE = utf8mb4_unicode_ci COMMENT = '登录日志' ROW_FORMAT = Dynamic;
+) ENGINE = InnoDB AUTO_INCREMENT = 1 CHARACTER SET = utf8mb4 COLLATE = utf8mb4_unicode_ci COMMENT = '登录日志' ROW_FORMAT = Dynamic;
 
 -- ----------------------------
 -- Table structure for sys_menu
@@ -1128,7 +1122,7 @@ CREATE TABLE `sys_menu`  (
   PRIMARY KEY (`id`) USING BTREE,
   INDEX `idx_parent`(`parent_id`) USING BTREE,
   INDEX `idx_permission`(`permission`) USING BTREE
-) ENGINE = InnoDB AUTO_INCREMENT = 133 CHARACTER SET = utf8mb4 COLLATE = utf8mb4_unicode_ci COMMENT = '菜单与权限码' ROW_FORMAT = Dynamic;
+) ENGINE = InnoDB AUTO_INCREMENT = 1 CHARACTER SET = utf8mb4 COLLATE = utf8mb4_unicode_ci COMMENT = '菜单与权限码' ROW_FORMAT = Dynamic;
 
 -- ----------------------------
 -- Table structure for sys_oper_log
@@ -1155,7 +1149,7 @@ CREATE TABLE `sys_oper_log`  (
   INDEX `idx_user_time`(`user_id`, `create_time`) USING BTREE,
   INDEX `idx_module_time`(`module`, `create_time`) USING BTREE,
   INDEX `idx_target`(`target_type`, `target_id`) USING BTREE
-) ENGINE = InnoDB AUTO_INCREMENT = 1735 CHARACTER SET = utf8mb4 COLLATE = utf8mb4_unicode_ci COMMENT = '平台操作日志' ROW_FORMAT = Dynamic;
+) ENGINE = InnoDB AUTO_INCREMENT = 1 CHARACTER SET = utf8mb4 COLLATE = utf8mb4_unicode_ci COMMENT = '平台操作日志' ROW_FORMAT = Dynamic;
 
 -- ----------------------------
 -- Table structure for sys_role
@@ -1176,7 +1170,7 @@ CREATE TABLE `sys_role`  (
   `update_time` datetime NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP COMMENT '更新时间',
   PRIMARY KEY (`id`) USING BTREE,
   UNIQUE INDEX `uk_code`(`code`) USING BTREE
-) ENGINE = InnoDB AUTO_INCREMENT = 17 CHARACTER SET = utf8mb4 COLLATE = utf8mb4_unicode_ci COMMENT = '平台角色' ROW_FORMAT = Dynamic;
+) ENGINE = InnoDB AUTO_INCREMENT = 1 CHARACTER SET = utf8mb4 COLLATE = utf8mb4_unicode_ci COMMENT = '平台角色' ROW_FORMAT = Dynamic;
 
 -- ----------------------------
 -- Table structure for sys_role_dept
@@ -1226,7 +1220,7 @@ CREATE TABLE `sys_user`  (
   UNIQUE INDEX `uk_username`(`username`) USING BTREE,
   INDEX `idx_dept`(`dept_id`) USING BTREE,
   INDEX `idx_phone`(`phone`) USING BTREE
-) ENGINE = InnoDB AUTO_INCREMENT = 57 CHARACTER SET = utf8mb4 COLLATE = utf8mb4_unicode_ci COMMENT = '平台用户' ROW_FORMAT = Dynamic;
+) ENGINE = InnoDB AUTO_INCREMENT = 1 CHARACTER SET = utf8mb4 COLLATE = utf8mb4_unicode_ci COMMENT = '平台用户' ROW_FORMAT = Dynamic;
 
 -- ----------------------------
 -- Table structure for sys_user_role
@@ -1261,7 +1255,7 @@ CREATE TABLE `tool_item`  (
   INDEX `idx_status`(`status`) USING BTREE,
   INDEX `idx_deleted`(`deleted`) USING BTREE,
   INDEX `idx_name`(`name`) USING BTREE
-) ENGINE = InnoDB AUTO_INCREMENT = 268 CHARACTER SET = utf8mb4 COLLATE = utf8mb4_general_ci COMMENT = '工具项' ROW_FORMAT = Dynamic;
+) ENGINE = InnoDB AUTO_INCREMENT = 1 CHARACTER SET = utf8mb4 COLLATE = utf8mb4_general_ci COMMENT = '工具项' ROW_FORMAT = Dynamic;
 
 -- ----------------------------
 -- Table structure for tool_source
@@ -1289,7 +1283,7 @@ CREATE TABLE `tool_source`  (
   INDEX `idx_type`(`type`) USING BTREE,
   INDEX `idx_status`(`status`) USING BTREE,
   INDEX `idx_deleted`(`deleted`) USING BTREE
-) ENGINE = InnoDB AUTO_INCREMENT = 10 CHARACTER SET = utf8mb4 COLLATE = utf8mb4_general_ci COMMENT = '工具源' ROW_FORMAT = Dynamic;
+) ENGINE = InnoDB AUTO_INCREMENT = 1 CHARACTER SET = utf8mb4 COLLATE = utf8mb4_general_ci COMMENT = '工具源' ROW_FORMAT = Dynamic;
 
 -- ----------------------------
 -- Table structure for workflow_def
@@ -1312,7 +1306,7 @@ CREATE TABLE `workflow_def`  (
   UNIQUE INDEX `uk_tenant_code`(`tenant_id`, `code`) USING BTREE,
   INDEX `idx_tenant_status`(`tenant_id`, `status`, `deleted`) USING BTREE,
   INDEX `idx_deleted`(`deleted`) USING BTREE
-) ENGINE = InnoDB AUTO_INCREMENT = 2 CHARACTER SET = utf8mb4 COLLATE = utf8mb4_general_ci COMMENT = '工作流定义' ROW_FORMAT = Dynamic;
+) ENGINE = InnoDB AUTO_INCREMENT = 1 CHARACTER SET = utf8mb4 COLLATE = utf8mb4_general_ci COMMENT = '工作流定义' ROW_FORMAT = Dynamic;
 
 -- ----------------------------
 -- Table structure for workflow_def_draft
@@ -1378,7 +1372,7 @@ CREATE TABLE `workflow_node_run`  (
   PRIMARY KEY (`id`) USING BTREE,
   UNIQUE INDEX `uk_run_node_attempt`(`run_id`, `node_id`, `attempt`) USING BTREE,
   INDEX `idx_run_status`(`run_id`, `status`) USING BTREE
-) ENGINE = InnoDB AUTO_INCREMENT = 25 CHARACTER SET = utf8mb4 COLLATE = utf8mb4_general_ci COMMENT = '工作流节点运行态' ROW_FORMAT = Dynamic;
+) ENGINE = InnoDB AUTO_INCREMENT = 1 CHARACTER SET = utf8mb4 COLLATE = utf8mb4_general_ci COMMENT = '工作流节点运行态' ROW_FORMAT = Dynamic;
 
 -- ----------------------------
 -- Table structure for workflow_release
@@ -1399,7 +1393,7 @@ CREATE TABLE `workflow_release`  (
   UNIQUE INDEX `uk_wf_ver`(`workflow_id`, `version`) USING BTREE,
   INDEX `idx_workflow_id`(`workflow_id`) USING BTREE,
   INDEX `idx_publish_time`(`publish_time`) USING BTREE
-) ENGINE = InnoDB AUTO_INCREMENT = 2 CHARACTER SET = utf8mb4 COLLATE = utf8mb4_general_ci COMMENT = '工作流发布版本（不可变）' ROW_FORMAT = Dynamic;
+) ENGINE = InnoDB AUTO_INCREMENT = 1 CHARACTER SET = utf8mb4 COLLATE = utf8mb4_general_ci COMMENT = '工作流发布版本（不可变）' ROW_FORMAT = Dynamic;
 
 -- ----------------------------
 -- Table structure for workflow_run
@@ -1432,6 +1426,6 @@ CREATE TABLE `workflow_run`  (
   UNIQUE INDEX `uk_app_request`(`app_id`, `client_request_id`) USING BTREE,
   INDEX `idx_tenant_wf`(`tenant_id`, `workflow_id`, `id`) USING BTREE,
   INDEX `idx_status`(`status`) USING BTREE
-) ENGINE = InnoDB AUTO_INCREMENT = 9 CHARACTER SET = utf8mb4 COLLATE = utf8mb4_general_ci COMMENT = '工作流运行实例' ROW_FORMAT = Dynamic;
+) ENGINE = InnoDB AUTO_INCREMENT = 1 CHARACTER SET = utf8mb4 COLLATE = utf8mb4_general_ci COMMENT = '工作流运行实例' ROW_FORMAT = Dynamic;
 
 SET FOREIGN_KEY_CHECKS = 1;
