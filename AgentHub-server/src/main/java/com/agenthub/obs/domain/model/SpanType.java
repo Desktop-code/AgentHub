@@ -24,7 +24,11 @@ public enum SpanType {
      * 复用 LLM 会让 trace 里的「轮数」把 OCR 也算成一轮。
      */
     VISION,
-    /** 检索。本期试跑没有单独检索步时不会写入 */
+    /**
+     * 检索。知识库工具调用时在其 TOOL span 下写检索子步
+     * （tool.input / rewrite / retrieve.vector / retrieve.bm25 / rrf / rerank / tool.output）；
+     * 无知识库检索的工具不会写入。
+     */
     RETRIEVE,
     /** 其它系统步 */
     SYSTEM,

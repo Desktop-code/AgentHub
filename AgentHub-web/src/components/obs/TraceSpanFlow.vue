@@ -5,10 +5,10 @@
     分组规则与拓扑同源，禁止另算一套。
   -->
   <div ref="rootRef" class="trace-flow">
-    <!-- 顶图与瀑布同用原始 spans 做并组；包络只服务甘特条 -->
+    <!-- 顶图与瀑布同用「泳道可见 spans」做并组；包络只服务甘特条 -->
     <TraceTopology
       v-if="showTopology"
-      :spans="spans"
+      :spans="displaySpans"
       :active-id="activeSpanId"
       @select="onTopologySelect"
     />
@@ -21,6 +21,8 @@
         :gantt-of="ganttOf"
         :active-span-id="activeSpanId"
         :expand-ids="expandIds"
+        :retrieve-of="retrieveOf"
+        @open-retrieve="onOpenRetrieve"
       />
     </div>
 
@@ -32,6 +34,13 @@
         </el-button>
       </el-tooltip>
     </div>
+
+    <!-- 检索明细：整条泳道只有一个抽屉实例，由 TOOL 卡入口事件驱动 -->
+    <TraceRetrieveDrawer
+      v-model="retrieveDrawerOpen"
+      :tool-name="retrieveToolName"
+      :steps="retrieveSteps"
+    />
   </div>
 </template>
 
@@ -43,6 +52,7 @@ import { envelopSpans, ganttAxis, spanBar } from '@/utils/traceParallel'
 import { ancestorIdsOf, buildTraceTree, treeBlocksOf } from '@/utils/traceGraphLayout'
 import TraceTopology from '@/components/obs/TraceTopology.vue'
 import TraceListView from '@/components/obs/TraceListView.vue'
+import TraceRetrieveDrawer from '@/components/obs/TraceRetrieveDrawer.vue'
 
 const props = withDefaults(
   defineProps<{
@@ -55,12 +65,85 @@ const props = withDefaults(
   { isWideMode: false, showTopology: false }
 )
 
-/** 甘特用包络后的 latency；并组用原始 spans，避免父包络把先后步时间窗撑到相交 */
-const envelope = computed(() => envelopSpans(props.spans))
+/**
+ * 挂在 TOOL 下的检索子步：按父 id 归组。
+ * <p>这些子步只进「检索明细」抽屉，不进主泳道与拓扑——主泳道保持工具一层。
+ */
+const retrieveByTool = computed(() => {
+  const typeById = new Map(props.spans.map((span) => [span.id, span.spanType]))
+  const grouped = new Map<number, ObsSpan[]>()
+  for (const span of props.spans) {
+    if (span.spanType !== 'RETRIEVE' || span.parentId == null) {
+      continue
+    }
+    // 只认父节点确实是 TOOL 的子步：别处若出现 RETRIEVE，仍按普通步骤展示
+    if (typeById.get(span.parentId) !== 'TOOL') {
+      continue
+    }
+    const list = grouped.get(span.parentId) ?? []
+    list.push(span)
+    grouped.set(span.parentId, list)
+  }
+  return grouped
+})
+
+/** 被抽屉接管的子步 id：用于从泳道 / 拓扑里剔除 */
+const hiddenRetrieveIds = computed(() => {
+  const ids = new Set<number>()
+  for (const list of retrieveByTool.value.values()) {
+    for (const span of list) {
+      ids.add(span.id)
+    }
+  }
+  return ids
+})
+
+/** 泳道 / 拓扑实际渲染的步骤：排除检索中间态，保证工具卡只有一层 */
+const displaySpans = computed(() =>
+  props.spans.filter((span) => !hiddenRetrieveIds.value.has(span.id))
+)
+
+/** 甘特用包络后的 latency；并组用泳道可见 spans，避免父包络把先后步时间窗撑到相交 */
+const envelope = computed(() => envelopSpans(displaySpans.value))
 const axis = computed(() => ganttAxis(envelope.value.spans))
 
 /** 树索引：父→子 + 根列表 + 模板上下文，一次算好供递归列表复用 */
-const tree = computed(() => buildTraceTree(props.spans))
+const tree = computed(() => buildTraceTree(displaySpans.value))
+
+/**
+ * 取某个 TOOL 下的检索子步（顺序不限，抽屉内再按执行序分段）。
+ *
+ * @param span 当前步骤
+ * @return 检索子步；非 TOOL / 无子步时为空数组
+ */
+function retrieveOf(span: ObsSpan): ObsSpan[] {
+  if (span.spanType !== 'TOOL') {
+    return []
+  }
+  return retrieveByTool.value.get(span.id) ?? []
+}
+
+/** 检索明细抽屉开关 */
+const retrieveDrawerOpen = ref(false)
+/** 抽屉标题里的工具名 */
+const retrieveToolName = ref('')
+/** 抽屉展示的子步快照：开抽屉时定格，避免中途重渲染抖动 */
+const retrieveSteps = ref<ObsSpan[]>([])
+
+/**
+ * 打开检索明细：只有真拿到子步才开抽屉，避免空抽屉。
+ *
+ * @param span 被点的 TOOL 步骤
+ */
+function onOpenRetrieve(span: ObsSpan) {
+  const steps = retrieveOf(span)
+  if (!steps.length) {
+    return
+  }
+  retrieveToolName.value = span.toolName || span.name || ''
+  retrieveSteps.value = steps
+  retrieveDrawerOpen.value = true
+}
 
 /** 顶层块：ROUTE 在并行块前、汇总在块后由 groupSiblingSpans 保证 */
 const rootBlocks = computed(() => treeBlocksOf(null, tree.value))
@@ -95,11 +178,14 @@ function onTopologySelect(spanId: number) {
   activeSpanId.value = spanId
 }
 
-// 换 trace 时清空选中，避免新链路里同 id 的节点被误高亮
+// 换 trace 时清空选中，避免新链路里同 id 的节点被误高亮；检索抽屉也一并收起
 watch(
   () => props.spans,
   () => {
     activeSpanId.value = null
+    retrieveDrawerOpen.value = false
+    retrieveSteps.value = []
+    retrieveToolName.value = ''
   }
 )
 
@@ -200,7 +286,7 @@ onBeforeUnmount(() => {
 
 // 换 trace 或列表高度变化（展开/收起卡片）都可能导致滚动容器变化，重新判定一次
 watch(
-  () => [props.spans.length, props.showTopology] as const,
+  () => [displaySpans.value.length, props.showTopology] as const,
   () => {
     void nextTick(syncScrollHost)
   }

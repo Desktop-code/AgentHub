@@ -4,6 +4,7 @@
     一级：并行块 → 虚线包裹容器 + 竖排 AGENT 大卡；串行 → 直接平铺。
     二级：AGENT 大卡展开后渲染子 LLM/TOOL 卡，通过自身递归继续往下；
           并行容器内的一组 AGENT 也复用同一个组件的 plain 模式。
+    TOOL 下的 RETRIEVE 子步不在这里铺开：只留「检索明细」入口，由泳道层抽屉展示。
     分组规则与顶部拓扑同源（traceGraphLayout.groupSiblingSpans），禁止各算一套。
   -->
   <div class="trace-list">
@@ -23,6 +24,8 @@
             :gantt-of="ganttOf"
             :active-span-id="activeSpanId"
             :expand-ids="expandIds"
+            :retrieve-of="retrieveOf"
+            @open-retrieve="emit('open-retrieve', $event)"
           />
         </div>
       </section>
@@ -38,6 +41,8 @@
         :default-open="item.span.spanType !== 'AGENT'"
         :active-span-id="activeSpanId"
         :force-open="expandIds.has(item.span.id)"
+        :retrieve-count="retrieveCountOf(item.span)"
+        @open-retrieve="emit('open-retrieve', item.span)"
       >
         <TraceListView
           v-if="childBlocksOf(item.span).length"
@@ -47,6 +52,8 @@
           :gantt-of="ganttOf"
           :active-span-id="activeSpanId"
           :expand-ids="expandIds"
+          :retrieve-of="retrieveOf"
+          @open-retrieve="emit('open-retrieve', $event)"
         />
       </TraceSpanCard>
     </template>
@@ -64,7 +71,9 @@
  * 3) Body 内不画树状折线，层级只用左侧淡虚线表示；
  * 4) 子块按 span.id 缓存，避免每次渲染重建数组导致子卡片反复挂载、展开态丢失；
  * 5) 上方拓扑点选节点时，本组件只负责把 activeSpanId / 祖先链往下传，
- *    真正「展开 + 滚动 + 高亮」由命中的 TraceSpanCard 自己完成（避免跨层找 DOM）。
+ *    真正「展开 + 滚动 + 高亮」由命中的 TraceSpanCard 自己完成（避免跨层找 DOM）；
+ * 6) TOOL 的 RETRIEVE 子步从子块里滤掉，只通过 retrieveOf 计数决定是否给入口按钮，
+ *    保证主泳道「工具一层」，不因检索埋点变长。
  */
 import { watch } from 'vue'
 import type { ObsSpan } from '@/types/obs'
@@ -86,9 +95,25 @@ const props = withDefaults(
     activeSpanId?: number | null
     /** 被点节点的祖先链：这些卡必须自动展开，否则目标卡藏在折叠 Body 里 */
     expandIds?: Set<number>
+    /** 取某 TOOL 下的检索子步：有则出「检索明细」入口，数据由泳道层持有 */
+    retrieveOf?: ((span: ObsSpan) => ObsSpan[]) | null
   }>(),
-  { isWideMode: false, ganttOf: null, activeSpanId: null, expandIds: () => new Set<number>() }
+  {
+    isWideMode: false,
+    ganttOf: null,
+    activeSpanId: null,
+    expandIds: () => new Set<number>(),
+    retrieveOf: null
+  }
 )
+
+/**
+ * 检索明细入口：递归层只做转发，抽屉由最外层泳道统一渲染。
+ * <p>事件带着被点的 TOOL span，外层据此取该工具的子步，避免卡片自己找数据。
+ */
+const emit = defineEmits<{
+  'open-retrieve': [span: ObsSpan]
+}>()
 
 /**
  * 子块缓存：按父 id 存 groupSiblingSpans 的结果。
@@ -114,9 +139,31 @@ function childBlocksOf(span: ObsSpan): TraceLayoutItem[] {
   if (cached) {
     return cached
   }
-  const list = treeBlocksOf(span, props.index)
+  const blocks = treeBlocksOf(span, props.index)
+  /*
+   * 主泳道不铺开检索中间态：挂在 TOOL 下的 RETRIEVE 子步只从「检索明细」抽屉看，
+   * 泳道里保持「searchKnowledgeBase 一层」。其它父节点（理论上不该有 RETRIEVE 子步）
+   * 不做过滤，避免误伤未来别的埋点结构。
+   */
+  const list =
+    span.spanType === 'TOOL'
+      ? blocks.filter((item) => item.kind !== 'single' || item.span.spanType !== 'RETRIEVE')
+      : blocks
   childCache.set(span.id, list)
   return list
+}
+
+/**
+ * 某步挂的检索子步数：只有 TOOL 且确有 RETRIEVE 子步时才 > 0，入口按钮据此显隐。
+ *
+ * @param span 当前步骤
+ * @return 子步数；无检索能力 / 无数据时为 0
+ */
+function retrieveCountOf(span: ObsSpan): number {
+  if (span.spanType !== 'TOOL' || !props.retrieveOf) {
+    return 0
+  }
+  return props.retrieveOf(span).length
 }
 
 /**

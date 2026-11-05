@@ -1,5 +1,7 @@
 package com.agenthub.runtime.infra.agentscope;
 
+import com.agenthub.obs.domain.ObsTraceHolder;
+import com.agenthub.obs.domain.ObsTraceScope;
 import io.agentscope.core.tool.AgentTool;
 import io.agentscope.core.tool.Toolkit;
 
@@ -26,6 +28,8 @@ public final class ToolkitRagContext {
         if (toolkit == null || agentId == null) {
             return toolkit;
         }
+        // 在 ReAct 主线程取好 trace：工具执行在 boundedElastic，那里 ObsTraceHolder 取不到
+        ObsTraceScope trace = ObsTraceHolder.current();
         Set<String> names = new HashSet<>(toolkit.getToolNames());
         for (String name : names) {
             AgentTool original = toolkit.getTool(name);
@@ -33,7 +37,7 @@ public final class ToolkitRagContext {
                 continue;
             }
             toolkit.removeTool(name);
-            toolkit.registerAgentTool(new RagContextAgentTool(original, agentId));
+            toolkit.registerAgentTool(new RagContextAgentTool(original, agentId, trace));
         }
         return toolkit;
     }
