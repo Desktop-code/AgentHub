@@ -4,8 +4,8 @@
  * <p>只做「后端码 → 中文/标签样式」的纯映射，不依赖 Vue / DOM，
  * 便于 node:test 直接校验，也保证列表页与详情编排 Tab 的中文叫法一致。
  *
- * <p>注意：五个模板码必须与服务端 {@code AgentRuntimeConfig} 及
- * {@code utils/orchestrationValidation.ts} 的五值白名单保持一致；
+ * <p>注意：六个模板码必须与服务端 {@code AgentRuntimeConfig} 及
+ * {@code utils/orchestrationValidation.ts} 的六值白名单保持一致；
  * 本文件刻意不引入运行时依赖，避免 node:test 需要解析路径别名。
  */
 
@@ -19,14 +19,17 @@ export const MA_LIST_TEMPLATE_FIXED_PARALLEL = 'FIXED_PARALLEL'
 export const MA_LIST_TEMPLATE_CRITIC_LOOP = 'CRITIC_LOOP'
 /** 模板：判路由选出有序子集 → 按判定序串行 → 汇总 */
 export const MA_LIST_TEMPLATE_ROUTER_THEN_SEQUENCE = 'ROUTER_THEN_SEQUENCE'
+/** 模板：同题并行竞争 → 选优取 1 个子终答 */
+export const MA_LIST_TEMPLATE_COMPETE = 'COMPETE'
 
-/** 五值白名单 */
+/** 六值白名单 */
 export const MA_LIST_TEMPLATES = [
   MA_LIST_TEMPLATE_ROUTER_PARALLEL,
   MA_LIST_TEMPLATE_FIXED_SEQUENCE,
   MA_LIST_TEMPLATE_FIXED_PARALLEL,
   MA_LIST_TEMPLATE_CRITIC_LOOP,
-  MA_LIST_TEMPLATE_ROUTER_THEN_SEQUENCE
+  MA_LIST_TEMPLATE_ROUTER_THEN_SEQUENCE,
+  MA_LIST_TEMPLATE_COMPETE
 ] as const
 
 /** 协作模式中文名；未知值按默认模板展示，避免列表出现空标签 */
@@ -35,7 +38,8 @@ export const MA_TEMPLATE_LABELS: Record<string, string> = {
   [MA_LIST_TEMPLATE_FIXED_SEQUENCE]: '固定串行',
   [MA_LIST_TEMPLATE_FIXED_PARALLEL]: '固定并行',
   [MA_LIST_TEMPLATE_CRITIC_LOOP]: '评审环',
-  [MA_LIST_TEMPLATE_ROUTER_THEN_SEQUENCE]: '路由后串行'
+  [MA_LIST_TEMPLATE_ROUTER_THEN_SEQUENCE]: '路由后串行',
+  [MA_LIST_TEMPLATE_COMPETE]: '竞争选优'
 }
 
 /** 模板对应的说明，作为鼠标悬浮提示，减少用户为选模板回详情页对照 */
@@ -44,11 +48,12 @@ export const MA_TEMPLATE_HINTS: Record<string, string> = {
   [MA_LIST_TEMPLATE_FIXED_SEQUENCE]: '跳过判路由，按顺序串行执行全部启用候选',
   [MA_LIST_TEMPLATE_FIXED_PARALLEL]: '跳过判路由，全部启用候选并行执行同一份用户原问',
   [MA_LIST_TEMPLATE_CRITIC_LOOP]: '跳过判路由，恰好 1 个执行者出稿，评审专家判定后有限回修（默认 1 轮）',
-  [MA_LIST_TEMPLATE_ROUTER_THEN_SEQUENCE]: '先判路由选出专家与子问，再按判定顺序串行；后步只看前置摘要'
+  [MA_LIST_TEMPLATE_ROUTER_THEN_SEQUENCE]: '先判路由选出专家与子问，再按判定顺序串行；后步只看前置摘要',
+  [MA_LIST_TEMPLATE_COMPETE]: '同一问题并行交给多个候选，评选模型选出最优终答（至少 2 个启用候选）'
 }
 
 /**
- * 模板归一：五值白名单外（含空）回落 ROUTER_PARALLEL，与服务端/执行器同口径。
+ * 模板归一：六值白名单外（含空）回落 ROUTER_PARALLEL，与服务端/执行器同口径。
  *
  * @param value 后端返回或表单里的模板值
  * @return 合法模板码
@@ -88,6 +93,10 @@ export function maTemplateTagType(raw?: string | null): 'primary' | 'success' | 
   }
   if (template === MA_LIST_TEMPLATE_CRITIC_LOOP) {
     return 'info'
+  }
+  if (template === MA_LIST_TEMPLATE_COMPETE) {
+    // 竞争选优是「正向选优」：成功色与固定串行区分开，又不落进判路由的 primary
+    return 'success'
   }
   return 'primary'
 }

@@ -125,6 +125,19 @@ public class ObsSpanRepositoryImpl implements ObsSpanRepository {
 
     /** {@inheritDoc} */
     @Override
+    public void updateAttrs(String traceId, Long id, String attrsJson) {
+        if (traceId == null || id == null || attrsJson == null || attrsJson.isBlank()) {
+            return;
+        }
+        // 只改 attrs_json：步骤已终态，其它列（状态 / 结束时间 / 正文）一律不碰
+        mapper.update(null, new LambdaUpdateWrapper<ObsSpanEntity>()
+                .eq(ObsSpanEntity::getTraceId, traceId)
+                .eq(ObsSpanEntity::getId, id)
+                .set(ObsSpanEntity::getAttrsJson, attrsJson));
+    }
+
+    /** {@inheritDoc} */
+    @Override
     public List<ObsSpan> listByTraceId(String traceId) {
         return mapper.selectList(new LambdaQueryWrapper<ObsSpanEntity>()
                         .eq(ObsSpanEntity::getTraceId, traceId)

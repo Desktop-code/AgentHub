@@ -235,6 +235,29 @@ public class TraceRecorderAppService implements TraceRecorder {
 
     /** {@inheritDoc} */
     @Override
+    public void amendAttrs(ObsTraceScope scope, Long spanId, java.util.Map<String, Object> fields) {
+        try {
+            if (scope == null || spanId == null || fields == null || fields.isEmpty()) {
+                return;
+            }
+            // 先读回既有 attrs 再合并：补写只加字段，不能把 brief / cause / 模板等已有信息冲掉
+            Optional<ObsSpan> existing = spans.find(scope.traceId(), spanId);
+            if (existing.isEmpty()) {
+                return;
+            }
+            String merged = ObsAttrs.withFields(existing.get().getAttrsJson(), fields);
+            if (merged == null || merged.isBlank()) {
+                return;
+            }
+            spans.updateAttrs(scope.traceId(), spanId, ObsTexts.mask(merged));
+        } catch (RuntimeException ex) {
+            // 埋点永远不能让主流程失败
+            log.warn("span attrs 补写失败 type={}", ex.getClass().getSimpleName());
+        }
+    }
+
+    /** {@inheritDoc} */
+    @Override
     public void finish(ObsTraceScope scope, ObsStatus status, String errorSummary) {
         finish(scope, status, errorSummary, null);
     }

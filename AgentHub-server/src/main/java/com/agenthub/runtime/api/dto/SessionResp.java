@@ -7,13 +7,22 @@ import java.time.LocalDateTime;
 /**
  * 试跑会话。所属域：runtime。预览和错误摘要已脱敏。
  * sessionTitle 是左栏主标题（自动生成或手改），lastMsgPreview 是首问短预览，两者互不覆盖。
+ *
+ * <p>MA-P2 刀2 起支持虚拟根：{@code agentId} 可空，{@code maId / maCode / maName}
+ * 用于左栏与试跑页标题；绑根会话也会带方案展示信息（执行读源以方案为准）。
  */
 @Data
 public class SessionResp {
 
     private Long id;
+    /** 绑根试跑为 Agent 主键；虚拟根为空 */
     private Long agentId;
+    /** 展示名：绑根用 Agent 名，虚拟根用方案名 */
     private String agentName;
+    /** 归属方案；绑根会话建会话时可能为空（执行时按启用方案解析） */
+    private Long maId;
+    private String maCode;
+    private String maName;
     private String runMode;
     private Long userId;
     private String status;

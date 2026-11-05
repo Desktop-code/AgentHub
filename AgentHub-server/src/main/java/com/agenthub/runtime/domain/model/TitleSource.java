@@ -6,7 +6,7 @@ package com.agenthub.runtime.domain.model;
  */
 public enum TitleSource {
 
-    /** 平台按首轮对话自动生成（模型概括，≤10 汉字） */
+    /** 平台按首轮对话自动生成（首条用户消息截断 ≤24 字符；模型兜底 ≤10 汉字） */
     AUTO,
 
     /** 用户在左栏手动改名；此后自动生成不再覆盖 */

@@ -12,7 +12,7 @@ import java.util.List;
 @Data
 public class AgentRuntimeConfigResp {
 
-    /** 编排模板；五值之一，非法/空回显 ROUTER_PARALLEL */
+    /** 编排模板；六值之一，非法/空回显 ROUTER_PARALLEL */
     private String maTemplate;
 
     /** 上下文策略；ISOLATED（默认）/ PRIOR_SUMMARY_ONLY（仅串行模板）/ SHARED_SCRATCH（五值模板均可用） */
@@ -24,7 +24,7 @@ public class AgentRuntimeConfigResp {
     /** 允许多意图路由；ROUTER 用 */
     private Boolean multiIntentEnabled;
 
-    /** CONCAT / SUMMARIZE；ROUTER 用 */
+    /** CONCAT / SUMMARIZE / VOTE；ROUTER 用（VOTE 仅路由并行 / 固定并行 / 路由后串行生效） */
     private String answerMode;
 
     /** 每轮最多子 Agent 数；ROUTER 用 */
@@ -50,4 +50,13 @@ public class AgentRuntimeConfigResp {
 
     /** 评审环：评审专家 agentId；未选为空 */
     private Long maCriticAgentId;
+
+    /** 判路由 / 汇总模型实例（model_instance.id）；虚拟根必填，绑根可空 */
+    private Long maJudgeModelInstanceId;
+
+    /** 判路由模型兼容别名（模型名）；只作回显，执行以 id 为准 */
+    private String maJudgeModel;
+
+    /** 竞争选优（模板=COMPETE）的选优策略：JUDGE_PICK（默认）/ FIRST_SUCCESS */
+    private String competeStrategy;
 }

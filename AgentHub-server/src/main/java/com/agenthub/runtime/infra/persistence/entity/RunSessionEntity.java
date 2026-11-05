@@ -20,6 +20,8 @@ public class RunSessionEntity {
     @TableId(type = IdType.AUTO)
     private Long id;
     private Long agentId;
+    /** ma_def.id；虚拟根试跑归属，绑根会话为空 */
+    private Long maDefId;
     private String runMode;
     private Long userId;
     private String status;

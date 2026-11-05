@@ -15,6 +15,8 @@ public class SessionQuery {
     private Long userId;
     /** 非空时只看该 Agent */
     private Long agentId;
+    /** 非空时只看该编排方案（虚拟根试跑）；与 agentId 互斥 */
+    private Long maId;
     /**
      * 可空。非空时匹配预览，纯数字再或上会话 id。
      * 试跑列表不填，避免调用追踪的模糊条件进到对话抽屉。

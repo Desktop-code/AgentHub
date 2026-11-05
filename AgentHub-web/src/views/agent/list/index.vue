@@ -1,7 +1,15 @@
 <template>
-  <div ref="pageRef" class="page" :class="{ 'is-flip-busy': flipBusy || trialOpen }">
+  <!--
+    is-master：仅主从态锁整页高度，由详情内部各区自行滚动。
+    网格态与回程飞卡不锁（否则网格会被锁高裁切），仍交给布局 .main 统一滚动。
+  -->
+  <div
+    ref="pageRef"
+    class="page"
+    :class="{ 'is-flip-busy': flipBusy || trialOpen, 'is-master': viewMode === 'master' }"
+  >
     <!-- 页头只承载标题/说明 + 全局「新建 Agent」；筛选条内不再重复放新建 -->
-    <PageHeader title="Agent 管理" description="配置 ReAct / Plan-Execute / Router Agent；绑定模型、工具、Skill 与子 Agent。">
+    <PageHeader title="Agent 管理" description="配置 ReAct / Plan-Execute / Router Agent；绑定模型、工具、技能与子 Agent。">
       <template #extra>
         <!-- 试跑抽屉打开或飞卡过程中禁用新建：避免弹层叠加与视图切换抢焦点 -->
         <el-button
@@ -1169,10 +1177,45 @@ function onTrial(payload: { agentId: number; name: string; runMode: string }) {
   max-width: none;
 }
 
+/*
+ * 主从态：整页锁成视口内的 flex 纵向容器。
+ * 高度取布局 .main 的 100%（主区已扣顶栏与内边距），overflow:hidden 禁止全局滚动条；
+ * 页头 / 筛选 / 提示条不收缩，.workspace 吃满剩余高度，内部再分区滚动。
+ */
+.page.is-master {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  min-height: 0;
+  overflow: hidden;
+}
+
+.page.is-master > .ph-toolbar,
+.page.is-master > .block-alert {
+  flex: none;
+}
+
 .workspace {
   position: relative;
   width: 100%;
   /* 不要用 100vh：主区已扣顶栏与内边距，再按视口撑高会一进页就出滚动条 */
+  min-height: 0;
+}
+
+/* 主从态：工作区吃满页头以下的剩余高度，作为下方两层定位的容器 */
+.page.is-master .workspace {
+  display: flex;
+  flex: 1;
+  flex-direction: column;
+  min-height: 0;
+  overflow: hidden;
+}
+
+/* 当前层撑满工作区，细节区的内部滚动才有确定的可用高度 */
+.page.is-master .layer.is-active {
+  display: flex;
+  flex: 1;
+  flex-direction: column;
   min-height: 0;
 }
 
@@ -1345,8 +1388,15 @@ function onTrial(payload: { agentId: number; name: string; runMode: string }) {
 
 .master {
   display: flex;
-  align-items: flex-start;
+  /* 左右两列等高：右栏详情锁高后，左轨才能用 flex:1 撑满并独立滚动 */
+  align-items: stretch;
   gap: 16px;
+  min-height: 0;
+}
+
+/* 主从态：主从容器吃满当前层；右栏 detail-pane 自己再分纵向 flex */
+.page.is-master .master {
+  flex: 1;
   min-height: 0;
 }
 
@@ -1360,6 +1410,12 @@ function onTrial(payload: { agentId: number; name: string; runMode: string }) {
   /* 左轨内部滚动；预留顶栏 56 + 主区内边距与页头筛选约 160 */
   max-height: calc(100vh - 220px);
   min-height: 0;
+}
+
+/* 主从锁高后不再猜视口：直接跟 .master 等高，列表区用 flex:1 得到确定高度 */
+.page.is-master .rail {
+  height: 100%;
+  max-height: none;
 }
 
 .rail-toolbar {
@@ -1457,8 +1513,12 @@ function onTrial(payload: { agentId: number; name: string; runMode: string }) {
 
 .detail-pane {
   position: relative;
+  /* 纵向 flex：详情壳（.detail-root）用 flex:1 撑满，骨架覆盖层仍绝对定位 */
+  display: flex;
+  flex-direction: column;
   flex: 1;
   min-width: 0;
+  min-height: 0;
 }
 
 /*

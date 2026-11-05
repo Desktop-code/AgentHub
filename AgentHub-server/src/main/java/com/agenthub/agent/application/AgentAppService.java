@@ -224,6 +224,7 @@ public class AgentAppService {
             applyPromptBinding(existing, req.getPrompt());
         }
         agents.updateProfile(existing, operatorContext.requireUserId());
+        // 刀3 起本路径只写 agent_def；多智能体方案以 ma_def 为唯一真源，不再反向镜像配置。
         operLogWriter.write("agent", "update", "agent_def", String.valueOf(id), "更新 Agent " + existing.getName());
         return toDetail(existing, warnings);
     }
@@ -422,6 +423,8 @@ public class AgentAppService {
             config.setMaChildRunModesAllowed(req.getMaChildRunModesAllowed());
             config.setMaCriticMaxRounds(req.getMaCriticMaxRounds());
             config.setMaCriticAgentId(req.getMaCriticAgentId());
+            // 竞争选优策略：只落配置，是否生效由执行侧按模板判断
+            config.setCompeteStrategy(req.getCompeteStrategy());
         }
         return AgentRuntimeConfig.toStorageJson(config, runMode);
     }
@@ -492,6 +495,9 @@ public class AgentAppService {
         resp.setMaChildRunModesAllowed(config.childRunModesAllowedOrDefault());
         resp.setMaCriticMaxRounds(config.criticMaxRoundsOrDefault());
         resp.setMaCriticAgentId(config.getMaCriticAgentId());
+        resp.setMaJudgeModelInstanceId(config.getMaJudgeModelInstanceId());
+        resp.setMaJudgeModel(config.getMaJudgeModel());
+        resp.setCompeteStrategy(config.competeStrategyOrDefault());
         return resp;
     }
 

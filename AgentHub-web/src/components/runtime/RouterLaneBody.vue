@@ -45,7 +45,11 @@
           <span v-if="row.kind === 'aggregate' && !row.spans.length" class="chip">
             {{ model.aggregate === LANE_AGGREGATE_SUMMARIZE
               ? '未找到汇总调用'
-              : model.aggregate === LANE_AGGREGATE_NONE ? '无汇总步骤' : '拼接' }}
+              : model.aggregate === LANE_AGGREGATE_NONE
+                ? '无汇总步骤'
+                : model.aggregate === LANE_AGGREGATE_PICK
+                  ? '选优'
+                  : model.aggregate === LANE_AGGREGATE_VOTE ? '投票' : '拼接' }}
           </span>
         </div>
         <div class="state">
@@ -54,7 +58,11 @@
           <el-tag v-else-if="row.kind === 'aggregate' && !row.spans.length" size="small" type="info" effect="plain">
             {{ model.aggregate === LANE_AGGREGATE_SUMMARIZE
               ? '降级'
-              : model.aggregate === LANE_AGGREGATE_NONE ? '评审环' : '无调用' }}
+              : model.aggregate === LANE_AGGREGATE_NONE
+                ? '评审环'
+                : model.aggregate === LANE_AGGREGATE_PICK
+                  ? '选优'
+                  : model.aggregate === LANE_AGGREGATE_VOTE ? '投票' : '无调用' }}
           </el-tag>
           <el-tag v-else size="small" type="success" effect="plain">完成</el-tag>
         </div>
@@ -98,7 +106,10 @@ import type { ObsSpan } from '@/types/obs'
 import { envelopSpans, ganttAxis, spanBar } from '@/utils/traceParallel'
 import {
   LANE_AGGREGATE_NONE,
+  LANE_AGGREGATE_PICK,
   LANE_AGGREGATE_SUMMARIZE,
+  LANE_AGGREGATE_VOTE,
+  LANE_TEMPLATE_COMPETE,
   LANE_TEMPLATE_ROUTER_PARALLEL,
   laneToneOf,
   type OrchestrationLaneEvent,
@@ -167,7 +178,11 @@ function barOf(span: ObsSpan, rowKind: string, template: string): LaneBar | null
     : span.spanType === 'AGENT'
       ? (span.agentName || span.name || 'Agent')
       : span.spanType === 'LLM'
-        ? (rowKind === 'aggregate' ? 'SUM' : 'JUDGE LLM')
+        ? (rowKind === 'aggregate'
+          ? (props.model.aggregate === LANE_AGGREGATE_VOTE
+            ? '投票 LLM'
+            : template === LANE_TEMPLATE_COMPETE ? '选优 LLM' : 'SUM')
+          : 'JUDGE LLM')
         : (span.name || span.spanType || '步骤')
   if (!gantt) {
     return {

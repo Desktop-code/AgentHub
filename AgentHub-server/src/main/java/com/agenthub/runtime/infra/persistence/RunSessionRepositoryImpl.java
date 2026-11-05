@@ -48,6 +48,10 @@ public class RunSessionRepositoryImpl implements RunSessionRepository {
         if (query.getAgentId() != null) {
             wrapper.eq(RunSessionEntity::getAgentId, query.getAgentId());
         }
+        // 虚拟根左栏：按方案过滤，和按 Agent 过滤同一套分页与账号隔离
+        if (query.getMaId() != null) {
+            wrapper.eq(RunSessionEntity::getMaDefId, query.getMaId());
+        }
         // 调用追踪左栏：标题与预览都参与模糊匹配，纯数字同时能点中会话 id。试跑不传 keyword
         if (query.getKeyword() != null && !query.getKeyword().isBlank()) {
             String keyword = query.getKeyword().trim();
@@ -97,6 +101,7 @@ public class RunSessionRepositoryImpl implements RunSessionRepository {
         LocalDateTime now = LocalDateTime.now();
         RunSessionEntity entity = new RunSessionEntity();
         entity.setAgentId(session.getAgentId());
+        entity.setMaDefId(session.getMaDefId());
         entity.setRunMode(session.getRunMode());
         entity.setUserId(session.getUserId());
         entity.setStatus(session.getStatus());
@@ -210,6 +215,7 @@ public class RunSessionRepositoryImpl implements RunSessionRepository {
         RunSession session = new RunSession();
         session.setId(entity.getId());
         session.setAgentId(entity.getAgentId());
+        session.setMaDefId(entity.getMaDefId());
         session.setRunMode(entity.getRunMode());
         session.setUserId(entity.getUserId());
         session.setStatus(entity.getStatus());

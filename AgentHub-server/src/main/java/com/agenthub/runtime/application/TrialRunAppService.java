@@ -18,6 +18,7 @@ import com.agenthub.obs.domain.service.ObsAttrs;
 import com.agenthub.runtime.domain.model.ChildPlanPendingView;
 import com.agenthub.runtime.domain.model.EventType;
 import com.agenthub.runtime.domain.model.GeneratedFile;
+import com.agenthub.runtime.domain.model.MaRunSpec;
 import com.agenthub.runtime.domain.model.MeterScope;
 import com.agenthub.runtime.domain.model.PendingPlan;
 import com.agenthub.runtime.domain.model.PlanState;
@@ -25,6 +26,7 @@ import com.agenthub.runtime.domain.model.PlanView;
 import com.agenthub.runtime.domain.model.RunEvent;
 import com.agenthub.runtime.domain.model.RunSession;
 import com.agenthub.runtime.domain.model.RunStatus;
+import com.agenthub.runtime.domain.model.TitleSource;
 import com.agenthub.runtime.domain.model.TrialPlan;
 import com.agenthub.runtime.domain.model.TrialTrace;
 import com.agenthub.runtime.domain.model.TrialTurn;
@@ -34,6 +36,7 @@ import com.agenthub.runtime.domain.service.CauseDigest;
 import com.agenthub.runtime.domain.service.PlanJson;
 import com.agenthub.runtime.domain.service.GeneratedFileMarker;
 import com.agenthub.runtime.domain.service.PromptInjectionHolder;
+import com.agenthub.runtime.domain.service.SessionTitleTexts;
 import com.agenthub.runtime.domain.service.TrialFailure;
 import com.agenthub.runtime.domain.service.TrialSendGate;
 import com.agenthub.runtime.domain.service.TrialTurnOutcome;
@@ -80,6 +83,8 @@ public class TrialRunAppService {
     private final TrialLiveBuffer live;
     private final VisionOcrExecutor vision;
     private final SessionTitleGeneratorAppService titleGenerator;
+    /** 方案读源：虚拟根与绑根都按 ma_def 执行；为空时才回落 Agent 旧配置 */
+    private final MaTrialSpecLoader maSpecs;
 
     /**
      * @param sessions        会话
@@ -101,6 +106,7 @@ public class TrialRunAppService {
      * @param live            进行中一轮的内存快照，供刷新后的只读轮询
      * @param vision          图片文字提取；无图时完全不参与
      * @param titleGenerator  首轮结束后异步生成会话标题；失败不影响本轮
+     * @param maSpecs         方案读源；虚拟根没有 Agent 时由它提供模板、候选与判路由模型
      */
     public TrialRunAppService(RunSessionRepository sessions, RunEventRepository events, AgentDefRepository agents,
                               TrialAccess access, TrialBindingLoader loader, ReActTrialExecutor react,
@@ -109,7 +115,7 @@ public class TrialRunAppService {
                               TrialEventWriter writer, TrialFlight flight,
                               OperatorContext operatorContext, OperLogWriter operLogWriter, TrialObsHooks obs,
                               TrialMemoryCoordinator memory, TrialLiveBuffer live, VisionOcrExecutor vision,
-                              SessionTitleGeneratorAppService titleGenerator) {
+                              SessionTitleGeneratorAppService titleGenerator, MaTrialSpecLoader maSpecs) {
         this.sessions = sessions;
         this.events = events;
         this.agents = agents;
@@ -129,6 +135,7 @@ public class TrialRunAppService {
         this.live = live;
         this.vision = vision;
         this.titleGenerator = titleGenerator;
+        this.maSpecs = maSpecs;
     }
 
     /**
@@ -240,8 +247,13 @@ public class TrialRunAppService {
         ObsTraceScope trace = null;
         try {
             trace = obs.begin(session, pending.userText());
-            AgentDef agent = agents.findById(session.getAgentId())
+            AgentDef agent = session.getAgentId() == null ? null
+                    : agents.findById(session.getAgentId())
                     .orElseThrow(() -> new TrialFailure("Agent 不存在"));
+            if (agent == null) {
+                // 虚拟根是 ROUTER，本不该产生单 Agent 待批计划；兜底拒绝而不是 NPE
+                throw new TrialFailure("该会话没有 Agent，无法续跑计划；请重新提问");
+            }
             if (agent.getStatus() == null || agent.getStatus() != AgentStatus.ENABLED) {
                 throw new TrialFailure("Agent 未启用");
             }
@@ -407,6 +419,11 @@ public class TrialRunAppService {
         }
         // 图片边界校验放在最外层：超量/超大属于请求本身不合法，应在建 trace、写事件之前就拒掉
         List<String> accepted = VisionOcrTexts.normalize(images);
+        // 虚拟根没有 Agent 视觉槽：明确拒绝，而不是走一条「模型调用失败」的模糊路径
+        if (!accepted.isEmpty() && session.getAgentId() == null) {
+            flight.finish(sessionId);
+            throw new BizException(ErrorCode.BAD_REQUEST, "虚拟根试跑暂不支持图片输入，请改用文字提问");
+        }
         List<RunEvent> written = new ArrayList<>();
         ObsTraceScope trace = null;
         try {
@@ -416,10 +433,18 @@ public class TrialRunAppService {
             childApprovals.rejectAll(sessionId);
             // 先落 RUNNING，页面在本轮结束前就能看到进行中的调用
             trace = obs.begin(session, content);
-            AgentDef agent = agents.findById(session.getAgentId())
+            // 虚拟根没有 Agent：agent 可空，但必须有方案（下面 resolve 会校验）
+            AgentDef agent = session.getAgentId() == null ? null
+                    : agents.findById(session.getAgentId())
                     .orElseThrow(() -> new TrialFailure("Agent 不存在"));
-            if (agent.getStatus() == null || agent.getStatus() != AgentStatus.ENABLED) {
+            if (agent != null && (agent.getStatus() == null || agent.getStatus() != AgentStatus.ENABLED)) {
                 throw new TrialFailure("Agent 未启用");
+            }
+            // 执行读源：有 ma_def_id 一律读方案；绑根按「当前启用方案」实时解析；
+            // 都没有才回落 Agent 旧配置（在 run() 里写可见提醒）
+            MaRunSpec spec = maSpecs.resolve(session, agent);
+            if (agent == null && spec == null) {
+                throw new TrialFailure("该会话既没有 Agent 也没有可用的编排方案，无法执行");
             }
             // 前置拦截：带图却没有 VISION 槽时，必须在写任何事件之前就用明确文案拒绝，
             // 否则用户会看到一条莫名其妙的「模型调用失败」
@@ -454,7 +479,7 @@ public class TrialRunAppService {
                 live.begin(sessionId, userSeq, content, visionNote);
                 mirrored = TrialLiveBuffer.tee(progress, live.recorder(sessionId));
             }
-            TrialTurn turn = run(agent, content, visionNote, session, written, seq, mirrored);
+            TrialTurn turn = run(agent, spec, content, visionNote, session, written, seq, mirrored);
             obs.finishOk(trace);
             return succeed(session, turn, written, content);
         } catch (TrialFailure ex) {
@@ -507,25 +532,43 @@ public class TrialRunAppService {
         return text;
     }
 
-    private TrialTurn run(AgentDef agent, String content, String ocrText, RunSession session, List<RunEvent> written,
-                          int seq, TrialProgress progress) {
+    private TrialTurn run(AgentDef agent, MaRunSpec spec, String content, String ocrText, RunSession session,
+                          List<RunEvent> written, int seq, TrialProgress progress) {
         long userId = session.getUserId();
         // 用户事件已经入库。这里追加窗口并在触顶时滚动摘要，再把摘要和短期记忆拼进本轮。
         // 注意：窗口里存的是用户原文 content，不是 OCR 结果——OCR 只在「本轮」有效，
         // 存进窗口会让后续每轮都把上次的图片文字再喂一遍，既浪费 token 也容易串味。
-        String modelUser = memory.prepareUser(session, content);
+        // 虚拟根没有 Agent 记忆策略：直接用原文，避免把方案会话写进某个 Agent 的窗口。
+        String modelUser = agent == null ? content : memory.prepareUser(session, content);
         // 多模态：识别结果只拼到「送给模型的那一版」，用户事件与标题仍保持原文
         String query = VisionOcrTexts.composeQuery(ocrText, content);
         modelUser = VisionOcrTexts.applyToModelUser(modelUser, ocrText, content);
-        if (AgentRunMode.ROUTER.name().equals(agent.getRunMode())) {
+        // 运行模式以会话快照为准：虚拟根会话固定 ROUTER，没有 Agent 可读
+        String runMode = agent != null ? agent.getRunMode() : session.getRunMode();
+        if (AgentRunMode.ROUTER.name().equals(runMode)) {
+            if (spec == null) {
+                // 绑根但没有启用方案：回落 Agent 旧配置，必须在时间线留痕，避免用户以为读的是方案
+                written.add(writer.append(session.getId(), seq++, EventType.SYSTEM,
+                        "该编排根未绑定启用中的方案，本轮按 Agent 侧旧配置执行；到「多智能体」为它启用方案后，"
+                                + "执行读源才会切到方案（模板 / 候选 / 判路由模型）", null, null));
+            }
+            // 虚拟根没有 agent_def 行：合成只读壳只为装配（提示词前缀 / 限制解析 / 计量归属），不落库
+            AgentDef root = agent != null ? agent : virtualRoot(spec);
             // 路由判定也要看得到图片里的文字，否则「这张发票什么时候到期」会判不出意图
-            RouterTrialExecutor.RoutedTurn routed = router.execute(agent, query, modelUser, userId, session.getId(), progress);
+            RouterTrialExecutor.RoutedTurn routed = router.execute(root, spec, query, modelUser, userId,
+                    session.getId(), progress);
             // 按子分段落库：决策块 + 每子「路由到」+ 该子 traces，禁止拼成单条时间线
             seq = appendRouterSegments(session.getId(), seq, routed, written);
             seq = appendNotices(session.getId(), seq, routed.notices(), written);
             written.add(assistant(session.getId(), seq, routed.turn()));
-            memory.afterAssistant(session, routed.turn().getAssistantText());
+            if (agent != null) {
+                memory.afterAssistant(session, routed.turn().getAssistantText());
+            }
             return routed.turn();
+        }
+        if (agent == null) {
+            // 方案试跑只支持一层编排；其它模式没有 Agent 时无法装配，直接中文失败
+            throw new TrialFailure("方案试跑只支持 ROUTER 编排，请检查方案模板与绑定关系");
         }
         if (AgentRunMode.PLAN_AND_EXECUTE.name().equals(agent.getRunMode())) {
             return runPlan(agent, query, modelUser, session, written, seq, progress);
@@ -575,6 +618,37 @@ public class TrialRunAppService {
                 trace.bindParent(null);
             }
         }
+    }
+
+    /**
+     * 虚拟根的执行壳：把方案伪装成一个只读 {@link AgentDef}，供装配层复用既有入口。
+     *
+     * <p>为什么需要它：判路由提示词前缀、生效限制解析、计量归属都按 Agent 取值；
+     * 虚拟根在 {@code agent_def} 里没有行，若各处判空会散落大量分支。
+     * 这里只填「标识 + ROUTER 模式 + 启用」，<b>不写库</b>，也不会被当成真实 Agent 查到；
+     * 模型槽与记忆策略仍由方案提供（判路由模型来自 {@code maJudgeModelInstanceId}）。
+     *
+     * @param spec 方案来源；调用方保证非空
+     * @return 只读合成 Agent（id 为空）
+     */
+    private static AgentDef virtualRoot(MaRunSpec spec) {
+        AgentDef root = new AgentDef();
+        root.setName(virtualRootName(spec));
+        root.setCode(spec == null ? null : spec.label());
+        root.setRunMode(AgentRunMode.ROUTER.name());
+        root.setStatus(AgentStatus.ENABLED);
+        return root;
+    }
+
+    /** 虚拟根展示名：方案名 → 编码 → 中性中文（会话标题与提示词都用它）。 */
+    private static String virtualRootName(MaRunSpec spec) {
+        if (spec == null) {
+            return "编排根";
+        }
+        if (spec.name() != null && !spec.name().isBlank()) {
+            return spec.name().trim();
+        }
+        return spec.label().isBlank() ? "编排根" : spec.label();
     }
 
     private int appendNotices(Long sessionId, int seq, List<String> notices, List<RunEvent> written) {
@@ -800,8 +874,12 @@ public class TrialRunAppService {
         recordTurn(session, userText, "", advance);
         operLogWriter.write("runtime", "run", "agent_run_session", String.valueOf(session.getId()),
                 "试跑会话 " + session.getId() + " 本轮完成");
-        // 首轮问答都已落库，交给后台按问答内容起个短标题；成功与否都不影响本轮响应
-        maybeGenerateTitle(session, userText, turn);
+        // MA 自动标题（刀：自动会话标题）：首轮成功后立刻用首句原文截出标题并写库，
+        // 左栏随下一次列表请求即可见；只有截不出标题（原文空白）时才回落既有 LLM 兜底。
+        boolean titled = applyFirstMessageTitle(session, userText);
+        if (!titled) {
+            maybeGenerateTitle(session, userText, turn);
+        }
         // 待批准：本轮没有助手正文，预览给一句可读说明，不把空串写进左栏
         String preview = turn.isAssistantSuppressed()
                 ? TrialTexts.preview("已生成计划，等待批准后执行")
@@ -813,7 +891,46 @@ public class TrialRunAppService {
     }
 
     /**
-     * 首轮结束后触发异步标题生成。
+     * 首轮成功后写入「首句截断」标题（MA 自动会话标题的唯一规则）。
+     *
+     * <p>为什么放在请求线程同步写：产品要求左栏在首轮结束后立刻有标题，
+     * 交给异步任务会晚 3～8 秒才出现；这里一条带条件的 UPDATE，开销可忽略。
+     *
+     * <p>边界：
+     * <ul>
+     *   <li>只在 {@code message_count == 1}（首轮）写，后续轮次不再动标题；</li>
+     *   <li>用户已手改（{@code title_source=MANUAL}）或已有标题时，
+     *       {@link RunSessionRepository#updateAutoTitleIfAbsent} 的条件更新会命中 0 行，
+     *       标题保持不变——这就是「手改后不再覆盖」的实现；</li>
+     *   <li>虚拟根会话同样生效：只依赖会话行，不需要 Agent。</li>
+     * </ul>
+     *
+     * @param session  本轮会话（轮次已累加）
+     * @param userText 用户这一轮原文
+     * @return true 表示已经存在确定性标题（无论本次是否真的写入），调用方不必再走 LLM 兜底
+     */
+    private boolean applyFirstMessageTitle(RunSession session, String userText) {
+        if (session == null || session.getId() == null || safeCount(session) != 1) {
+            return false;
+        }
+        String title = SessionTitleTexts.fromFirstMessage(userText);
+        if (title.isEmpty()) {
+            return false;
+        }
+        boolean written = sessions.updateAutoTitleIfAbsent(session.getId(), title, operatorContext.requireUserId());
+        if (written) {
+            // 本地对象同步成已写状态：后续同一轮的续跑不会重复尝试（条件更新本就只会命中一次）
+            session.setSessionTitle(title);
+            session.setTitleSource(TitleSource.AUTO.name());
+        }
+        return true;
+    }
+
+    /**
+     * 首轮结束后触发异步标题生成（LLM 兜底，仅当首句截断写不出标题时才走到这里）。
+     *
+     * <p>本刀（自动会话标题）的正常路径是 {@link #applyFirstMessageTitle}：首句原文直接截断入库、
+     * 不产生任何出站；本方法保留为既有能力复用，处理「用户原文全是空白」这类极端输入。
      *
      * <p>为什么只在 message_count == 1 时触发：标题概括的是会话主题，首轮就定了；
      * 后续轮次再调模型纯属浪费 token。批准计划那条路径的 advance=false、轮次仍是 1，
@@ -899,9 +1016,10 @@ public class TrialRunAppService {
     /**
      * 只在还没有预览时用用户原文生成 last_msg_preview。
      *
-     * <p>严禁在这里写 session_title：首轮开始时系统只落一条副标题预览，
-     * 真正的主标题由 {@link SessionTitleGeneratorAppService} 在本轮结束后异步生成，
-     * 或由用户手动改名产生。若这里顺手写了标题，异步任务会因为「已有值」而永远跳过。
+     * <p>严禁在这里写 session_title：首轮开始时系统只落一条副标题预览；
+     * 主标题由 {@link #applyFirstMessageTitle} 在本轮成功后用首句原文截断写入
+     * （写不出时才由 {@link SessionTitleGeneratorAppService} 兜底），或由用户手动改名产生。
+     * 若这里顺手写了标题，条件更新会因为「已有值」而跳过，标题就等于绕开了统一规则。
      *
      * @param session  会话
      * @param userText 用户原文

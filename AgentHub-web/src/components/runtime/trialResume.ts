@@ -45,31 +45,46 @@ function persist() {
 }
 
 /**
- * 记住当前 Agent 正在看的会话。
+ * 记住当前 Agent / 方案正在看的会话。
  * 只该在**会话确已落库**后调用：`send` 里 create 成功、或在列表里点开历史会话。
  * 前端临时草稿（负 id）会被直接忽略，保证「新建不提问就刷新」不留痕迹。
- * @param agentId  Agent 主键，未选中时调用方不应调用
+ * @param ownerId   归属主键：绑根为 Agent 主键，虚拟根为方案主键
  * @param sessionId 落库会话 id
+ * @param scope     归属类型；agent 与 ma 的 id 可能撞号，必须分开存
  */
-export function rememberTrialSession(agentId: number, sessionId: number) {
-  if (!agentId || sessionId == null || sessionId < 0) {
+export function rememberTrialSession(ownerId: number, sessionId: number, scope: TrialSessionScope = 'agent') {
+  if (!ownerId || sessionId == null || sessionId < 0) {
     return
   }
-  table()[String(agentId)] = sessionId
+  table()[ownerKey(ownerId, scope)] = sessionId
   persist()
 }
 
 /**
- * 取该 Agent 上次看的会话。
- * @param agentId Agent 主键
+ * 取该 Agent / 方案上次看的会话。
+ * @param ownerId 归属主键
+ * @param scope   归属类型；默认 agent，虚拟根传 ma
  * @return 没有记录时为 undefined
  */
-export function recallTrialSession(agentId?: number): number | undefined {
-  if (!agentId) {
+export function recallTrialSession(ownerId?: number, scope: TrialSessionScope = 'agent'): number | undefined {
+  if (!ownerId) {
     return undefined
   }
-  const id = table()[String(agentId)]
+  const id = table()[ownerKey(ownerId, scope)]
   return typeof id === 'number' && id > 0 ? id : undefined
+}
+
+/** 归属类型：同一数字在 agent / ma 两个空间里互不影响 */
+export type TrialSessionScope = 'agent' | 'ma'
+
+/**
+ * 存储键：agent 沿用旧键（老用户已有记录不失效），ma 加前缀区分。
+ * @param ownerId 归属主键
+ * @param scope   归属类型
+ * @return sessionStorage 表内的键
+ */
+function ownerKey(ownerId: number, scope: TrialSessionScope): string {
+  return scope === 'ma' ? `ma:${ownerId}` : String(ownerId)
 }
 
 /**

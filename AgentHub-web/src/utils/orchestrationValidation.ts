@@ -4,13 +4,14 @@
  * 职责：把「候选列表 + 策略」校验成中文错误 / 提醒，供编排 Tab 的「校验关系图」按钮使用。
  * 约束：
  * - 纯函数，不依赖 Vue / DOM，便于 node:test 直接跑；
- * - 五种模板可持久：ROUTER_PARALLEL / FIXED_SEQUENCE / FIXED_PARALLEL / CRITIC_LOOP /
- *   ROUTER_THEN_SEQUENCE；
+ * - 六种模板可持久：ROUTER_PARALLEL / FIXED_SEQUENCE / FIXED_PARALLEL / CRITIC_LOOP /
+ *   ROUTER_THEN_SEQUENCE / COMPETE；
  *   子 Agent 只能是「获本编排允许」的 REACT 或 PLAN_AND_EXECUTE（ROUTER 恒禁止）；
  * - 评审环：执行者候选（排除评审者）必须恰好 1 个，评审者必填且不能与执行者相同；
+ * - 竞争选优：启用候选至少 2 个，策略 JUDGE_PICK（默认）/ FIRST_SUCCESS；
  * - M4 口径：零候选 / 零启用候选都不允许，固定模板没有判路由兜底，同样必须整次失败；
  * - 一层结构下子不能是 ROUTER，因此不存在更深环；直接自环（子指向父）单独拦。
-    10| * - 上下文策略三值：ISOLATED / PRIOR_SUMMARY_ONLY（仅串行）/ SHARED_SCRATCH（五值模板都可选）。
+ * - 上下文策略三值：ISOLATED / PRIOR_SUMMARY_ONLY（仅串行）/ SHARED_SCRATCH（六值模板都可选）。
  */
 import type { AgentRouteRow } from '@/types/agent'
 
@@ -24,13 +25,16 @@ export const MA_TEMPLATE_FIXED_PARALLEL = 'FIXED_PARALLEL'
 export const MA_TEMPLATE_CRITIC_LOOP = 'CRITIC_LOOP'
 /** 模板：判路由选出有序子集 → 按判定序串行 → 汇总；后步可见前置终答摘要 */
 export const MA_TEMPLATE_ROUTER_THEN_SEQUENCE = 'ROUTER_THEN_SEQUENCE'
-/** 五值白名单；服务端同口径，非法/空回落 ROUTER_PARALLEL */
+/** 模板：同一问题并行交给多个候选，选优取 1 个子终答 */
+export const MA_TEMPLATE_COMPETE = 'COMPETE'
+/** 六值白名单；服务端同口径，非法/空回落 ROUTER_PARALLEL */
 export const MA_TEMPLATES = [
   MA_TEMPLATE_ROUTER_PARALLEL,
   MA_TEMPLATE_FIXED_SEQUENCE,
   MA_TEMPLATE_FIXED_PARALLEL,
   MA_TEMPLATE_CRITIC_LOOP,
-  MA_TEMPLATE_ROUTER_THEN_SEQUENCE
+  MA_TEMPLATE_ROUTER_THEN_SEQUENCE,
+  MA_TEMPLATE_COMPETE
 ] as const
 
 /** 串行模板集合：只有这些模板的「前置摘要」才有意义（与服务端 AgentRuntimeConfig 同口径） */
@@ -50,6 +54,15 @@ export function isSerialTemplate(template: string): boolean {
 export const DEFAULT_CRITIC_MAX_ROUNDS = 1
 /** 评审环轮次硬顶：与服务端 AgentRuntimeConfig.MAX_CRITIC_ROUNDS_CAP 一致 */
 export const MAX_CRITIC_ROUNDS_CAP = 3
+
+/** 竞争选优：评选模型选优（默认） */
+export const MA_COMPETE_STRATEGY_JUDGE_PICK = 'JUDGE_PICK'
+/** 竞争选优：第一个成功子的终答（无评选模型 / 评选失败时兜底） */
+export const MA_COMPETE_STRATEGY_FIRST_SUCCESS = 'FIRST_SUCCESS'
+/** 竞争选优策略白名单；服务端同口径，非法值回落 JUDGE_PICK */
+export const MA_COMPETE_STRATEGIES = [MA_COMPETE_STRATEGY_JUDGE_PICK, MA_COMPETE_STRATEGY_FIRST_SUCCESS] as const
+/** 竞争选优最少参与候选数：与服务端 AgentRuntimeConfig.MIN_COMPETE_CANDIDATES 一致 */
+export const MIN_COMPETE_CANDIDATES = 2
 
 /** 上下文策略：子互相隔离，只吃 sub_query / 用户原问 */
 export const MA_CONTEXT_ISOLATED = 'ISOLATED'
@@ -71,6 +84,25 @@ export const MA_CONTEXT_POLICIES = [
 export const MA_AGGREGATE_CONCAT = 'CONCAT'
 /** 汇总策略：父模型整合 */
 export const MA_AGGREGATE_SUMMARIZE = 'SUMMARIZE'
+/** 汇总策略：评选模型在多份子终答里投票选一路原文；失败降级 CONCAT */
+export const MA_AGGREGATE_VOTE = 'VOTE'
+/** 汇总策略白名单；服务端同口径，未知值回落 CONCAT */
+export const MA_AGGREGATES = [MA_AGGREGATE_CONCAT, MA_AGGREGATE_SUMMARIZE, MA_AGGREGATE_VOTE] as const
+
+/**
+ * 该模板是否支持「投票选优」汇总。
+ *
+ * <p>与服务端 `AgentRuntimeConfig.supportsVote` 同口径：只放「等齐后统一出终答」的模板。
+ * COMPETE 的选优由模板自身（PICK）负责、CRITIC_LOOP 不做汇总、FIXED_SEQUENCE 串行主语义不变。
+ *
+ * @param template 已归一的模板码
+ * @return true＝可配 VOTE
+ */
+export function supportsVoteTemplate(template: string): boolean {
+  return template === MA_TEMPLATE_ROUTER_PARALLEL
+    || template === MA_TEMPLATE_FIXED_PARALLEL
+    || template === MA_TEMPLATE_ROUTER_THEN_SEQUENCE
+}
 
 /** 子运行模式：ReAct（默认，恒在允许集合里） */
 export const MA_CHILD_MODE_REACT = 'REACT'
@@ -174,6 +206,17 @@ export function normalizeCriticMaxRounds(value?: number | null): number {
   return Math.min(n, MAX_CRITIC_ROUNDS_CAP)
 }
 
+/**
+ * 竞争选优策略归一：缺省/非法回落 JUDGE_PICK（与服务端同口径）。
+ *
+ * @param value 表单或库内值
+ * @return JUDGE_PICK | FIRST_SUCCESS
+ */
+export function normalizeCompeteStrategy(value?: string | null): string {
+  const text = (value || '').trim().toUpperCase()
+  return (MA_COMPETE_STRATEGIES as readonly string[]).includes(text) ? text : MA_COMPETE_STRATEGY_JUDGE_PICK
+}
+
 /** 校验入参；routes 直接复用现网 RouteResp 字段 */
 export interface OrchestrationValidationInput {
   /** 编排根 Agent 主键，用于拦直接自环 */
@@ -192,6 +235,8 @@ export interface OrchestrationValidationInput {
   criticAgentId?: number | null
   /** 评审环：最大评审轮次；空按 1 */
   criticMaxRounds?: number
+  /** 竞争选优：JUDGE_PICK（默认）/ FIRST_SUCCESS */
+  competeStrategy?: string
   /** 候选列表，含停用行 */
   routes: AgentRouteRow[]
 }
@@ -229,18 +274,25 @@ export function validateOrchestration(input: OrchestrationValidationInput): Orch
   // 允许的子运行模式：归一后恒含 REACT，P&E 只有显式勾选才会出现在这里
   const allowedChildModes = normalizeChildRunModes(input.allowedChildRunModes)
 
-  // 策略侧：五值白名单之外直接拦，避免前端选了未知值却落库被服务端悄悄洗掉
+  // 策略侧：六值白名单之外直接拦，避免前端选了未知值却落库被服务端悄悄洗掉
   const template = normalizeTemplate(input.template)
   const isCriticTemplate = template === MA_TEMPLATE_CRITIC_LOOP
+  const isCompeteTemplate = template === MA_TEMPLATE_COMPETE
   const serialTemplate = isSerialTemplate(template)
   if (input.template && input.template !== template) {
     errors.push(
-      `未知协作模式「${input.template}」，只能是 ROUTER_PARALLEL / FIXED_SEQUENCE / FIXED_PARALLEL / CRITIC_LOOP / ROUTER_THEN_SEQUENCE`
+      `未知协作模式「${input.template}」，只能是 ROUTER_PARALLEL / FIXED_SEQUENCE / FIXED_PARALLEL / CRITIC_LOOP / ROUTER_THEN_SEQUENCE / COMPETE`
     )
   }
   const aggregate = input.aggregate || MA_AGGREGATE_CONCAT
-  if (aggregate !== MA_AGGREGATE_CONCAT && aggregate !== MA_AGGREGATE_SUMMARIZE) {
-    errors.push(`未知结果合成「${aggregate}」，只能是 CONCAT 或 SUMMARIZE`)
+  if (aggregate !== MA_AGGREGATE_CONCAT && aggregate !== MA_AGGREGATE_SUMMARIZE
+    && aggregate !== MA_AGGREGATE_VOTE) {
+    errors.push(`未知结果合成「${aggregate}」，只能是 CONCAT、SUMMARIZE 或 VOTE`)
+  }
+  // VOTE 只对支持投票的模板成立；其它模板服务端会收敛回 CONCAT，这里提前提醒避免误解
+  const voteAggregate = aggregate === MA_AGGREGATE_VOTE && supportsVoteTemplate(template)
+  if (aggregate === MA_AGGREGATE_VOTE && !supportsVoteTemplate(template)) {
+    warnings.push('投票选优只对路由并行 / 固定并行 / 路由后串行生效：当前模板保存后会按拼接执行（CONCAT）')
   }
   const context = normalizeContextPolicy(input.context, template)
   if (!serialTemplate && input.context === MA_CONTEXT_PRIOR_SUMMARY_ONLY) {
@@ -271,8 +323,8 @@ export function validateOrchestration(input: OrchestrationValidationInput): Orch
   // M4：零候选不允许；全部停用同样等于没有可用子
   if (!routes.length) {
     errors.push('没有任何候选子 Agent：至少添加 1 个获本编排允许的子 Agent（M4：不允许零子）')
-  } else if (!enabled.length && !isCriticTemplate) {
-    // 评审环的「启用候选」口径是「执行者恰好 1 个」，下面单独给更准确的文案，这里不重复报
+  } else if (!enabled.length && !isCriticTemplate && !isCompeteTemplate) {
+    // 评审环 / 竞争选优的「启用候选」口径各自有更准确的文案，这里不重复报
     errors.push('没有启用的候选子 Agent：判路由需要至少 1 个启用候选')
   }
 
@@ -359,10 +411,35 @@ export function validateOrchestration(input: OrchestrationValidationInput): Orch
     warnings.push('评审环：执行者出稿后由评审专家判定，不同意则回修（默认 1 轮）；终答＝最后一版执行稿')
   }
 
+  // 竞争选优：至少 2 个启用候选 + 策略白名单；与保存/运行时同口径
+  if (isCompeteTemplate) {
+    if (enabled.length < MIN_COMPETE_CANDIDATES) {
+      errors.push(
+        `竞争选优至少需要 ${MIN_COMPETE_CANDIDATES} 个启用候选（当前 ${enabled.length} 个）：请添加或启用更多候选专家`
+      )
+    }
+    const strategy = normalizeCompeteStrategy(input.competeStrategy)
+    if (input.competeStrategy && strategy !== input.competeStrategy.trim().toUpperCase()) {
+      warnings.push(`未知选优策略「${input.competeStrategy}」，保存后按默认 ${MA_COMPETE_STRATEGY_JUDGE_PICK} 回落`)
+    }
+    warnings.push(
+      strategy === MA_COMPETE_STRATEGY_FIRST_SUCCESS
+        ? '竞争选优：直接取候选顺序第一个成功子的终答（不调用评选模型）；全部失败才报错'
+        : '竞争选优：评选模型比较各子终答后选 1 个赢家；评选模型不可用时自动降级为第一个成功子'
+    )
+  }
+
   // SUMMARIZE 依赖父 ROUTER 文本模型；这里拿不到模型绑定，只能提醒用户确认
   if (aggregate === MA_AGGREGATE_SUMMARIZE) {
     warnings.push(
       '结果合成为 SUMMARIZE：请确认父 Agent 已在「模型配置」绑定 ROUTER 用途的文本模型；未绑定时会降级为 CONCAT'
+    )
+  }
+  // VOTE 依赖同一份评选模型；票池只有 1 路时不会调用，这一点在提醒里写清
+  if (voteAggregate) {
+    warnings.push(
+      '投票选优：多个成功子终答交给评选模型选一路原文作为终答（默认用判路由模型）；'
+      + '只有 1 路成功时不投票直接出，评选失败则降级为拼接'
     )
   }
   if (!isCriticTemplate && enabled.length > maxParallel) {
@@ -378,6 +455,11 @@ export function validateOrchestration(input: OrchestrationValidationInput): Orch
       )
     } else if (template === MA_TEMPLATE_ROUTER_PARALLEL) {
       warnings.push(`启用候选 ${enabled.length} 个，超过并行上限 ${maxParallel}：超出的意图不会同时执行`)
+    } else if (template === MA_TEMPLATE_COMPETE) {
+      // 竞争选优需要同时比较：超上限的候选不参与，必须让用户看到竞争面被缩小
+      warnings.push(
+        `启用候选 ${enabled.length} 个，超过并行上限 ${maxParallel}：只有 sort_order 前 ${maxParallel} 个参与竞争，其余标「已跳过」`
+      )
     } else {
       // 固定串行不设并行上限：全部候选按顺序跑完
       warnings.push(`固定串行按顺序执行全部 ${enabled.length} 个启用候选，不受并行上限限制`)

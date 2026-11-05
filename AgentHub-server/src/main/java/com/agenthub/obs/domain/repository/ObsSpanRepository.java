@@ -49,6 +49,19 @@ public interface ObsSpanRepository {
     void closeRunning(String traceId, ObsStatus status, LocalDateTime endTime);
 
     /**
+     * 覆盖写入一条步骤的 attrs_json（调用方负责先合并既有字段）。
+     *
+     * <p>用于「步骤已收尾、结论后到」的补写场景（如投票 winner）；不存在该行时静默跳过。
+     *
+     * @param traceId   业务 traceId
+     * @param id        行主键
+     * @param attrsJson 已合并并通过脱敏的 attrs
+     */
+    default void updateAttrs(String traceId, Long id, String attrsJson) {
+        // 默认空实现：非关键埋点，实现方按需覆写
+    }
+
+    /**
      * @param traceId 业务 traceId
      * @return 按 seq 升序的全部步骤
      */
