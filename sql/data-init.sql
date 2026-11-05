@@ -122,6 +122,29 @@ INSERT INTO sys_menu (id, parent_id, type, name, path, component, redirect, perm
 INSERT INTO sys_menu (id, parent_id, type, name, path, component, redirect, permission, icon, sort, visible, status, open_type, deleted, created_by, create_time, updated_by, update_time) VALUES (107, 109, 3, '编辑模板', NULL, NULL, NULL, 'prompt:template:edit', NULL, 3, 1, 1, 0, 0, NULL, '2026-10-31 02:45:05', NULL, '2026-10-31 03:33:39');
 INSERT INTO sys_menu (id, parent_id, type, name, path, component, redirect, permission, icon, sort, visible, status, open_type, deleted, created_by, create_time, updated_by, update_time) VALUES (108, 109, 3, '发布模板', NULL, NULL, NULL, 'prompt:template:publish', NULL, 4, 1, 1, 0, 0, NULL, '2026-10-31 02:45:05', NULL, '2026-10-31 03:33:39');
 INSERT INTO sys_menu (id, parent_id, type, name, path, component, redirect, permission, icon, sort, visible, status, open_type, deleted, created_by, create_time, updated_by, update_time) VALUES (109, 27, 2, '提示词模板库', '/access/prompt-center', 'prompt/center', NULL, 'prompt:l1:list', 'Document', 55, 1, 1, 0, 0, NULL, '2026-10-31 03:33:39', NULL, '2026-10-31 03:33:39');
+INSERT INTO sys_menu (id, parent_id, type, name, path, component, redirect, permission, icon, sort, visible, status, open_type, deleted, created_by, create_time, updated_by, update_time) VALUES (110, 67, 2, 'Agent 评测', '/ops/eval', 'eval/console/index', NULL, 'eval:suite:view', 'Finished', 40, 1, 1, 0, 0, 1, '2026-11-03 16:45:14', 1, '2026-11-03 16:45:14');
+INSERT INTO sys_menu (id, parent_id, type, name, path, component, redirect, permission, icon, sort, visible, status, open_type, deleted, created_by, create_time, updated_by, update_time) VALUES (111, 110, 3, '套件查询', NULL, NULL, NULL, 'eval:suite:view', NULL, 1, 1, 1, 0, 0, 1, '2026-11-03 16:45:14', 1, '2026-11-03 16:45:14');
+INSERT INTO sys_menu (id, parent_id, type, name, path, component, redirect, permission, icon, sort, visible, status, open_type, deleted, created_by, create_time, updated_by, update_time) VALUES (112, 110, 3, '套件编辑', NULL, NULL, NULL, 'eval:suite:edit', NULL, 2, 1, 1, 0, 0, 1, '2026-11-03 16:45:14', 1, '2026-11-03 16:45:14');
+INSERT INTO sys_menu (id, parent_id, type, name, path, component, redirect, permission, icon, sort, visible, status, open_type, deleted, created_by, create_time, updated_by, update_time) VALUES (113, 110, 3, '跑批触发', NULL, NULL, NULL, 'eval:run:trigger', NULL, 3, 1, 1, 0, 0, 1, '2026-11-03 16:45:14', 1, '2026-11-03 16:45:14');
+INSERT INTO sys_menu (id, parent_id, type, name, path, component, redirect, permission, icon, sort, visible, status, open_type, deleted, created_by, create_time, updated_by, update_time) VALUES (114, 110, 3, '跑批查看', NULL, NULL, NULL, 'eval:run:view', NULL, 4, 1, 1, 0, 0, 1, '2026-11-03 16:45:14', 1, '2026-11-03 16:45:14');
+INSERT INTO sys_menu (id, parent_id, type, name, path, component, redirect, permission, icon, sort, visible, status, open_type, deleted, created_by, create_time, updated_by, update_time) VALUES (115, 110, 3, '跑批取消', NULL, NULL, NULL, 'eval:run:cancel', NULL, 5, 1, 1, 0, 0, 1, '2026-11-03 16:45:14', 1, '2026-11-03 16:45:14');
+INSERT INTO sys_menu (id, parent_id, type, name, path, component, redirect, permission, icon, sort, visible, status, open_type, deleted, created_by, create_time, updated_by, update_time) VALUES (116, 0, 4, '编排', '/orchestration', '', NULL, '', 'Guide', 55, 1, 1, 0, 0, 1, '2026-11-04 00:29:43', 1, '2026-11-04 00:29:43');
+INSERT INTO sys_menu (id, parent_id, type, name, path, component, redirect, permission, icon, sort, visible, status, open_type, deleted, created_by, create_time, updated_by, update_time) VALUES (117, 116, 2, '工作流', '/orchestration/workflow', 'workflow/list/index', NULL, 'workflow:def:view', 'Connection', 10, 1, 1, 0, 0, 1, '2026-11-04 00:29:44', 1, '2026-11-04 00:29:44');
+INSERT INTO sys_menu (id, parent_id, type, name, path, component, redirect, permission, icon, sort, visible, status, open_type, deleted, created_by, create_time, updated_by, update_time) VALUES (118, 117, 3, '工作流查询', NULL, NULL, NULL, 'workflow:def:view', NULL, 1, 1, 1, 0, 0, 1, '2026-11-04 00:29:44', 1, '2026-11-04 00:29:44');
+INSERT INTO sys_menu (id, parent_id, type, name, path, component, redirect, permission, icon, sort, visible, status, open_type, deleted, created_by, create_time, updated_by, update_time) VALUES (119, 117, 3, '编辑草稿', NULL, NULL, NULL, 'workflow:def:edit', NULL, 2, 1, 1, 0, 0, 1, '2026-11-04 00:29:44', 1, '2026-11-04 00:29:44');
+INSERT INTO sys_menu (id, parent_id, type, name, path, component, redirect, permission, icon, sort, visible, status, open_type, deleted, created_by, create_time, updated_by, update_time) VALUES (120, 117, 3, '发布版本', NULL, NULL, NULL, 'workflow:def:publish', NULL, 3, 1, 1, 0, 0, 1, '2026-11-04 00:29:44', 1, '2026-11-04 00:29:44');
+INSERT INTO sys_menu (id, parent_id, type, name, path, component, redirect, permission, icon, sort, visible, status, open_type, deleted, created_by, create_time, updated_by, update_time) VALUES (121, 117, 3, '试跑工作流', NULL, NULL, NULL, 'workflow:run:trial', NULL, 4, 1, 1, 0, 0, 1, '2026-11-04 01:11:14', 1, '2026-11-04 01:11:14');
+INSERT INTO sys_menu (id, parent_id, type, name, path, component, redirect, permission, icon, sort, visible, status, open_type, deleted, created_by, create_time, updated_by, update_time) VALUES (122, 117, 3, '处理人工待办', NULL, NULL, NULL, 'workflow:human:act', NULL, 5, 1, 1, 0, 0, 1, '2026-11-04 01:11:14', 1, '2026-11-04 01:11:14');
+INSERT INTO sys_menu (id, parent_id, type, name, path, component, redirect, permission, icon, sort, visible, status, open_type, deleted, created_by, create_time, updated_by, update_time) VALUES (123, 0, 1, '编排', '/orch', NULL, NULL, NULL, 'Share', 55, 1, 1, 0, 1, NULL, '2026-11-04 01:42:43', 1, '2026-11-04 09:10:19');
+INSERT INTO sys_menu (id, parent_id, type, name, path, component, redirect, permission, icon, sort, visible, status, open_type, deleted, created_by, create_time, updated_by, update_time) VALUES (124, 123, 2, '多智能体', '/orch/multi-agent', 'ma/list/index', NULL, 'agent:route:view', 'Connection', 20, 1, 1, 0, 1, NULL, '2026-11-04 01:42:43', 1, '2026-11-04 09:10:16');
+INSERT INTO sys_menu (id, parent_id, type, name, path, component, redirect, permission, icon, sort, visible, status, open_type, deleted, created_by, create_time, updated_by, update_time) VALUES (125, 124, 3, '多智能体列表查询', NULL, NULL, NULL, 'agent:route:view', NULL, 1, 1, 1, 0, 1, NULL, '2026-11-04 01:42:43', 1, '2026-11-04 09:10:08');
+INSERT INTO sys_menu (id, parent_id, type, name, path, component, redirect, permission, icon, sort, visible, status, open_type, deleted, created_by, create_time, updated_by, update_time) VALUES (126, 116, 2, '多智能体', '/orchestration/multi-agent', 'ma/list/index', NULL, 'ma:def:view', 'Management', 20, 1, 1, 0, 0, 1, '2026-11-04 01:55:24', 1, '2026-11-05 01:45:12');
+INSERT INTO sys_menu (id, parent_id, type, name, path, component, redirect, permission, icon, sort, visible, status, open_type, deleted, created_by, create_time, updated_by, update_time) VALUES (127, 126, 3, '多智能体查询', NULL, NULL, NULL, 'agent:route:view', NULL, 1, 1, 1, 0, 0, 1, '2026-11-04 01:55:24', 1, '2026-11-04 01:55:24');
+INSERT INTO sys_menu (id, parent_id, type, name, path, component, redirect, permission, icon, sort, visible, status, open_type, deleted, created_by, create_time, updated_by, update_time) VALUES (128, 117, 3, '应用触发（P1）', NULL, NULL, NULL, 'workflow:run:invoke', NULL, 6, 1, 1, 0, 0, 1, '2026-11-04 04:34:01', 1, '2026-11-04 04:34:01');
+INSERT INTO sys_menu (id, parent_id, type, name, path, component, redirect, permission, icon, sort, visible, status, open_type, deleted, created_by, create_time, updated_by, update_time) VALUES (129, 6, 3, '工作流授权', NULL, NULL, NULL, 'system:app:edit', NULL, 5, 1, 1, 0, 0, 1, '2026-11-04 04:34:01', 1, '2026-11-04 04:34:01');
+INSERT INTO sys_menu (id, parent_id, type, name, path, component, redirect, permission, icon, sort, visible, status, open_type, deleted, created_by, create_time, updated_by, update_time) VALUES (130, 6, 3, '应用触发说明', NULL, NULL, NULL, 'workflow:run:invoke', NULL, 6, 1, 1, 0, 0, 1, '2026-11-04 04:34:01', 1, '2026-11-04 04:34:01');
+INSERT INTO sys_menu (id, parent_id, type, name, path, component, redirect, permission, icon, sort, visible, status, open_type, deleted, created_by, create_time, updated_by, update_time) VALUES (131, 126, 3, '编辑方案', NULL, NULL, NULL, 'ma:def:edit', NULL, 1, 1, 1, 0, 0, 1, '2026-11-05 01:45:12', 1, '2026-11-05 01:45:12');
+INSERT INTO sys_menu (id, parent_id, type, name, path, component, redirect, permission, icon, sort, visible, status, open_type, deleted, created_by, create_time, updated_by, update_time) VALUES (132, 126, 3, '试跑方案', NULL, NULL, NULL, 'ma:def:run', NULL, 2, 1, 1, 0, 0, 1, '2026-11-05 01:45:12', 1, '2026-11-05 01:45:12');
 
 
 -- sys_role_menu
@@ -233,6 +256,35 @@ INSERT INTO sys_role_menu (role_id, menu_id) VALUES (1, 106);
 INSERT INTO sys_role_menu (role_id, menu_id) VALUES (1, 107);
 INSERT INTO sys_role_menu (role_id, menu_id) VALUES (1, 108);
 INSERT INTO sys_role_menu (role_id, menu_id) VALUES (1, 109);
+INSERT INTO sys_role_menu (role_id, menu_id) VALUES (1, 100);
+INSERT INTO sys_role_menu (role_id, menu_id) VALUES (1, 101);
+INSERT INTO sys_role_menu (role_id, menu_id) VALUES (1, 102);
+INSERT INTO sys_role_menu (role_id, menu_id) VALUES (1, 103);
+INSERT INTO sys_role_menu (role_id, menu_id) VALUES (1, 104);
+INSERT INTO sys_role_menu (role_id, menu_id) VALUES (1, 105);
+INSERT INTO sys_role_menu (role_id, menu_id) VALUES (1, 106);
+INSERT INTO sys_role_menu (role_id, menu_id) VALUES (1, 107);
+INSERT INTO sys_role_menu (role_id, menu_id) VALUES (1, 108);
+INSERT INTO sys_role_menu (role_id, menu_id) VALUES (1, 109);
+INSERT INTO sys_role_menu (role_id, menu_id) VALUES (1, 110);
+INSERT INTO sys_role_menu (role_id, menu_id) VALUES (1, 111);
+INSERT INTO sys_role_menu (role_id, menu_id) VALUES (1, 112);
+INSERT INTO sys_role_menu (role_id, menu_id) VALUES (1, 113);
+INSERT INTO sys_role_menu (role_id, menu_id) VALUES (1, 114);
+INSERT INTO sys_role_menu (role_id, menu_id) VALUES (1, 115);
+INSERT INTO sys_role_menu (role_id, menu_id) VALUES (1, 116);
+INSERT INTO sys_role_menu (role_id, menu_id) VALUES (1, 117);
+INSERT INTO sys_role_menu (role_id, menu_id) VALUES (1, 118);
+INSERT INTO sys_role_menu (role_id, menu_id) VALUES (1, 119);
+INSERT INTO sys_role_menu (role_id, menu_id) VALUES (1, 120);
+INSERT INTO sys_role_menu (role_id, menu_id) VALUES (1, 121);
+INSERT INTO sys_role_menu (role_id, menu_id) VALUES (1, 122);
+INSERT INTO sys_role_menu (role_id, menu_id) VALUES (1, 126);
+INSERT INTO sys_role_menu (role_id, menu_id) VALUES (1, 127);
+INSERT INTO sys_role_menu (role_id, menu_id) VALUES (1, 128);
+INSERT INTO sys_role_menu (role_id, menu_id) VALUES (1, 130);
+INSERT INTO sys_role_menu (role_id, menu_id) VALUES (1, 131);
+INSERT INTO sys_role_menu (role_id, menu_id) VALUES (1, 132);
 
 
 -- tool 
@@ -242,6 +294,9 @@ INSERT INTO tool_item ( source_id, name, title, description, input_schema_json, 
 INSERT INTO tool_item ( source_id, name, title, description, input_schema_json, status, deleted, created_by, create_time, updated_by, update_time) VALUES (1, 'systemInfo', '系统信息', '采集本机 OS/CPU/内存/磁盘/JVM（自测用，勿默认开源）', '{\"type\":\"object\",\"properties\":{}}', 1, 0, NULL, '2026-10-25 13:29:33', NULL, '2026-10-27 14:35:58');
 INSERT INTO tool_item ( source_id, name, title, description, input_schema_json, status, deleted, created_by, create_time, updated_by, update_time) VALUES (1, 'browserUse', '打开网页', 'Playwright 打开公网页面返回标题（自测用，重依赖）', '{\"type\":\"object\",\"properties\":{\"url\":{\"type\":\"string\",\"description\":\"要打开的网址\"}},\"required\":[\"url\"]}', 1, 0, NULL, '2026-10-25 13:29:33', 1, '2026-10-27 15:45:16');
 INSERT INTO tool_item ( source_id, name, title, description, input_schema_json, status, deleted, created_by, create_time, updated_by, update_time) VALUES (1, 'searchKnowledgeBase', '知识库检索', '检索当前 Agent 已绑定的知识库，返回相关片段与来源；无命中时明确告知没有依据，不要编造', '{\"type\":\"object\",\"properties\":{\"query\":{\"type\":\"string\",\"description\":\"检索问题或关键字\"},\"topK\":{\"type\":\"integer\",\"minimum\":1,\"maximum\":10,\"description\":\"返回条数，默认 5，最大 10\"}},\"required\":[\"query\"]}', 1, 0, NULL, '2026-10-30 06:04:10', 1, '2026-10-30 20:50:35');
+INSERT INTO tool_item (source_id, name, title, description, input_schema_json, status, deleted, created_by, create_time, updated_by, update_time) VALUES (1, 'workspaceWriteFile', '工作区写入', '把长文本写入当前会话工作区，返回可引用的虚拟路径 /workspace/文件名；用于 Context Offloading，避免长内容占满对话上下文。只允许相对文件名，禁止脚本与可执行后缀', '{\"type\":\"object\",\"properties\":{\"fileName\":{\"type\":\"string\",\"description\":\"相对文件名，可带子目录，如 notes/plan.md；不要以 / 开头，不要含 ..\"},\"content\":{\"type\":\"string\",\"description\":\"要写入的文本内容（UTF-8）\"},\"append\":{\"type\":\"boolean\",\"description\":\"true 表示追加到已有文件末尾；false 或不传表示覆盖写入\"}},\"required\":[\"fileName\",\"content\"]}', 1, 0, NULL, '2026-11-01 17:19:21', 1, '2026-11-01 17:19:50');
+INSERT INTO tool_item (source_id, name, title, description, input_schema_json, status, deleted, created_by, create_time, updated_by, update_time) VALUES (1, 'workspaceReadFile', '工作区读取', '按行范围读取当前会话工作区文件，返回带行号内容（行号 | 正文）；单次最多 2000 字符或 100 行，超出截断并提示用 start_line 续读', '{\"type\":\"object\",\"properties\":{\"fileName\":{\"type\":\"string\",\"description\":\"相对文件名，可带子目录，如 notes/plan.md\"},\"startLine\":{\"type\":\"integer\",\"minimum\":1,\"default\":1,\"description\":\"从第几行开始读，从 1 开始，缺省 1\"},\"maxLines\":{\"type\":\"integer\",\"minimum\":1,\"maximum\":100,\"default\":100,\"description\":\"本次最多读多少行，缺省 100，上限 100\"}},\"required\":[\"fileName\"]}', 1, 0, NULL, '2026-11-01 17:19:21', 1, '2026-11-01 17:19:51');
+INSERT INTO tool_item (source_id, name, title, description, input_schema_json, status, deleted, created_by, create_time, updated_by, update_time) VALUES (1, 'workspaceListFiles', '工作区文件列表', '列出当前会话工作区的所有文件及大小，用于确认已落盘哪些文件、该读哪个。无需参数', '{\"type\":\"object\",\"properties\":{}}', 1, 0, NULL, '2026-11-01 17:19:21', 1, '2026-11-01 17:19:49');
 
 
 -- prompt
