@@ -16,6 +16,8 @@ public class SkillBindResp {
     private Integer status;
     /** Skill 当前启停；Skill 已删时为空 */
     private Integer targetStatus;
+    /** Skill 当前生效的已发布版本号；未发布过为空 */
+    private Integer activeVersionNo;
     /** ROUTER 绑得过多时的保存警告 */
     private String warning;
 }

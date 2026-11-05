@@ -8,7 +8,8 @@ import java.util.List;
 
 /**
  * Skill 入参收口。所属域：skill。
- * 注解挡住空值和超长；这里负责去空白、默认版本、启停取值和触发关键词归一。
+ * 注解挡住空值和超长；这里负责去空白、启停取值、正文上限和触发关键词归一。
+ * 版本号不再由入参决定：只能由「发布 / 设为生效」产生，见 SkillVersionAppService。
  * contentMd 上限按字符数计 100 万，低于库 MEDIUMTEXT（约 16MB），避免单次请求过大。
  */
 public final class SkillChecks {
@@ -55,23 +56,6 @@ public final class SkillChecks {
         String text = raw.trim();
         if (text.length() > max) {
             throw new BizException(ErrorCode.BAD_REQUEST, label + "最长 " + max);
-        }
-        return text;
-    }
-
-    /**
-     * 空值记为 "1"。不改写非空版本号，后续版本表再演进。
-     *
-     * @param raw 版本字符串，可空
-     * @return 入库值
-     */
-    public static String version(String raw) {
-        if (raw == null || raw.isBlank()) {
-            return "1";
-        }
-        String text = raw.trim();
-        if (text.length() > 32) {
-            throw new BizException(ErrorCode.BAD_REQUEST, "版本最长 32");
         }
         return text;
     }

@@ -21,7 +21,7 @@ public interface SkillDefRepository {
 
     /**
      * @param id 主键
-     * @return 未删除的 Skill，含正文
+     * @return 未删除的 Skill；contentMd 为当前生效已发布版本正文，activeVersionNo / hasDraft 已填充
      */
     Optional<SkillDef> findById(Long id);
 
@@ -35,19 +35,31 @@ public interface SkillDefRepository {
     boolean existsByName(String name, Long excludeId);
 
     /**
-     * @param skill      新 Skill，正文可空
+     * @param skill      新 Skill（只含定义层字段，正文与简介随之进 v1 草稿）
      * @param operatorId 创建人
      * @return 新主键
      */
     Long insert(SkillDef skill, Long operatorId);
 
     /**
-     * 改元数据和正文，不改启停。
+     * 改定义层元数据（名称/标题/触发词/备注），不碰正文、版本与简介。
+     * 简介与生效版本号由「发布 / 设为生效」通过 {@link #updateActiveMirror} 回写。
      *
      * @param skill      已存在的 Skill
      * @param operatorId 更新人
      */
     void updateProfile(SkillDef skill, Long operatorId);
+
+    /**
+     * 回写生效版镜像：skill_def.version = 生效号字符串，skill_def.description = 生效版简介。
+     * 只允许发布 / 设为生效路径调用，禁止当作普通保存使用。
+     *
+     * @param id          主键
+     * @param version     生效版本号字符串
+     * @param description 生效版简介，可空
+     * @param operatorId  操作人
+     */
+    void updateActiveMirror(Long id, String version, String description, Long operatorId);
 
     /**
      * 只改启停，不重写正文。

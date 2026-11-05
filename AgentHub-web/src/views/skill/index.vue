@@ -112,11 +112,21 @@
                   </el-tag>
                 </div>
               </template>
+              <!-- 卡片简介只占一行，超出省略；完整内容由 tooltip 兜底 -->
               <el-tooltip :content="row.description?.trim() || '暂无简介'" placement="top">
-                <span :class="{ muted: !row.description?.trim() }">{{ row.description?.trim() || '暂无简介' }}</span>
+                <span class="card-desc" :class="{ muted: !row.description?.trim() }">
+                  {{ row.description?.trim() || '暂无简介' }}
+                </span>
               </el-tooltip>
               <template #footer>
-                <span class="version">v{{ row.version || '1' }}</span>
+                <!-- 卡片只展示生效版本号；没有发布过明确写「未发布」，草稿单独打标 -->
+                <span class="version">
+                  <template v-if="row.activeVersionNo">v{{ row.activeVersionNo }}</template>
+                  <template v-else>未发布</template>
+                  <el-tag v-if="row.hasDraft" size="small" effect="plain" type="info" class="draft-tag">
+                    草稿
+                  </el-tag>
+                </span>
               </template>
             </ConfigCard>
           </div>
@@ -214,21 +224,14 @@
                       </el-form-item>
                     </el-col>
                     <el-col :span="3">
-                      <!-- 窄列用数字控件，保证版本数字可见；落库仍走字符串 version -->
+                      <!-- 版本号为只读派生：当前生效已发布版本；升版只能走「发布」，禁止手改 -->
                       <el-form-item label="版本" label-width="42px">
-                        <el-input-number
-                          v-model="versionNumber"
-                          class="version-input"
-                          :min="1"
-                          :max="9999"
-                          :step="1"
-                          controls-position="right"
-                          :disabled="!canEdit"
-                        />
+                        <el-input :model-value="activeVersionLabel" disabled />
                       </el-form-item>
                     </el-col>
                     <el-col :span="3">
-                      <el-form-item label="状态" label-width="42px">
+                      <!-- 状态开关居右，与下两行按钮列对齐 -->
+                      <el-form-item label="状态" label-width="42px" class="status-item">
                         <el-switch
                           :model-value="form.status === 1"
                           :disabled="!user.hasPerm('skill:enable') || statusSaving"
@@ -237,67 +240,197 @@
                       </el-form-item>
                     </el-col>
                   </el-row>
-                  <!-- 第二行：简介全宽；旁 Tooltip 说明大模型何时加载此技能 -->
-                  <el-form-item>
-                    <template #label>
-                      <span class="label-with-tip">
-                        简介
-                        <el-tooltip content="此描述会供大模型判断何时加载此技能" placement="top">
-                          <el-icon class="tip-icon"><QuestionFilled /></el-icon>
-                        </el-tooltip>
-                      </span>
-                    </template>
-                    <el-input
-                      v-model="form.description"
-                      type="textarea"
-                      maxlength="1000"
-                      :rows="2"
-                      :disabled="!canEdit"
-                    />
-                  </el-form-item>
-                  <!-- 第三行：逗号分隔纯文本；提交仍经 splitKeywords → 数组 -->
-                  <el-form-item label="触发关键词">
-                    <el-input
-                      v-model="keywordsText"
-                      maxlength="500"
-                      :disabled="!canEdit"
-                      placeholder="输入触发词，用逗号分隔，如：天气,查询"
-                    />
-                  </el-form-item>
-                  <!-- 第四行：备注浅灰底；仅内部可见，永不注入模型 -->
-                  <el-form-item label="备注">
-                    <el-input
-                      v-model="form.remark"
-                      type="textarea"
-                      maxlength="500"
-                      :rows="2"
-                      class="remark-input"
-                      placeholder="仅内部人员可见，不会注入模型"
-                      :disabled="!canEdit"
-                    />
-                  </el-form-item>
-                  <!-- 第五行：正文吃满剩余高度；溢出只在 textarea 内滚，首屏不出现表单区滚动条 -->
-                  <el-form-item label="正文" class="field-content">
-                    <div class="content-wrap">
-                      <div class="content-wrap__toolbar">
-                        <el-button link type="primary" class="preview-link" @click="previewOpen = true">
-                          预览效果
+                  <!--
+                    定义层第二、三行：触发关键词、备注各占一行。
+                    每行右侧（状态开关正下方）各放一个按钮：关键词行=取消，备注行=保存；
+                    定义层只保存名称/标题/触发词/备注，简介与正文由版本编辑器负责。
+                  -->
+                  <el-row :gutter="12">
+                    <el-col :span="21">
+                      <el-form-item label="触发关键词">
+                        <TagInput v-model="keywordTags" :disabled="!canEdit" />
+                      </el-form-item>
+                    </el-col>
+                    <el-col :span="3">
+                      <!-- 无编辑权限整套定义层按钮不出现，避免只读用户看到无效操作 -->
+                      <el-form-item v-if="canEdit" label-width="0" class="inline-action">
+                        <el-button :disabled="!dirty || saving" @click="cancelDetail">取消</el-button>
+                      </el-form-item>
+                    </el-col>
+                  </el-row>
+                  <el-row :gutter="12">
+                    <el-col :span="21">
+                      <el-form-item label="备注">
+                        <el-input
+                          v-model="form.remark"
+                          maxlength="500"
+                          class="remark-input"
+                          placeholder="仅内部可见，不注入模型"
+                          :disabled="!canEdit"
+                        />
+                      </el-form-item>
+                    </el-col>
+                    <el-col :span="3">
+                      <el-form-item v-if="canEdit" label-width="0" class="inline-action">
+                        <el-button type="primary" :disabled="!dirty" :loading="saving" @click="saveDetail">
+                          保存
+                        </el-button>
+                      </el-form-item>
+                    </el-col>
+                  </el-row>
+
+                  <!-- 版本工作区：左侧版本列表（号/状态/生效/时间），右侧当前版本编辑器 -->
+                  <div class="version-workspace">
+                    <aside class="version-list">
+                      <div class="version-list__head">
+                        <span class="version-list__title">版本</span>
+                        <el-button
+                          link
+                          type="primary"
+                          class="version-list__add"
+                          :disabled="!canEdit || hasDraft"
+                          :title="hasDraft ? '已有草稿，先发布或继续编辑' : '新建草稿'"
+                          @click="createDraft()"
+                        >
+                          新建草稿
                         </el-button>
                       </div>
-                      <el-input
-                        v-model="form.contentMd"
-                        type="textarea"
-                        :rows="1"
-                        class="markdown"
-                        placeholder="Markdown"
-                        :disabled="!canEdit"
-                      />
-                    </div>
-                  </el-form-item>
+                      <div v-loading="versionLoading" class="version-list__body">
+                        <el-empty
+                          v-if="!versionLoading && !versionRows.length"
+                          description="尚无版本"
+                          :image-size="56"
+                        />
+                        <!-- 版本项用 div（内含下拉操作，button 不能嵌套 button）；键盘同样可切换 -->
+                        <div
+                          v-for="row in versionRows"
+                          :key="row.id"
+                          class="version-item"
+                          :class="{ 'is-current': row.id === activeVersionId }"
+                          role="button"
+                          tabindex="0"
+                          @click="selectVersion(row.id)"
+                          @keyup.enter="selectVersion(row.id)"
+                        >
+                          <span class="version-item__no">v{{ row.versionNo }}</span>
+                          <el-tag
+                            size="small"
+                            effect="plain"
+                            :type="row.publishStatus === 1 ? 'success' : 'info'"
+                          >
+                            {{ row.publishStatus === 1 ? '已发布' : '草稿' }}
+                          </el-tag>
+                          <el-tag v-if="row.isActive === 1" size="small" effect="dark" type="success">
+                            生效
+                          </el-tag>
+                          <span class="version-item__time">{{ row.updateTime || row.createTime || '' }}</span>
+                          <!--
+                            版本操作收进「⋯」下拉：复制为草稿 / 设置为生效 / 删除。
+                            复制为草稿：同 Skill 已有草稿时不可用；设置为生效：仅已发布且未生效；删除：仅草稿。
+                          -->
+                          <el-dropdown
+                            v-if="canEdit"
+                            trigger="click"
+                            class="version-item__more"
+                            :disabled="versionSaving"
+                            @command="(cmd: VersionCommand) => onVersionCommand(cmd, row)"
+                            @click.stop
+                          >
+                            <button
+                              type="button"
+                              class="version-item__more-btn"
+                              aria-label="版本操作"
+                              title="版本操作"
+                              @click.stop
+                            >
+                              ⋯
+                            </button>
+                            <template #dropdown>
+                              <el-dropdown-menu>
+                                <el-dropdown-item command="copy" :disabled="hasDraft">
+                                  复制为草稿
+                                </el-dropdown-item>
+                                <el-dropdown-item
+                                  command="activate"
+                                  :disabled="row.publishStatus !== 1 || row.isActive === 1"
+                                >
+                                  设置为生效
+                                </el-dropdown-item>
+                                <el-dropdown-item command="delete" divided :disabled="row.publishStatus !== 0">
+                                  删除
+                                </el-dropdown-item>
+                              </el-dropdown-menu>
+                            </template>
+                          </el-dropdown>
+                        </div>
+                      </div>
+                    </aside>
+
+                    <section class="version-editor">
+                      <template v-if="versionDetail">
+                        <div class="version-editor__head">
+                          <span class="version-editor__title">v{{ versionDetail.versionNo }}</span>
+                          <el-tag
+                            size="small"
+                            effect="plain"
+                            :type="versionDetail.publishStatus === 1 ? 'success' : 'info'"
+                          >
+                            {{ versionDetail.publishStatus === 1 ? '已发布' : '草稿' }}
+                          </el-tag>
+                          <el-tag v-if="versionDetail.isActive === 1" size="small" effect="dark" type="success">
+                            生效中
+                          </el-tag>
+                          <!-- 有无改动改由这里的「未保存」标提示，避免只靠按钮禁用态传达 -->
+                          <el-tag v-if="versionDirty" size="small" effect="plain" type="warning">
+                            未保存
+                          </el-tag>
+                          <span class="version-editor__hint">{{ versionHint }}</span>
+                          <el-button link type="primary" class="preview-link" @click="previewOpen = true">
+                            预览效果
+                          </el-button>
+                        </div>
+                        <!-- 版本编辑器：label 居左，简介与正文左对齐；简介 label 在输入框左侧 -->
+                        <el-form class="version-form" label-width="56px" @submit.prevent>
+                          <el-form-item label="简介" class="version-field">
+                            <el-input
+                              v-model="versionDetail.description"
+                              type="textarea"
+                              maxlength="1000"
+                              :rows="2"
+                              :disabled="!versionEditable"
+                              placeholder="供大模型判断何时加载此技能"
+                            />
+                          </el-form-item>
+                          <el-form-item label="正文" class="field-content">
+                            <el-input
+                              v-model="versionDetail.contentMd"
+                              type="textarea"
+                              :rows="1"
+                              class="markdown"
+                              placeholder="Markdown 正文；保存草稿不会影响线上"
+                              :disabled="!versionEditable"
+                            />
+                          </el-form-item>
+                        </el-form>
+                      </template>
+                      <el-empty v-else description="请选择左侧版本，或新建草稿" />
+                    </section>
+                  </div>
                 </div>
-                <div v-if="canEdit" class="detail-actions">
-                  <el-button :disabled="!dirty || saving" @click="cancelDetail">取消</el-button>
-                  <el-button type="primary" :disabled="!dirty" :loading="saving" @click="saveDetail">保存</el-button>
+                <!-- 底栏只留草稿的保存/发布；复制、设生效、删除都收进版本行「⋯」 -->
+                <div v-if="canEdit && versionEditable" class="detail-actions">
+                  <div class="detail-actions__group">
+                    <!--
+                      保存按钮不跟脏标记联动：复制来的草稿内容与来源版一致，脏标记为 false，
+                      若据此禁用会被误解为「按钮坏了」。是否真的有改动在提交时判断。
+                    -->
+                    <el-button :disabled="versionSaving" :loading="versionSaving" @click="saveVersionDraft">
+                      保存草稿
+                    </el-button>
+                    <el-button type="primary" :loading="versionSaving" @click="publishVersion">
+                      发布
+                    </el-button>
+                  </div>
                 </div>
               </el-form>
             </div>
@@ -308,15 +441,15 @@
 
     <FlipGhost :snap="ghostSnap" :frame="ghostFrame" :landing="ghostLanding" />
     <SkillFormDialog v-model="createOpen" @submit="saveCreate" />
-    <!-- 按 Anthropic SKILL.md 规范拼 frontmatter + 正文后渲染；不参与脏检查 -->
+    <!-- 按 Anthropic SKILL.md 规范拼 frontmatter + 正文后渲染；预览的是当前选中版本 -->
     <SkillPreviewDrawer
       v-model="previewOpen"
       :title="form?.title || form?.name || 'Skill 预览'"
       :name="form?.name || ''"
-      :description="form?.description || ''"
-      :trigger-keywords="keywordsText"
+      :description="versionDetail?.description || ''"
+      :trigger-keywords="keywordTags"
       :skill-title="form?.title || ''"
-      :content="form?.contentMd || ''"
+      :content="versionDetail?.contentMd || ''"
     />
   </div>
 </template>
@@ -330,14 +463,21 @@ defineOptions({ name: 'SkillManage' })
  * 无路由 id：仅本地 viewMode + activeId；保存/取消跟正文脏标记，启停开关即时提交。
  */
 import { computed, nextTick, onMounted, reactive, ref, watch } from 'vue'
-import { Plus, QuestionFilled, RefreshRight, Search } from '@element-plus/icons-vue'
-import { ElMessage } from 'element-plus'
+import { Plus, RefreshRight, Search } from '@element-plus/icons-vue'
+import { ElMessage, ElMessageBox } from 'element-plus'
 import {
+  activateSkillVersion,
   changeSkillStatus,
   createSkill,
+  createSkillVersionDraft,
   deleteSkill,
+  deleteSkillVersionDraft,
   getSkill,
+  getSkillVersion,
+  listSkillVersions,
   pageSkills,
+  publishSkillVersion,
+  saveSkillVersionDraft,
   updateSkill
 } from '@/api/skill'
 import ConfigCard from '@/components/ConfigCard.vue'
@@ -346,25 +486,23 @@ import PageHeader from '@/components/PageHeader.vue'
 import TablePager from '@/components/TablePager.vue'
 import SkillFormDialog from '@/components/skill/SkillFormDialog.vue'
 import SkillPreviewDrawer from '@/components/skill/SkillPreviewDrawer.vue'
+import TagInput from '@/components/skill/TagInput.vue'
 import ViewModeToggle from '@/components/browse/ViewModeToggle.vue'
 import { useViewFlip, type FlipCardSnap } from '@/composables/viewFlip'
 import { CARD_HEIGHT_NORMAL, lastPage, useGridPageSize } from '@/composables/gridPageSize'
 import { confirmDiscardUnsaved } from '@/utils/unsavedConfirm'
 import { useUserStore } from '@/stores/user'
-import type { SkillCard, SkillDetail } from '@/types/skill'
+import type { SkillCard, SkillDetail, SkillVersionDetail, SkillVersionRow } from '@/types/skill'
 
 /**
- * 参与脏检查的字段快照；不含 status（开关即时提交）。
- * triggerKeywords 存详情输入框里的逗号串原文，避免边打边拆词导致脏判抖动。
+ * 定义层脏检查快照；不含 status（开关即时提交），也不含简介/正文/版本号
+ * —— 它们属于 skill_version，保存走「保存草稿 / 发布」，混进来会变成手改冒充升版。
  */
 interface EditSnapshot {
   name: string
   title: string
-  version: string
-  description: string
-  triggerKeywords: string
+  triggerKeywords: string[]
   remark: string
-  contentMd: string
 }
 
 const RAIL_PAGE_SIZE = 100
@@ -398,11 +536,28 @@ const railSource = ref<SkillCard[]>([])
 const total = ref(0)
 const railKeyword = ref('')
 const form = ref<SkillDetail | null>(null)
+/** 当前 Skill 的版本列表（不含正文），版本号倒序 */
+const versionRows = ref<SkillVersionRow[]>([])
+/** 当前选中版本详情（含正文）；编辑器与预览都读这一份 */
+const versionDetail = ref<SkillVersionDetail | null>(null)
+const versionLoading = ref(false)
+const versionSaving = ref(false)
+const activeVersionId = ref(0)
+/** 版本编辑器基准：只含可改字段，用于脏检查与取消回退 */
+const versionBaseline = ref('')
 /**
- * 触发关键词编辑态：逗号分隔纯文本，与接口数组解耦。
- * 提交时再 split；脏检查直接比这段原文。
+ * 详情表单里的触发关键词（Tag 数组）。
+ * 用 computed 兜住 SkillDetail.triggerKeywords 的可选类型，同时保持与 form 同源：
+ * TagInput 回写、脏检查、保存、预览都读这一份。
  */
-const keywordsText = ref('')
+const keywordTags = computed<string[]>({
+  get: () => form.value?.triggerKeywords ?? [],
+  set: (tags) => {
+    if (form.value) {
+      form.value.triggerKeywords = tags
+    }
+  }
+})
 /** 载入或保存后的基准；取消时回退到这里 */
 const baseline = ref<EditSnapshot | null>(null)
 /** 网格分页与筛选；size 由一屏容量实测得出，不再写死 10。 */
@@ -488,31 +643,44 @@ const railRows = computed(() => {
 
 const canEdit = computed(() => user.hasPerm('skill:edit'))
 
-/**
- * 版本数字控件 ↔ 表单字符串 version。
- * 非法/空值回落为 1，保存仍提交字符串，不改业务语义。
- */
-const versionNumber = computed({
-  get(): number {
-    const raw = form.value?.version
-    const n = Number(raw)
-    return Number.isFinite(n) && n >= 1 ? Math.floor(n) : 1
-  },
-  set(value: number | null | undefined) {
-    if (!form.value) {
-      return
-    }
-    const n = value == null || !Number.isFinite(value) ? 1 : Math.floor(value)
-    form.value.version = String(Math.max(1, n))
-  }
-})
-
 /** 相对 baseline 是否有未保存改动（不含开关状态）。 */
 const dirty = computed(() => {
   if (!form.value || !baseline.value || !canEdit.value) {
     return false
   }
-  return snapshotOf(form.value, keywordsText.value) !== serialize(baseline.value)
+  return snapshotOf(form.value, keywordTags.value) !== serialize(baseline.value)
+})
+
+/** 版本列表里是否存在草稿：同 Skill 至多一条，决定「新建草稿」是否可用 */
+const hasDraft = computed(() => versionRows.value.some((row) => row.publishStatus === 0))
+
+/** 生效版本只读展示；没有发布过显示「未发布」 */
+const activeVersionLabel = computed(() =>
+  form.value?.activeVersionNo ? `v${form.value.activeVersionNo}` : '未发布'
+)
+
+/** 草稿才可改正文与简介；已发布版本只读 */
+const versionEditable = computed(() => !!versionDetail.value && versionDetail.value.publishStatus === 0)
+
+/** 版本编辑器脏标记：只比简介与正文 */
+const versionDirty = computed(() => {
+  if (!versionDetail.value || !versionEditable.value) {
+    return false
+  }
+  return versionSignature(versionDetail.value) !== versionBaseline.value
+})
+
+/** 编辑器右上提示：已发布说明只读与「⋯」菜单入口，草稿说明保存不影响线上 */
+const versionHint = computed(() => {
+  if (!versionDetail.value) {
+    return ''
+  }
+  if (versionDetail.value.publishStatus === 1) {
+    return versionDetail.value.isActive === 1
+      ? '当前生效版本，正文只读'
+      : '已发布历史版本，正文只读；可在左侧「⋯」设置为生效回滚'
+  }
+  return '草稿：保存不影响线上，发布后才生效'
 })
 
 /**
@@ -535,21 +703,18 @@ function snapFromSkill(row: SkillCard): FlipCardSnap {
 }
 
 /**
- * 从详情 + 关键词输入框抽出可编辑快照。
+ * 从详情 + 当前 Tag 列表抽出可编辑快照。
  *
- * @param detail 当前表单
- * @param keywords 逗号分隔原文
+ * @param detail   当前表单
+ * @param keywords 当前 Tag 数组
  * @return 快照对象
  */
-function toSnapshot(detail: SkillDetail, keywords: string): EditSnapshot {
+function toSnapshot(detail: SkillDetail, keywords: string[]): EditSnapshot {
   return {
     name: detail.name || '',
     title: detail.title || '',
-    version: detail.version || '1',
-    description: detail.description || '',
-    triggerKeywords: keywords,
-    remark: detail.remark || '',
-    contentMd: detail.contentMd || ''
+    triggerKeywords: [...keywords],
+    remark: detail.remark || ''
   }
 }
 
@@ -558,13 +723,27 @@ function serialize(snap: EditSnapshot) {
   return JSON.stringify(snap)
 }
 
-function snapshotOf(detail: SkillDetail, keywords: string) {
+function snapshotOf(detail: SkillDetail, keywords: string[]) {
   return serialize(toSnapshot(detail, keywords))
 }
 
 /**
+ * 版本编辑器快照：只含草稿可改的简介与正文，用于脏检查。
+ *
+ * @param version 版本详情
+ * @return 可比较的字符串
+ */
+function versionSignature(version: SkillVersionDetail) {
+  return JSON.stringify({
+    description: version.description || '',
+    contentMd: version.contentMd || ''
+  })
+}
+
+/**
  * 把接口详情归一进表单，并刷新 baseline。
- * 关键词数组 join 成输入框文本；提交时再拆回数组。
+ * 关键词数组直接作为 Tag 列表；库内逗号串的拆分已由后端完成。
+ * 简介/正文/版本号不再进表单：它们来自版本接口。
  *
  * @param data 接口详情
  */
@@ -573,42 +752,35 @@ function applyDetail(data: SkillDetail) {
     ...data,
     description: data.description || '',
     triggerKeywords: [...(data.triggerKeywords || [])],
-    contentMd: data.contentMd || '',
-    remark: data.remark || '',
-    version: data.version || '1'
+    remark: data.remark || ''
   }
-  keywordsText.value = joinKeywords(data.triggerKeywords)
-  baseline.value = toSnapshot(form.value, keywordsText.value)
+  baseline.value = toSnapshot(form.value, form.value.triggerKeywords || [])
+}
+
+/**
+ * 把版本详情归一进编辑器并刷新版本 baseline。
+ *
+ * @param data 版本详情
+ */
+function applyVersionDetail(data: SkillVersionDetail) {
+  versionDetail.value = {
+    ...data,
+    description: data.description || '',
+    contentMd: data.contentMd || ''
+  }
+  versionBaseline.value = versionSignature(versionDetail.value)
 }
 
 /** 清空右侧详情态。 */
 function clearDetail() {
   form.value = null
-  keywordsText.value = ''
   baseline.value = null
+  versionRows.value = []
+  versionDetail.value = null
+  versionBaseline.value = ''
+  activeVersionId.value = 0
   detailError.value = ''
   previewOpen.value = false
-}
-
-/**
- * 数组 → 逗号串，供输入框展示。
- *
- * @param words 接口返回的关键词数组
- */
-function joinKeywords(words?: string[]) {
-  return (words || []).map((word) => word.trim()).filter(Boolean).join(', ')
-}
-
-/**
- * 逗号串 → 数组；兼容中英文逗号。
- *
- * @param raw 输入框原文
- */
-function splitKeywords(raw: string): string[] {
-  return raw
-    .split(/[,，]/)
-    .map((word) => word.trim())
-    .filter(Boolean)
 }
 
 /**
@@ -731,21 +903,276 @@ async function loadAll(silent = false) {
 }
 
 /**
- * 载入右侧详情。
+ * 载入右侧详情，并顺带拉版本列表。
  *
- * @param id Skill id
+ * @param id              Skill id
+ * @param preferVersionId 期望选中的版本 id（保存/发布后保住当前版本）；0 表示按默认优先级
  */
-async function loadDetail(id: number) {
+async function loadDetail(id: number, preferVersionId = 0) {
   detailLoading.value = true
   detailError.value = ''
   try {
     const { data } = await getSkill(id)
     applyDetail(data.data)
+    await loadVersions(id, preferVersionId)
   } catch {
     detailError.value = '详情加载失败'
     clearDetail()
   } finally {
     detailLoading.value = false
+  }
+}
+
+/**
+ * 拉版本列表并选中一个版本。
+ * 默认优先级：指定 id → 草稿 → 生效版 → 最新版（列表已按号倒序）。
+ *
+ * @param skillId         Skill id
+ * @param preferVersionId 期望选中的版本 id
+ */
+async function loadVersions(skillId: number, preferVersionId = 0) {
+  versionLoading.value = true
+  try {
+    const { data } = await listSkillVersions(skillId)
+    versionRows.value = data.data || []
+    const picked =
+      versionRows.value.find((row) => row.id === preferVersionId) ||
+      versionRows.value.find((row) => row.publishStatus === 0) ||
+      versionRows.value.find((row) => row.isActive === 1) ||
+      versionRows.value[0]
+    if (picked) {
+      await fetchVersion(picked.id)
+    } else {
+      versionDetail.value = null
+      versionBaseline.value = ''
+      activeVersionId.value = 0
+    }
+  } catch {
+    versionRows.value = []
+    versionDetail.value = null
+    versionBaseline.value = ''
+    activeVersionId.value = 0
+  } finally {
+    versionLoading.value = false
+  }
+}
+
+/**
+ * 取单个版本详情并切到该版本。切换前若有未保存草稿先确认。
+ *
+ * @param versionId 版本 id
+ */
+async function fetchVersion(versionId: number) {
+  if (!form.value) {
+    return
+  }
+  const { data } = await getSkillVersion(form.value.id, versionId)
+  activeVersionId.value = versionId
+  applyVersionDetail(data.data)
+}
+
+/**
+ * 点击版本列表切换版本。
+ *
+ * @param versionId 版本 id
+ */
+async function selectVersion(versionId: number) {
+  if (versionId === activeVersionId.value) {
+    return
+  }
+  if (versionDirty.value) {
+    const keep = await confirmDiscardUnsaved('当前草稿')
+    if (!keep) {
+      return
+    }
+  }
+  try {
+    await fetchVersion(versionId)
+  } catch {
+    ElMessage.error('版本加载失败')
+  }
+}
+
+/**
+ * 新建草稿。不传 fromVersionId 为空白草稿；传则复制该已发布版本正文。
+ * 同 Skill 至多一条草稿，已有草稿时按钮禁用。
+ *
+ * @param fromVersionId 复制来源的已发布版本 id
+ */
+async function createDraft(fromVersionId?: number) {
+  if (!form.value || versionSaving.value) {
+    return
+  }
+  versionSaving.value = true
+  try {
+    const { data } = await createSkillVersionDraft(
+      form.value.id,
+      fromVersionId ? { fromVersionId } : {}
+    )
+    await loadVersions(form.value.id, data.data.id)
+    onCatalogChanged()
+    ElMessage.success('已新建草稿')
+  } catch {
+    // 后端已给出中文业务错误（已有草稿 / 来源非法），这里不重复弹
+  } finally {
+    versionSaving.value = false
+  }
+}
+
+/**
+ * 删除草稿。只有草稿可删；已发布版本是历史快照，后端也会拒绝。
+ * 删的若正是当前选中版本，则重新按默认优先级选一个。
+ *
+ * @param row 版本列表行
+ */
+async function removeDraft(row: SkillVersionRow) {
+  if (!form.value || versionSaving.value) {
+    return
+  }
+  try {
+    await ElMessageBox.confirm(
+      `删除草稿 v${row.versionNo}？草稿正文将不可恢复，线上不受影响。`,
+      '删除草稿',
+      { type: 'warning', confirmButtonText: '删除', cancelButtonText: '取消' }
+    )
+  } catch {
+    return
+  }
+  const skillId = form.value.id
+  const wasCurrent = row.id === activeVersionId.value
+  versionSaving.value = true
+  try {
+    await deleteSkillVersionDraft(skillId, row.id)
+    // 删的是当前版本时让 loadVersions 自己按 草稿→生效→最新 重新挑一个
+    await loadVersions(skillId, wasCurrent ? 0 : activeVersionId.value)
+    onCatalogChanged()
+    ElMessage.success('草稿已删除')
+  } finally {
+    versionSaving.value = false
+  }
+}
+
+/**
+ * 保存草稿：只写版本行，不影响线上注入。
+ * <p>
+ * 不做脏校验拦截：复制来的草稿与来源版内容相同，脏标记天然为 false，
+ * 若因此让按钮或提交静默失败，用户会以为保存坏了。真无改动时给一条明确提示即可。
+ */
+async function saveVersionDraft() {
+  if (!form.value || !versionDetail.value || versionSaving.value) {
+    return
+  }
+  // 复制来的草稿内容与来源版一致，此时保存是无副作用的空操作，直接提示而不是白跑一次接口
+  if (!versionDirty.value) {
+    ElMessage.info('内容未修改，无需保存')
+    return
+  }
+  const skillId = form.value.id
+  const versionId = versionDetail.value.id
+  versionSaving.value = true
+  try {
+    const { data } = await saveSkillVersionDraft(skillId, versionId, {
+      description: versionDetail.value.description || '',
+      contentMd: versionDetail.value.contentMd || ''
+    })
+    applyVersionDetail(data.data)
+    await loadVersions(skillId, versionId)
+    onCatalogChanged()
+    ElMessage.success('草稿已保存')
+  } finally {
+    versionSaving.value = false
+  }
+}
+
+/** 发布当前草稿：成为唯一生效版本，线上注入立即改读该版正文。 */
+async function publishVersion() {
+  if (!form.value || !versionDetail.value || versionSaving.value) {
+    return
+  }
+  const version = versionDetail.value
+  try {
+    await ElMessageBox.confirm(
+      `发布 v${version.versionNo} 后立即成为唯一生效版本，线上 Skill 注入将改为该版正文。`,
+      '发布 Skill 版本',
+      { type: 'warning', confirmButtonText: '发布', cancelButtonText: '取消' }
+    )
+  } catch {
+    return
+  }
+  const skillId = form.value.id
+  versionSaving.value = true
+  try {
+    await publishSkillVersion(skillId, version.id)
+    // 不回读详情：避免把定义层未保存的修改冲掉；生效号本地同步即可
+    if (form.value) {
+      form.value.activeVersionNo = version.versionNo
+      form.value.version = String(version.versionNo)
+    }
+    await loadVersions(skillId, version.id)
+    onCatalogChanged()
+    ElMessage.success(`已发布 v${version.versionNo}`)
+  } finally {
+    versionSaving.value = false
+  }
+}
+
+/** 把指定已发布版本设回生效（正文回滚）。版本行「⋯」菜单调用，不再依赖当前选中版本。 */
+async function activateVersion(row: SkillVersionRow) {
+  if (!form.value || versionSaving.value) {
+    return
+  }
+  try {
+    await ElMessageBox.confirm(
+      `将 v${row.versionNo} 设置为生效后，线上 Skill 注入回到该版正文。`,
+      '设置生效版本',
+      { type: 'warning', confirmButtonText: '设置为生效', cancelButtonText: '取消' }
+    )
+  } catch {
+    return
+  }
+  const skillId = form.value.id
+  versionSaving.value = true
+  try {
+    await activateSkillVersion(skillId, row.id)
+    // 不回读详情：保留定义层未保存修改，仅同步生效号
+    if (form.value) {
+      form.value.activeVersionNo = row.versionNo
+      form.value.version = String(row.versionNo)
+    }
+    await loadVersions(skillId, row.id)
+    onCatalogChanged()
+    ElMessage.success(`v${row.versionNo} 已生效`)
+  } finally {
+    versionSaving.value = false
+  }
+}
+
+/** 版本行「⋯」下拉命令：复制为草稿 / 设置为生效 / 删除。 */
+type VersionCommand = 'copy' | 'activate' | 'delete'
+
+/**
+ * 分发版本行下拉命令。菜单项的可用性已由 disabled 控制，这里再兜一次状态判断。
+ *
+ * @param command 命令名
+ * @param row     目标版本行
+ */
+function onVersionCommand(command: VersionCommand, row: SkillVersionRow) {
+  if (command === 'copy') {
+    if (!hasDraft.value) {
+      void createDraft(row.id)
+    }
+    return
+  }
+  if (command === 'activate') {
+    if (row.publishStatus === 1 && row.isActive !== 1) {
+      void activateVersion(row)
+    }
+    return
+  }
+  if (command === 'delete') {
+    if (row.publishStatus === 0) {
+      void removeDraft(row)
+    }
   }
 }
 
@@ -816,7 +1243,7 @@ async function openDetail(row: SkillCard) {
   if (row.id === activeId.value) {
     return
   }
-  if (dirty.value) {
+  if (dirty.value || versionDirty.value) {
     const keep = await confirmDiscardUnsaved('当前 Skill')
     if (!keep) {
       return
@@ -831,8 +1258,8 @@ async function backToGrid() {
   if (flipBusy.value) {
     return
   }
-  // 回网格会清空右侧详情：有草稿时先确认
-  if (dirty.value) {
+  // 回网格会清空右侧详情：定义层或草稿有未保存改动时先确认
+  if (dirty.value || versionDirty.value) {
     const keep = await confirmDiscardUnsaved('当前 Skill')
     if (!keep) {
       return
@@ -943,7 +1370,7 @@ async function saveCreate(payload: Record<string, unknown>, done: () => void) {
   }
 }
 
-/** 保存正文类字段；status 不走这里。 */
+/** 保存定义层字段（名称/标题/触发词/备注）；简介、正文与版本号走版本接口。 */
 async function saveDetail() {
   if (!form.value || !activeId.value || !dirty.value) {
     return
@@ -957,10 +1384,7 @@ async function saveDetail() {
     const { data } = await updateSkill(activeId.value, {
       name: form.value.name.trim(),
       title: form.value.title.trim(),
-      description: form.value.description?.trim() || '',
-      triggerKeywords: splitKeywords(keywordsText.value),
-      version: form.value.version?.trim() || '1',
-      contentMd: form.value.contentMd || '',
+      triggerKeywords: [...keywordTags.value],
       remark: form.value.remark?.trim() || ''
     })
     // 保留当前开关态（可能刚改过），再叠回接口字段
@@ -973,7 +1397,7 @@ async function saveDetail() {
   }
 }
 
-/** 取消：回到载入/上次保存的正文类字段，不改开关。 */
+/** 取消：回到载入/上次保存的定义层字段，不改开关，也不动版本编辑器。 */
 function cancelDetail() {
   if (!form.value || !baseline.value) {
     return
@@ -983,14 +1407,10 @@ function cancelDetail() {
     ...form.value,
     name: snap.name,
     title: snap.title,
-    version: snap.version,
-    description: snap.description,
     // 同步数组字段，避免脏检查与下次保存口径不一致
-    triggerKeywords: splitKeywords(snap.triggerKeywords),
-    remark: snap.remark,
-    contentMd: snap.contentMd
+    triggerKeywords: [...snap.triggerKeywords],
+    remark: snap.remark
   }
-  keywordsText.value = snap.triggerKeywords
 }
 
 /**
@@ -1102,6 +1522,25 @@ onMounted(loadRows)
   color: var(--ah-text-muted);
 }
 
+/* 卡片简介单行截断：长文只显示一行，完整内容由 tooltip 兜底 */
+.card-desc {
+  display: block;
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/*
+ * ConfigCard 默认简介区是两行 -webkit-box；Skill 卡片按本页口径收紧为单行。
+ * 用 block 覆盖 -webkit-box，避免 line-clamp 与 nowrap 叠加出现半行。
+ */
+.card :deep(.config-card__body-inner) {
+  display: block;
+  max-height: none;
+  overflow: hidden;
+}
+
 .version {
   color: var(--ah-text-muted, #9ca3af);
   font-size: 12px;
@@ -1171,32 +1610,6 @@ onMounted(loadRows)
   min-height: 0;
 }
 
-.content-wrap {
-  display: flex;
-  flex: 1;
-  flex-direction: column;
-  width: 100%;
-  min-height: 0;
-}
-
-.content-wrap__toolbar {
-  display: flex;
-  flex: none;
-  justify-content: flex-end;
-  margin-bottom: 4px;
-}
-
-.label-with-tip {
-  display: inline-flex;
-  align-items: center;
-  gap: 4px;
-}
-
-.tip-icon {
-  color: var(--el-text-color-placeholder);
-  cursor: help;
-}
-
 .preview-link {
   height: auto;
   padding: 0;
@@ -1207,16 +1620,6 @@ onMounted(loadRows)
 /* Label 一律不换行；「触发关键词」五字靠 96px label-width 撑开 */
 .detail-form :deep(.el-form-item__label) {
   white-space: nowrap;
-}
-
-/* 窄列版本数字：占满列宽，避免控件把数字挤没 */
-.version-input {
-  width: 100%;
-}
-
-.version-input :deep(.el-input__wrapper) {
-  padding-left: 8px;
-  padding-right: 28px;
 }
 
 /* 备注浅灰底，与会进 Prompt 的简介在视觉上分开 */
@@ -1242,7 +1645,7 @@ onMounted(loadRows)
   background: var(--ah-surface);
 }
 
-/* 正文框撑满 content-wrap 剩余高度；字多时只在框内滚 */
+/* 正文框撑满版本编辑器剩余高度；字多时只在框内滚 */
 .markdown {
   display: flex;
   flex: 1;
@@ -1256,5 +1659,204 @@ onMounted(loadRows)
   min-height: 0;
   resize: none;
   font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+}
+
+/* ===== 版本工作区：左侧版本列表 + 右侧编辑器 ===== */
+.version-workspace {
+  display: flex;
+  flex: 1;
+  gap: 12px;
+  min-height: 0;
+  margin-top: 2px;
+}
+
+.version-list {
+  display: flex;
+  flex: none;
+  flex-direction: column;
+  width: 200px;
+  min-height: 0;
+  border-right: 1px solid var(--ah-border);
+  padding-right: 10px;
+}
+
+.version-list__head {
+  display: flex;
+  flex: none;
+  align-items: center;
+  justify-content: space-between;
+  padding-bottom: 6px;
+}
+
+.version-list__title {
+  color: var(--ah-text-secondary);
+  font-size: 13px;
+  font-weight: 600;
+}
+
+.version-list__add {
+  height: auto;
+  padding: 0;
+  font-size: 12px;
+  font-weight: 400;
+}
+
+.version-list__body {
+  display: flex;
+  flex: 1;
+  flex-direction: column;
+  gap: 6px;
+  min-height: 0;
+  overflow-y: auto;
+  padding-right: 2px;
+}
+
+/* 定义层右侧按钮列：与状态开关同列，按钮贴右 */
+.inline-action {
+  margin-bottom: 18px;
+}
+
+.inline-action :deep(.el-form-item__content) {
+  justify-content: flex-end;
+}
+
+/* 状态整组（含「状态」两字）一起贴右：el-form-item 本身是 flex，直接右对齐即可 */
+.status-item {
+  justify-content: flex-end;
+}
+
+/* 右对齐后 label 与开关连成一组，label 内部再右对齐文字，避免 42px 内出现空隙 */
+.status-item :deep(.el-form-item__label) {
+  justify-content: flex-end;
+}
+
+.status-item :deep(.el-form-item__content) {
+  flex: none;
+  justify-content: flex-end;
+}
+
+.version-item {
+  position: relative;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 4px;
+  width: 100%;
+  padding: 8px 26px 8px 10px;
+  border: 1px solid var(--ah-border);
+  border-radius: 8px;
+  background: var(--ah-surface);
+  color: inherit;
+  text-align: left;
+  cursor: pointer;
+  transition: border-color 0.15s, background-color 0.15s;
+}
+
+/* 版本行「⋯」下拉：绝对定位右上角，不挤压版本号与状态标 */
+.version-item__more {
+  position: absolute;
+  top: 4px;
+  right: 4px;
+}
+
+.version-item__more-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 20px;
+  height: 20px;
+  padding: 0;
+  border: 0;
+  border-radius: 4px;
+  background: transparent;
+  color: #9ca3af;
+  font-size: 14px;
+  line-height: 1;
+  cursor: pointer;
+}
+
+.version-item__more-btn:hover {
+  color: var(--ah-primary, #635bff);
+  background: #f1f0ff;
+}
+
+.version-item:hover {
+  border-color: var(--ah-primary, #635bff);
+}
+
+.version-item.is-current {
+  border-color: var(--ah-primary, #635bff);
+  background: #f5f3ff;
+}
+
+.version-item__no {
+  font-size: 13px;
+  font-weight: 650;
+}
+
+.version-item__time {
+  flex-basis: 100%;
+  color: var(--ah-text-muted, #9ca3af);
+  font-size: 11px;
+}
+
+.version-editor {
+  display: flex;
+  flex: 1;
+  flex-direction: column;
+  min-width: 0;
+  min-height: 0;
+}
+
+/* 版本编辑器内嵌表单：label 置顶，简介与正文都从左边界起排 */
+.version-form {
+  display: flex;
+  flex: 1;
+  flex-direction: column;
+  min-height: 0;
+}
+
+/* 版本编辑器标题行：v3 版本号用黑框高亮，与简介区隔开 */
+.version-editor__head {
+  display: flex;
+  flex: none;
+  align-items: center;
+  gap: 6px;
+  padding-bottom: 6px;
+}
+
+/* v3 版本号：黑框高亮，明确当前正在编辑哪一版 */
+.version-editor__title {
+  padding: 0 7px;
+  border: 1px solid #1f2937;
+  border-radius: 4px;
+  color: #1f2937;
+  font-size: 13px;
+  font-weight: 650;
+  line-height: 20px;
+}
+
+.version-editor__hint {
+  flex: 1;
+  overflow: hidden;
+  color: var(--ah-text-muted, #9ca3af);
+  font-size: 12px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* 版本字段间距收紧，正文仍吃掉剩余高度 */
+.version-field {
+  margin-bottom: 8px;
+}
+
+.detail-actions__group {
+  display: flex;
+  gap: 8px;
+}
+
+.draft-tag {
+  margin-left: 6px;
+  transform: scale(0.9);
 }
 </style>
