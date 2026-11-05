@@ -313,6 +313,8 @@
 
               <el-card class="table-card" shadow="never">
                 <el-table v-loading="instanceLoading" :data="instances" empty-text="没有模型实例">
+                  <!-- 最左序号列：跨页连续，纯展示 -->
+                  <el-table-column v-bind="indexColumnProps" />
                   <el-table-column v-if="activeId === 0" prop="providerName" label="供应商" min-width="100" align="center" />
                   <el-table-column prop="displayName" label="名称" min-width="120" align="center" />
                   <el-table-column prop="modelId" label="模型 ID" min-width="120" align="center" />
@@ -431,6 +433,7 @@ import ProviderFormDialog from '@/components/model/ProviderFormDialog.vue'
 import TestResultDialog from '@/components/model/TestResultDialog.vue'
 import { useViewFlip, type FlipCardSnap } from '@/composables/viewFlip'
 import { CARD_HEIGHT_NORMAL, lastPage, useGridPageSize } from '@/composables/gridPageSize'
+import { useListIndexColumn } from '@/composables/listIndex'
 import { useUserStore } from '@/stores/user'
 import type { ConnectivityResult, InstanceRow, ProviderCard } from '@/types/model'
 import {
@@ -521,6 +524,8 @@ watch(gridPageSize, (next) => {
 })
 
 const query = reactive({ current: 1, size: 10, capability: '', keyword: '' })
+/** 模型实例表最左「序号」列；跨页连续，仅前端展示，不改模型实例分页接口 */
+const { indexColumnProps } = useListIndexColumn(() => query.current, () => query.size)
 const providerDialog = reactive({ open: false, editing: null as ProviderCard | null })
 const credentialDialog = reactive({ open: false, providerId: undefined as number | undefined })
 const instanceDialog = reactive({ open: false, editing: null as InstanceRow | null })

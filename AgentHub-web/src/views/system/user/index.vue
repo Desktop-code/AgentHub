@@ -34,6 +34,8 @@
     </div>
     <el-card class="table-card" shadow="never">
       <el-table v-loading="loading" :data="rows" empty-text="没有用户">
+        <!-- 最左序号列：跨页连续（(current-1)*size + 行下标 + 1），纯展示，不参与接口排序 -->
+        <el-table-column v-bind="indexColumnProps" />
         <!-- 用户名/昵称/部门给足宽度并单行省略，避免中文名换行撑高行高 -->
         <el-table-column prop="username" label="用户名" min-width="150" show-overflow-tooltip align="center" />
         <el-table-column prop="nickname" label="昵称" min-width="140" show-overflow-tooltip align="center" />
@@ -134,6 +136,7 @@ import { pageRoles } from '@/api/role'
 import { deptTree } from '@/api/dept'
 import PageHeader from '@/components/PageHeader.vue'
 import TablePager from '@/components/TablePager.vue'
+import { useListIndexColumn } from '@/composables/listIndex'
 import { useObjectDirty } from '@/composables/useFormDirty'
 import { useUserStore } from '@/stores/user'
 import type { DeptRow, RoleRow, UserRow } from '@/types'
@@ -145,6 +148,8 @@ const total = ref(0)
 const roles = ref<RoleRow[]>([])
 const depts = ref<DeptRow[]>([])
 const query = reactive({ current: 1, size: 10, username: '', status: undefined as number | undefined })
+/** 表格最左「序号」列；翻页 / 改每页条数时按全局序号重算，不改后端分页参数 */
+const { indexColumnProps } = useListIndexColumn(() => query.current, () => query.size)
 const editor = reactive({
   open: false,
   saving: false,

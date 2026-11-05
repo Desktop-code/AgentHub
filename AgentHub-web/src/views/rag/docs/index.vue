@@ -88,6 +88,7 @@
               :row-class-name="rowClass"
               @row-click="onRowClick"
             >
+              <el-table-column v-bind="indexColumnProps" />
               <el-table-column prop="title" label="文档名" min-width="140" show-overflow-tooltip align="left" />
               <el-table-column label="大小" width="78" align="right">
                 <template #default="{ row }">{{ formatByteSize(row.byteSize) }}</template>
@@ -270,6 +271,7 @@ import {
   uploadDocument
 } from '@/api/rag'
 import TablePager from '@/components/TablePager.vue'
+import { useListIndexColumn } from '@/composables/listIndex'
 import { useUserStore } from '@/stores/user'
 import { DOC_STATUS_LABEL, KB_CAPABILITY_LABEL, type RagChunkRow, type RagDocumentRow, type RagKbRow } from '@/types/rag'
 
@@ -329,6 +331,8 @@ const total = ref(0)
 const retryingId = ref(0)
 const removingId = ref(0)
 const query = reactive({ current: 1, size: 10, keyword: '' })
+/** 文档表最左「序号」列；左栏偏窄，列宽收到 56px，序号仍跨页连续 */
+const { indexColumnProps } = useListIndexColumn(() => query.current, () => query.size, 56)
 
 /* ---------------- 右栏：切片 ---------------- */
 const currentDoc = ref<RagDocumentRow | null>(null)

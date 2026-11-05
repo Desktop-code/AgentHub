@@ -20,6 +20,8 @@
     </div>
     <el-card class="table-card" shadow="never">
       <el-table v-loading="loading" :data="rows" empty-text="没有登录日志">
+        <!-- 最左序号列：跨页连续，纯展示，不参与接口排序 -->
+        <el-table-column v-bind="indexColumnProps" />
         <el-table-column prop="username" label="用户名" min-width="140" align="center" />
         <el-table-column prop="ip" label="IP" min-width="160" align="center" />
         <el-table-column label="结果" min-width="90" align="center">
@@ -49,6 +51,7 @@ import { onMounted, reactive, ref } from 'vue'
 import { RefreshRight, Search } from '@element-plus/icons-vue'
 import PageHeader from '@/components/PageHeader.vue'
 import TablePager from '@/components/TablePager.vue'
+import { useListIndexColumn } from '@/composables/listIndex'
 import { pageLoginLogs } from '@/api/log'
 import type { LoginLogRow } from '@/types'
 
@@ -57,6 +60,8 @@ const rows = ref<LoginLogRow[]>([])
 const total = ref(0)
 /** 默认每页 10 条；可选 10/20/50/100 由 TablePager 统一提供 */
 const query = reactive({ current: 1, size: 10, username: '' })
+/** 表格最左「序号」列；跨页连续，仅前端展示 */
+const { indexColumnProps } = useListIndexColumn(() => query.current, () => query.size)
 
 async function load() {
   loading.value = true
