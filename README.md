@@ -1,6 +1,6 @@
 ﻿# AgentHub
 
-Agent 中台：以「配置驱动」的方式管理模型、工具、知识库、提示词与记忆，向下屏蔽厂商差异，向上提供统一的 Agent 试跑 / 对话与可观测能力。单模块 Spring Boot 后端 + Vue3 管理台，可独立部署为单 jar 或 Docker 服务。
+Agent 中台：以「配置驱动」的方式管理模型、工具、知识库、提示词与记忆，向下屏蔽厂商差异，向上提供统一的 Agent 运行 / 对话、多智能体编排与自动评测能力。单模块 Spring Boot 后端 + Vue3 管理台，可独立部署为单 jar 或 Docker 服务。
 
 ## 能力亮点
 
@@ -13,6 +13,13 @@ Agent 中台：以「配置驱动」的方式管理模型、工具、知识库�
 | `PLAN_AND_EXECUTE` | 先规划出有序步骤，再按序串行执行，最后汇总终答；可要求「规划后停住、人工批准再执行」 |
 
 运行限制（轮次 / 墙钟 / 工具与 LLM 调用次数 / 重试 / 工具结果裁剪）平台给硬顶，Agent 可在此之下逐项收紧。
+
+**多智能体（`ma_def` 方案）**
+
+- 方案与候选的**唯一真源**是 `ma_def` + `ma_candidate`；Agent 详情的「编排」Tab 只做只读摘要与深链，不再双写旧 `agent_route`（无启用方案绑根时执行回落读，并给系统提示）。
+- 列表入口「编排 → 多智能体」；绑根方案深链到对应 `ROUTER`，`root_agent_id=NULL` 的**虚拟根**可直接按方案运行（无 Agent 模型槽时用方案里的判路由模型）。
+- 六种模板：路由并行、固定串行、固定并行、评审环、路由后串行、**竞争选优 `COMPETE`**（同题 fan-out ≥2，默认评选模型选优 `JUDGE_PICK`，失败降级 `FIRST_SUCCESS`；不做拼接 / 投票委员会 / 多轮辩论）。
+- 汇总策略：`CONCAT` / `SUMMARIZE` / **`VOTE`**（多路终答进票池，评选模型选一路原文；仅 1 路成功时跳过投票，失败降级 `CONCAT`）。`COMPETE` 是模板选优，`VOTE` 是汇总投票，两者语义与降级方向不同。
 
 **模型中心**
 
@@ -48,6 +55,13 @@ Agent 中台：以「配置驱动」的方式管理模型、工具、知识库�
 
 短期记忆（Redis 热数据 + MySQL 持久化双写）、长期记忆（`fact_key` 归并去重）、Agent 工作记忆三层；上下文窗口按轮次 / 字符 / 空闲时间规划，触顶先滚动摘要再裁剪旧轮。长期记忆只在显式「记住」、会话结束、滚动摘要三处抽取，不每轮都抽。
 
+**Agent 自动评测**
+
+- 用例集 → 复用现网运行入口跑批 → 规则断言**硬门禁**（`gate_passed` / `PASS|FAIL`）+ OpenJudge **软评分**（`scores.openjudge.*`），报告落 JSON 与 Markdown。
+- 建跑时可**可选打分模型**：不选则本 run 关闭软评分只跑规则；选了才调本机 OpenJudge sidecar（`127.0.0.1:18765`，`POST /v1/aevaluate`）。**软分默认不翻转 `gate_passed`**。
+- Judge 凭据由 Java 从模型中心解密后经本机环回透传（`model` / `base_url` / `api_key`），Key 不进日志 / 库 / 报告；解密失败记 `ERROR` + `JUDGE_CREDENTIAL_UNAVAILABLE`，不回退环境变量。
+- sidecar 是独立 Python 进程（`scripts/openjudge-sidecar`，Windows 用 `start.ps1`）；未启动时软评分 `SKIPPED`，不影响规则结论。
+
 **会话标题**
 
 首轮对话落库后异步生成 ≤10 汉字的标题（`agent_run_session.session_title`），跑在独立的轻量线程池上、失败只记日志，不阻塞也不影响这一轮响应；用户手动改名会把 `title_source` 置 `MANUAL`，此后自动生成不再覆盖。左栏标题与首问预览分列，互不踩。
@@ -62,7 +76,7 @@ Agent 中台：以「配置驱动」的方式管理模型、工具、知识库�
 
 Sa-Token 登录与 `Bearer` Token、菜单树与按钮级权限码、部门 `path` 前缀数据范围、登录日志与操作日志。调用方应用（`appId` + `apiKey`）只存哈希，明文仅在创建或重置时返回一次。
 
-> 尚未落地的能力（不在上表内）：运行时自我反思 / 自动选模式、入站 apiKey 调 Agent、检索链路中的查询改写执行、第三方 Dataset 接入、OTel / 多实例实时增量。这些只在配置位或表结构上预留，不作为已交付能力对外描述。
+> 尚未落地的能力（不在上表内）：运行时自我反思 / 自动选模式、入站 apiKey 调 Agent、检索链路中的查询改写执行、第三方 Dataset 接入、评测坏案回流 / EvalScope 桥、OTel / 多实例实时增量。这些只在配置位或表结构上预留，不作为已交付能力对外描述。
 
 ## 技术栈
 
@@ -70,6 +84,7 @@ Sa-Token 登录与 `Bearer` Token、菜单树与按钮级权限码、部门 `pat
 |---|---|
 | 后端 | JDK 17、Spring Boot 3.2（单模块 Maven）、MyBatis-Plus、Sa-Token |
 | Agent 引擎 | AgentScope-Java 2.0.4（core + OpenAI 兼容 / DashScope 模型扩展） |
+| 评测 | 规则断言门禁 + OpenJudge（`py-openjudge` 本机 HTTP sidecar，软评分） |
 | 数据库 | MySQL 5.7+（兼容 8.0，不使用 8.0 专有语法） |
 | 缓存 | Redis（记忆窗口、短期记忆、提示词缓存）+ Caffeine（进程内） |
 | 向量库 | Milvus 2.5+ standalone（dense + BM25；低版本自动降级纯向量） |
@@ -84,14 +99,17 @@ AgentHub/
 │   └── src/main/java/com/agenthub/
 │       ├── auth/ admin/ audit/  登录、用户角色菜单部门、审计日志
 │       ├── model/ tool/ skill/  模型中心、工具目录、Skill
-│       ├── prompt/ agent/       提示词 L1/L2、Agent 定义与绑定
-│       ├── runtime/             AgentScope 编排、试跑会话与 SSE
+│       ├── prompt/ agent/       提示词 L1/L2、Agent 定义与多智能体方案（ma_def）
+│       ├── runtime/             AgentScope 编排、运行会话与 SSE
+│       ├── eval/                评测用例 / 跑批 / 规则门禁 / OpenJudge 适配
 │       ├── rag/                 知识库、入库、检索
 │       ├── memory/ obs/ billing/ 记忆、调用追踪、Token 计量
 │       ├── spi/ common/         扩展接口、Result / 错误码 / 通用能力
 │       └── AgentHubApplication.java
 ├── AgentHub-web/          管理台（Vue3 + Vite + TS + Element Plus）
 │   └── src/{api,views,components,stores,router,types,utils}
+├── scripts/
+│   └── openjudge-sidecar/ OpenJudge 本机 HTTP sidecar（Python，软评分）
 ├── sql/
 │   ├── agenthub.sql       全量建表（41 张表）
 │   └── data-init.sql      菜单、权限、内置工具、L1/L2 提示词等种子
@@ -178,10 +196,11 @@ npm run dev
 - 接口：<http://localhost:8080>，前端 `VITE_API_BASE` 默认指向这里
 - 健康检查：`GET /api/health`（匿名）
 - 接口文档：<http://localhost:8080/swagger-ui.html>
+- 评测软评分（可选）：先起 `scripts/openjudge-sidecar`（Windows 用 `start.ps1`），默认监听 `127.0.0.1:18765`；未启动不影响规则门禁。
 
 开发环境默认账号 `admin`，初始口令见 `AGENTHUB_RESET_PASSWORD`（默认 `admin123`，仅开发用；生产必须改）。新建用户与重置密码都用该配置项，不写死在业务代码里。
 
-首次登录后按顺序配置：模型供应商 → 凭证 → 模型实例（按用途）→ 工具源同步 / 启用 → 知识库（可选）→ Agent 定义与绑定 → 在 Agent 详情打开「对话」试跑。
+首次登录后按顺序配置：模型供应商 → 凭证 → 模型实例（按用途）→ 工具源同步 / 启用 → 知识库（可选）→ Agent 定义与绑定 → 在 Agent 详情打开「对话」运行。
 
 ## 配置与安全
 
@@ -189,8 +208,8 @@ npm run dev
 - **不进 git 的内容**：`.env` 与 `.env.*`、`secrets/`、`**/application-local.yml`、`**/application-{dev,prod}.yml`、`*.pem` / `*.key`、日志与 `data/`；只保留 `.env.example` 与 `application-local.yml.example` 模板。
 - **示例值不是凭据**：`.env.example`、`docker-compose.yml` 里的口令默认值是占位符，生产必须用真实环境变量覆盖；README 与文档不贴任何完整密钥样例。
 - **主密钥轮换**：配置 `agenthub.crypto.previous-keys` 后启动，旧密文会被自动重写为新密钥，迁移完成再移除旧密钥。
-- **试跑工作区**：会话级文件工具（`workspaceWriteFile` / `ReadFile` / `ListFiles`）的落盘根目录由 `agenthub.workspace.root-path`（环境变量 `AGENTHUB_WORKSPACE_ROOT_PATH`）决定，默认 `./workspace-test`（相对进程工作目录，已 gitignore）；留空则回落到系统临时目录的 `agenthub_workspace`。该目录只放 Agent 试跑产物，不参与备份。
-- **会话标题开关**：`agenthub.runtime.trial.auto-title-enabled`（环境变量 `AGENTHUB_AUTO_TITLE_ENABLED`，默认 `true`）。关掉只是不再异步生成标题，左栏退回展示首问预览，不影响试跑。
+- **运行工作区**：会话级文件工具（`workspaceWriteFile` / `ReadFile` / `ListFiles`）的落盘根目录由 `agenthub.workspace.root-path`（环境变量 `AGENTHUB_WORKSPACE_ROOT_PATH`）决定，默认 `./workspace-test`（相对进程工作目录，已 gitignore）；留空则回落到系统临时目录的 `agenthub_workspace`。该目录只放 Agent 运行产物，不参与备份。
+- **会话标题开关**：`agenthub.runtime.trial.auto-title-enabled`（环境变量 `AGENTHUB_AUTO_TITLE_ENABLED`，默认 `true`）。关掉只是不再异步生成标题，左栏退回展示首问预览，不影响运行。
 - **时间与鉴权约定**：时区 `Asia/Shanghai`，Token 走 `Authorization: Bearer <token>`，权限码统一 `{域}:{资源}:{动作}` 且菜单种子 / 后端注解 / 前端按钮同码。
 
 ## 常见端口
@@ -205,12 +224,14 @@ npm run dev
 | `milvus` | `19530`（gRPC）、`9091`（healthz / metrics） | 后端默认 `AGENTHUB_MILVUS_URI=http://127.0.0.1:19530` |
 | `mysql` | 默认不暴露，需要时开 `3307:3306` | 库名 `agenthub` |
 | `minio` | 默认不暴露，需要时开 `9000` / `9001` | 仅 Milvus 内部使用 |
+| `openjudge-sidecar` | `18765` | 仅本机 `127.0.0.1`；评测软评分可选，未启动时 `SKIPPED` |
 
 端口被占用时：后端换端口需同步改 `AgentHub-web/.env.development` 的 `VITE_API_BASE` 与后端 CORS 白名单，不要只改一侧。
 
 ## 文档
 
-- `docs/架构设计.md`：分层总图、试跑主链路、三种运行模式、模型防腐、提示词三层、RAG 双流水、工具闸门、记忆分层、可观测与部署拓扑（含 mermaid 图）
+- `docs/架构设计.md`：分层总图、运行主链路、三种运行模式、模型防腐、提示词三层、RAG 双流水、工具闸门、记忆分层、可观测与部署拓扑（含 mermaid 图）。
+- `scripts/openjudge-sidecar/README.md`：sidecar 契约、启动、排障与进 git 范围。
 
 ## 开源协议与致谢 (License & Acknowledgements)
 
