@@ -34,7 +34,8 @@ import java.util.Map;
  *       工具区，因此失败一律用 {@link #KB_UNAVAILABLE} 一类短句；主机、端口、异常码、
  *       本机路径与中间件名只进服务端日志（见 {@link UserFacingText}）。</li>
  * </ol>
- * 与 runtime 的耦合只有一处：读 {@link RagToolContext} 拿当前 Agent。
+ * 与 runtime 的耦合只有两处：读 {@link RagToolContext} 拿当前 Agent；
+ * 读工具线程已绑定的 obs TOOL span 锚点，把检索中间态挂成子步（无 trace 时为空操作）。
  */
 @Component
 public class RagSearchTool {
@@ -82,6 +83,10 @@ public class RagSearchTool {
      * <p>
      * 返回 JSON 数组（含 content / title / score / hitBy），或明确的失败说明。
      * 异常不抛出：Tool 抛异常会让整轮试跑失败，而「查不到东西」是可预期的业务结果。
+     * <p>
+     * 命中有 trace 锚点时，本次调用会在 TOOL span 下写
+     * {@code tool.input → rewrite → retrieve.vector → retrieve.bm25 → rrf → rerank → tool.output}
+     * 子步；其它工具不读该锚点，仍保持单层入参/返回。
      *
      * @param query 检索问题或关键字
      * @param topK  返回条数，默认 5，最大 10
@@ -101,43 +106,81 @@ public class RagSearchTool {
         int k = topK == null ? 5 : Math.min(Math.max(topK, 1), MAX_TOP_K);
 
         Long agentId = RagToolContext.agentIdOrNull();
-        if (agentId == null) {
-            // 上下文缺失说明装配没做对；宁可拒绝也不猜一个库去查
-            log.warn("[RAG] 检索工具缺少 Agent 上下文，拒绝检索");
-            return NO_BINDING;
-        }
-
-        List<RagKnowledgeBase> usable = binds.listUsableForAgent(agentId);
-        if (usable.isEmpty()) {
-            return NO_BINDING;
-        }
-
-        Map<Long, String> overrides = binds.overridesFor(agentId);
-        // Agent「知识库」Tab 配了重排就以它为准；没配则由各库自带配置决定
-        Long agentRerankModelId = rerankLookup.enabledRerankModelId(agentId).orElse(null);
-        List<SearchResult> hits;
+        String trimmedQuery = query.trim();
+        // 工具线程已由 RagContextAgentTool 绑定 TOOL span 锚点；无 trace 时会话为空操作，不影响检索
+        RagObsSpans.Session obs = RagObsSpans.begin(agentId);
         try {
-            hits = retrieval.retrieveMulti(usable, query.trim(), k, overrides, agentRerankModelId);
-        } catch (EmbeddingException e) {
-            // 向量化失败同属知识库侧不可用：对用户只说产品话，异常原文（厂商地址/状态码）只进日志
-            log.warn("[RAG] 知识库向量化失败 agentId={} reason={}", agentId, e.getMessage(), e);
-            return KB_UNAVAILABLE;
-        } catch (RagStoreException e) {
-            log.warn("[RAG] 知识库向量检索失败 agentId={} reason={}", agentId, e.getMessage(), e);
-            return KB_UNAVAILABLE;
-        } catch (BizException e) {
-            // 业务拒绝（库被停用/未初始化等）同样是配置侧问题：用户面不给路径与整改步骤
-            log.warn("[RAG] 知识库检索被拒绝 agentId={} reason={}", agentId, e.getMessage());
-            return KB_UNAVAILABLE;
-        } catch (RuntimeException e) {
-            // 兜底：任何未预期异常都不把 message 交给模型，否则等于把部署细节交给它复述
-            log.warn("[RAG] 知识库检索异常 agentId={} type={}", agentId, e.getClass().getSimpleName(), e);
-            return UserFacingText.SERVICE_UNAVAILABLE;
+            if (agentId == null) {
+                // 上下文缺失说明装配没做对；宁可拒绝也不猜一个库去查
+                log.warn("[RAG] 检索工具缺少 Agent 上下文，拒绝检索");
+                obs.input(RagObsSpans.jsonText(Map.of("query", trimmedQuery, "topK", k)), trimmedQuery, k,
+                        Map.of("topK", k, "kbCount", 0));
+                obs.output(NO_BINDING, "no_binding", 0, false);
+                return NO_BINDING;
+            }
+
+            List<RagKnowledgeBase> usable = binds.listUsableForAgent(agentId);
+            // 没有可用库时无需再查覆盖项与重排绑定，省两次库读
+            Map<Long, String> overrides = usable.isEmpty() ? Map.of() : binds.overridesFor(agentId);
+            // Agent「知识库」Tab 配了重排就以它为准；没配则由各库自带配置决定
+            Long agentRerankModelId = usable.isEmpty()
+                    ? null : rerankLookup.enabledRerankModelId(agentId).orElse(null);
+
+            Map<String, Object> input = new LinkedHashMap<>();
+            input.put("query", trimmedQuery);
+            input.put("topK", k);
+            input.put("kbIds", usable.stream().map(RagKnowledgeBase::getId).toList());
+            input.put("overrides", overrides);
+            input.put("agentRerankModelId", agentRerankModelId);
+            Map<String, Object> inputAttrs = new LinkedHashMap<>();
+            inputAttrs.put("topK", k);
+            inputAttrs.put("kbCount", usable.size());
+            inputAttrs.put("kbIds", usable.stream().map(RagKnowledgeBase::getId)
+                    .map(String::valueOf).reduce((a, b) -> a + "," + b).orElse(""));
+            if (agentRerankModelId != null) {
+                inputAttrs.put("agentRerankModelId", agentRerankModelId);
+            }
+            obs.input(RagObsSpans.jsonText(input), trimmedQuery, k, inputAttrs);
+
+            if (usable.isEmpty()) {
+                obs.output(NO_BINDING, "no_binding", 0, false);
+                return NO_BINDING;
+            }
+
+            List<SearchResult> hits;
+            try {
+                hits = retrieval.retrieveMulti(usable, trimmedQuery, k, overrides, agentRerankModelId);
+            } catch (EmbeddingException e) {
+                // 向量化失败同属知识库侧不可用：对用户只说产品话，异常原文（厂商地址/状态码）只进日志
+                log.warn("[RAG] 知识库向量化失败 agentId={} reason={}", agentId, e.getMessage(), e);
+                obs.output(KB_UNAVAILABLE, "unavailable", null, true);
+                return KB_UNAVAILABLE;
+            } catch (RagStoreException e) {
+                log.warn("[RAG] 知识库向量检索失败 agentId={} reason={}", agentId, e.getMessage(), e);
+                obs.output(KB_UNAVAILABLE, "unavailable", null, true);
+                return KB_UNAVAILABLE;
+            } catch (BizException e) {
+                // 业务拒绝（库被停用/未初始化等）同样是配置侧问题：用户面不给路径与整改步骤
+                log.warn("[RAG] 知识库检索被拒绝 agentId={} reason={}", agentId, e.getMessage());
+                obs.output(KB_UNAVAILABLE, "unavailable", null, true);
+                return KB_UNAVAILABLE;
+            } catch (RuntimeException e) {
+                // 兜底：任何未预期异常都不把 message 交给模型，否则等于把部署细节交给它复述
+                log.warn("[RAG] 知识库检索异常 agentId={} type={}", agentId, e.getClass().getSimpleName(), e);
+                obs.output(UserFacingText.SERVICE_UNAVAILABLE, "error", null, true);
+                return UserFacingText.SERVICE_UNAVAILABLE;
+            }
+            if (hits.isEmpty()) {
+                obs.output(NO_HIT, "no_hit", 0, false);
+                return NO_HIT;
+            }
+            String json = toJson(hits);
+            // 与工具真实返回对齐：正文一致，超长部分由 obs 截断并标 truncated
+            obs.output(json, "ok", hits.size(), false);
+            return json;
+        } finally {
+            obs.end();
         }
-        if (hits.isEmpty()) {
-            return NO_HIT;
-        }
-        return toJson(hits);
     }
 
     /**

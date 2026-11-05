@@ -72,6 +72,22 @@
         >
           {{ span.toolSuccess === 1 ? '成功' : '失败' }}
         </el-tag>
+        <!--
+          检索明细入口：只有挂了 RETRIEVE 子步的工具才出现；
+          点它只开抽屉，不展开主泳道，也不触发展开/收起本卡。
+        -->
+        <el-button
+          v-if="retrieveCount > 0"
+          class="retrieve-entry"
+          link
+          type="primary"
+          size="small"
+          :aria-label="`查看检索明细，共 ${retrieveCount} 个子步`"
+          @click.stop="emit('open-retrieve')"
+          @keydown.stop
+        >
+          检索明细 · {{ retrieveCount }}
+        </el-button>
       </template>
 
       <span class="latency" :class="latencyClass">{{ latencyText }}</span>
@@ -237,6 +253,8 @@ const props = withDefaults(
     activeSpanId?: number | null
     /** 该卡是否位于「被点节点的祖先链」上：用于逐级自动展开，否则目标卡藏在折叠 Body 里 */
     forceOpen?: boolean
+    /** 本 TOOL 下挂的 RETRIEVE 子步数；0 表示不出「检索明细」入口 */
+    retrieveCount?: number
   }>(),
   {
     isWideMode: false,
@@ -245,9 +263,19 @@ const props = withDefaults(
     collapsible: false,
     defaultOpen: true,
     activeSpanId: null,
-    forceOpen: false
+    forceOpen: false,
+    retrieveCount: 0
   }
 )
+
+/**
+ * 检索明细入口事件。所属域：obs。
+ * <p>卡片只负责「有没有入口 + 点了一下」，抽屉数据由列表/泳道层持有，
+ * 避免每张卡各自建一个抽屉实例。
+ */
+const emit = defineEmits<{
+  'open-retrieve': []
+}>()
 
 const extraOpen = ref(false)
 /** 折叠态；不可折叠时恒为 true */
@@ -687,6 +715,13 @@ function agentLabel(name: string | null | undefined, id: number | null | undefin
   font-size: 12px;
   font-weight: 600;
   font-variant-numeric: tabular-nums;
+}
+
+/* 检索明细入口：与 Header 其它 chip 同高，不抢状态标签的位置 */
+.retrieve-entry {
+  padding: 0;
+  font-size: 12px;
+  font-weight: 600;
 }
 
 .latency--ok {

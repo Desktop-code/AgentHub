@@ -1,6 +1,7 @@
 package com.agenthub.runtime.infra.agentscope;
 
 import com.agenthub.obs.domain.ObsSpanStack;
+import com.agenthub.obs.domain.ObsToolSpanContext;
 import com.agenthub.obs.domain.ObsTraceHolder;
 import com.agenthub.obs.domain.ObsTraceScope;
 import com.agenthub.obs.domain.model.ObsStatus;
@@ -59,6 +60,9 @@ public final class TrialSpanSink {
         Long spanId = scope.open(SpanType.TOOL, toolName(name), agentOf(), parentId, null);
         if (spanId != null) {
             open.computeIfAbsent(key(toolCallId, name), ignored -> new ConcurrentLinkedDeque<>()).addLast(spanId);
+            // 登记 callId → TOOL 行：工具执行线程据此把检索子步挂到「本次调用」下
+            scope.registerToolSpan(toolCallId, spanId);
+            ObsToolSpanContext.bind(scope, spanId, agentOf());
         }
     }
 
@@ -99,6 +103,9 @@ public final class TrialSpanSink {
         close.setAttrsJson(ObsAttrs.withBrief(null,
                 success ? "执行工具 " + toolName(name) : "工具失败 " + toolName(name)));
         scope.close(spanId, close);
+        // 收尾即清理登记与当前线程锚点：并行调用各用各的 callId，避免串到下一次
+        scope.forgetToolSpan(toolCallId);
+        ObsToolSpanContext.clear();
     }
 
     private Long agentOf() {

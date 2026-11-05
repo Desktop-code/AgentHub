@@ -29,6 +29,14 @@ public final class ObsTraceScope {
     private final ThreadLocal<ObsSpanStack> stacks = ThreadLocal.withInitial(ObsSpanStack::new);
     /** 本 trace 最近一次成功打开的 LLM 行 id；Router 扇出前可读作判路由 LLM */
     private final AtomicReference<Long> lastLlmSpanId = new AtomicReference<>();
+    /**
+     * 工具调用 id → TOOL 行 id。
+     * <p>为什么需要：知识库检索等工具执行在 {@code boundedElastic} 线程，拿到本次 TOOL 行 id
+     * 只能靠引擎给的 toolCallId 反查；有了它，检索子步才能稳定挂到「本次工具调用」下。
+     */
+    private final ConcurrentHashMap<String, Long> toolSpanByCallId = new ConcurrentHashMap<>();
+    /** 最近一次成功打开的 TOOL 行 id；callId 缺失或事件尚未落库时的兜底挂点 */
+    private final AtomicReference<Long> lastToolSpanId = new AtomicReference<>();
 
     /**
      * 全新 trace：seq 与 step_no 都从 1 起号。
@@ -132,6 +140,46 @@ public final class ObsTraceScope {
     }
 
     /**
+     * 登记「本次工具调用 id → TOOL 行 id」。
+     * <p>调用方：TrialSpanSink.onStart（同一工具调用的入参事件）；执行线程可据此反查父 span。
+     *
+     * @param toolCallId 引擎侧工具调用 id；空则忽略
+     * @param spanId     本次 TOOL 行 id；空则忽略
+     */
+    public void registerToolSpan(String toolCallId, Long spanId) {
+        if (toolCallId == null || toolCallId.isBlank() || spanId == null) {
+            return;
+        }
+        toolSpanByCallId.put(toolCallId, spanId);
+    }
+
+    /**
+     * 按工具调用 id 取 TOOL 行 id。
+     * <p>有 callId 时只认精确登记：登记缺失说明本次 TOOL 行没落成，
+     * 这时绝不能回退到「上一条 TOOL」，否则会把检索子步挂到别的工具下。
+     *
+     * @param toolCallId 引擎侧工具调用 id；可空
+     * @return 对应行 id；callId 为空时回退最近一次 TOOL 行，仍无则 null
+     */
+    public Long toolSpanOf(String toolCallId) {
+        if (toolCallId != null && !toolCallId.isBlank()) {
+            return toolSpanByCallId.get(toolCallId);
+        }
+        return lastToolSpanId.get();
+    }
+
+    /**
+     * 工具调用收尾时清理登记，避免长会话 map 无限增长。
+     *
+     * @param toolCallId 引擎侧工具调用 id；空则忽略
+     */
+    public void forgetToolSpan(String toolCallId) {
+        if (toolCallId != null && !toolCallId.isBlank()) {
+            toolSpanByCallId.remove(toolCallId);
+        }
+    }
+
+    /**
      * 接下来的 LLM / TOOL 挂到这个步骤下面（仅当前线程的 stack）。
      *
      * @param spanId 父行自增 id，可空表示回到根
@@ -176,6 +224,10 @@ public final class ObsTraceScope {
         // 仅成功落库的 LLM 计入，供 Router「先链后扇」挂子 AGENT
         if (id != null && type == SpanType.LLM) {
             lastLlmSpanId.set(id);
+        }
+        // TOOL 行也留一个「最近一次」兜底：个别引擎事件不带 callId 时，工具内子步仍能挂上
+        if (id != null && type == SpanType.TOOL) {
+            lastToolSpanId.set(id);
         }
         // 串行业务步：开成功后把当前叶推进到本步，下一步挂本步 id，禁止钉死容器 AGENT
         // 真并行扇出（parallelFanout）不推进，兄弟仍同挂分叉点
