@@ -8,19 +8,18 @@
  * <p>约束：
  * - 只读 obs 接口，不写库、不改 RouterTrialExecutor 的隔离 / 并行 / 汇总语义；
  * - 只在 `enabled` 为真时请求，Agent 管理里的试跑抽屉仍走 `useRouterLane`，互不影响；
- * - 步骤按 traceId 缓存；轮询只刷新仍在 RUNNING 的 trace，避免整表重拉。
+ * - 步骤按 traceId 缓存；轮询只刷新仍在 RUNNING 的 trace，避免整表重拉；
+ * - 轮询骨架（运行中短轮询、结束后补一拍、切会话作废在途请求）收口在 `useObsTracePolling`。
  */
-import { computed, onBeforeUnmount, reactive, ref, watch, type Ref } from 'vue'
+import { computed, reactive, ref } from 'vue'
+import type { Ref } from 'vue'
 import { listObsSpans, pageObsTraces } from '@/api/obs'
+import { useObsTracePolling } from '@/composables/useObsTracePolling'
 import { useUserStore } from '@/stores/user'
 import { buildOrchestrationLane } from '@/utils/orchestrationLane'
 import type { ObsSpan, ObsTrace } from '@/types/obs'
 import type { MaTurnTrace } from '@/components/runtime/ma/maRunView'
 
-/** 运行中的刷新间隔；与试跑续订同一量级，够看出子一开跑就出现 */
-const POLL_MS = 2000
-/** 本轮结束后补一拍：trace 收尾略晚于 SSE done */
-const SETTLE_MS = 900
 /** 单会话最多取多少轮；试跑会话通常远小于这个数 */
 const TRACE_PAGE_SIZE = 50
 
@@ -41,6 +40,14 @@ export function useMaTurnTraces(sessionId: Ref<number | null>, active: Ref<boole
   const records = ref<ObsTrace[]>([])
   /** 步骤缓存：traceId → spans；并行写入用 reactive 对象，避免 Map 整体替换互相覆盖 */
   const spanCache = reactive<Record<string, ObsSpan[]>>({})
+  /**
+   * traceId → 上一拍看到的 trace 状态。
+   *
+   * <p>用途：trace 由 RUNNING 转为终态的那一拍，步骤可能还是「跑到一半」的快照
+   * （例如汇总 LLM 仍是 RUNNING）。只按「缺步骤 / 仍在跑」判断是否补拉，会把这个
+   * 中间快照永久留在缓存里，右栏「汇总」就一直转圈；这里据此在收尾那一拍必补一次。
+   */
+  const lastStatus: Record<string, string> = {}
   const loading = ref(false)
   const error = ref('')
 
@@ -76,11 +83,6 @@ export function useMaTurnTraces(sessionId: Ref<number | null>, active: Ref<boole
     })
   })
 
-  /** 请求令牌：切会话 / 切权限后丢弃迟到的响应，避免串会话 */
-  let token = 0
-  let timer: number | undefined
-  let settleTimer: number | undefined
-
   /** 服务端时间串转毫秒 */
   function parseTime(value?: string | null): number | null {
     if (!value) {
@@ -90,122 +92,86 @@ export function useMaTurnTraces(sessionId: Ref<number | null>, active: Ref<boole
     return Number.isNaN(ms) ? null : ms
   }
 
-  /**
-   * 拉会话下全部 trace，并按需补步骤。
-   *
-   * @param showLoading true 时显示首次 / 手动刷新的 loading
-   */
-  async function load(showLoading = false) {
-    const id = sessionId.value
-    if (id == null || !usable.value) {
-      reset()
-      return
-    }
-    const mine = ++token
-    if (showLoading) {
-      loading.value = true
-    }
-    try {
-      const { data } = await pageObsTraces(id, { current: 1, size: TRACE_PAGE_SIZE })
-      if (mine !== token) {
-        return
-      }
-      const list = data.data?.records || []
-      records.value = list
-      error.value = ''
-      // 只补缺失步骤与仍在跑的 trace；已完成的历史轮次不重复拉
-      const need = list.filter((record) => !(record.traceId in spanCache) || record.status === 'RUNNING')
-      await Promise.all(
-        need.map(async (record) => {
-          try {
-            const spanRes = await listObsSpans(record.traceId)
-            if (mine !== token) {
-              return
-            }
-            spanCache[record.traceId] = spanRes.data.data || []
-          } catch {
-            // 单条失败不拖垮整页：标记成已加载（空），中栏走事件块兜底
-            if (mine === token && !(record.traceId in spanCache)) {
-              spanCache[record.traceId] = []
-            }
-          }
-        })
-      )
-    } catch {
-      if (mine === token) {
-        error.value = '执行链路加载失败'
-      }
-    } finally {
-      if (mine === token) {
-        loading.value = false
-      }
-    }
-  }
-
-  /** 清空数据并作废在途请求（切会话 / 无权限） */
+  /** 清空数据（切会话 / 无权限）；在途请求由引擎令牌作废 */
   function reset() {
-    token += 1
     loading.value = false
     error.value = ''
     records.value = []
     for (const key of Object.keys(spanCache)) {
       delete spanCache[key]
     }
-  }
-
-  /** 停轮询与收尾补拍 */
-  function stopTimer() {
-    if (timer != null) {
-      window.clearInterval(timer)
-      timer = undefined
-    }
-    if (settleTimer != null) {
-      window.clearTimeout(settleTimer)
-      settleTimer = undefined
+    for (const key of Object.keys(lastStatus)) {
+      delete lastStatus[key]
     }
   }
 
-  /** 本轮在跑时开轮询：子一开跑就能看到候选卡与链路节点 */
-  function startPolling() {
-    if (!active.value || timer != null) {
-      return
+  /**
+   * 拉会话下全部 trace，并按需补步骤。
+   *
+   * @param id          会话主键（引擎已保证非空且已鉴权）
+   * @param isCurrent   是否仍是当前请求；false 表示已被切会话/重拉取代，结果直接丢弃
+   * @param showLoading true 时显示首次 / 手动刷新的 loading
+   */
+  async function load(id: number, isCurrent: () => boolean, showLoading: boolean) {
+    if (showLoading) {
+      loading.value = true
     }
-    timer = window.setInterval(() => void load(), POLL_MS)
+    try {
+      const { data } = await pageObsTraces(id, { current: 1, size: TRACE_PAGE_SIZE })
+      if (!isCurrent()) {
+        return
+      }
+      const list = data.data?.records || []
+      records.value = list
+      error.value = ''
+      // 补步骤的三种情形：从没拉过 / 仍在跑（要看进度）/ 上一拍还在跑而这一拍已收尾（要拿终态快照）
+      const need = list.filter((record) => {
+        if (!(record.traceId in spanCache)) {
+          return true
+        }
+        if (record.status === 'RUNNING') {
+          return true
+        }
+        return lastStatus[record.traceId] === 'RUNNING'
+      })
+      // 先算出 need 再更新状态，否则「刚收尾」这一拍会被自己覆盖掉
+      for (const record of list) {
+        lastStatus[record.traceId] = record.status || ''
+      }
+      await Promise.all(
+        need.map(async (record) => {
+          try {
+            const spanRes = await listObsSpans(record.traceId)
+            if (!isCurrent()) {
+              return
+            }
+            spanCache[record.traceId] = spanRes.data.data || []
+          } catch {
+            // 单条失败不拖垮整页：标记成已加载（空），中栏走事件块兜底
+            if (isCurrent() && !(record.traceId in spanCache)) {
+              spanCache[record.traceId] = []
+            }
+          }
+        })
+      )
+    } catch {
+      if (isCurrent()) {
+        error.value = '执行链路加载失败'
+      }
+    } finally {
+      if (isCurrent()) {
+        loading.value = false
+      }
+    }
   }
 
-  // 切会话 / 切权限：清空后立即重拉；无会话或无权限时保持空态
-  watch(
-    () => [sessionId.value, usable.value] as const,
-    ([id, ok]) => {
-      stopTimer()
-      reset()
-      if (id == null || !ok) {
-        return
-      }
-      void load(true)
-      startPolling()
-    },
-    { immediate: true }
-  )
-
-  // 本轮结束的那一刻补一拍，等 trace 收尾落库；再停轮询
-  watch(
-    () => active.value,
-    (running) => {
-      if (sessionId.value == null || !usable.value) {
-        return
-      }
-      stopTimer()
-      void load()
-      if (running) {
-        startPolling()
-        return
-      }
-      settleTimer = window.setTimeout(() => void load(), SETTLE_MS)
-    }
-  )
-
-  onBeforeUnmount(stopTimer)
+  const polling = useObsTracePolling({
+    sessionId,
+    active,
+    usable,
+    load,
+    clear: reset
+  })
 
   return {
     traces,
@@ -213,6 +179,6 @@ export function useMaTurnTraces(sessionId: Ref<number | null>, active: Ref<boole
     loading,
     error,
     /** 手动刷新当前会话的全部轮次 */
-    reload: () => load(true)
+    reload: polling.reload
   }
 }

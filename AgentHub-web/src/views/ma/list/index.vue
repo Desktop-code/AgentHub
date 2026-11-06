@@ -51,7 +51,7 @@
     <section class="panel">
       <el-table v-loading="loading" :data="rows" class="ma-table" :row-class-name="() => 'ma-row'" @row-click="openEdit">
         <!-- 最左序号列：跨页连续，纯展示，不参与接口排序 -->
-        <el-table-column v-bind="indexColumnProps" />
+        <el-table-column v-bind="indexColumnProps" min-width="60"/>
         <!-- 名称/编码：方案主键之外的业务标识，点名称与点整行都进编辑抽屉 -->
         <el-table-column label="名称" min-width="190" align="center" show-overflow-tooltip>
           <template #default="{ row }">
@@ -63,7 +63,7 @@
             <span class="cell-code">{{ row.code }}</span>
           </template>
         </el-table-column>
-        <el-table-column label="模板" min-width="130" align="center">
+        <el-table-column label="模板" min-width="100" align="center">
           <template #default="{ row }">
             <el-tooltip :content="maTemplateHint(row.template)" placement="top">
               <el-tag size="small" effect="plain" :type="maTemplateTagType(row.template)">
@@ -72,7 +72,7 @@
             </el-tooltip>
           </template>
         </el-table-column>
-        <el-table-column label="状态" min-width="100" align="center">
+        <el-table-column label="状态" min-width="60" align="center">
           <template #default="{ row }">
             <!-- 列表直接切换状态：只改 ma_def；启用会校验同根唯一，失败自动回滚 -->
             <span @click.stop>
@@ -287,7 +287,7 @@
               <el-form-item label="选优策略">
                 <el-radio-group v-model="form.config.competeStrategy">
                   <el-radio value="JUDGE_PICK">评选模型选优（默认）</el-radio>
-                  <el-radio value="FIRST_SUCCESS">第一个成功子</el-radio>
+                  <el-radio value="FIRST_SUCCESS">首次成功优先</el-radio>
                 </el-radio-group>
                 <span class="field-hint inline">
                   同题并行后只取 1 份终答；至少 2 个启用候选，评选模型缺省用判路由模型
@@ -299,30 +299,27 @@
 
         <!-- 区块 3：候选池。标题行承担说明 + 添加入口，表格只放数据 -->
         <section class="form-block">
-          <h3 class="form-block__title">候选池</h3>
-          <div class="candidate-toolbar">
-            <span class="field-hint">候选必须是启用、允许被编排的 REACT / 计划执行 Agent，且不能是绑定的根。</span>
-            <el-button size="small" @click="addCandidate">添加候选</el-button>
+          <!-- 标题行：说明紧随标题之后，与标题隔开一段距离；添加入口靠右 -->
+          <div class="candidate-head">
+            <h3 class="form-block__title candidate-head__title">候选池</h3>
+            <span class="candidate-head__hint">候选必须是启用、允许被编排的 REACT / 计划执行 Agent，且不能是绑定的根。</span>
+            <el-button size="small" class="candidate-head__add" @click="addCandidate">添加候选</el-button>
           </div>
           <el-table :data="form.candidates" class="candidate-table" size="small">
-            <el-table-column label="子 Agent" min-width="190">
+            <el-table-column label="子 Agent" min-width="170">
               <template #default="{ row }">
-                <el-select v-model="row.agentId" filterable placeholder="选择 Agent" @change="onCandidateAgentChange(row)">
-                  <el-option v-for="agent in candidateOptions" :key="agent.id" :label="`${agent.name}（${agent.code}）`" :value="agent.id" />
+                <!-- 路由键不落表单：保存时不传，服务端按所选 Agent 编码统一生成，切换 Agent 自然跟着变 -->
+                <el-select v-model="row.agentId" filterable placeholder="选择 Agent">
+                  <el-option v-for="agent in optionsForRow(row)" :key="agent.id" :label="`${agent.name}（${agent.code}）`" :value="agent.id" />
                 </el-select>
               </template>
             </el-table-column>
-            <el-table-column label="路由键" min-width="140">
-              <template #default="{ row }">
-                <el-input v-model="row.routeKey" maxlength="64" placeholder="留空按编码生成" />
-              </template>
-            </el-table-column>
-            <el-table-column label="意图描述" min-width="200">
+            <el-table-column label="意图描述" min-width="240">
               <template #default="{ row }">
                 <el-input v-model="row.intentDesc" maxlength="512" placeholder="喂给判路由 / 串行步骤说明" />
               </template>
             </el-table-column>
-            <el-table-column label="排序" width="100">
+            <el-table-column label="排序" width="86">
               <template #default="{ row }">
                 <el-input-number v-model="row.sortNo" :min="0" :max="10000" :step="10" controls-position="right" />
               </template>
@@ -493,7 +490,10 @@ interface CandidateRow {
   agentCode?: string
   agentRunMode?: string
   agentStatus?: number
-  routeKey: string
+  /**
+   * 不保留 routeKey：路由键是服务端派生数据（子 Agent 编码，冲突回落 child_{id}），
+   * 前端不展示、不提交，避免切换 Agent 后旧键残留导致指向错误。
+   */
   intentDesc: string
   sortNo?: number
   enabled: number
@@ -706,7 +706,7 @@ function fillForm(detail: MaDefDetail) {
     agentCode: item.agentCode,
     agentRunMode: item.agentRunMode,
     agentStatus: item.agentStatus,
-    routeKey: item.routeKey,
+    // routeKey 不回填：该键由服务端按 Agent 编码派生，不在前端保存/编辑
     intentDesc: item.intentDesc,
     sortNo: item.sortNo,
     enabled: item.enabled
@@ -715,17 +715,26 @@ function fillForm(detail: MaDefDetail) {
 
 /** 加一行空候选；sortNo 留空交给后端按 max+10 生成 */
 function addCandidate() {
-  form.candidates.push({ agentId: null, routeKey: '', intentDesc: '', sortNo: undefined, enabled: 1 })
+  form.candidates.push({ agentId: null, intentDesc: '', sortNo: undefined, enabled: 1 })
 }
 
 /**
- * 选中子 Agent 后，若路由键为空则用 Agent 编码预填，减少手工输入。
- * 编码为空时用 child_{id}，与后端兜底规则一致。
+ * 单行候选可选的下拉项：排除其它行已选中的 Agent，避免同一方案重复添加同一子 Agent。
+ *
+ * <p>保留本行当前已选值，否则切换时当前选中项会从选项里消失、下拉显示成裸 id。
+ *
+ * @param row 候选行
+ * @return 过滤后的可选 Agent 列表
  */
-function onCandidateAgentChange(row: CandidateRow) {
-  if (row.routeKey.trim() || !row.agentId) return
-  const agent = leafAgents.value.find((item) => item.id === row.agentId)
-  row.routeKey = agent?.code || `child_${row.agentId}`
+function optionsForRow(row: CandidateRow) {
+  const usedByOthers = new Set(
+    form.candidates
+      .filter((item) => item !== row && item.agentId !== null)
+      .map((item) => item.agentId as number)
+  )
+  return candidateOptions.value.filter(
+    (agent) => agent.id === row.agentId || !usedByOthers.has(agent.id)
+  )
 }
 
 /** 提交前把 REACT 恒补回允许集合，避免用户取消勾选造成服务端归一化差异 */
@@ -769,7 +778,7 @@ async function submit() {
     enabled: form.enabled,
     candidates: form.candidates.map((item) => ({
       agentId: item.agentId as number,
-      routeKey: item.routeKey.trim() || undefined,
+      // 不传 routeKey：服务端按该 Agent 编码生成（同方案内唯一），切换 Agent 时不会残留旧键
       intentDesc: item.intentDesc.trim(),
       sortNo: item.sortNo,
       enabled: item.enabled
@@ -1064,12 +1073,31 @@ watch(
   font-size: 12px;
 }
 
-.candidate-toolbar {
+/* 候选池标题行：标题 + 说明 + 添加入口同一行，说明与标题隔开一段距离 */
+.candidate-head {
   display: flex;
   align-items: center;
-  justify-content: space-between;
   gap: 12px;
-  margin-bottom: 8px;
+  margin-bottom: 10px;
+}
+
+/* 标题在 flex 行内不再自带下边距，由容器统一控制与表格的间距 */
+.candidate-head__title {
+  margin: 0;
+  flex: none;
+}
+
+/* 说明占满中间剩余空间；过长时换行，不挤压右侧按钮 */
+.candidate-head__hint {
+  flex: 1;
+  min-width: 0;
+  color: var(--ah-text-muted, #9ca3af);
+  font-size: 12px;
+  line-height: 1.5;
+}
+
+.candidate-head__add {
+  flex: none;
 }
 
 .candidate-table {

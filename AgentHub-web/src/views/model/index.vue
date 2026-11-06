@@ -407,7 +407,7 @@ defineOptions({ name: 'ModelManage' })
  * 网格↔主从飞卡：复用 useViewFlip / FlipGhost / ViewModeToggle / browse-workspace。
  * 无路由 id；本地 viewMode + activeId。网格卡=供应商；左栏含「全部」伪项；右栏实例表 + 供应商级操作。
  */
-import { computed, nextTick, onMounted, reactive, ref, watch } from 'vue'
+import { computed, onMounted, reactive, ref } from 'vue'
 import { Plus, RefreshRight, Search } from '@element-plus/icons-vue'
 import { ElMessageBox } from 'element-plus'
 import {
@@ -431,8 +431,8 @@ import CredentialDialog from '@/components/model/CredentialDialog.vue'
 import InstanceFormDialog from '@/components/model/InstanceFormDialog.vue'
 import ProviderFormDialog from '@/components/model/ProviderFormDialog.vue'
 import TestResultDialog from '@/components/model/TestResultDialog.vue'
-import { useViewFlip, type FlipCardSnap } from '@/composables/viewFlip'
-import { CARD_HEIGHT_NORMAL, lastPage, useGridPageSize } from '@/composables/gridPageSize'
+import type { FlipCardSnap } from '@/composables/viewFlip'
+import { useBrowseFlip } from '@/composables/useBrowseFlip'
 import { useListIndexColumn } from '@/composables/listIndex'
 import { useUserStore } from '@/stores/user'
 import type { ConnectivityResult, InstanceRow, ProviderCard } from '@/types/model'
@@ -445,15 +445,6 @@ import {
 } from '@/types/model'
 
 const user = useUserStore()
-const {
-  busy: flipBusy,
-  flyingId,
-  ghostSnap,
-  ghostFrame,
-  ghostLanding,
-  detailPhase,
-  runFlip
-} = useViewFlip()
 
 const providerLoading = ref(false)
 const instanceLoading = ref(false)
@@ -463,65 +454,6 @@ const instances = ref<InstanceRow[]>([])
 const total = ref(0)
 const testingId = ref<number>()
 const removingId = ref(0)
-const railKeyword = ref('')
-
-/** 同页视图态；无路由同步。 */
-const viewMode = ref<'grid' | 'master'>('grid')
-/** 0=左栏「全部」跨商实例；>0=具体供应商。 */
-const activeId = ref(0)
-
-/*
- * 切回网格后补量一次：主从态下网格层是 display:none（.layer:not(.is-active)），
- * 浏览器不给它算宽度，容量会停在进主从前的值。等 DOM 真正可见再量；
- * pageSize 若变化，容量 watch 会把页码夹回合法范围。
- */
-watch(viewMode, (mode) => {
-  if (mode !== 'grid') {
-    return
-  }
-  void nextTick(() => {
-    remeasureGridSize()
-  })
-})
-
-/** 网格筛选草稿（点查询才落到 gridFilter）。 */
-const gridDraft = reactive({
-  keyword: '',
-  protocol: '' as string,
-  status: undefined as number | undefined
-})
-/** 网格已生效筛选：名称模糊 + 协议 + 状态。 */
-const gridFilter = reactive({
-  keyword: '',
-  protocol: '' as string,
-  status: undefined as number | undefined
-})
-/** 网格分页（前端切片）；size 由一屏容量实测得出，仅一页时只显示总数文案。 */
-const gridPage = reactive({ current: 1, size: 10 })
-
-/** 卡片墙容器（.grid-wrap）：一屏容量按它的宽高实测 */
-const gridWrapRef = ref<HTMLElement | null>(null)
-/**
- * 一屏容量分页：pageSize = 当前栅格列数 × 行数（上限 100）。
- * 供应商卡为 ConfigCard normal 档 160px；尺寸变化防抖重算。
- */
-const { pageSize: gridPageSize, remeasure: remeasureGridSize } = useGridPageSize({
-  container: () => gridWrapRef.value,
-  options: { cardHeight: CARD_HEIGHT_NORMAL }
-})
-
-/**
- * 一屏容量变化 → 写回本地分页态。
- * 网格是前端切片，无需重新请求；页码越界由 pagedProviders 夹到末页，
- * 这里再把 current 落回去，避免底栏页码与实际切片不一致。
- */
-watch(gridPageSize, (next) => {
-  if (!next || next === gridPage.size) {
-    return
-  }
-  gridPage.size = next
-  gridPage.current = Math.min(gridPage.current, lastPage(filteredProviders.value.length, next))
-})
 
 const query = reactive({ current: 1, size: 10, capability: '', keyword: '' })
 /** 模型实例表最左「序号」列；跨页连续，仅前端展示，不改模型实例分页接口 */
@@ -531,80 +463,95 @@ const credentialDialog = reactive({ open: false, providerId: undefined as number
 const instanceDialog = reactive({ open: false, editing: null as InstanceRow | null })
 const testDialog = reactive({ open: false, result: null as ConnectivityResult | null })
 
-/** 飞卡时两层都留着；平时只显示当前态。 */
-const showGridLayer = computed(() => viewMode.value === 'grid' || flipBusy.value)
-const showMasterLayer = computed(() => viewMode.value === 'master' || flipBusy.value)
+/**
+ * 网格 ↔ 主从浏览骨架（useBrowseFlip）：视图态、一屏容量分页、网格筛选、左栏过滤、飞卡导航。
+ * 本页只提供「怎么筛、怎么取数」，骨架时序与原实现逐条一致（见 composable 头部注释）。
+ * 起飞的预取与落地写数据通过 prepare / landed 钩子插入，保持「动画与请求并行」。
+ */
+const {
+  viewMode,
+  activeId,
+  flipBusy,
+  flyingId,
+  ghostSnap,
+  ghostFrame,
+  ghostLanding,
+  detailPhase,
+  showGridLayer,
+  showMasterLayer,
+  gridDraft,
+  gridPage,
+  gridWrapRef,
+  filteredRows: filteredProviders,
+  pagedRows: pagedProviders,
+  applyGridFilter,
+  resetGridFilter,
+  onGridPageChange,
+  railKeyword,
+  railRows,
+  onGridCardClick,
+  enterListView,
+  backToGrid,
+  onViewModeChange
+} = useBrowseFlip<ProviderCard, { keyword: string; protocol: string; status?: number }>({
+  rows: providers,
+  idOf: (row) => row.id,
+  snapOf: snapFromProvider,
+  createFilter: () => ({ keyword: '', protocol: '', status: undefined }),
+  // 网格筛选：名称模糊 + 协议 + 状态（前端筛选，不另打接口）
+  matchFilter: (row, filter) => {
+    const key = filter.keyword.trim().toLowerCase()
+    if (key && !row.name.toLowerCase().includes(key)) {
+      return false
+    }
+    if (filter.protocol && row.protocol !== filter.protocol) {
+      return false
+    }
+    if (filter.status === 0 || filter.status === 1) {
+      if (row.status !== filter.status) {
+        return false
+      }
+    }
+    return true
+  },
+  // 左栏关键词：名称 / 协议中文名 / 协议码三选一命中
+  matchRail: (row, key) =>
+    row.name.toLowerCase().includes(key) ||
+    protocolLabel(row.protocol).toLowerCase().includes(key) ||
+    row.protocol.toLowerCase().includes(key),
+  /*
+   * 起飞即清空旧行：prepare 之后主从层立刻可见，
+   * 若不清空会在整个飞行过程中显示上一个供应商的实例列表，观感错误。
+   * 同时发起预取，返回 Promise 交给 landed 等待。
+   */
+  prepare: () => {
+    query.current = 1
+    instances.value = []
+    total.value = 0
+    return fetchInstances().catch(() => null)
+  },
+  // 落地即写状态：预取已完成的直接同步落地，未完成的等它返回
+  landed: async (_row, prepared) => {
+    instanceLoading.value = true
+    const result = (await prepared) as { records: InstanceRow[]; total: number } | null
+    instances.value = result?.records ?? []
+    total.value = result?.total ?? 0
+    instanceLoading.value = false
+  },
+  // 回到网格：右栏详情清空（选中态与左栏关键词由骨架清零）
+  left: () => {
+    instances.value = []
+    total.value = 0
+  }
+})
+
 
 const activeProvider = computed(() =>
   activeId.value > 0 ? providers.value.find((item) => item.id === activeId.value) : undefined
 )
 
-/** 网格全量筛选结果（前端筛选，不另打接口）。 */
-const filteredProviders = computed(() => {
-  const key = gridFilter.keyword.trim().toLowerCase()
-  return providers.value.filter((row) => {
-    if (key && !row.name.toLowerCase().includes(key)) {
-      return false
-    }
-    if (gridFilter.protocol && row.protocol !== gridFilter.protocol) {
-      return false
-    }
-    if (gridFilter.status === 0 || gridFilter.status === 1) {
-      if (row.status !== gridFilter.status) {
-        return false
-      }
-    }
-    return true
-  })
-})
+/** 网格筛选 / 分页 / 左栏过滤已由 useBrowseFlip 提供（filteredProviders / pagedProviders / railRows） */
 
-/** 当前页卡片；页码越界时回退到末页切片。 */
-const pagedProviders = computed(() => {
-  const list = filteredProviders.value
-  const size = gridPage.size
-  const maxPage = Math.max(1, Math.ceil(list.length / size) || 1)
-  const current = Math.min(gridPage.current, maxPage)
-  const start = (current - 1) * size
-  return list.slice(start, start + size)
-})
-
-/** 查询：草稿写入生效条件并回到第一页。 */
-function applyGridFilter() {
-  gridFilter.keyword = gridDraft.keyword
-  gridFilter.protocol = gridDraft.protocol
-  gridFilter.status = gridDraft.status
-  gridPage.current = 1
-}
-
-/** 重置：清空草稿与生效条件。 */
-function resetGridFilter() {
-  gridDraft.keyword = ''
-  gridDraft.protocol = ''
-  gridDraft.status = undefined
-  applyGridFilter()
-}
-
-/** 翻页时校正越界（删除后总数变少）。 */
-function onGridPageChange() {
-  const maxPage = Math.max(1, Math.ceil(filteredProviders.value.length / gridPage.size) || 1)
-  if (gridPage.current > maxPage) {
-    gridPage.current = maxPage
-  }
-}
-
-/** 左栏供应商列表（本地关键词过滤；「全部」伪项不在此列）。 */
-const railRows = computed(() => {
-  const key = railKeyword.value.trim().toLowerCase()
-  if (!key) {
-    return providers.value
-  }
-  return providers.value.filter(
-    (row) =>
-      row.name.toLowerCase().includes(key) ||
-      protocolLabel(row.protocol).toLowerCase().includes(key) ||
-      row.protocol.toLowerCase().includes(key)
-  )
-})
 
 /**
  * 用途标签色；与改版前一致。
@@ -642,17 +589,6 @@ function snapFromProvider(row: ProviderCard): FlipCardSnap {
     code: protocolLabel(row.protocol),
     tags: [{ label: row.status === 1 ? '启用' : '停用', tone: row.status === 1 ? 'on' : 'off' }]
   }
-}
-
-/**
- * 按 data-browse-id 找网格卡或左栏卡。
- *
- * @param id 供应商 id
- * @param where 网格或左轨
- */
-function findBrowseEl(id: number, where: 'grid' | 'rail') {
-  const root = where === 'grid' ? '.layer-grid .card' : '.layer-master .rail-card'
-  return document.querySelector<HTMLElement>(`${root}[data-browse-id="${id}"]`)
 }
 
 async function loadProviders() {
@@ -715,94 +651,6 @@ async function loadInstances() {
   }
 }
 
-/**
- * ViewModeToggle：网格进主从 / 主从回网格。
- *
- * @param mode 目标视图
- */
-function onViewModeChange(mode: 'grid' | 'master') {
-  if (mode === 'master') {
-    void enterListView()
-    return
-  }
-  void backToGrid()
-}
-
-/**
- * 网格 → 主从：同页亮主从层、量落点、飞完再拉实例。
- *
- * @param row 点中的供应商
- * @param event 点击事件（取起飞元素）
- */
-async function onGridCardClick(row: ProviderCard, event: Event) {
-  if (flipBusy.value) {
-    return
-  }
-  const fromEl =
-    (event.currentTarget as HTMLElement | null) ||
-    (event.target as HTMLElement | null)?.closest?.('.card') ||
-    findBrowseEl(row.id, 'grid')
-  if (!fromEl) {
-    activeId.value = row.id
-    viewMode.value = 'master'
-    query.current = 1
-    await loadInstances()
-    return
-  }
-
-  activeId.value = row.id
-  query.current = 1
-  /*
-   * 起飞即清空旧行：prepare 之后主从层立刻可见，
-   * 若不清空会在整个飞行过程中显示上一个供应商的实例列表，观感错误。
-   * 此时表格尚不可见，清空不产生可见重绘。
-   */
-  instances.value = []
-  total.value = 0
-
-  /*
-   * 并行预取：动画一开始就发请求，与 340ms 飞卡同时进行。
-   * 这样落地时数据多半已到，只需写一次状态即可，不再是
-   * 「动画 340ms → 干等 240ms → 再等网络往返」的串行等待。
-   * 失败不影响动画，落地后仍有 v-loading 兜底。
-   */
-  const prefetch = fetchInstances().catch(() => null)
-
-  const ok = await runFlip({
-    snap: snapFromProvider(row),
-    fromEl,
-    direction: 'to-master',
-    detail: 'enter',
-    prepare: async () => {
-      viewMode.value = 'master'
-      await nextTick()
-      await nextTick()
-      return findBrowseEl(row.id, 'rail')
-    }
-  })
-
-  if (ok) {
-    // 落地即写状态：预取已完成的直接同步落地，未完成的等它返回
-    instanceLoading.value = true
-    const result = await prefetch
-    instances.value = result?.records ?? []
-    total.value = result?.total ?? 0
-    instanceLoading.value = false
-  }
-}
-
-/** 工具栏点「列表」：以当前网格筛选结果第一张飞入主从。 */
-async function enterListView() {
-  // 用当前页第一张，保证网格 DOM 里有起飞元素
-  const first = pagedProviders.value[0]
-  if (!first) {
-    return
-  }
-  const el = findBrowseEl(first.id, 'grid')
-  const fakeEvent = { currentTarget: el } as unknown as Event
-  await onGridCardClick(first, fakeEvent)
-}
-
 /** 主从实例：点查询回到第一页再拉。 */
 function searchInstances() {
   query.current = 1
@@ -815,47 +663,6 @@ function resetInstanceFilter() {
   query.keyword = ''
   query.current = 1
   void loadInstances()
-}
-
-/**
- * 主从 → 网格。选中「全部」(activeId=0) 时无对应网格卡，直接切态。
- */
-async function backToGrid() {
-  if (flipBusy.value) {
-    return
-  }
-  const id = activeId.value
-  const row = providers.value.find((item) => item.id === id)
-  const fromEl = id > 0 ? findBrowseEl(id, 'rail') : null
-  if (!id || !row || !fromEl) {
-    viewMode.value = 'grid'
-    activeId.value = 0
-    railKeyword.value = ''
-    instances.value = []
-    total.value = 0
-    return
-  }
-
-  const ok = await runFlip({
-    snap: snapFromProvider(row),
-    fromEl,
-    direction: 'to-grid',
-    detail: 'leave',
-    prepare: async () => {
-      viewMode.value = 'grid'
-      await nextTick()
-      await nextTick()
-      return findBrowseEl(id, 'grid')
-    }
-  })
-
-  activeId.value = 0
-  railKeyword.value = ''
-  instances.value = []
-  total.value = 0
-  if (!ok) {
-    viewMode.value = 'grid'
-  }
 }
 
 /** 左栏点「全部」：无飞卡，右栏跨商实例表。 */

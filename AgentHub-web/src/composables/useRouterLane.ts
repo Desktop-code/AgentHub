@@ -6,18 +6,18 @@
  * 归纳成泳道模型后交给对话流内的紧凑时间线（RouterTimeline）渲染；
  * 详细甘特图由试跑面板的右侧抽屉复用同一份泳道模型。
  * 只读：不写库、不改 RouterTrialExecutor 的隔离/并行/汇总语义。
+ *
+ * 轮询骨架（运行中短轮询、结束后补一拍、切会话作废在途请求）已收口到
+ * `useObsTracePolling`，本文件只负责「取哪个 trace、怎么落地」。
  */
-import { computed, onBeforeUnmount, ref, watch, type Ref } from 'vue'
+import { computed, ref } from 'vue'
+import type { Ref } from 'vue'
 import { listObsSpans, pageObsTraces } from '@/api/obs'
+import { useObsTracePolling } from '@/composables/useObsTracePolling'
 import { useUserStore } from '@/stores/user'
 import { buildOrchestrationLane, type OrchestrationLaneModel } from '@/utils/orchestrationLane'
 import type { ObsSpan } from '@/types/obs'
 import type { RouterTraceView } from '@/types/runtime'
-
-/** 轮询间隔：与试跑续订同一量级，够看出「子开始即出现条」 */
-const POLL_MS = 2000
-/** 本轮结束后补一拍：trace 收尾略晚于 SSE done */
-const SETTLE_MS = 900
 
 /**
  * 按会话轮询编排追踪，产出对话流内卡片所需的数据。
@@ -60,30 +60,29 @@ export function useRouterLane(sessionId: Ref<number | null>, active: Ref<boolean
     }
   })
 
-  /** 请求令牌：切会话 / 关面板后丢弃迟到的响应，避免串会话 */
-  let token = 0
-  let timer: number | undefined
-  let settleTimer: number | undefined
+  /** 清空视图（切到临时草稿 / 无权限） */
+  function reset() {
+    loading.value = false
+    error.value = ''
+    traceId.value = ''
+    spans.value = []
+  }
 
   /**
    * 拉最近一轮 trace 与其全部步骤。
    *
+   * @param id          会话主键（引擎已保证非空且已鉴权）
+   * @param isCurrent   是否仍是当前请求；false 表示已被切会话/重拉取代，结果直接丢弃
    * @param showLoading true 时显示 loading（首次 / 手动刷新）
    */
-  async function load(showLoading = false) {
-    const id = sessionId.value
-    if (id == null || !canView.value) {
-      reset()
-      return
-    }
-    const mine = ++token
+  async function load(id: number, isCurrent: () => boolean, showLoading: boolean) {
     if (showLoading) {
       loading.value = true
     }
     try {
       // 中栏接口按开始时间降序；第一条就是本轮（进行中的 trace 也会立刻出现）
       const { data } = await pageObsTraces(id, { current: 1, size: 20 })
-      if (mine !== token) {
+      if (!isCurrent()) {
         return
       }
       const latest = data.data?.records?.[0] ?? null
@@ -99,86 +98,33 @@ export function useRouterLane(sessionId: Ref<number | null>, active: Ref<boolean
         spans.value = []
       }
       const spanRes = await listObsSpans(latest.traceId)
-      if (mine !== token) {
+      if (!isCurrent()) {
         return
       }
       spans.value = spanRes.data.data || []
     } catch {
-      if (mine === token) {
+      if (isCurrent()) {
         error.value = '编排调度数据加载失败'
       }
     } finally {
-      if (mine === token) {
+      if (isCurrent()) {
         loading.value = false
       }
     }
   }
 
-  /** 清空视图（切到临时草稿 / 无权限） */
-  function reset() {
-    token += 1
-    loading.value = false
-    error.value = ''
-    traceId.value = ''
-    spans.value = []
-  }
-
-  /** 停轮询。切会话、组件卸载、本轮结束都要调 */
-  function stopTimer() {
-    if (timer != null) {
-      window.clearInterval(timer)
-      timer = undefined
-    }
-    if (settleTimer != null) {
-      window.clearTimeout(settleTimer)
-      settleTimer = undefined
-    }
-  }
-
-  /** 本轮在跑时开轮询：子一开跑就能看到条，不必等整轮结束 */
-  function startPolling() {
-    if (!active.value || timer != null) {
-      return
-    }
-    timer = window.setInterval(() => void load(), POLL_MS)
-  }
-
-  // 本轮结束的那一刻补一拍，等 trace 收尾落库；再停轮询
-  watch(
-    () => active.value,
-    (running) => {
-      stopTimer()
-      if (running) {
-        void load()
-        startPolling()
-        return
-      }
-      void load()
-      settleTimer = window.setTimeout(() => void load(), SETTLE_MS)
-    }
-  )
-
-  // 切会话 / 权限装载完成：立即重拉；无会话或无权限时清空并停轮询
-  watch(
-    () => [sessionId.value, canView.value] as const,
-    ([id, ok]) => {
-      if (id == null || !ok) {
-        stopTimer()
-        reset()
-        return
-      }
-      void load(true)
-      startPolling()
-    },
-    { immediate: true }
-  )
-
-  onBeforeUnmount(stopTimer)
+  const polling = useObsTracePolling({
+    sessionId,
+    active,
+    usable: canView,
+    load,
+    clear: reset
+  })
 
   return {
     view,
     canView,
     /** 手动刷新（卡片上的「刷新」按钮） */
-    reload: () => load(true)
+    reload: polling.reload
   }
 }
