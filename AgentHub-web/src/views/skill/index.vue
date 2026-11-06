@@ -488,7 +488,8 @@ import SkillFormDialog from '@/components/skill/SkillFormDialog.vue'
 import SkillPreviewDrawer from '@/components/skill/SkillPreviewDrawer.vue'
 import TagInput from '@/components/skill/TagInput.vue'
 import ViewModeToggle from '@/components/browse/ViewModeToggle.vue'
-import { useViewFlip, type FlipCardSnap } from '@/composables/viewFlip'
+import { useBrowseFlip } from '@/composables/useBrowseFlip'
+import type { FlipCardSnap } from '@/composables/viewFlip'
 import { CARD_HEIGHT_NORMAL, lastPage, useGridPageSize } from '@/composables/gridPageSize'
 import { confirmDiscardUnsaved } from '@/utils/unsavedConfirm'
 import { useUserStore } from '@/stores/user'
@@ -509,15 +510,6 @@ const RAIL_PAGE_SIZE = 100
 const RAIL_MAX_PAGES = 20
 
 const user = useUserStore()
-const {
-  busy: flipBusy,
-  flyingId,
-  ghostSnap,
-  ghostFrame,
-  ghostLanding,
-  detailPhase,
-  runFlip
-} = useViewFlip()
 
 const listLoading = ref(false)
 const detailLoading = ref(false)
@@ -534,7 +526,6 @@ const rows = ref<SkillCard[]>([])
 /** 主从左栏全量（进主从后拉）；飞卡前可用网格页占位。 */
 const railSource = ref<SkillCard[]>([])
 const total = ref(0)
-const railKeyword = ref('')
 const form = ref<SkillDetail | null>(null)
 /** 当前 Skill 的版本列表（不含正文），版本号倒序 */
 const versionRows = ref<SkillVersionRow[]>([])
@@ -605,40 +596,87 @@ watch(gridPageSize, (next) => {
 })
 
 /**
- * 同页视图态。Skill 不跟路由绑定。
+ * 网格↔主从骨架。Skill 网格是**服务端分页**（`query` + `total` + TablePager），
+ * 所以 `takeOverGrid: false`：骨架只管视图态、图层显隐、左栏关键词与飞卡导航；
+ * 网格筛选/页码/一屏容量仍由本页 `query` + `useGridPageSize` 负责（行为与拆分前一致）。
  */
-const viewMode = ref<'grid' | 'master'>('grid')
-const activeId = ref(0)
-
-/*
- * 切回网格后补量一次：主从态下网格层是 display:none（.layer:not(.is-active)），
- * 浏览器不给它算宽度，容量会停在进主从前的值。等 DOM 真正可见再量；
- * pageSize 若变化，上面的容量 watch 会自动重新取数。
- */
-watch(viewMode, (mode) => {
-  if (mode !== 'grid') {
-    return
-  }
-  void nextTick(() => {
+const {
+  viewMode,
+  activeId,
+  flipBusy,
+  flyingId,
+  ghostSnap,
+  ghostFrame,
+  ghostLanding,
+  detailPhase,
+  showGridLayer,
+  showMasterLayer,
+  pagedRows: gridRows,
+  railKeyword,
+  railRows,
+  findRowEl,
+  onGridCardClick,
+  onViewModeChange
+} = useBrowseFlip<SkillCard, Record<string, unknown>>({
+  rows,
+  idOf: (row) => row.id,
+  snapOf: snapFromSkill,
+  matchRail: (row, key) =>
+    row.name.toLowerCase().includes(key) || (row.title || '').toLowerCase().includes(key),
+  railSource,
+  // 服务端分页：骨架不接管筛选与切片
+  takeOverGrid: false,
+  /**
+   * 起飞前：左栏先用当前页占位（保证落点节点立刻存在），同时并行拉详情。
+   * 与原实现同序——先占位，再拉详情，再飞。
+   */
+  prepare: (row) => {
+    if (!railSource.value.length) {
+      railSource.value = rows.value.slice()
+    }
+    void loadDetail(row.id)
+  },
+  /**
+   * 落地后：飞卡走了动画才延迟 240ms 补全左栏（等落地帧结束）；
+   * 无动画直切时立即补全（与原实现一致）。
+   */
+  landed: (_row, _prepared, meta) => {
+    if (meta.animated) {
+      window.setTimeout(() => {
+        void loadAll(true)
+      }, 240)
+      return
+    }
+    void loadAll(true)
+  },
+  /** 回网格前：定义层或草稿有未保存改动要先确认，取消则保持主从态 */
+  beforeLeave: () => {
+    if (!dirty.value && !versionDirty.value) {
+      return true
+    }
+    return confirmDiscardUnsaved('当前 Skill')
+  },
+  /** 回程量落点前：网格页若还没有这张卡（被全量覆盖过），先补取当前页 */
+  prepareLeave: async (row) => {
+    if (!findRowEl(row.id, 'grid') && rows.value.every((item) => item.id !== row.id)) {
+      await loadRows()
+      await nextTick()
+    }
+  },
+  /**
+   * 回网格收尾：清空右栏详情；无动画直切或飞卡失败时重取当前页。
+   * 关键词由骨架清空（与原实现一致）。
+   */
+  left: (result) => {
+    clearDetail()
+    if (!result.animated || !result.ok) {
+      void loadRows()
+    }
+  },
+  // 回到网格后重申一次一屏容量（主从态下网格层不参与布局，量出来是 0）
+  onReturnToGrid: () => {
     remeasureGridSize()
-  })
-})
-
-/** 飞卡时两层都留着；平时只显示当前态。 */
-const showGridLayer = computed(() => viewMode.value === 'grid' || flipBusy.value)
-const showMasterLayer = computed(() => viewMode.value === 'master' || flipBusy.value)
-
-const gridRows = computed(() => rows.value)
-
-const railRows = computed(() => {
-  const base = railSource.value.length ? railSource.value : rows.value
-  const key = railKeyword.value.trim().toLowerCase()
-  if (!key) {
-    return base
   }
-  return base.filter(
-    (row) => row.name.toLowerCase().includes(key) || (row.title || '').toLowerCase().includes(key)
-  )
 })
 
 const canEdit = computed(() => user.hasPerm('skill:edit'))
@@ -781,17 +819,6 @@ function clearDetail() {
   activeVersionId.value = 0
   detailError.value = ''
   previewOpen.value = false
-}
-
-/**
- * 按 data-browse-id 找网格卡或左栏卡，供飞卡量 First/Last。
- *
- * @param id Skill id
- * @param where 网格或左栏
- */
-function findEl(id: number, where: 'grid' | 'rail') {
-  const root = where === 'grid' ? '.layer-grid .card' : '.layer-master .rail-card'
-  return document.querySelector<HTMLElement>(`${root}[data-browse-id="${id}"]`)
 }
 
 /** 首次测量前不取数，避免先按默认条数拉一次再按实测 pageSize 重拉；序号用于丢弃过期请求 */
@@ -1185,56 +1212,6 @@ function onCatalogChanged() {
   void loadRows()
 }
 
-/**
- * 网格 → 主从：同页亮主从层、量落点、飞完再拉全量。
- *
- * @param row 被点卡片
- * @param event 点击事件（取起飞元素）
- */
-async function onGridCardClick(row: SkillCard, event: Event) {
-  if (flipBusy.value) {
-    return
-  }
-  const fromEl =
-    (event.currentTarget as HTMLElement | null) ||
-    (event.target as HTMLElement | null)?.closest?.('.card') ||
-    findEl(row.id, 'grid')
-  if (!fromEl) {
-    activeId.value = row.id
-    viewMode.value = 'master'
-    railSource.value = rows.value.slice()
-    void loadDetail(row.id)
-    void loadAll(true)
-    return
-  }
-
-  // 左栏先用当前页数据，保证落点节点立刻存在
-  if (!railSource.value.length) {
-    railSource.value = rows.value.slice()
-  }
-  activeId.value = row.id
-  void loadDetail(row.id)
-
-  const ok = await runFlip({
-    snap: snapFromSkill(row),
-    fromEl,
-    direction: 'to-master',
-    detail: 'enter',
-    prepare: async () => {
-      viewMode.value = 'master'
-      await nextTick()
-      await nextTick()
-      return findEl(row.id, 'rail')
-    }
-  })
-
-  if (ok) {
-    window.setTimeout(() => {
-      void loadAll(true)
-    }, 240)
-  }
-}
-
 /** 主从内切 Skill：只改选中并拉详情，无飞卡。切走前若有未保存草稿先确认。 */
 async function openDetail(row: SkillCard) {
   if (flipBusy.value) {
@@ -1251,78 +1228,6 @@ async function openDetail(row: SkillCard) {
   }
   activeId.value = row.id
   void loadDetail(row.id)
-}
-
-/** 主从 → 网格：先亮网格层再飞。回网格入口仅 ViewModeToggle。 */
-async function backToGrid() {
-  if (flipBusy.value) {
-    return
-  }
-  // 回网格会清空右侧详情：定义层或草稿有未保存改动时先确认
-  if (dirty.value || versionDirty.value) {
-    const keep = await confirmDiscardUnsaved('当前 Skill')
-    if (!keep) {
-      return
-    }
-  }
-  const id = activeId.value
-  const row = railRows.value.find((item) => item.id === id) || rows.value.find((item) => item.id === id)
-  const fromEl = id ? findEl(id, 'rail') : null
-  if (!id || !row || !fromEl) {
-    viewMode.value = 'grid'
-    activeId.value = 0
-    railKeyword.value = ''
-    clearDetail()
-    void loadRows()
-    return
-  }
-
-  const ok = await runFlip({
-    snap: snapFromSkill(row),
-    fromEl,
-    direction: 'to-grid',
-    detail: 'leave',
-    prepare: async () => {
-      viewMode.value = 'grid'
-      await nextTick()
-      await nextTick()
-      if (!findEl(id, 'grid') && rows.value.every((item) => item.id !== id)) {
-        await loadRows()
-        await nextTick()
-      }
-      return findEl(id, 'grid')
-    }
-  })
-
-  activeId.value = 0
-  railKeyword.value = ''
-  clearDetail()
-  if (!ok) {
-    void loadRows()
-  }
-}
-
-/**
- * ViewModeToggle：网格进主从 / 主从回网格（与 Agent 同一入口，勿独造「返回」）。
- *
- * @param mode 目标视图
- */
-function onViewModeChange(mode: 'grid' | 'master') {
-  if (mode === 'grid') {
-    void backToGrid()
-    return
-  }
-  void enterListView()
-}
-
-/** 工具栏点「列表」：以当前页第一张飞入主从。 */
-async function enterListView() {
-  const first = rows.value[0]
-  if (!first) {
-    return
-  }
-  const fakeEvent = { currentTarget: findEl(first.id, 'grid') } as unknown as Event
-  await onGridCardClick(first, fakeEvent)
 }
 
 /**

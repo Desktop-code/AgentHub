@@ -357,13 +357,15 @@ function rowSummary(row: OrchestrationLaneRow): string {
  * 一组步骤的墙钟耗时。
  *
  * <p>并行子会同时开跑，不能把 latency 相加；这里取最早开始到最晚结束的包络。
- * 仍在运行且没有结束时间时，用 now 兜住，让中栏耗时每秒增长。
+ * 仍在运行且没有结束时间时，用 now 兜住，让中栏耗时每秒增长；
+ * 本轮已收尾时改用 capMs 封顶，残留 RUNNING 的步骤不会一直涨。
  *
  * @param spans 同一组步骤
  * @param now   当前毫秒
+ * @param capMs 本轮收尾时刻（已收尾时传入）；null 表示本轮还在跑
  * @return 毫秒；无有效时间时取最大单步 latency
  */
-function spanSetDuration(spans: ObsSpan[], now: number): number {
+function spanSetDuration(spans: ObsSpan[], now: number, capMs: number | null = null): number {
   let start: number | null = null
   let end: number | null = null
   let latency = 0
@@ -385,7 +387,7 @@ function spanSetDuration(spans: ObsSpan[], now: number): number {
     }
   }
   if (start != null) {
-    const stop = end ?? (running ? now : null)
+    const stop = end ?? (running ? (capMs ?? now) : null)
     if (stop != null) {
       return Math.max(0, stop - start)
     }
@@ -393,12 +395,22 @@ function spanSetDuration(spans: ObsSpan[], now: number): number {
   return latency
 }
 
-/** 取单步耗时；运行中用 now 兜住 */
-function spanDuration(span: ObsSpan, now: number): number {
+/**
+ * 取单步耗时。
+ *
+ * <p>运行中用 now 兜住让时间往前走；本轮已收尾时用 capMs 封顶，
+ * 避免残留 RUNNING 的步骤（如汇总 LLM）在历史轮次里跑出小时级耗时。
+ *
+ * @param span  步骤
+ * @param now   当前毫秒
+ * @param capMs 本轮收尾时刻；null 表示本轮还在跑
+ * @return 毫秒
+ */
+function spanDuration(span: ObsSpan, now: number, capMs: number | null = null): number {
   const begin = timeMs(span.startTime)
   const end = timeMs(span.endTime)
   if (begin != null) {
-    const stop = end ?? (span.status === 'RUNNING' ? now : null)
+    const stop = end ?? (span.status === 'RUNNING' ? (capMs ?? now) : null)
     if (stop != null) {
       return Math.max(0, stop - begin)
     }
@@ -465,6 +477,8 @@ function cardsFromModel(model: OrchestrationLaneModel, group: MaRunGroup, now: n
   // 汇总（父模型做结果合成）算路由 Agent 自己的收尾一步，并入路由卡，不单出一张「结论」卡
   const aggregate = rows.find((row) => row.kind === 'aggregate')
   const cards: MaRunCard[] = []
+  // 本轮已收尾时用收尾时刻封顶：残留 RUNNING 的步骤不会把耗时一直算下去
+  const capMs = isRoundRunning(group) ? null : settleAt(group)
   // 本轮所有业务 Agent 先统一分配颜色，避免两张卡撞色后被图例合并
   const colors = buildAgentColors(children.map((row) => row.title || '子 Agent'))
   // 每轮最上一张固定是「路由」卡：任何模板（含竞争 / 固定并行）都要先说明派发名单
@@ -472,7 +486,7 @@ function cardsFromModel(model: OrchestrationLaneModel, group: MaRunGroup, now: n
     // 耗时把判路由与汇总一起算进来，卡上显示的就是路由这一段的总时间
     const routeSpans = [...(judge?.spans ?? []), ...(aggregate?.spans ?? [])]
     // 有汇总行时以汇总终态为准（汇总算路由的一步）；没有汇总就看判路由这一行
-    const status: TimelineCardStatus = aggregate
+    const raw: TimelineCardStatus = aggregate
       ? resultStatus(aggregate, group)
       : judge
         ? rowStatus(judge)
@@ -481,9 +495,10 @@ function cardsFromModel(model: OrchestrationLaneModel, group: MaRunGroup, now: n
       key: judge?.key ?? aggregate?.key ?? 'router',
       kind: 'router',
       title: '路由',
-      status,
+      // 助手已收尾时，残留的进行态按终态兜住，避免卡片一直转圈
+      status: settleCardStatus(raw, group, routeSpans),
       summary: judge ? routerSummary(model, judge, children) : '',
-      durationMs: spanSetDuration(routeSpans, now),
+      durationMs: spanSetDuration(routeSpans, now, capMs),
       color: MA_ROUTER_COLOR
     })
   }
@@ -493,10 +508,10 @@ function cardsFromModel(model: OrchestrationLaneModel, group: MaRunGroup, now: n
       key: row.key,
       kind: 'agent',
       title,
-      status: rowStatus(row),
+      status: settleCardStatus(rowStatus(row), group, row.spans),
       // 子 Agent 卡不展示正文：正文统一进下方「模型回答」，过程明细进右栏
       summary: '',
-      durationMs: spanSetDuration(row.spans, now),
+      durationMs: spanSetDuration(row.spans, now, capMs),
       color: colors[title] ?? agentColorOf(title)
     })
   }
@@ -597,28 +612,98 @@ function attachTraces(groups: MaRunGroup[], traces: MaTurnTrace[]): void {
   }
 }
 
-/** 本轮整体状态：助手状态优先，obs 还有 RUNNING 行时也算进行中 */
+/**
+ * 本轮是否仍在执行（展示口径）。
+ *
+ * <p>以**助手轮**为准：助手还在流式 → 本轮一定在跑；助手已给出终态 → 即使 obs 里
+ * 残留 RUNNING 步骤（步骤收尾那一拍没落进缓存 / 轮询已停），也按已收尾处理。
+ * 否则中栏卡片一直转圈、右栏「汇总」永远停不下来。
+ *
+ * @param group 一轮运行
+ * @return true 表示本轮仍在跑
+ */
+function isRoundRunning(group: MaRunGroup): boolean {
+  if (group.assistant) {
+    return group.assistant.status === 'streaming'
+  }
+  // 助手轮还没回放出来（刷新后事件未到）：只能参考 trace 自身
+  if (group.trace?.status === 'RUNNING') {
+    return true
+  }
+  return !!group.trace?.model?.rows.some((row) => row.running)
+}
+
+/**
+ * 本轮收尾时刻（毫秒）：给「已收尾但步骤仍标记 RUNNING」的行封顶耗时。
+ *
+ * <p>不封顶的话，历史轮次里残留的 RUNNING 步骤会用「现在」减开始时刻，
+ * 显示成几小时甚至几天。
+ *
+ * @param group 一轮运行
+ * @return 毫秒；拿不到返回 null
+ */
+function settleAt(group: MaRunGroup): number | null {
+  const trace = group.trace
+  if (!trace) {
+    return null
+  }
+  const end = timeMs(trace.endTime)
+  if (end != null) {
+    return end
+  }
+  const start = timeMs(trace.startTime)
+  if (start != null && trace.latencyMs > 0) {
+    return start + trace.latencyMs
+  }
+  let latest: number | null = null
+  for (const span of trace.spans) {
+    const spanEnd = timeMs(span.endTime)
+    if (spanEnd != null) {
+      latest = latest == null ? spanEnd : Math.max(latest, spanEnd)
+    }
+  }
+  return latest
+}
+
+/**
+ * 卡片状态兜底：本轮已收尾时把残留的进行态改成终态。
+ *
+ * @param status 原始状态（来自泳道行）
+ * @param group  一轮运行
+ * @param spans  该卡的步骤，用于识别「整组已取消」
+ * @return 展示状态
+ */
+function settleCardStatus(status: TimelineCardStatus, group: MaRunGroup, spans: ObsSpan[] = []): TimelineCardStatus {
+  if (status !== 'running' || isRoundRunning(group)) {
+    return status
+  }
+  if (spans.length && spans.every((span) => span.status === 'CANCELLED')) {
+    return 'cancelled'
+  }
+  return group.assistant?.status === 'error' ? 'error' : 'success'
+}
+
+/** 本轮整体状态：助手状态优先，obs 只剩残留 RUNNING 行时不判进行中 */
 function groupStatus(group: MaRunGroup): 'running' | 'done' | 'error' {
-  if (group.assistant?.status === 'streaming') {
+  if (isRoundRunning(group)) {
     return 'running'
   }
-  if (group.assistant?.status === 'error') {
+  if (group.assistant?.status === 'error' || group.trace?.status === 'ERROR') {
     return 'error'
-  }
-  if (group.trace?.model?.rows.some((row) => row.running)) {
-    return 'running'
   }
   return 'done'
 }
 
 /** 本轮总耗时：优先 ROUTE 根（覆盖整轮），否则用整条 trace 的包络 */
 function groupDuration(group: MaRunGroup, now: number): number {
+  // 已收尾时用收尾时刻封顶：残留 RUNNING 的根步骤不会让耗时继续增长
+  const capMs = isRoundRunning(group) ? null : settleAt(group)
   const route = group.trace?.model?.routeSpan
   if (route) {
-    return spanDuration(route, now)
+    return spanDuration(route, now, capMs)
   }
   if (group.trace?.spans.length) {
-    return spanSetDuration(group.trace.spans, now)
+    return spanSetDuration(group.trace.spans, now, capMs)
   }
   if (group.assistant?.status === 'streaming' && group.assistant.startTime) {
     return Math.max(0, now - group.assistant.startTime)
@@ -712,7 +797,7 @@ function chainKind(span: ObsSpan): MaChainLine['kind'] {
 }
 
 /**
- * 右栏一行的公共上下文：颜色表 + 父链索引 + 汇总节点集合。
+ * 右栏一行的公共上下文：颜色表 + 父链索引 + 汇总节点集合 + 收尾兜底。
  *
  * <p>三个视图共用一份，避免每个节点都重建 Map，也保证「同一节点同一颜色」。
  */
@@ -723,6 +808,37 @@ interface LineContext {
   byId: Map<number, ObsSpan>
   /** 汇总步骤：父模型做的结果合成，归属路由 Agent */
   aggregateIds: Set<number>
+  /** 本轮是否已收尾：收尾后残留的 RUNNING 步骤不再画成执行中 */
+  settled: boolean
+  /** 已收尾时用的兜底状态（按 trace 终态给 success / error / cancelled） */
+  settledState: MaLineState
+  /** 本轮收尾时刻；已收尾时用于给残留 RUNNING 步骤封顶耗时，未收尾为 null */
+  capMs: number | null
+}
+
+/**
+ * 构建右栏共享上下文。
+ *
+ * <p>`settled` 以助手轮为准（见 {@link isRoundRunning}），所以哪怕 obs 里
+ * 还留着 RUNNING 的汇总步骤，也不会一直转圈。
+ *
+ * @param group 当前选中的运行轮次
+ * @return 右栏三视图共用的上下文
+ */
+function lineContext(group?: MaRunGroup): LineContext {
+  const settled = !!group && !isRoundRunning(group)
+  const traceStatus = (group?.trace?.status || '').toUpperCase()
+  // trace 终态决定残留 RUNNING 步骤显示成成功还是失败，避免假装一切正常
+  const settledState: MaLineState =
+    traceStatus === 'ERROR' ? 'error' : traceStatus === 'CANCELLED' ? 'cancelled' : 'success'
+  return {
+    colors: group?.colors ?? {},
+    byId: new Map((group?.trace?.spans ?? []).map((span) => [span.id, span])),
+    aggregateIds: aggregateSpanIds(group),
+    settled,
+    settledState,
+    capMs: settled && group ? settleAt(group) : null
+  }
 }
 
 /** 右栏节点显示名：不拼接任何正文 */
@@ -769,13 +885,18 @@ function tokenText(span: ObsSpan, kind: MaChainLine['kind']): string {
  * <p>工具自报失败（toolSuccess=0）也算失败，与观测页口径一致；
  * 状态为空表示 trace 还没给出终态，此时不画图标，避免假装成功。
  *
+ * <p>本轮已收尾（助手已给终态）时，残留 RUNNING 的步骤按本轮终态兜底：
+ * 否则「汇总」这类最后一步会一直转圈，哪怕答案早就出来了。
+ *
  * @param span 步骤
  * @param kind 节点类型
+ * @param ctx  右栏共享上下文（含收尾兜底信息）；缺省按未收尾处理
  * @return 状态枚举
  */
-function spanState(span: ObsSpan, kind: MaChainLine['kind']): MaLineState {
+function spanState(span: ObsSpan, kind: MaChainLine['kind'], ctx?: LineContext): MaLineState {
   if (span.status === 'RUNNING') {
-    return 'running'
+    // 收尾那一拍的步骤快照晚于 trace 终态落库时，缓存里会留下 RUNNING；用本轮终态盖掉
+    return ctx?.settled ? ctx.settledState : 'running'
   }
   if (span.status === 'ERROR') {
     return 'error'
@@ -824,8 +945,8 @@ function chainLineOf(
     kind,
     label: chainLabel(span, kind, aggregate),
     tokens: tokenText(span, kind),
-    duration: formatDuration(spanDuration(span, now)),
-    state: spanState(span, kind),
+    duration: formatDuration(spanDuration(span, now, ctx.capMs)),
+    state: spanState(span, kind, ctx),
     color: spanColor(span, ctx, aggregate)
   }
 }
@@ -837,7 +958,7 @@ const MAX_TREE_DEPTH = 16
  * 构建右栏执行链路。
  *
  * <p>按 span 父子关系画 `├── / └──` 树，顺序即执行顺序；
- * 只输出节点名、工具入参摘要与耗时，LLM 不输出任何正文。
+ * 只输出节点名与耗时，LLM 正文与工具入参都不铺。
  *
  * @param group 当前选中的运行轮次
  * @param now   当前毫秒，用于运行中耗时
@@ -853,11 +974,7 @@ export function buildChainLines(group: MaRunGroup | undefined, now: number): MaC
     return []
   }
   // 本轮颜色表来自中栏卡片；缺失时按角色名单独取色，不会出现无色节点
-  const ctx: LineContext = {
-    colors: group?.colors ?? {},
-    byId: new Map((group?.trace?.spans ?? []).map((span) => [span.id, span])),
-    aggregateIds: aggregateSpanIds(group)
-  }
+  const ctx = lineContext(group)
   /** 已展开的节点：父子关系异常时防止同一节点被无限递归 */
   const visited = new Set<number>()
   const byId = new Map(spans.map((span) => [span.id, span]))
@@ -933,7 +1050,7 @@ export function buildChainLines(group: MaRunGroup | undefined, now: number): MaC
  *
  * <p>与「链路」的区别只在形态：明细是扁平时序清单，一眼看清每一步是
  * 「路由 / 某 Agent / LLM / 调了哪个工具」；链路保留树形父子关系。
- * 两者都排除汇总节点（终答不重复出现在右栏）。
+ * 两者都保留汇总步骤（归属路由 Agent），但不输出结论正文。
  *
  * @param group 当前选中的运行轮次
  * @param now   当前毫秒，用于运行中耗时
@@ -945,11 +1062,7 @@ export function buildDetailLines(group: MaRunGroup | undefined, now: number): Ma
     return []
   }
   // 颜色要按父链回溯，先把共享上下文建好，避免每行重建一次 Map
-  const ctx: LineContext = {
-    colors: group?.colors ?? {},
-    byId: new Map((group?.trace?.spans ?? []).map((span) => [span.id, span])),
-    aggregateIds: aggregateSpanIds(group)
-  }
+  const ctx = lineContext(group)
   return spans.map((span) => {
     const kind = chainKind(span)
     const aggregate = ctx.aggregateIds.has(span.id)
@@ -960,8 +1073,8 @@ export function buildDetailLines(group: MaRunGroup | undefined, now: number): Ma
       label: detailLabel(span, kind, aggregate),
       // 右栏只到「哪一步」为止：工具入参 / LLM 摘要一律不铺
       tokens: tokenText(span, kind),
-      duration: formatDuration(spanDuration(span, now)),
-      state: spanState(span, kind),
+      duration: formatDuration(spanDuration(span, now, ctx.capMs)),
+      state: spanState(span, kind, ctx),
       // 颜色跟着所属 Agent 走，与中栏卡片色条一致
       color: spanColor(span, ctx, aggregate)
     }

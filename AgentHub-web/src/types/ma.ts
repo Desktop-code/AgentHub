@@ -81,6 +81,10 @@ export interface MaDefDetail {
 /** 候选保存请求 */
 export interface MaCandidateSave {
   agentId: number
+  /**
+   * 可空。前端不再提交：路由键由服务端按子 Agent 编码生成（同方案内唯一，冲突回落 child_{id}），
+   * 保留该字段仅为兼容旧调用。
+   */
   routeKey?: string
   intentDesc: string
   sortNo?: number

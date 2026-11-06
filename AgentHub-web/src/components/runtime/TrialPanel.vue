@@ -21,65 +21,29 @@
       其余入口仍是原来的「左会话 + 右对话」两栏，不做任何视觉改动。
     -->
     <div v-else class="split" :class="{ 'split--ma': variant === 'ma' }">
-      <aside class="sessions">
-        <div class="sessions-title">历史会话</div>
-        <div class="session-ops">
-          <el-button
-            v-if="canRun"
-            size="small"
-            type="primary"
-            :disabled="!ownerId || sending || resuming"
-            @click="createSession"
-          >
-            + 新会话
-          </el-button>
-          <el-button
-            size="small"
-            :disabled="!session || isTempSession(session) || sending || resuming"
-            @click="clearCurrent"
-          >
-            清空当前
-          </el-button>
-        </div>
-        <p v-if="!historyGroups.length" class="session-hint">提问后才会保存到历史会话</p>
-        <div v-loading="historyLoading" class="session-list">
-          <section v-for="group in historyGroups" :key="group.label" class="session-group">
-            <div class="group-label">{{ group.label }}</div>
-            <div
-              v-for="item in group.items"
-              :key="item.id"
-              class="session-item"
-              :class="{ 'is-active': item.id === session?.id, 'is-running': isRowRunning(item) }"
-              :title="sessionTooltip(item)"
-              @click="openHistory(item.id)"
-            >
-              <div class="session-main">
-                <span class="session-name">{{ sessionTitle(item) }}</span>
-                <span class="session-time">{{ sessionSubtitle(item) }}</span>
-              </div>
-              <el-dropdown
-                v-if="canRun && !isTempSession(item)"
-                trigger="click"
-                @command="(cmd: string) => onSessionCommand(cmd, item)"
-              >
-                <button type="button" class="session-more" aria-label="会话操作" @click.stop>
-                  <el-icon><MoreFilled /></el-icon>
-                </button>
-                <template #dropdown>
-                  <el-dropdown-menu>
-                    <el-dropdown-item command="rename">重命名</el-dropdown-item>
-                    <el-dropdown-item command="remove" divided class="session-remove-item">删除</el-dropdown-item>
-                  </el-dropdown-menu>
-                </template>
-              </el-dropdown>
-              <!-- 本轮还在执行：贴在行最右侧，结束后自动消失 -->
-              <span v-if="isRowRunning(item)" class="session-running" title="本轮执行中">
-                <el-icon class="is-loading"><Loading /></el-icon>
-              </span>
-            </div>
-          </section>
-        </div>
-      </aside>
+      <!--
+        左栏「历史会话」：纯展示子组件，分组/文案/执行中判定仍由本组件计算，
+        拆分只搬模板与样式，不改会话生命周期与轮询行为。
+      -->
+      <TrialSessionList
+        :groups="historyGroups"
+        :active-id="session?.id"
+        :owner-id="ownerId"
+        :can-run="canRun"
+        :session="session"
+        :sending="sending"
+        :resuming="resuming"
+        :history-loading="historyLoading"
+        :is-temp="isTempSession"
+        :is-running="isRowRunning"
+        :title-of="sessionTitle"
+        :subtitle-of="sessionSubtitle"
+        :tooltip-of="sessionTooltip"
+        @create="createSession"
+        @clear="clearCurrent"
+        @open="openHistory"
+        @command="onSessionCommand"
+      />
 
       <!--
         MA 运行页中栏：业务协作流。每轮固定「路由 → 子 Agent → 结论」，
@@ -87,35 +51,16 @@
       -->
       <section v-if="variant === 'ma'" class="ma-center">
         <el-alert v-if="pageError" :title="pageError" type="error" show-icon :closable="false" class="block-alert" />
-        <!-- 子专家计划待批准：与对话页同一套状态与按钮，只换宿主列 -->
-        <section v-if="childPending && canRun" class="child-approval">
-          <div class="child-approval-head">
-            <div class="child-approval-main">
-              <div class="section-label">子专家计划待批准</div>
-              <p class="child-approval-title">
-                子专家「{{ childPending.childAgentName || '子 Agent' }}」计划待批准
-              </p>
-              <p class="child-approval-sub">
-                根运行已暂停（等待子计划批准）；同时仅允许一个待批子。批准后该子继续执行，拒绝则该子记为失败、其它子继续。
-              </p>
-            </div>
-            <div class="child-approval-actions">
-              <el-button type="primary" size="small" :loading="childDeciding" @click="decideChildPlan(true)">
-                批准
-              </el-button>
-              <el-button size="small" :disabled="childDeciding" @click="decideChildPlan(false)">拒绝</el-button>
-            </div>
-          </div>
-          <ol v-if="childPending.steps?.length" class="child-plan-steps">
-            <li v-for="step in childPending.steps" :key="step.seq">
-              <span class="child-plan-seq">{{ step.seq }}</span>
-              <span class="child-plan-text">
-                <strong>{{ step.title }}</strong>
-                <span v-if="step.detail" class="child-plan-detail">{{ step.detail }}</span>
-              </span>
-            </li>
-          </ol>
-        </section>
+        <!--
+          MA 中栏与对话栏各需要一个待批条位置，模板原先完全重复两份；
+          现统一收敛到 TrialChildPlanBar，状态仍在父组件（SSE / 刷新恢复接口驱动）。
+        -->
+        <TrialChildPlanBar
+          v-if="childPending && canRun"
+          :pending="childPending"
+          :deciding="childDeciding"
+          @decide="decideChildPlan"
+        />
         <MaRunFlow
           :groups="maGroups"
           :selected-key="selectedMaTurn"
@@ -136,34 +81,12 @@
           子专家计划待批准：根试跑暂停时由 SSE ma_child_plan_pending / 刷新恢复接口驱动。
           同时仅一个待批（后端单批准槽），因此这里只渲染一条，不排队多张卡片。
         -->
-        <section v-if="childPending && canRun" class="child-approval">
-          <div class="child-approval-head">
-            <div class="child-approval-main">
-              <div class="section-label">子专家计划待批准</div>
-              <p class="child-approval-title">
-                子专家「{{ childPending.childAgentName || '子 Agent' }}」计划待批准
-              </p>
-              <p class="child-approval-sub">
-                根运行已暂停（等待子计划批准）；同时仅允许一个待批子。批准后该子继续执行，拒绝则该子记为失败、其它子继续。
-              </p>
-            </div>
-            <div class="child-approval-actions">
-              <el-button type="primary" size="small" :loading="childDeciding" @click="decideChildPlan(true)">
-                批准
-              </el-button>
-              <el-button size="small" :disabled="childDeciding" @click="decideChildPlan(false)">拒绝</el-button>
-            </div>
-          </div>
-          <ol v-if="childPending.steps?.length" class="child-plan-steps">
-            <li v-for="step in childPending.steps" :key="step.seq">
-              <span class="child-plan-seq">{{ step.seq }}</span>
-              <span class="child-plan-text">
-                <strong>{{ step.title }}</strong>
-                <span v-if="step.detail" class="child-plan-detail">{{ step.detail }}</span>
-              </span>
-            </li>
-          </ol>
-        </section>
+        <TrialChildPlanBar
+          v-if="childPending && canRun"
+          :pending="childPending"
+          :deciding="childDeciding"
+          @decide="decideChildPlan"
+        />
         <ChatPanel
           :turns="turns"
           :sending="sending || resuming"
@@ -232,7 +155,6 @@
  */
 import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
-import { MoreFilled, Loading } from '@element-plus/icons-vue'
 import {
   approveTrialPlan,
   clearTrialSession,
@@ -295,13 +217,10 @@ import { runModeLabel } from '@/composables/agentViewFlip'
 import { useRouterLane } from '@/composables/useRouterLane'
 import { useMaTurnTraces } from '@/composables/useMaTurnTraces'
 import { useUserStore } from '@/stores/user'
+import TrialChildPlanBar from '@/components/runtime/trial/TrialChildPlanBar.vue'
+import TrialSessionList from '@/components/runtime/trial/TrialSessionList.vue'
+import type { SessionGroup } from '@/components/runtime/trial/sessionGroup'
 import type { ChatTurn, TrialAgent, TrialEvent, TrialPlanView, TrialSession } from '@/types/runtime'
-
-/** 左栏分组标题与会话列表。 */
-interface SessionGroup {
-  label: string
-  items: TrialSession[]
-}
 
 const props = withDefaults(
   defineProps<{
@@ -2353,6 +2272,7 @@ function stopClock() {
   gap: 12px;
 }
 
+/* 左栏容器布局：子组件根元素继承本组件的 scope，故宽度/分隔线留在这里；内部元素样式已迁至 TrialSessionList.vue */
 .sessions {
   display: flex;
   flex: none;
@@ -2361,135 +2281,6 @@ function stopClock() {
   min-height: 0;
   padding-right: 10px;
   border-right: 1px solid var(--ah-border);
-}
-
-.sessions-title {
-  margin-bottom: 8px;
-  padding-bottom: 10px;
-  border-bottom: 1px solid var(--ah-border);
-  font-size: 14px;
-  font-weight: 650;
-}
-
-.session-ops {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 6px;
-  margin-bottom: 8px;
-}
-
-.session-hint {
-  margin: 0 0 8px;
-  color: var(--ah-text-muted);
-  font-size: 12px;
-  line-height: 1.4;
-}
-
-.session-list {
-  flex: 1;
-  min-height: 0;
-  overflow: auto;
-}
-
-.session-group + .session-group {
-  margin-top: 12px;
-}
-
-.group-label {
-  margin: 0 0 4px 8px;
-  color: var(--ah-text-muted);
-  font-size: 12px;
-  font-weight: 600;
-}
-
-.session-item {
-  display: flex;
-  align-items: center;
-  gap: 4px;
-  margin-bottom: 4px;
-  padding: 8px;
-  border: 1px solid transparent;
-  border-radius: 8px;
-  cursor: pointer;
-}
-
-/* 悬停比选中浅一档，避免「鼠标扫过」和「已选中」长得一样 */
-.session-item:hover {
-  background: #f7f6ff;
-}
-
-/* 选中态：比悬停明显加深一档，仍克制（浅紫底 + 主色描边 + 左侧色条） */
-.session-item.is-active {
-  background: #e8e4ff;
-  border-color: #cdc6ff;
-  box-shadow: inset 3px 0 0 var(--ah-primary, #635bff);
-}
-
-.session-item.is-active .session-name {
-  color: #3d34c9;
-  font-weight: 650;
-}
-
-.session-main {
-  display: flex;
-  flex: 1;
-  flex-direction: column;
-  min-width: 0;
-}
-
-.session-name {
-  overflow: hidden;
-  font-size: 13px;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-/* 副标题：预览 + 时间。预览可能很长，同样单行省略，不能把行高撑开 */
-.session-time {
-  overflow: hidden;
-  color: var(--ah-text-muted);
-  font-size: 12px;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-/* 本轮执行中：贴在该行最右侧，小号转圈；行内操作按钮的显隐优先级更低 */
-.session-running {
-  display: inline-flex;
-  flex: none;
-  align-items: center;
-  color: var(--ah-primary, #635bff);
-  font-size: 12px;
-}
-
-.session-more {
-  display: none;
-  flex: none;
-  place-items: center;
-  width: 26px;
-  height: 26px;
-  border: 0;
-  border-radius: 6px;
-  background: transparent;
-  color: var(--ah-text-secondary);
-  cursor: pointer;
-}
-
-.session-item:hover .session-more,
-.session-item.is-active .session-more {
-  display: grid;
-}
-
-/* 执行中优先显示转圈，不显示三点菜单，避免右侧两个图标挤在一起 */
-.session-item.is-running .session-more,
-.session-item.is-running:hover .session-more,
-.session-item.is-running.is-active .session-more {
-  display: none;
-}
-
-.session-more:hover {
-  background: #ebe9ff;
-  color: var(--ah-text);
 }
 
 .chat-col {
@@ -2540,95 +2331,4 @@ function stopClock() {
   margin-bottom: 8px;
 }
 
-/* 子专家计划待批准：一条窄卡片，压在泳道与对话之间，不占聊天气泡位 */
-.child-approval {
-  margin-bottom: 10px;
-  padding: 12px 14px;
-  background: #fffdf6;
-  border: 1px solid #f2d9a0;
-  border-radius: 10px;
-}
-
-.child-approval-head {
-  display: flex;
-  align-items: flex-start;
-  justify-content: space-between;
-  gap: 12px;
-}
-
-.child-approval-main {
-  min-width: 0;
-}
-
-.child-approval-title {
-  margin: 4px 0 0;
-  font-size: 14px;
-  font-weight: 650;
-  color: var(--ah-text, #1f2430);
-}
-
-.child-approval-sub {
-  margin: 4px 0 0;
-  color: var(--ah-text-secondary, #8b90a0);
-  font-size: 12px;
-  line-height: 1.55;
-}
-
-.child-approval-actions {
-  display: flex;
-  flex: none;
-  gap: 8px;
-}
-
-.child-plan-steps {
-  margin: 10px 0 0;
-  padding-left: 0;
-  list-style: none;
-}
-
-.child-plan-steps li {
-  display: flex;
-  gap: 8px;
-  padding: 5px 0;
-  border-top: 1px dashed #f0e3c6;
-  font-size: 13px;
-}
-
-.child-plan-seq {
-  flex: none;
-  width: 20px;
-  height: 20px;
-  border-radius: 50%;
-  background: #fff3d6;
-  color: #8a6116;
-  font-size: 12px;
-  line-height: 20px;
-  text-align: center;
-}
-
-.child-plan-text {
-  display: flex;
-  flex-direction: column;
-  gap: 2px;
-  min-width: 0;
-}
-
-.child-plan-detail {
-  color: var(--ah-text-secondary, #8b90a0);
-  font-size: 12px;
-  line-height: 1.5;
-}
-</style>
-
-<style>
-/* 下拉挂到 body，需非 scoped 才能把删除项染红 */
-.session-remove-item {
-  color: var(--el-color-danger) !important;
-}
-
-.session-remove-item:hover,
-.session-remove-item:focus {
-  color: var(--el-color-danger) !important;
-  background-color: var(--el-color-danger-light-9) !important;
-}
 </style>

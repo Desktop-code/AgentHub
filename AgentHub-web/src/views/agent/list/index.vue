@@ -37,7 +37,7 @@
           aria-label="列表"
           aria-pressed="false"
           :disabled="!rows.length || flipBusy || trialOpen"
-          @click="enterListView"
+          @click="handleEnterListView"
         >
           <el-icon :size="16"><List /></el-icon>
         </button>
@@ -117,8 +117,8 @@
               :class="{ 'is-flying': flyingId === row.id }"
               :data-agent-id="row.id"
               tabindex="0"
-              @click="onGridCardClick(row, $event)"
-              @keyup.enter="onGridCardClick(row, $event)"
+              @click="handleGridCardClick(row, $event)"
+              @keyup.enter="handleGridCardClick(row, $event)"
             >
               <template #header>
                 <!-- 右上灰色 ×；stop 防止进详情；二次确认后删除 -->
@@ -301,7 +301,8 @@ import PageHeader from '@/components/PageHeader.vue'
 import TablePager from '@/components/TablePager.vue'
 import { agentBrowse } from '@/composables/agentBrowse'
 import { closeAgentTrial, openAgentTrial, useAgentTrial } from '@/composables/agentTrial'
-import { runModeLabel, snapFromCard, useAgentViewFlip } from '@/composables/agentViewFlip'
+import { runModeLabel, snapFromCard } from '@/composables/agentViewFlip'
+import { useBrowseFlip } from '@/composables/useBrowseFlip'
 import { confirmLeaveDraft } from '@/composables/draftGuard'
 import { CARD_HEIGHT_NORMAL, lastPage, useGridPageSize } from '@/composables/gridPageSize'
 import { useUserStore } from '@/stores/user'
@@ -337,15 +338,6 @@ const user = useUserStore()
 const route = useRoute()
 const router = useRouter()
 const { open: trialOpen } = useAgentTrial()
-const {
-  busy: flipBusy,
-  flyingId,
-  ghostSnap,
-  ghostFrame,
-  ghostLanding,
-  detailPhase,
-  runFlip
-} = useAgentViewFlip()
 
 const pageRef = ref<HTMLElement | null>(null)
 const listLoading = ref(false)
@@ -377,7 +369,6 @@ const railLoading = ref(false)
 /** 底部哨兵节点。 */
 const railSentinelRef = ref<HTMLElement | null>(null)
 const total = ref(0)
-const railKeyword = ref('')
 
 /** 卡片墙容器（.grid-wrap）：一屏容量按它的宽高实测 */
 const gridWrapRef = ref<HTMLElement | null>(null)
@@ -443,38 +434,125 @@ const initialTab = computed(() => {
 })
 
 /**
- * 同页视图态。不跟路由瞬时绑定，避免 /list → /list/:id 中途拆掉网格。
+ * 网格↔主从骨架。Agent 网格与左栏**都是服务端分页**，因此 `takeOverGrid: false`：
+ * 骨架只管视图态、图层显隐、左栏关键词输入框与飞卡导航；
+ * `agentBrowse` 分页、左栏无限滚动、URL 同步、详情挂起仍由本页负责。
  */
-const viewMode = ref<'grid' | 'master'>('grid')
-const activeId = ref(0)
-
-/*
- * 切回网格后补量一次：主从态下网格层是 display:none（.layer:not(.is-active)），
- * 浏览器不给 display:none 的元素算宽度，容量会一直停在进主从前的值。
- * 等 DOM 真正可见再量；pageSize 若变化，上面的 watch 会自动重新取数。
- */
-watch(viewMode, (mode) => {
-  if (mode !== 'grid') {
-    return
-  }
-  void nextTick(() => {
+const {
+  viewMode,
+  activeId,
+  flipBusy,
+  flyingId,
+  ghostSnap,
+  ghostFrame,
+  ghostLanding,
+  detailPhase,
+  showGridLayer,
+  showMasterLayer,
+  pagedRows: gridRows,
+  railKeyword,
+  railRows,
+  findRowEl,
+  onGridCardClick,
+  backToGrid,
+  enterListView
+} = useBrowseFlip<AgentCard, Record<string, unknown>>({
+  rows,
+  railSource,
+  idOf: (row) => row.id,
+  snapOf: snapFromCard,
+  // 左栏由服务端按关键词分页，骨架只管输入框，不再做本地过滤
+  matchRail: () => true,
+  takeOverGrid: false,
+  idAttr: 'data-agent-id',
+  /**
+   * 起飞前：左栏先用当前页占位（保证落点节点立刻存在），当前页不含该卡时插到首位兜底。
+   * 返回值告知落地后是否需要把左栏游标拉回第 1 页重新累积。
+   */
+  prepare: (row) => {
+    if (!railSource.value.length) {
+      railSource.value = rows.value.slice()
+    }
+    if (railSource.value.every((item) => item.id !== row.id)) {
+      railSource.value = [row, ...railSource.value]
+    }
+    return railSource.value.length > 0
+  },
+  /** 去程落点：左栏可能已滚动，先滚进可视区再交给执行器量 Last，避免飞到屏幕外 */
+  resolveRailTarget: (row) => revealRailCard(row.id),
+  /** 落地后：先改 URL 再续拉左栏；无动画直切时按第一页重建左栏（与原实现一致） */
+  landed: async (row, prepared, meta) => {
+    if (!meta.animated) {
+      railSource.value = rows.value.slice()
+      await replaceMasterUrl(row.id)
+      void resetRail()
+      return
+    }
+    // 交接完成后再改 URL，避免落地帧整列重挂
+    await replaceMasterUrl(row.id)
+    void resumeRailAfterSeed(!!prepared)
+  },
+  /** 回网格前：当前 Agent 有未保存草稿先确认，取消则保持主从态 */
+  beforeLeave: (): boolean | Promise<boolean> => {
+    if (activeId.value <= 0) {
+      return true
+    }
+    return confirmLeaveDraft(`agent:${activeId.value}`, '当前 Agent 配置')
+  },
+  /** 回程量落点前：网格页若还没有这张卡（被全量覆盖过），先补取当前页 */
+  prepareLeave: async (row) => {
+    if (!findRowEl(row.id, 'grid') && rows.value.every((item) => item.id !== row.id)) {
+      await loadRows()
+      await nextTick()
+    }
+  },
+  /**
+   * 回网格收尾：飞卡路径下关键词非空则整份丢弃左栏；无动画直切时重取网格。
+   * （与原实现一致：关键词为空时保留已加载分页，下次进主从可秒开）
+   */
+  left: async (result) => {
+    if (result.animated && result.prevRailKeyword) {
+      clearRailState()
+    }
+    await replaceGridUrl()
+    if (!result.animated) {
+      void loadRows()
+    }
+  },
+  // 回到网格后重申一次一屏容量（主从态下网格层不参与布局，量出来是 0）
+  onReturnToGrid: () => {
     remeasureGridSize()
-  })
+  }
 })
 
-/** 飞卡时两层都留着；平时只显示当前态。 */
-const showGridLayer = computed(() => viewMode.value === 'grid' || flipBusy.value)
-const showMasterLayer = computed(() => viewMode.value === 'master' || flipBusy.value)
-
-const gridRows = computed(() => rows.value)
-
 /**
- * 左栏行数据。
- * 改为直接映射 railSource：分页与搜索全部在服务端完成，
- * 不再本地过滤，否则只能搜到已加载的部分。
- * 保留原名是为了 Template 的 v-for 不用改。
+ * 网格卡点击入口：试跑抽屉打开时忽略；去程期间挂起右栏详情，
+ * 把 AgentDetail 的挂载与并发请求推迟到落地之后。
  */
-const railRows = computed(() => railSource.value)
+async function handleGridCardClick(row: AgentCard, event: Event) {
+  if (trialOpen.value) {
+    return
+  }
+  detailSuspended.value = true
+  try {
+    await onGridCardClick(row, event)
+  } finally {
+    detailSuspended.value = false
+  }
+}
+
+/** 工具栏「列表」入口：与卡片点击同一套守卫与详情挂起 */
+async function handleEnterListView() {
+  if (trialOpen.value) {
+    return
+  }
+  detailSuspended.value = true
+  try {
+    await enterListView()
+  } finally {
+    detailSuspended.value = false
+  }
+}
 
 function parseAgentId(raw: unknown) {
   const text = Array.isArray(raw) ? raw[0] : raw
@@ -547,11 +625,6 @@ function filterParams() {
   }
 }
 
-function findAgentEl(id: number, where: 'grid' | 'rail') {
-  const root = where === 'grid' ? '.layer-grid .card' : '.layer-master .rail-card'
-  return document.querySelector<HTMLElement>(`${root}[data-agent-id="${id}"]`)
-}
-
 /** 等一帧：滚动写入后要等浏览器完成布局，量的坐标才是最终值。 */
 function nextFrame(): Promise<void> {
   return new Promise<void>((resolve) => {
@@ -600,10 +673,10 @@ function railScroller(): HTMLElement | null {
  *
  * 注意：只允许滚 .rail-list 这类子级滚动容器。
  * 若改滚外层 .main，起飞元素（网格卡 / 左栏卡）会跟着位移，
- * 而 runFlip 已在 prepare 之前量过 first，起点会失真。
+ * 而飞卡执行器已在 prepare 之前量过 first，起点会失真。
  */
 async function revealRailCard(id: number): Promise<HTMLElement | null> {
-  const card = findAgentEl(id, 'rail')
+  const card = findRowEl(id, 'rail')
   if (!card) {
     return null
   }
@@ -951,85 +1024,6 @@ function replaceGridUrl() {
   return router.replace({ path: '/agent/list', query })
 }
 
-/**
- * 网格 → 主从：同页亮主从层、量落点、飞完再 replace。
- */
-async function onGridCardClick(row: AgentCard, event: Event) {
-  if (trialOpen.value || flipBusy.value) {
-    return
-  }
-  const fromEl =
-    (event.currentTarget as HTMLElement | null) ||
-    (event.target as HTMLElement | null)?.closest?.('.card') ||
-    findAgentEl(row.id, 'grid')
-  if (!fromEl) {
-    activeId.value = row.id
-    viewMode.value = 'master'
-    railSource.value = rows.value.slice()
-    await replaceMasterUrl(row.id)
-    // 无飞卡，不涉及落点保活，直接按第一页重建左栏
-    void resetRail()
-    return
-  }
-
-  // 左栏先用当前页数据，保证落点节点立刻存在
-  if (!railSource.value.length) {
-    railSource.value = rows.value.slice()
-  }
-  // 兜底：当前页不含这张卡（跨页点卡 / 筛选后漂移）时先插到首位，保证落点一定存在
-  if (railSource.value.every((item) => item.id !== row.id)) {
-    railSource.value = [row, ...railSource.value]
-  }
-  /*
-   * 记录本次是否用过种子：
-   * 种子来自网格页（≤10 条），不等于「已加载的分页」，
-   * 落地后需要把游标拉回第 1 页重新累积，而不是接着往后翻。
-   */
-  const seeded = railSource.value.length > 0
-  activeId.value = row.id
-  /*
-   * 去程关键一步：在 runFlip 之前挂起详情。
-   * 此刻 AgentDetail 还没挂载，挂起后它整段动画期间都不存在，
-   * 首帧长任务与飞行中的表单/表格渲染一并消失。
-   * 落地后由 runFlip 结束（busy 变 false）自然解除，无需定时器。
-   */
-  detailSuspended.value = true
-
-  let ok = false
-  try {
-    ok = await runFlip({
-      snap: snapFromCard(row),
-      fromEl,
-      direction: 'to-master',
-      detail: 'enter',
-      prepare: async () => {
-        // 同页亮出主从层，网格仍在 DOM；落点卡稍后由 flyingId 藏字
-        viewMode.value = 'master'
-        await nextTick()
-        await nextTick()
-        // 先确认落点在左栏可视区内，再交给执行器量 Last；否则会飞到屏幕外再落下
-        return revealRailCard(row.id)
-      }
-    })
-  } finally {
-    /*
-     * 必须放 finally：任一步抛错都要解除挂起，
-     * 否则右栏会永久停在骨架，比卡顿更严重。
-     */
-    detailSuspended.value = false
-  }
-
-  if (ok) {
-    // 交接完成后再改 URL，避免落地帧整列重挂
-    await replaceMasterUrl(row.id)
-    /*
-     * 落地后补齐左栏剩余分页。
-     * 用 append 语义而非重置：重置会清掉刚用于定位的种子行。
-     */
-    void resumeRailAfterSeed(seeded)
-  }
-}
-
 /** 主从内切 Agent：无飞卡。切走前若有未保存草稿先确认，避免静默丢稿。 */
 async function openDetail(row: AgentCard) {
   if (trialOpen.value || flipBusy.value) {
@@ -1044,68 +1038,6 @@ async function openDetail(row: AgentCard) {
   }
   activeId.value = row.id
   void replaceMasterUrl(row.id)
-}
-
-/** 主从 → 网格：先亮网格层再飞，飞完 replace。回网格前确认是否丢弃当前草稿。 */
-async function backToGrid() {
-  if (trialOpen.value || flipBusy.value) {
-    return
-  }
-  // 回列表会卸载右栏详情：有未保存草稿时先确认，别让用户以为已经存下
-  if (activeId.value > 0) {
-    const keep = await confirmLeaveDraft(`agent:${activeId.value}`, '当前 Agent 配置')
-    if (!keep) {
-      return
-    }
-  }
-  const id = activeId.value
-  const row = railRows.value.find((item) => item.id === id) || rows.value.find((item) => item.id === id)
-  const fromEl = id ? findAgentEl(id, 'rail') : null
-  if (!id || !row || !fromEl) {
-    viewMode.value = 'grid'
-    activeId.value = 0
-    await replaceGridUrl()
-    void loadRows()
-    return
-  }
-
-  const ok = await runFlip({
-    snap: snapFromCard(row),
-    fromEl,
-    direction: 'to-grid',
-    detail: 'leave',
-    prepare: async () => {
-      viewMode.value = 'grid'
-      await nextTick()
-      await nextTick()
-      // 若网格页还没有这张卡（被全量覆盖过），先还原分页数据
-      if (!findAgentEl(id, 'grid') && rows.value.every((item) => item.id !== id)) {
-        await loadRows()
-        await nextTick()
-      }
-      // 回程不滚主区：起飞元素在左栏，滚 .main 会连带挪走已量好的 first
-      return findAgentEl(id, 'grid')
-    }
-  })
-
-  activeId.value = 0
-  /*
-   * 关键词为空时保留已加载分页，下次进主从可秒开；
-   * 有关键词则整份放弃（复用统一清理，避免两处逻辑漂移）。
-   */
-  if (railKeyword.value) {
-    clearRailState()
-  }
-  await replaceGridUrl()
-}
-
-async function enterListView() {
-  const first = rows.value[0]
-  if (!first) {
-    return
-  }
-  const fakeEvent = { currentTarget: findAgentEl(first.id, 'grid') } as unknown as Event
-  await onGridCardClick(first, fakeEvent)
 }
 
 async function removeCard(row: AgentCard) {

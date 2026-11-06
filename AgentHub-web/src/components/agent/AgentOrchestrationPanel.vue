@@ -161,15 +161,13 @@
       </div>
 
       <el-tabs v-model="activeTab" class="orch-tabs">
-        <!-- Tab 一：候选列表；增删改/启停即时落库，与现网 /routes API 等价 -->
+        <!-- Tab 一：候选列表；只读展示（写入口已收敛到多智能体方案页） -->
         <el-tab-pane label="候选列表" name="routes">
           <div class="pane-toolbar">
             <span class="hint">
               <template v-if="boundMa">旧 agent_route 行，仅供对照 · </template>
               route_key / 意图 / 子 Agent / 启停 · 共 {{ routes.length }} 个候选，启用 {{ enabledCount }} 个
             </span>
-            <!-- 新建入口跟随本 Tab 顶部，不回到页头，避免和全局「新建 Agent」混淆 -->
-            <el-button v-if="canOperate" type="primary" @click="routeOpen = true">+ 添加候选</el-button>
           </div>
 
           <el-alert
@@ -209,21 +207,9 @@
               </el-table-column>
               <el-table-column label="启停" width="90" align="center">
                 <template #default="{ row }">
-                  <el-switch
-                    v-if="canOperate"
-                    :model-value="row.status === 1"
-                    :loading="rowBusy === row.id"
-                    @change="(on: string | number | boolean) => onToggle(row, on === true)"
-                  />
-                  <el-tag v-else size="small" :type="row.status === 1 ? 'success' : 'info'" effect="plain">
+                  <el-tag size="small" :type="row.status === 1 ? 'success' : 'info'" effect="plain">
                     {{ row.status === 1 ? '启用' : '停用' }}
                   </el-tag>
-                </template>
-              </el-table-column>
-              <el-table-column v-if="canOperate" label="操作" width="130" align="center">
-                <template #default="{ row }">
-                  <el-button link type="primary" @click="openEdit(row)">编辑</el-button>
-                  <el-button link type="danger" @click="removeRow(row)">移除</el-button>
                 </template>
               </el-table-column>
             </el-table>
@@ -390,7 +376,7 @@
                     @change="(value: string | number | boolean) => patchConfig({ competeStrategy: String(value) })"
                   >
                     <el-radio :value="MA_COMPETE_STRATEGY_JUDGE_PICK">评选模型选优（默认）</el-radio>
-                    <el-radio :value="MA_COMPETE_STRATEGY_FIRST_SUCCESS">第一个成功子</el-radio>
+                    <el-radio :value="MA_COMPETE_STRATEGY_FIRST_SUCCESS">首次成功优先</el-radio>
                   </el-radio-group>
                   <span class="field-warn">
                     至少 2 个启用候选；评选模型缺省用判路由模型，失败自动降级为第一个成功子
@@ -544,43 +530,6 @@
       </div>
     </footer>
 
-    <RouteBindDialog
-      v-model="routeOpen"
-      :parent-id="agentId"
-      :bound-ids="routes.map((item) => item.childAgentId)"
-      :allowed-child-run-modes="allowedChildRunModes"
-      @submit="addRoute"
-    />
-
-    <el-dialog v-model="routeEditOpen" title="编辑候选" width="520px">
-      <el-form label-width="88px">
-        <el-form-item label="意图" required>
-          <el-input
-            v-model="routeDraft.intent"
-            maxlength="255"
-            type="textarea"
-            :rows="2"
-            placeholder="白话描述该子 Agent 负责什么，供判路由识别"
-          />
-        </el-form-item>
-        <el-form-item label="排序">
-          <el-input-number v-model="routeDraft.sortOrder" :min="0" :max="10000" controls-position="right" />
-        </el-form-item>
-        <el-collapse v-model="editAdvanced" class="route-advanced">
-          <el-collapse-item title="高级 · 路由键" name="adv">
-            <el-form-item label="路由键">
-              <el-input v-model="routeDraft.routeKey" maxlength="64" placeholder="系统生成的稳定短码" />
-              <div class="route-hint">改后须与判路由输出一致；默认不要改，避免已跑通的提示词对不上</div>
-            </el-form-item>
-          </el-collapse-item>
-        </el-collapse>
-      </el-form>
-      <template #footer>
-        <el-button @click="routeEditOpen = false">取消</el-button>
-        <el-button type="primary" :loading="routeSaving" @click="saveEdit">保存</el-button>
-      </template>
-    </el-dialog>
-
     <!--
       最近一轮试跑的编排泳道（只读）。与试跑面板共用同一个组件，
       这里只负责找到该 Agent 最近的会话；没有会话时给中文提示，不新开列表。
@@ -613,15 +562,14 @@
  * - 关系图用静态布局，不引入 X6 / VueFlow；
  * - 不改 RouterTrialExecutor 的隔离 / 并行 / CONCAT·SUMMARIZE 语义。
  */
-import { computed, reactive, ref, watch } from 'vue'
+import { computed, ref, watch } from 'vue'
 import { ElMessage } from 'element-plus'
 import { QuestionFilled } from '@element-plus/icons-vue'
 import { useRouter } from 'vue-router'
-import { createRoute, deleteRoute, pageAgents, updateRoute } from '@/api/agent'
+import { pageAgents } from '@/api/agent'
 import { pageTrialSessions } from '@/api/runtime'
 import { getMaDefByRoot } from '@/api/ma'
 import { useUserStore } from '@/stores/user'
-import RouteBindDialog from '@/components/agent/RouteBindDialog.vue'
 import OrchestrationLane from '@/components/runtime/OrchestrationLane.vue'
 import type { AgentCard, AgentRouteRow, AgentRuntimeConfig } from '@/types/agent'
 import type { MaDefRow } from '@/types/ma'
@@ -670,7 +618,10 @@ const props = defineProps<{
   routes: AgentRouteRow[]
   /** 是否有 agent:edit（策略编辑） */
   canEdit: boolean
-  /** 是否有 agent:bind（候选增删改/启停） */
+  /**
+   * 是否有 agent:bind（候选增删改/启停）。
+   * 当前 Tab 恒只读，候选写入口已移除；本字段保留为契约，放开只读时复用。
+   */
   canBind: boolean
   /** 父 Agent 是否已按 ROUTER 落库；未保存前禁止维护候选 */
   savedRouter: boolean
@@ -681,7 +632,7 @@ const props = defineProps<{
 const emit = defineEmits<{
   /** 策略字段变更；父组件写回 form.runtimeConfig，走页面底栏保存 */
   'update:config': [config: AgentRuntimeConfig]
-  /** 候选增删改/启停成功；父组件重新拉取详情与候选 */
+  /** 候选增删改/启停成功；父组件重新拉取详情与候选。当前 Tab 只读，暂无人 emit，保留为契约 */
   'routes-changed': []
   /** 点「试跑」：交回父级决定落点（Router 跳独立页，其它模式维持原抽屉） */
   trial: []
@@ -1002,27 +953,11 @@ const tabReadOnly = true
 const strategyDisabled = computed(() => tabReadOnly || !props.canEdit)
 
 /**
- * 只有「已落库的 Router + agent:bind + 非只读」才能维护候选。
- * 刀3 起 tabReadOnly 恒真 → 恒 false，保留与权限组合的原表达式便于后续放开。
- */
-const canOperate = computed(() => !tabReadOnly && props.canBind && props.savedRouter)
-
-/** 正在提交启停的路由行 id；空表示没有请求在飞 */
-const rowBusy = ref<number | null>(null)
-
-/**
  * 「候选与策略」区块的当前 Tab。
  * 默认停在候选列表（日常最高频）；策略改动走页面底栏保存，切 Tab 不丢草稿、不触发请求。
  * 用 string 而非字面量联合：el-tabs 的 v-model 回写类型是 string | number，收窄会与组件签名冲突。
  */
 const activeTab = ref<string>('routes')
-
-/** 候选编辑弹窗 */
-const routeOpen = ref(false)
-const routeEditOpen = ref(false)
-const routeSaving = ref(false)
-const editAdvanced = ref<string[]>([])
-const routeDraft = reactive({ id: 0, routeKey: '', intent: '', sortOrder: 0 })
 
 /** 校验结果；候选或策略变化后置空，避免展示过期结论 */
 const validation = ref<OrchestrationValidationResult | null>(null)
@@ -1114,98 +1049,6 @@ function onContextChange(value: string) {
  */
 function childLabel(row: AgentRouteRow): string {
   return row.childName?.trim() || row.childCode?.trim() || `#${row.childAgentId}`
-}
-
-/**
- * 打开候选编辑弹窗并回填现值。
- *
- * @param row 路由行
- */
-function openEdit(row: AgentRouteRow) {
-  routeDraft.id = row.id
-  routeDraft.routeKey = row.routeKey || ''
-  routeDraft.intent = row.intent || ''
-  routeDraft.sortOrder = row.sortOrder
-  editAdvanced.value = []
-  routeEditOpen.value = true
-}
-
-/**
- * 保存候选编辑：空意图在本地先拦，route_key 空则交给后端补全。
- */
-async function saveEdit() {
-  const intent = routeDraft.intent.trim()
-  if (!intent) {
-    ElMessage.warning('请填写意图')
-    return
-  }
-  routeSaving.value = true
-  try {
-    await updateRoute(props.agentId, routeDraft.id, {
-      routeKey: routeDraft.routeKey.trim() || undefined,
-      intent,
-      sortOrder: routeDraft.sortOrder,
-      status: props.routes.find((row) => row.id === routeDraft.id)?.status ?? 1
-    })
-    routeEditOpen.value = false
-    emit('routes-changed')
-  } finally {
-    routeSaving.value = false
-  }
-}
-
-/**
- * 新增候选：复用 RouteBindDialog 的子 Agent + 意图表单。
- *
- * @param body 子 Agent、意图、可选 key/sort
- * @param done 弹窗结果回调
- */
-async function addRoute(
-  body: { childAgentId: number; routeKey?: string; intent: string; sortOrder?: number },
-  done: () => void
-) {
-  try {
-    await createRoute(props.agentId, body)
-    routeOpen.value = false
-    emit('routes-changed')
-  } finally {
-    done()
-  }
-}
-
-/**
- * 启停候选：带上原 key / intent，避免后端把空意图当成未填。
- *
- * @param row    路由行
- * @param enable 目标状态
- */
-async function onToggle(row: AgentRouteRow, enable: boolean) {
-  const next = enable ? 1 : 0
-  if (row.status === next || rowBusy.value !== null) {
-    return
-  }
-  rowBusy.value = row.id
-  try {
-    await updateRoute(props.agentId, row.id, {
-      routeKey: row.routeKey || undefined,
-      intent: row.intent || undefined,
-      sortOrder: row.sortOrder,
-      status: next
-    })
-    emit('routes-changed')
-  } finally {
-    rowBusy.value = null
-  }
-}
-
-/**
- * 移除候选；不弹二次确认，与现网路由页行为一致。
- *
- * @param row 路由行
- */
-async function removeRow(row: AgentRouteRow) {
-  await deleteRoute(props.agentId, row.id)
-  emit('routes-changed')
 }
 
 /**
@@ -1731,30 +1574,6 @@ watch(
   margin: 4px 0 0;
   padding-left: 18px;
   line-height: 1.7;
-}
-
-.route-advanced {
-  margin-top: 4px;
-  border: none;
-}
-
-.route-advanced :deep(.el-collapse-item__header) {
-  height: 36px;
-  border: none;
-  color: #6b7280;
-  font-size: 13px;
-  line-height: 36px;
-}
-
-.route-advanced :deep(.el-collapse-item__wrap) {
-  border: none;
-}
-
-.route-hint {
-  margin-top: 4px;
-  color: #9ca3af;
-  font-size: 12px;
-  line-height: 1.4;
 }
 
 /* 泳道抽屉正文：只读，不参与页面底栏保存 */

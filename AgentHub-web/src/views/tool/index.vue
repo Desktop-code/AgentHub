@@ -396,11 +396,12 @@
 defineOptions({ name: 'ToolManage' })
 /**
  * 工具管理页。所属域：tool。
- * 网格↔主从飞卡与 Agent 同壳（useViewFlip / FlipGhost / ViewModeToggle / browse-workspace）。
+ * 网格↔主从飞卡由 useBrowseFlip 统一装配（筛选/前端切片/一屏容量/飞卡与返回），
+ * 页面只提供数据源、飞卡快照与「起飞前拉右栏工具项」的预取钩子。
  * 无路由 id：本地 viewMode + activeId；activeId=0 表示伪源「全部」（跨源汇总表）。
  * 源删除只在网格卡 ×；源级编辑/同步/启停在右栏；BUILTIN 仍隐藏新建项与同步。
  */
-import { computed, nextTick, onMounted, reactive, ref, watch } from 'vue'
+import { computed, onMounted, reactive, ref } from 'vue'
 import { Plus, RefreshRight, Search } from '@element-plus/icons-vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import {
@@ -426,22 +427,13 @@ import ViewModeToggle from '@/components/browse/ViewModeToggle.vue'
 import ItemFormDialog from '@/components/tool/ItemFormDialog.vue'
 import SourceFormDialog from '@/components/tool/SourceFormDialog.vue'
 import SyncResultDialog from '@/components/tool/SyncResultDialog.vue'
-import { useViewFlip, type FlipCardSnap } from '@/composables/viewFlip'
-import { CARD_HEIGHT_NORMAL, lastPage, useGridPageSize } from '@/composables/gridPageSize'
+import { useBrowseFlip } from '@/composables/useBrowseFlip'
+import type { FlipCardSnap } from '@/composables/viewFlip'
 import { useListIndexColumn } from '@/composables/listIndex'
 import { useUserStore } from '@/stores/user'
 import type { SyncResult, ToolItemRow, ToolSource } from '@/types/tool'
 
 const user = useUserStore()
-const {
-  busy: flipBusy,
-  flyingId,
-  ghostSnap,
-  ghostFrame,
-  ghostLanding,
-  detailPhase,
-  runFlip
-} = useViewFlip()
 
 const sourceLoading = ref(false)
 const itemLoading = ref(false)
@@ -462,68 +454,78 @@ const { indexColumnProps } = useListIndexColumn(() => query.current, () => query
 const sourceDialog = reactive({ open: false, editing: null as ToolSource | null })
 const itemDialog = reactive({ open: false, editing: null as ToolItemRow | null })
 const syncDialog = reactive({ open: false, result: null as SyncResult | null })
-const railKeyword = ref('')
-
-/** 网格筛选草稿（点查询才生效）。 */
-const gridDraft = reactive({
-  keyword: '',
-  type: '' as string,
-  status: undefined as number | undefined
-})
-/** 网格已生效筛选。 */
-const gridFilter = reactive({
-  keyword: '',
-  type: '' as string,
-  status: undefined as number | undefined
-})
-/** 网格分页（前端切片）；size 由一屏容量实测得出，仅一页时只显示总数文案。 */
-const gridPage = reactive({ current: 1, size: 10 })
-
-/** 卡片墙容器（.grid-wrap）：一屏容量按它的宽高实测 */
-const gridWrapRef = ref<HTMLElement | null>(null)
-/**
- * 一屏容量分页：pageSize = 当前栅格列数 × 行数（上限 100）。
- * 工具源卡为 ConfigCard normal 档 160px；尺寸变化防抖重算。
- */
-const { pageSize: gridPageSize, remeasure: remeasureGridSize } = useGridPageSize({
-  container: () => gridWrapRef.value,
-  options: { cardHeight: CARD_HEIGHT_NORMAL }
-})
-
-/**
- * 一屏容量变化 → 写回本地分页态。
- * 网格是前端切片，无需重新请求；只把页码夹回合法范围。
- */
-watch(gridPageSize, (next) => {
-  if (!next || next === gridPage.size) {
-    return
-  }
-  gridPage.size = next
-  gridPage.current = Math.min(gridPage.current, lastPage(filteredSources.value.length, next))
-})
-
-/** 同页视图态；不跟路由绑定。 */
-const viewMode = ref<'grid' | 'master'>('grid')
-/** 当前源；0=伪源「全部」→ 右栏跨源汇总。 */
-const activeId = ref(0)
-
-/*
- * 切回网格后补量一次：主从态下网格层是 display:none（.layer:not(.is-active)），
- * 浏览器不给它算宽度，容量会停在进主从前的值。等 DOM 真正可见再量；
- * pageSize 若变化，容量 watch 会把页码夹回合法范围。
- */
-watch(viewMode, (mode) => {
-  if (mode !== 'grid') {
-    return
-  }
-  void nextTick(() => {
-    remeasureGridSize()
+/** 内置源排第一，其余保持原顺序（网格与左栏共用这份顺序）。 */
+const sortedSources = computed(() => {
+  const list = [...sources.value]
+  list.sort((a, b) => {
+    const aw = a.type === 'BUILTIN' ? 0 : 1
+    const bw = b.type === 'BUILTIN' ? 0 : 1
+    return aw - bw
   })
+  return list
 })
 
-/** 飞卡时两层都留着；平时只显示当前态。 */
-const showGridLayer = computed(() => viewMode.value === 'grid' || flipBusy.value)
-const showMasterLayer = computed(() => viewMode.value === 'master' || flipBusy.value)
+/**
+ * 网格↔主从骨架。工具源是前端全量数据，骨架接管筛选、切片与一屏容量；
+ * 页面只提供数据源、飞卡快照与「起飞前拉右栏工具项」的预取钩子。
+ */
+const {
+  viewMode,
+  activeId,
+  flipBusy,
+  flyingId,
+  ghostSnap,
+  ghostFrame,
+  ghostLanding,
+  detailPhase,
+  showGridLayer,
+  showMasterLayer,
+  gridDraft,
+  gridPage,
+  gridWrapRef,
+  filteredRows: filteredSources,
+  pagedRows: pagedSources,
+  applyGridFilter,
+  resetGridFilter,
+  onGridPageChange,
+  railKeyword,
+  railRows,
+  onGridCardClick,
+  onViewModeChange,
+  backToGrid
+} = useBrowseFlip<ToolSource, { keyword: string; type: string; status?: number }>({
+  rows: sortedSources,
+  idOf: (row) => row.id,
+  snapOf: snapFromSource,
+  createFilter: () => ({ keyword: '', type: '', status: undefined }),
+  matchFilter: (row, filter) => {
+    const key = filter.keyword.trim().toLowerCase()
+    if (key && !row.name.toLowerCase().includes(key)) {
+      return false
+    }
+    if (filter.type && row.type !== filter.type) {
+      return false
+    }
+    // BUILTIN 无启停语义：选状态时仍按 status 字段比
+    if ((filter.status === 0 || filter.status === 1) && row.status !== filter.status) {
+      return false
+    }
+    return true
+  },
+  matchRail: (row, key) => row.name.toLowerCase().includes(key) || row.type.toLowerCase().includes(key),
+  // 起飞即重置右栏页码并并行取数；失败由右栏 loading / 空态兜底
+  prepare: () => {
+    query.current = 1
+    void loadItems()
+  },
+  // 网格为空时点「列表」：直接进伪源「全部」，无飞卡（与原实现一致）
+  enterEmpty: async () => {
+    activeId.value = 0
+    viewMode.value = 'master'
+    query.current = 1
+    await loadItems()
+  }
+})
 
 const selected = computed(() =>
   activeId.value > 0 ? sources.value.find((item) => item.id === activeId.value) : undefined
@@ -535,82 +537,6 @@ const itemPanelTitle = computed(() => (selected.value ? selected.value.name : '�
 const canSync = computed(
   () => !!selected.value && selected.value.type === 'MCP' && selected.value.status === 1 && !syncing.value
 )
-
-/** 内置源排第一，其余保持原顺序 */
-const sortedSources = computed(() => {
-  const list = [...sources.value]
-  list.sort((a, b) => {
-    const aw = a.type === 'BUILTIN' ? 0 : 1
-    const bw = b.type === 'BUILTIN' ? 0 : 1
-    return aw - bw
-  })
-  return list
-})
-
-/** 网格筛选后的源列表。 */
-const filteredSources = computed(() => {
-  const key = gridFilter.keyword.trim().toLowerCase()
-  return sortedSources.value.filter((item) => {
-    if (key && !item.name.toLowerCase().includes(key)) {
-      return false
-    }
-    if (gridFilter.type && item.type !== gridFilter.type) {
-      return false
-    }
-    // BUILTIN 无启停语义：选状态时仍按 status 字段比
-    if (gridFilter.status === 0 || gridFilter.status === 1) {
-      if (item.status !== gridFilter.status) {
-        return false
-      }
-    }
-    return true
-  })
-})
-
-/** 当前页源卡片。 */
-const pagedSources = computed(() => {
-  const list = filteredSources.value
-  const size = gridPage.size
-  const maxPage = Math.max(1, Math.ceil(list.length / size) || 1)
-  const current = Math.min(gridPage.current, maxPage)
-  const start = (current - 1) * size
-  return list.slice(start, start + size)
-})
-
-/** 左栏真源列表（伪源「全部」单独渲染在顶部）。 */
-const railRows = computed(() => {
-  const key = railKeyword.value.trim().toLowerCase()
-  if (!key) {
-    return sortedSources.value
-  }
-  return sortedSources.value.filter(
-    (item) => item.name.toLowerCase().includes(key) || item.type.toLowerCase().includes(key)
-  )
-})
-
-/** 查询：草稿写入生效条件并回到第一页。 */
-function applyGridFilter() {
-  gridFilter.keyword = gridDraft.keyword
-  gridFilter.type = gridDraft.type
-  gridFilter.status = gridDraft.status
-  gridPage.current = 1
-}
-
-/** 重置：清空网格筛选。 */
-function resetGridFilter() {
-  gridDraft.keyword = ''
-  gridDraft.type = ''
-  gridDraft.status = undefined
-  applyGridFilter()
-}
-
-/** 翻页时校正越界。 */
-function onGridPageChange() {
-  const maxPage = Math.max(1, Math.ceil(filteredSources.value.length / gridPage.size) || 1)
-  if (gridPage.current > maxPage) {
-    gridPage.current = maxPage
-  }
-}
 
 /** 主从工具项筛选重置。 */
 function resetItemFilter() {
@@ -669,17 +595,6 @@ function snapFromSource(item: ToolSource): FlipCardSnap {
       }
     ]
   }
-}
-
-/**
- * 按 data-browse-id 找网格卡或轨卡。
- *
- * @param id 源 id（伪源为 0）
- * @param where 网格或左轨
- */
-function findBrowseEl(id: number, where: 'grid' | 'rail') {
-  const root = where === 'grid' ? '.layer-grid .card' : '.layer-master .rail-card'
-  return document.querySelector<HTMLElement>(`${root}[data-browse-id="${id}"]`)
 }
 
 /**
@@ -806,80 +721,6 @@ function searchItems() {
 }
 
 /**
- * ViewModeToggle：网格 ↔ 主从。
- *
- * @param mode 目标视图
- */
-function onViewModeChange(mode: 'grid' | 'master') {
-  if (mode === 'grid') {
-    void backToGrid()
-    return
-  }
-  void enterListView()
-}
-
-/**
- * 进主从：优先飞入第一个真源；无真源则直接进「全部」（无飞卡）。
- */
-async function enterListView() {
-  if (flipBusy.value) {
-    return
-  }
-  // 用当前页第一张，保证网格 DOM 里有起飞元素
-  const first = pagedSources.value[0]
-  if (first) {
-    const fromEl = findBrowseEl(first.id, 'grid')
-    await onGridCardClick(first, { currentTarget: fromEl } as unknown as Event)
-    return
-  }
-  activeId.value = 0
-  viewMode.value = 'master'
-  query.current = 1
-  await loadItems()
-}
-
-/**
- * 网格点源卡 → 飞入主从，右栏仅该源 items。
- *
- * @param item 工具源
- * @param event 点击事件（取起飞元素）
- */
-async function onGridCardClick(item: ToolSource, event: Event) {
-  if (flipBusy.value) {
-    return
-  }
-  const fromEl =
-    (event.currentTarget as HTMLElement | null) ||
-    (event.target as HTMLElement | null)?.closest?.('.card') ||
-    findBrowseEl(item.id, 'grid')
-  if (!fromEl) {
-    activeId.value = item.id
-    viewMode.value = 'master'
-    query.current = 1
-    await loadItems()
-    return
-  }
-
-  activeId.value = item.id
-  query.current = 1
-  void loadItems()
-
-  await runFlip({
-    snap: snapFromSource(item),
-    fromEl,
-    direction: 'to-master',
-    detail: 'enter',
-    prepare: async () => {
-      // 同页亮出主从层，网格仍在 DOM；落点卡由 flyingId 藏字
-      viewMode.value = 'master'
-      await nextTick()
-      await nextTick()
-      return findBrowseEl(item.id, 'rail')
-    }
-  })
-}
-
-/**
  * 主从内切源：无飞卡。切「全部」(id=0) 也不飞。
  *
  * @param id 源 id；0=全部
@@ -894,38 +735,6 @@ function openRailSource(id: number) {
   activeId.value = id
   query.current = 1
   void loadItems()
-}
-
-/** 主从 → 网格：真源有落点则飞回；「全部」或找不到元素则直接切。 */
-async function backToGrid() {
-  if (flipBusy.value) {
-    return
-  }
-  const id = activeId.value
-  const row = id > 0 ? sources.value.find((item) => item.id === id) : undefined
-  const fromEl = id > 0 ? findBrowseEl(id, 'rail') : null
-  if (!id || !row || !fromEl) {
-    viewMode.value = 'grid'
-    activeId.value = 0
-    railKeyword.value = ''
-    return
-  }
-
-  await runFlip({
-    snap: snapFromSource(row),
-    fromEl,
-    direction: 'to-grid',
-    detail: 'leave',
-    prepare: async () => {
-      viewMode.value = 'grid'
-      await nextTick()
-      await nextTick()
-      return findBrowseEl(id, 'grid')
-    }
-  })
-
-  activeId.value = 0
-  railKeyword.value = ''
 }
 
 function openSource(row?: ToolSource) {
