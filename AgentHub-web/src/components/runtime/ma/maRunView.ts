@@ -11,7 +11,7 @@
  * - 不修改 RouterTrialExecutor 的任何执行 / 选优语义，只做展示归纳。
  */
 import type { ObsSpan } from '@/types/obs'
-import type { ChatTurn } from '@/types/runtime'
+import type { AssistantBlock, ChatTurn } from '@/types/runtime'
 import type { TimelineCardStatus } from '@/components/runtime/routerTimeline'
 import { processLanes } from '@/components/runtime/trialMessages'
 import {
@@ -518,6 +518,108 @@ function cardsFromModel(model: OrchestrationLaneModel, group: MaRunGroup, now: n
   return cards
 }
 
+/** 非判路由模板的子路由前缀；文案来自 RouterTrialExecutor 的 routeLine */
+const CHILD_ROUTE_PREFIXES = ['竞争选优', '固定并行', '固定串行', '路由后串行'] as const
+
+/**
+ * 清洗路由行里取到的 Agent 名：去掉尾部标点 / 分隔符，内部空格保留。
+ *
+ * @param raw 捕获到的名称片段
+ * @return 可直接展示的名称；空值返回空串
+ */
+function cleanAgentName(raw: string): string {
+  return (raw || '').replace(/[，,。；;·\s]+$/g, '').trim()
+}
+
+/**
+ * 单行路由文案 → 子 Agent 展示名；不是「某个子开跑」的行返回空串。
+ *
+ * <p>为什么需要它：判路由模板推「路由到 X（key），依据…」，固定 / 竞争模板推
+ * 「竞争选优 1/3 · X（key） · 同题作答」这类前缀文案。后者不会被
+ * {@link processLanes} 识别成 agent 泳道，若直接把后续思考落进匿名「执行」泳道，
+ * 中栏就会按泳道数刷出一串同名「执行」卡。
+ *
+ * <p>只认明确的子路由行：总控说明（竞争选优：N 位候选…）、跳过行、评审环角色行
+ * 都不当作子 Agent，避免凭空造卡。
+ *
+ * @param raw 路由块中的一行
+ * @return Agent 名；非子路由返回空串
+ */
+function childNameOfRouteLine(raw: string): string {
+  const text = (raw || '').trim()
+  if (!text) {
+    return ''
+  }
+  // 判路由：「路由到 X（key），依据：…」；名字取到全角括号 / 逗号前
+  if (text.startsWith('路由到')) {
+    const rest = text.slice('路由到'.length).trim()
+    return cleanAgentName(rest.split(/[（，,]/)[0] ?? '')
+  }
+  // 固定 / 竞争 / 路由后串行：「前缀 1/3 · X（key）…」
+  for (const prefix of CHILD_ROUTE_PREFIXES) {
+    if (!text.startsWith(prefix)) {
+      continue
+    }
+    const matched = new RegExp(`^${prefix}\\s*\\d+\\s*/\\s*\\d+\\s*·\\s*([^（·]+)`).exec(text)
+    return matched ? cleanAgentName(matched[1]) : ''
+  }
+  return ''
+}
+
+/**
+ * 从流式 / 落库块里提取本轮真实子 Agent 名单（按出现顺序去重）。
+ *
+ * <p>只读 route 块，不读 reasoning / tool：后两者没有 Agent 归属，
+ * 不能当成一张子卡渲染，否则就会回到「一堆同名执行卡」的老问题。
+ *
+ * @param blocks 助手轮的全部块
+ * @return 子 Agent 名；空数组表示本轮还没派发或无法从文案识别
+ */
+function childNamesFromBlocks(blocks: AssistantBlock[]): string[] {
+  const names: string[] = []
+  const seen = new Set<string>()
+  for (const block of blocks) {
+    if (block.kind !== 'route') {
+      continue
+    }
+    // 旧数据可能把多条路由行用「；」拼成一段，逐行解析
+    for (const line of (block.text || '').split(/[；\n]/)) {
+      const name = childNameOfRouteLine(line)
+      if (!name || seen.has(name)) {
+        continue
+      }
+      seen.add(name)
+      names.push(name)
+    }
+  }
+  return names
+}
+
+/**
+ * 兜底路径的路由卡摘要：按文案前缀区分「候选 / 派发 / 按序 / 命中」。
+ *
+ * @param names  已识别的子 Agent 名单（非空）
+ * @param blocks 助手轮块，用于识别模板前缀
+ * @return 一句名单说明
+ */
+function fallbackRouterSummary(names: string[], blocks: AssistantBlock[]): string {
+  const scope = names.join('、')
+  const routeText = blocks
+    .filter((block) => block.kind === 'route')
+    .map((block) => block.text || '')
+    .join('\n')
+  if (routeText.includes('竞争选优')) {
+    return `候选 ${names.length} 个同题并行：${scope}`
+  }
+  if (routeText.includes('固定并行')) {
+    return `派发 ${names.length} 个：${scope}`
+  }
+  if (routeText.includes('固定串行') || routeText.includes('路由后串行')) {
+    return `按序执行 ${names.length} 个：${scope}`
+  }
+  return `命中：${scope}`
+}
+
 /** 没有 obs 数据时：用落库 / 流式块兜底，仍不展示思维链与工具正文 */
 function cardsFromBlocks(group: MaRunGroup, now: number): MaRunCard[] {
   const turn = group.assistant
@@ -539,19 +641,17 @@ function cardsFromBlocks(group: MaRunGroup, now: number): MaRunCard[] {
   const durationMs = turn.startTime ? Math.max(0, now - turn.startTime) : 0
   const cards: MaRunCard[] = []
   const lanes = processLanes(turn.blocks)
-  const agentTitles: string[] = []
+  /*
+   * 只认路由行里能点名的子 Agent：
+   * processLanes 会把「没有归属的思考 / 工具」收进匿名「执行」泳道，
+   * 固定 / 竞争模板每次重推子路由都会新开一条这种泳道，直接按泳道出卡就会刷屏。
+   */
+  const agentTitles = childNamesFromBlocks(turn.blocks)
   // 兜底路径也先统一分配颜色：中栏每张 Agent 卡不撞色，右栏图例才能逐条列出
-  const colors = buildAgentColors(
-    lanes.filter((lane) => lane.kind === 'agent').map((lane) => lane.title.replace(/^路由到\s*/, '').trim() || '子 Agent')
-  )
-  for (const lane of lanes) {
-    if (lane.kind !== 'agent') {
-      continue
-    }
-    const title = lane.title.replace(/^路由到\s*/, '').trim() || '子 Agent'
-    agentTitles.push(title)
+  const colors = buildAgentColors(agentTitles)
+  for (const title of agentTitles) {
     cards.push({
-      key: `${turn.key}:agent:${cards.length}`,
+      key: `${turn.key}:agent:${title}`,
       kind: 'agent',
       title,
       status,
@@ -564,7 +664,7 @@ function cardsFromBlocks(group: MaRunGroup, now: number): MaRunCard[] {
   const decision = lanes.find((lane) => lane.kind === 'decision')
   // 路由卡恒在最上：有子名单就报名单，没有才退回判路由摘要
   const routeSummary = agentTitles.length
-    ? `命中：${agentTitles.join('、')}`
+    ? fallbackRouterSummary(agentTitles, turn.blocks)
     : decision?.body
       ? summaryText(decision.body)
       : phaseText(turn.phase)
@@ -580,7 +680,22 @@ function cardsFromBlocks(group: MaRunGroup, now: number): MaRunCard[] {
   return cards
 }
 
-/** 按 trace 与用户轮次对齐：先精确匹配原问，再从末尾补齐（长问截断 / 旧 trace 丢失时兜底） */
+/**
+ * 按 trace 与用户轮次对齐。
+ *
+ * <p>三轮匹配，越往后越保守：
+ * 1. 原问精确相等（服务端 trace.title 就是用户原问）；
+ * 2. 标题互为前缀（服务端可能截断长问）；
+ * 3. 数量恰好相等时才按顺序一一对应。
+ *
+ * <p>第 3 步不做「从末尾补齐」：新一轮刚发出时 trace 还没落库，
+ * 末尾补齐会把上一条旧 trace（甚至上一会话）挂到这一轮上，
+ * 中栏与右栏就会先闪一段别人的「路由 / 子 Agent」，随后又变回空。
+ * 数量不等说明有轮次还没落 trace，宁可不挂也不串台。
+ *
+ * @param groups 已按提问顺序排好的轮次（就地写入 trace）
+ * @param traces 会话下的全部 trace（顺序不限）
+ */
 function attachTraces(groups: MaRunGroup[], traces: MaTurnTrace[]): void {
   const ordered = [...traces].sort((a, b) => {
     const ta = timeMs(a.startTime) ?? 0
@@ -589,6 +704,8 @@ function attachTraces(groups: MaRunGroup[], traces: MaTurnTrace[]): void {
   })
   const used = new Set<string>()
   const normalize = (value: string) => (value || '').replace(/\s+/g, ' ').trim()
+
+  // 1) 精确匹配原问
   for (const group of groups) {
     const question = normalize(group.question)
     if (!question) {
@@ -600,16 +717,35 @@ function attachTraces(groups: MaRunGroup[], traces: MaTurnTrace[]): void {
       used.add(hit.traceId)
     }
   }
-  const restGroups = groups.filter((group) => !group.trace)
-  const restTraces = ordered.filter((trace) => !used.has(trace.traceId))
-  const count = Math.min(restGroups.length, restTraces.length)
-  for (let i = 0; i < count; i += 1) {
-    const group = restGroups[restGroups.length - 1 - i]
-    const trace = restTraces[restTraces.length - 1 - i]
-    if (group && trace) {
-      group.trace = trace
+
+  // 2) 截断容错：长问被服务端截成标题时，标题是原问的前缀（或反之）
+  for (const group of groups) {
+    const question = normalize(group.question)
+    if (!question || group.trace) {
+      continue
+    }
+    const hit = ordered.find((trace) => {
+      if (used.has(trace.traceId)) {
+        return false
+      }
+      const title = normalize(trace.title)
+      return !!title && (question.startsWith(title) || title.startsWith(question))
+    })
+    if (hit) {
+      group.trace = hit
+      used.add(hit.traceId)
     }
   }
+
+  // 3) 位置兜底：只有两边数量相等时才一一对应，避免把旧 trace 盖到新一轮上
+  const restGroups = groups.filter((group) => !group.trace)
+  const restTraces = ordered.filter((trace) => !used.has(trace.traceId))
+  if (restGroups.length !== restTraces.length) {
+    return
+  }
+  restGroups.forEach((group, index) => {
+    group.trace = restTraces[index]
+  })
 }
 
 /**

@@ -121,7 +121,14 @@ export function useMaTurnTraces(sessionId: Ref<number | null>, active: Ref<boole
       if (!isCurrent()) {
         return
       }
-      const list = data.data?.records || []
+      /*
+       * 只认本会话的 trace：接口按会话过滤，这里再兜一层，
+       * 避免服务端参数异常 / 迟到响应把上一方案、上一会话的轮次带进中栏与右栏。
+       * sessionId 缺省（老数据）时不参与过滤，保持兼容。
+       */
+      const list = (data.data?.records || []).filter(
+        (record) => record.sessionId == null || record.sessionId === id
+      )
       records.value = list
       error.value = ''
       // 补步骤的三种情形：从没拉过 / 仍在跑（要看进度）/ 上一拍还在跑而这一拍已收尾（要拿终态快照）

@@ -197,6 +197,10 @@ function stateLabel(state: MaLineState): string {
   if (props.loading || props.group.trace?.loading) {
     return '执行明细采集中…'
   }
+  // 本轮还在跑但 trace 尚未落库：说「采集中」，不能和执行中的卡片同时显示「暂无记录」
+  if (props.group.status === 'running') {
+    return '执行明细采集中…'
+  }
   return '本轮暂无执行记录'
 })
 </script>
