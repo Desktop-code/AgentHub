@@ -1,5 +1,6 @@
 package com.agenthub.workflow.infra.persistence;
 
+import com.agenthub.common.api.PageQuery;
 import com.agenthub.workflow.domain.model.WorkflowHumanTask;
 import com.agenthub.workflow.domain.repository.WorkflowHumanTaskRepository;
 import com.agenthub.workflow.infra.persistence.entity.WorkflowHumanTaskEntity;
@@ -85,7 +86,7 @@ public class WorkflowHumanTaskRepositoryImpl implements WorkflowHumanTaskReposit
     @Override
     public List<WorkflowHumanTask> listByTenant(Long tenantId, String status, int limit) {
         // OPEN 优先：待办中心的默认视图就是「还没处理的」，其余状态按时间倒序归档
-        int size = Math.min(Math.max(limit, 1), 200);
+        int size = (int) PageQuery.clampSize(limit, 200);
         LambdaQueryWrapper<WorkflowHumanTaskEntity> wrapper = new LambdaQueryWrapper<WorkflowHumanTaskEntity>()
                 .eq(WorkflowHumanTaskEntity::getTenantId, tenantId);
         if (status != null && !status.isBlank()) {

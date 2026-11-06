@@ -2,7 +2,7 @@ package com.agenthub.runtime.domain.service;
 
 import com.agenthub.agent.domain.model.AgentDef;
 import com.agenthub.runtime.domain.model.EffectiveLimits;
-import com.agenthub.runtime.infra.agentscope.RuntimeLimitsProperties;
+import com.agenthub.common.config.RuntimeLimitsProperties;
 import org.springframework.stereotype.Component;
 
 /**

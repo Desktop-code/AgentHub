@@ -2,6 +2,7 @@ package com.agenthub.eval.infra;
 
 import com.agenthub.common.error.BizException;
 import com.agenthub.common.error.ErrorCode;
+import com.agenthub.common.text.TextClip;
 import com.agenthub.eval.application.EvalRunFlight;
 import com.agenthub.eval.domain.model.EvalArtifact;
 import com.agenthub.eval.domain.model.EvalTrialRequest;
@@ -189,7 +190,7 @@ public class TrialEvalPortImpl implements TrialEvalPort {
             return artifact;
         }
         artifact.setStatus(resp.getStatus());
-        artifact.setFinalAnswer(clip(resp.getAssistantPreview(), FINAL_ANSWER_MAX));
+        artifact.setFinalAnswer(TextClip.trimmed(resp.getAssistantPreview(), FINAL_ANSWER_MAX));
         artifact.setErrorSummary(resp.getErrorSummary());
         if (resp.isPlanPending()) {
             artifact.setFinishReason("plan_pending");
@@ -219,7 +220,7 @@ public class TrialEvalPortImpl implements TrialEvalPort {
             EvalArtifact.ToolCallSummary one = new EvalArtifact.ToolCallSummary();
             // summary 通常是工具名或短描述；没有则退回 eventType
             one.setName(event.getSummary() == null || event.getSummary().isBlank()
-                    ? "tool" : clip(event.getSummary(), 64));
+                    ? "tool" : TextClip.trimmed(event.getSummary(), 64));
             one.setSuccess(Boolean.TRUE);
             list.add(one);
         }
@@ -291,19 +292,9 @@ public class TrialEvalPortImpl implements TrialEvalPort {
     private static String buildEvalTitle(EvalTrialRequest request) {
         String caseKey = request.getCaseKey() == null ? "-" : request.getCaseKey();
         String raw = "eval:" + request.getEvalRunId() + ":" + caseKey;
-        return clip(raw, 64);
+        return TextClip.trimmed(raw, 64);
     }
 
-    private static String clip(String raw, int max) {
-        if (raw == null) {
-            return null;
-        }
-        String text = raw.trim();
-        if (text.length() <= max) {
-            return text;
-        }
-        return text.substring(0, max);
-    }
 
     private static String brief(Throwable ex) {
         String message = ex.getMessage() == null ? ex.getClass().getSimpleName() : ex.getMessage();

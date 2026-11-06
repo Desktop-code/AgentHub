@@ -1,5 +1,6 @@
 package com.agenthub.eval.infra.persistence;
 
+import com.agenthub.common.api.PageQuery;
 import com.agenthub.common.api.PageResult;
 import com.agenthub.common.error.BizException;
 import com.agenthub.common.error.ErrorCode;
@@ -89,8 +90,8 @@ public class EvalResultRepositoryImpl implements EvalResultRepository {
     @Override
     public PageResult<EvalResult> pageByVerdicts(long tenantId, List<EvalVerdict> verdicts,
                                                  long current, long size) {
-        long pageNo = Math.max(current, 1);
-        long pageSize = Math.min(Math.max(size, 1), 100);
+        long pageNo = PageQuery.clampCurrent(current);
+        long pageSize = PageQuery.clampSize(size);
         if (verdicts == null || verdicts.isEmpty()) {
             return PageResult.of(0, pageNo, pageSize, List.of());
         }
@@ -107,8 +108,8 @@ public class EvalResultRepositoryImpl implements EvalResultRepository {
     /** {@inheritDoc} */
     @Override
     public PageResult<EvalResult> pageByRun(Long runId, long tenantId, long current, long size) {
-        long pageNo = Math.max(current, 1);
-        long pageSize = Math.min(Math.max(size, 1), 100);
+        long pageNo = PageQuery.clampCurrent(current);
+        long pageSize = PageQuery.clampSize(size);
         IPage<EvalResultEntity> page = mapper.selectPage(new Page<>(pageNo, pageSize),
                 new LambdaQueryWrapper<EvalResultEntity>()
                         .eq(EvalResultEntity::getRunId, runId)

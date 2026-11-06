@@ -5,7 +5,9 @@ import com.agenthub.agent.domain.model.AgentQuery;
 import com.agenthub.agent.domain.repository.AgentDefRepository;
 import com.agenthub.agent.infra.persistence.entity.AgentDefEntity;
 import com.agenthub.agent.infra.persistence.mapper.AgentDefMapper;
+import com.agenthub.common.api.PageQuery;
 import com.agenthub.common.api.PageResult;
+import com.agenthub.common.text.LikeText;
 import com.baomidou.mybatisplus.core.conditions.query.LambdaQueryWrapper;
 import com.baomidou.mybatisplus.core.conditions.update.LambdaUpdateWrapper;
 import com.baomidou.mybatisplus.core.metadata.IPage;
@@ -34,8 +36,8 @@ public class AgentDefRepositoryImpl implements AgentDefRepository {
     /** {@inheritDoc} */
     @Override
     public PageResult<AgentDef> page(AgentQuery query) {
-        long current = Math.max(query.getCurrent(), 1);
-        long size = Math.min(Math.max(query.getSize(), 1), 100);
+        long current = PageQuery.clampCurrent(query.getCurrent());
+        long size = PageQuery.clampSize(query.getSize());
         LambdaQueryWrapper<AgentDefEntity> wrapper = new LambdaQueryWrapper<AgentDefEntity>()
                 .orderByDesc(AgentDefEntity::getId);
         if (query.getStatus() != null) {
@@ -44,7 +46,7 @@ public class AgentDefRepositoryImpl implements AgentDefRepository {
         if (query.getRunMode() != null) {
             wrapper.eq(AgentDefEntity::getRunMode, query.getRunMode());
         }
-        String keyword = likeText(query.getKeyword());
+        String keyword = LikeText.contains(query.getKeyword());
         if (keyword != null) {
             wrapper.and(one -> one.like(AgentDefEntity::getName, keyword)
                     .or()
@@ -174,15 +176,6 @@ public class AgentDefRepositoryImpl implements AgentDefRepository {
         mapper.deleteById(id);
     }
 
-    /**
-     * MySQL 默认用反斜杠转义 LIKE。去掉用户输入里的通配符含义。
-     */
-    private String likeText(String raw) {
-        if (raw == null || raw.isBlank()) {
-            return null;
-        }
-        return raw.trim().replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_");
-    }
 
     private AgentDef toDomain(AgentDefEntity entity) {
         AgentDef agent = new AgentDef();

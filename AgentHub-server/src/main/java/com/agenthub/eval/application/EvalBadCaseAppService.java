@@ -4,6 +4,7 @@ import com.agenthub.audit.domain.OperLogWriter;
 import com.agenthub.common.api.PageResult;
 import com.agenthub.common.error.BizException;
 import com.agenthub.common.error.ErrorCode;
+import com.agenthub.common.text.TextClip;
 import com.agenthub.common.web.OperatorContext;
 import com.agenthub.eval.api.dto.EvalBadCasePageReq;
 import com.agenthub.eval.api.dto.EvalBadCaseResp;
@@ -159,7 +160,7 @@ public class EvalBadCaseAppService {
         }
         spec.setCaseKey(caseKey);
         spec.setTitle(blankToNull(req.getTitle()) != null ? req.getTitle().trim()
-                : "观测回流：" + clip(req.getMessage().trim(), 40));
+                : "观测回流：" + TextClip.raw(req.getMessage().trim(), 40));
         spec.setEnabled(1);
         spec.setSortOrder(0);
         ObjectNode input = json.createObjectNode();
@@ -168,10 +169,10 @@ public class EvalBadCaseAppService {
 
         ObjectNode expect = json.createObjectNode();
         if (req.getFinalAnswer() != null && !req.getFinalAnswer().isBlank()) {
-            expect.put("reference", clip(req.getFinalAnswer().trim(), 4000));
+            expect.put("reference", TextClip.raw(req.getFinalAnswer().trim(), 4000));
         }
         if (req.getNote() != null && !req.getNote().isBlank()) {
-            expect.put("note", clip(req.getNote().trim(), 1000));
+            expect.put("note", TextClip.raw(req.getNote().trim(), 1000));
         }
         if (req.getSessionId() != null) {
             expect.put("from_session_id", req.getSessionId());
@@ -215,10 +216,10 @@ public class EvalBadCaseAppService {
         ObjectNode expect = json.createObjectNode();
         var artifact = assembler.readNode(result.getArtifactSummaryJson());
         if (artifact != null && artifact.has("final_answer") && artifact.get("final_answer").isTextual()) {
-            expect.put("reference", clip(artifact.get("final_answer").asText(), 4000));
+            expect.put("reference", TextClip.raw(artifact.get("final_answer").asText(), 4000));
         }
         if (req.getNote() != null && !req.getNote().isBlank()) {
-            expect.put("note", clip(req.getNote().trim(), 1000));
+            expect.put("note", TextClip.raw(req.getNote().trim(), 1000));
         }
         expect.put("from_run_id", run.getId());
         expect.put("from_result_id", result.getId());
@@ -277,10 +278,4 @@ public class EvalBadCaseAppService {
         return raw == null || raw.isBlank() ? null : raw.trim();
     }
 
-    private static String clip(String raw, int max) {
-        if (raw == null) {
-            return null;
-        }
-        return raw.length() <= max ? raw : raw.substring(0, max);
-    }
 }

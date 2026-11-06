@@ -1,5 +1,6 @@
 package com.agenthub.eval.domain.service;
 
+import com.agenthub.common.text.TextClip;
 import com.agenthub.eval.domain.model.AssertionResult;
 import com.agenthub.eval.domain.model.EvalArtifact;
 import com.agenthub.eval.domain.model.RuleScoreResult;
@@ -161,7 +162,7 @@ public final class RuleScorer {
         return AssertionResult.of(type, blocking, ok,
                 ok ? (expectContain ? "终答包含期望子串" : "终答未包含禁止子串")
                         : (expectContain ? "终答未包含期望子串" : "终答包含了禁止子串"),
-                text, clip(answer, 120));
+                text, TextClip.raw(answer, 120));
     }
 
     private static AssertionResult finalRegex(EvalArtifact art, JsonNode args, boolean blocking) {
@@ -174,7 +175,7 @@ public final class RuleScorer {
             String answer = nullToEmpty(art.getFinalAnswer());
             boolean ok = compiled.matcher(answer).find();
             return AssertionResult.of("final_regex", blocking, ok,
-                    ok ? "终答匹配正则" : "终答不匹配正则", pattern, clip(answer, 120));
+                    ok ? "终答匹配正则" : "终答不匹配正则", pattern, TextClip.raw(answer, 120));
         } catch (PatternSyntaxException ex) {
             return AssertionResult.of("final_regex", blocking, false, "非法正则：" + ex.getDescription(),
                     pattern, null);
@@ -202,7 +203,7 @@ public final class RuleScorer {
             root = json.readTree(answer);
         } catch (Exception ex) {
             return AssertionResult.of("json_path_equals", blocking, false, "终答不是合法 JSON",
-                    path, clip(answer, 80));
+                    path, TextClip.raw(answer, 80));
         }
         JsonNode actual = walkPath(root, path);
         if (actual == null || actual.isMissingNode()) {
@@ -556,10 +557,4 @@ public final class RuleScorer {
         return raw == null ? "" : raw;
     }
 
-    private static String clip(String raw, int max) {
-        if (raw == null) {
-            return null;
-        }
-        return raw.length() <= max ? raw : raw.substring(0, max);
-    }
 }

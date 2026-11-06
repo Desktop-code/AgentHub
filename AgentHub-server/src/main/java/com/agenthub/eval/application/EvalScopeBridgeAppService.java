@@ -2,6 +2,7 @@ package com.agenthub.eval.application;
 
 import com.agenthub.common.error.BizException;
 import com.agenthub.common.error.ErrorCode;
+import com.agenthub.common.text.TextClip;
 import com.agenthub.eval.api.dto.EvalScopeExportReq;
 import com.agenthub.eval.api.dto.EvalScopeExportResp;
 import com.agenthub.eval.domain.model.EvalResult;
@@ -171,10 +172,10 @@ public class EvalScopeBridgeAppService {
             // 仅导出终答摘要；不拷贝工具实参/密钥类字段
             String finalAnswer = extractFinalAnswer(one.getArtifactSummaryJson());
             if (finalAnswer != null) {
-                row.put("final_answer", clip(finalAnswer, 4000));
+                row.put("final_answer", TextClip.raw(finalAnswer, 4000));
             }
             if (one.getErrorMessage() != null && !one.getErrorMessage().isBlank()) {
-                row.put("error_message", clip(maskSecrets(one.getErrorMessage()), 512));
+                row.put("error_message", TextClip.raw(maskSecrets(one.getErrorMessage()), 512));
             }
         }
         return root;
@@ -244,12 +245,6 @@ public class EvalScopeBridgeAppService {
         return tertiary;
     }
 
-    private static String clip(String raw, int max) {
-        if (raw == null) {
-            return null;
-        }
-        return raw.length() <= max ? raw : raw.substring(0, max);
-    }
 
     /**
      * 极简脱敏：掩码常见密钥字段字面量，避免导出物泄漏。

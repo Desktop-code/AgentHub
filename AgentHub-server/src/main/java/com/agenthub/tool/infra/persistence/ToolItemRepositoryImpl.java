@@ -1,6 +1,8 @@
 package com.agenthub.tool.infra.persistence;
 
+import com.agenthub.common.api.PageQuery;
 import com.agenthub.common.api.PageResult;
+import com.agenthub.common.text.LikeText;
 import com.agenthub.tool.domain.model.ItemQuery;
 import com.agenthub.tool.domain.model.ToolItem;
 import com.agenthub.tool.domain.repository.ToolItemRepository;
@@ -36,8 +38,8 @@ public class ToolItemRepositoryImpl implements ToolItemRepository {
      */
     @Override
     public PageResult<ToolItem> page(ItemQuery query) {
-        long current = Math.max(query.getCurrent(), 1);
-        long size = Math.min(Math.max(query.getSize(), 1), 100);
+        long current = PageQuery.clampCurrent(query.getCurrent());
+        long size = PageQuery.clampSize(query.getSize());
         if (query.getSourceIds() != null && query.getSourceIds().isEmpty()) {
             return PageResult.of(0, current, size, List.of());
         }
@@ -52,7 +54,7 @@ public class ToolItemRepositoryImpl implements ToolItemRepository {
         if (query.getStatus() != null) {
             wrapper.eq(ToolItemEntity::getStatus, query.getStatus());
         }
-        String keyword = likeText(query.getKeyword());
+        String keyword = LikeText.contains(query.getKeyword());
         if (keyword != null) {
             wrapper.and(one -> one.like(ToolItemEntity::getName, keyword)
                     .or()
@@ -174,15 +176,6 @@ public class ToolItemRepositoryImpl implements ToolItemRepository {
         mapper.delete(new LambdaQueryWrapper<ToolItemEntity>().eq(ToolItemEntity::getSourceId, sourceId));
     }
 
-    /**
-     * MySQL 默认用反斜杠转义 LIKE。去掉用户输入里的通配符含义。
-     */
-    private String likeText(String raw) {
-        if (raw == null || raw.isBlank()) {
-            return null;
-        }
-        return raw.trim().replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_");
-    }
 
     private ToolItem toDomain(ToolItemEntity entity) {
         ToolItem item = new ToolItem();

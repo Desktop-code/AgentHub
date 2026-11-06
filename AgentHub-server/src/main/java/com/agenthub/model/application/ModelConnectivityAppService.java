@@ -10,13 +10,13 @@ import com.agenthub.model.domain.model.ModelInstance;
 import com.agenthub.model.domain.model.ModelProtocol;
 import com.agenthub.model.domain.model.ModelProvider;
 import com.agenthub.model.domain.repository.ModelInstanceRepository;
+import com.agenthub.model.domain.service.ModelCredentialResolver;
 import com.agenthub.model.domain.service.ModelPurposeMatrix;
 import com.agenthub.model.domain.service.ModelReferencePolicy;
 import com.agenthub.model.domain.service.PurposeRoute;
 import com.agenthub.model.infra.adapter.ModelClientFactory;
 import com.agenthub.model.infra.adapter.ProbeCommand;
 import com.agenthub.model.infra.adapter.ProbeResult;
-import com.agenthub.spi.crypto.SecretContexts;
 import com.agenthub.spi.crypto.SecretStore;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.stereotype.Service;
@@ -116,7 +116,8 @@ public class ModelConnectivityAppService {
      */
     private String decrypt(ModelCredential credential) {
         try {
-            return secretStore.decrypt(credential.getApiKeyCipher(), SecretContexts.modelCredential(credential.getProviderId()));
+            return ModelCredentialResolver.decryptKey(secretStore, credential.getApiKeyCipher(),
+                    credential.getProviderId());
         } catch (RuntimeException ex) {
             throw new BizException(ErrorCode.BAD_REQUEST, "凭证无法解密，请重置 Key");
         }

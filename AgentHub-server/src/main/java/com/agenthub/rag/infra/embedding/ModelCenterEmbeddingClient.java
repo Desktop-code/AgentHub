@@ -1,11 +1,12 @@
 package com.agenthub.rag.infra.embedding;
 
+import com.agenthub.common.text.SecretBrief;
 import com.agenthub.model.domain.model.ModelInstance;
 import com.agenthub.model.domain.model.ModelProvider;
 import com.agenthub.model.domain.repository.ModelInstanceRepository;
 import com.agenthub.model.domain.repository.ModelProviderRepository;
 import com.agenthub.model.domain.repository.ModelCredentialRepository;
-import com.agenthub.spi.crypto.SecretContexts;
+import com.agenthub.model.domain.service.ModelCredentialResolver;
 import com.agenthub.spi.crypto.SecretStore;
 import com.agenthub.spi.rag.EmbeddingClient;
 import com.agenthub.spi.rag.EmbeddingException;
@@ -330,7 +331,7 @@ public class ModelCenterEmbeddingClient implements EmbeddingClient {
             throw new EmbeddingException("Embedding 模型的凭证未配置 Key");
         }
         try {
-            return secretStore.decrypt(cipher, SecretContexts.modelCredential(instance.getProviderId()));
+            return ModelCredentialResolver.decryptKey(secretStore, cipher, instance.getProviderId());
         } catch (RuntimeException e) {
             // 不把 e.getMessage() 直接抛给前端：里面可能含密文片段
             log.warn("[RAG] 解密 Embedding 凭证失败 instanceId={}", instance.getId());
@@ -355,16 +356,9 @@ public class ModelCenterEmbeddingClient implements EmbeddingClient {
     }
 
     /**
-     * 失败说明截断并抹掉 Key，只用于 error_msg 与日志。
+     * 失败说明截断并抹掉 Key，只用于 error_msg 与日志。实现见 {@link SecretBrief#brief}.
      */
     private static String brief(String body, String apiKey) {
-        if (body == null || body.isBlank()) {
-            return "";
-        }
-        String text = body.replace('\n', ' ').replace('\r', ' ').trim();
-        if (apiKey != null && !apiKey.isBlank()) {
-            text = text.replace(apiKey, "***");
-        }
-        return text.length() > 180 ? text.substring(0, 180) : text;
+        return SecretBrief.brief(body, apiKey);
     }
 }

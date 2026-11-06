@@ -9,6 +9,7 @@ import com.agenthub.admin.infra.persistence.entity.SysAppAgentEntity;
 import com.agenthub.admin.infra.persistence.entity.SysAppEntity;
 import com.agenthub.admin.infra.persistence.mapper.AppAgentMapper;
 import com.agenthub.admin.infra.persistence.mapper.AppMapper;
+import com.agenthub.common.api.PageQuery;
 import com.agenthub.common.api.PageResult;
 import com.baomidou.mybatisplus.core.conditions.query.LambdaQueryWrapper;
 import com.baomidou.mybatisplus.core.conditions.update.LambdaUpdateWrapper;
@@ -44,8 +45,8 @@ public class AppRepositoryImpl implements AppRepository {
     /** {@inheritDoc} */
     @Override
     public PageResult<App> page(AppQuery query, DataScopeSpec scope) {
-        long current = Math.max(query.getCurrent(), 1);
-        long size = Math.min(Math.max(query.getSize(), 1), 100);
+        long current = PageQuery.clampCurrent(query.getCurrent());
+        long size = PageQuery.clampSize(query.getSize());
         IPage<SysAppEntity> page = appMapper.selectPageByScope(new Page<>(current, size), query.getName(), query.getStatus(), scope);
         List<App> records = new ArrayList<>();
         for (SysAppEntity entity : page.getRecords()) {

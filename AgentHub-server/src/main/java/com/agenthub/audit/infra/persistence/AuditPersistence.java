@@ -14,6 +14,7 @@ import com.agenthub.audit.infra.persistence.entity.SysLoginLogEntity;
 import com.agenthub.audit.infra.persistence.entity.SysOperLogEntity;
 import com.agenthub.audit.infra.persistence.mapper.LoginLogMapper;
 import com.agenthub.audit.infra.persistence.mapper.OperLogMapper;
+import com.agenthub.common.api.PageQuery;
 import com.agenthub.common.api.PageResult;
 import com.agenthub.common.web.OperatorContext;
 import com.baomidou.mybatisplus.core.conditions.query.LambdaQueryWrapper;
@@ -69,8 +70,8 @@ public final class AuditPersistence {
         /** {@inheritDoc} */
         @Override
         public PageResult<LoginLog> page(LoginLogQuery query) {
-            long current = Math.max(query.getCurrent(), 1);
-            long size = Math.min(Math.max(query.getSize(), 1), 100);
+            long current = PageQuery.clampCurrent(query.getCurrent());
+            long size = PageQuery.clampSize(query.getSize());
             LambdaQueryWrapper<SysLoginLogEntity> wrapper = new LambdaQueryWrapper<SysLoginLogEntity>()
                     .like(query.getUsername() != null && !query.getUsername().isBlank(), SysLoginLogEntity::getUsername, query.getUsername())
                     .eq(query.getSuccess() != null, SysLoginLogEntity::getSuccess, query.getSuccess())
@@ -134,8 +135,8 @@ public final class AuditPersistence {
         /** {@inheritDoc} */
         @Override
         public PageResult<OperLog> page(OperLogQuery query) {
-            long current = Math.max(query.getCurrent(), 1);
-            long size = Math.min(Math.max(query.getSize(), 1), 100);
+            long current = PageQuery.clampCurrent(query.getCurrent());
+            long size = PageQuery.clampSize(query.getSize());
             LambdaQueryWrapper<SysOperLogEntity> wrapper = new LambdaQueryWrapper<SysOperLogEntity>()
                     .eq(query.getModule() != null && !query.getModule().isBlank(), SysOperLogEntity::getModule, query.getModule())
                     .like(query.getUsername() != null && !query.getUsername().isBlank(), SysOperLogEntity::getUsername, query.getUsername())

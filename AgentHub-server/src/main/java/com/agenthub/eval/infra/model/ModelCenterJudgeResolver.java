@@ -9,7 +9,7 @@ import com.agenthub.model.domain.model.ModelProvider;
 import com.agenthub.model.domain.repository.ModelCredentialRepository;
 import com.agenthub.model.domain.repository.ModelInstanceRepository;
 import com.agenthub.model.domain.repository.ModelProviderRepository;
-import com.agenthub.spi.crypto.SecretContexts;
+import com.agenthub.model.domain.service.ModelCredentialResolver;
 import com.agenthub.spi.crypto.SecretStore;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.stereotype.Component;
@@ -94,7 +94,7 @@ public class ModelCenterJudgeResolver implements JudgeModelResolver {
         }
         try {
             // AAD 绑定供应商：密文被搬走就解不开，因此必须用凭证自己的 providerId
-            String plain = secretStore.decrypt(cipher, SecretContexts.modelCredential(credential.getProviderId()));
+            String plain = ModelCredentialResolver.decryptKey(secretStore, cipher, credential.getProviderId());
             if (plain == null || plain.isBlank()) {
                 throw new JudgeModelUnavailableException("打分模型的凭证解密结果为空：" + instance.getId());
             }

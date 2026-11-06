@@ -1,5 +1,6 @@
 package com.agenthub.memory.infra.persistence;
 
+import com.agenthub.common.api.PageQuery;
 import com.agenthub.common.api.PageResult;
 import com.agenthub.memory.domain.model.MemoryItem;
 import com.agenthub.memory.domain.model.MemoryQuery;
@@ -36,8 +37,8 @@ public class MemoryItemRepositoryImpl implements MemoryItemRepository {
      */
     @Override
     public PageResult<MemoryItem> page(MemoryQuery query) {
-        long current = Math.max(query.getCurrent(), 1);
-        long size = Math.min(Math.max(query.getSize(), 1), 100);
+        long current = PageQuery.clampCurrent(query.getCurrent());
+        long size = PageQuery.clampSize(query.getSize());
         String life = query.getLifeStatus() == null ? "" : query.getLifeStatus().trim().toUpperCase();
 
         // 已删除行被 TableLogic 默认滤掉，必须用显式 deleted=1 的分页 SQL

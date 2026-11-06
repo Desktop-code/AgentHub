@@ -1,6 +1,8 @@
 package com.agenthub.skill.infra.persistence;
 
+import com.agenthub.common.api.PageQuery;
 import com.agenthub.common.api.PageResult;
+import com.agenthub.common.text.LikeText;
 import com.agenthub.skill.domain.enums.SkillPublishStatus;
 import com.agenthub.skill.domain.model.SkillDef;
 import com.agenthub.skill.domain.model.SkillQuery;
@@ -50,14 +52,14 @@ public class SkillDefRepositoryImpl implements SkillDefRepository {
      */
     @Override
     public PageResult<SkillDef> page(SkillQuery query) {
-        long current = Math.max(query.getCurrent(), 1);
-        long size = Math.min(Math.max(query.getSize(), 1), 100);
+        long current = PageQuery.clampCurrent(query.getCurrent());
+        long size = PageQuery.clampSize(query.getSize());
         LambdaQueryWrapper<SkillDefEntity> wrapper = profileSelect()
                 .orderByDesc(SkillDefEntity::getId);
         if (query.getStatus() != null) {
             wrapper.eq(SkillDefEntity::getStatus, query.getStatus());
         }
-        String keyword = likeText(query.getKeyword());
+        String keyword = LikeText.contains(query.getKeyword());
         if (keyword != null) {
             wrapper.and(one -> one.like(SkillDefEntity::getName, keyword)
                     .or()
@@ -180,15 +182,6 @@ public class SkillDefRepositoryImpl implements SkillDefRepository {
                         SkillDefEntity::getUpdatedBy, SkillDefEntity::getUpdateTime);
     }
 
-    /**
-     * MySQL 默认用反斜杠转义 LIKE。去掉用户输入里的通配符含义。
-     */
-    private String likeText(String raw) {
-        if (raw == null || raw.isBlank()) {
-            return null;
-        }
-        return raw.trim().replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_");
-    }
 
     /**
      * 单条补齐生效版正文与版本摘要。

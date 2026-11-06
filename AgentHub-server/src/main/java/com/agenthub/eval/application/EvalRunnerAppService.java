@@ -6,6 +6,7 @@ import com.agenthub.agent.domain.repository.AgentDefRepository;
 import com.agenthub.audit.domain.OperLogWriter;
 import com.agenthub.common.error.BizException;
 import com.agenthub.common.error.ErrorCode;
+import com.agenthub.common.text.TextClip;
 import com.agenthub.common.web.OperatorContext;
 import com.agenthub.eval.api.dto.EvalRunResp;
 import com.agenthub.eval.domain.model.EvalArtifact;
@@ -236,7 +237,7 @@ public class EvalRunnerAppService {
 
     private EvalRunResp failBeforeStart(EvalRun run, Long operatorId, String message) {
         EvalRunStateMachine.moveTo(run, EvalRunStatus.FAILED);
-        run.setErrorMessage(clip(message, 1024));
+        run.setErrorMessage(TextClip.trimmed(message, 1024));
         run.setGatePassed(null);
         runs.updateState(run, operatorId);
         attachReport(run, results.listByRun(run.getId()), operatorId);
@@ -252,9 +253,9 @@ public class EvalRunnerAppService {
             EvalArtifact artifact = trialPort.runCase(request);
             applyArtifact(stub, artifact, caseRow, config, started);
         } catch (BizException ex) {
-            markTrialError(stub, clip(ex.getMessage(), 1024));
+            markTrialError(stub, TextClip.trimmed(ex.getMessage(), 1024));
         } catch (RuntimeException ex) {
-            markTrialError(stub, clip("试跑异常：" + ex.getClass().getSimpleName(), 1024));
+            markTrialError(stub, TextClip.trimmed("试跑异常：" + ex.getClass().getSimpleName(), 1024));
             log.warn("评测 case 抛错 run={} case={}：{}", run.getId(), stub.getCaseKey(), ex.toString());
         }
         results.updateOutcome(stub);
@@ -295,7 +296,7 @@ public class EvalRunnerAppService {
         stub.setLatencyMs(artifact.getLatencyMs());
         stub.setCacheHit(Boolean.TRUE.equals(artifact.getCacheHit()) ? 1 : 0);
         stub.setArtifactSummaryJson(writeArtifactJson(artifact));
-        stub.setErrorMessage(clip(artifact.getErrorSummary(), 1024));
+        stub.setErrorMessage(TextClip.trimmed(artifact.getErrorSummary(), 1024));
 
         String status = artifact.getStatus() == null ? "" : artifact.getStatus().trim().toUpperCase();
         if (!RunStatus.SUCCESS.name().equals(status)) {
@@ -379,7 +380,7 @@ public class EvalRunnerAppService {
         OpenJudgeStatus status = oj.getStatus() == null ? OpenJudgeStatus.ERROR : oj.getStatus();
         stub.setOpenjudgeStatus(status.name());
         // 第二道闸：即使 Adapter 漏抹，落库前再按 Key 脱敏
-        stub.setOpenjudgeRawJson(clip(OpenJudgeScorerAdapter.redact(oj.getRawJson(), judge.getApiKey()),
+        stub.setOpenjudgeRawJson(TextClip.trimmed(OpenJudgeScorerAdapter.redact(oj.getRawJson(), judge.getApiKey()),
                 OpenJudgeScorerAdapter.RAW_MAX_CHARS));
 
         ObjectNode ojNode = scoresRoot.putObject("openjudge");
@@ -642,11 +643,4 @@ public class EvalRunnerAppService {
         return run;
     }
 
-    private static String clip(String raw, int max) {
-        if (raw == null) {
-            return null;
-        }
-        String text = raw.trim();
-        return text.length() <= max ? text : text.substring(0, max);
-    }
 }

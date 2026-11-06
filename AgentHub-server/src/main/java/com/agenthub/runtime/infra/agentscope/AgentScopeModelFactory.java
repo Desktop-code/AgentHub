@@ -9,6 +9,7 @@ import com.agenthub.model.domain.model.ModelProvider;
 import com.agenthub.model.domain.repository.ModelCredentialRepository;
 import com.agenthub.model.domain.repository.ModelInstanceRepository;
 import com.agenthub.model.domain.repository.ModelProviderRepository;
+import com.agenthub.model.domain.service.ModelCredentialResolver;
 import com.agenthub.model.domain.service.ModelTemperaturePolicy;
 import com.agenthub.runtime.domain.service.CauseDigest;
 import com.agenthub.runtime.domain.service.LimitHitReasons;
@@ -16,7 +17,6 @@ import com.agenthub.runtime.domain.service.TrialFailure;
 import com.agenthub.runtime.domain.service.VisionMaxTokens;
 import com.agenthub.runtime.model.acl.impl.AdapterEndpointConfig;
 import com.agenthub.runtime.model.acl.impl.ModelAdapterFactory;
-import com.agenthub.spi.crypto.SecretContexts;
 import com.agenthub.spi.crypto.SecretStore;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import io.agentscope.core.model.Model;
@@ -248,8 +248,8 @@ public class AgentScopeModelFactory {
      */
     private String decrypt(ModelCredential credential) {
         try {
-            return secretStore.decrypt(credential.getApiKeyCipher(),
-                    SecretContexts.modelCredential(credential.getProviderId()));
+            return ModelCredentialResolver.decryptKey(secretStore, credential.getApiKeyCipher(),
+                    credential.getProviderId());
         } catch (RuntimeException ex) {
             // 只记异常类型与脱敏 cause：绝不打印密文或解密后的 Key
             log.warn("模型凭证解密失败 credentialId={} type={} cause={}",

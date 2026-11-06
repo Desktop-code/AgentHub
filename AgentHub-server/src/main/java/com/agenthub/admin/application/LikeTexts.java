@@ -1,11 +1,16 @@
 package com.agenthub.admin.application;
 
+import com.agenthub.common.text.LikeText;
+
 /**
- * 把用户输入收成安全的 LIKE 片段。所属域：admin。
- * MySQL 默认把 \ 当转义符，这里去掉 % 和 _ 的通配含义。
+ * admin 域的 LIKE 片段入口。所属域：admin。
+ *
+ * <p>实现已收敛到 {@link LikeText}（common 域），本类只保留原方法签名供 admin 既有调用点使用；
+ * 新代码请直接用 {@code LikeText.contains}。
  */
 public final class LikeTexts {
 
+    /** 工具类禁止实例化。 */
     private LikeTexts() {
     }
 
@@ -14,9 +19,6 @@ public final class LikeTexts {
      * @return 可放进 LIKE 的文本；不需要筛选时返回 null
      */
     public static String contains(String raw) {
-        if (raw == null || raw.isBlank()) {
-            return null;
-        }
-        return raw.trim().replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_");
+        return LikeText.contains(raw);
     }
 }

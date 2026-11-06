@@ -1,6 +1,8 @@
 package com.agenthub.eval.infra.persistence;
 
+import com.agenthub.common.api.PageQuery;
 import com.agenthub.common.api.PageResult;
+import com.agenthub.common.text.LikeText;
 import com.agenthub.eval.domain.model.EvalSuite;
 import com.agenthub.eval.domain.model.EvalSuiteQuery;
 import com.agenthub.eval.domain.repository.EvalSuiteRepository;
@@ -34,8 +36,8 @@ public class EvalSuiteRepositoryImpl implements EvalSuiteRepository {
     /** {@inheritDoc} */
     @Override
     public PageResult<EvalSuite> page(EvalSuiteQuery query) {
-        long current = Math.max(query.getCurrent(), 1);
-        long size = Math.min(Math.max(query.getSize(), 1), 100);
+        long current = PageQuery.clampCurrent(query.getCurrent());
+        long size = PageQuery.clampSize(query.getSize());
         LambdaQueryWrapper<EvalSuiteEntity> wrapper = new LambdaQueryWrapper<>();
         // 只读样例与本租户数据并集；两者都在同一条 WHERE 里，避免两次查询合并后再排序
         if (query.isIncludePlatform()) {
@@ -45,7 +47,7 @@ public class EvalSuiteRepositoryImpl implements EvalSuiteRepository {
         } else {
             wrapper.eq(EvalSuiteEntity::getTenantId, query.getTenantId());
         }
-        String keyword = likeText(query.getKeyword());
+        String keyword = LikeText.contains(query.getKeyword());
         if (keyword != null) {
             wrapper.and(one -> one.like(EvalSuiteEntity::getSuiteKey, keyword)
                     .or()
@@ -135,15 +137,6 @@ public class EvalSuiteRepositoryImpl implements EvalSuiteRepository {
         return touched;
     }
 
-    /**
-     * MySQL 默认反斜杠转义 LIKE；这里抹掉用户输入里的通配符含义。
-     */
-    private String likeText(String raw) {
-        if (raw == null || raw.isBlank()) {
-            return null;
-        }
-        return raw.trim().replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_");
-    }
 
     private EvalSuite toDomain(EvalSuiteEntity entity) {
         EvalSuite suite = new EvalSuite();

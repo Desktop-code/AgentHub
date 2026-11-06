@@ -1,5 +1,6 @@
 package com.agenthub.prompt.infra.persistence;
 
+import com.agenthub.common.api.PageQuery;
 import com.agenthub.common.api.PageResult;
 import com.agenthub.prompt.domain.enums.PromptPublishStatus;
 import com.agenthub.prompt.domain.model.PromptTemplate;
@@ -34,8 +35,8 @@ public class PromptTemplateRepositoryImpl implements PromptTemplateRepository {
     /** {@inheritDoc} */
     @Override
     public PageResult<PromptTemplate> page(PromptTemplateQuery query) {
-        long current = Math.max(query.getCurrent(), 1);
-        long size = Math.min(Math.max(query.getSize(), 1), 100);
+        long current = PageQuery.clampCurrent(query.getCurrent());
+        long size = PageQuery.clampSize(query.getSize());
         LambdaQueryWrapper<PromptTemplateEntity> wrapper = new LambdaQueryWrapper<PromptTemplateEntity>()
                 .orderByDesc(PromptTemplateEntity::getId);
         if (query.getPurpose() != null && !query.getPurpose().isBlank()) {

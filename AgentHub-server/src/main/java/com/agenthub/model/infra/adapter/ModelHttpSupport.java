@@ -1,5 +1,6 @@
 package com.agenthub.model.infra.adapter;
 
+import com.agenthub.common.text.SecretBrief;
 import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import org.springframework.stereotype.Component;
@@ -164,19 +165,9 @@ public class ModelHttpSupport {
     }
 
     /**
-     * 失败说明最多 180 字，并抹掉本次使用的 Key。不记录完整响应。
+     * 失败说明最多 180 字，并抹掉本次使用的 Key。不记录完整响应。实现见 {@link SecretBrief#brief}.
      */
     private String brief(String body, String apiKey) {
-        if (body == null || body.isBlank()) {
-            return "";
-        }
-        String text = body.replace('\n', ' ').replace('\r', ' ').trim();
-        if (apiKey != null && !apiKey.isBlank()) {
-            text = text.replace(apiKey, "***");
-        }
-        if (text.length() > 180) {
-            text = text.substring(0, 180);
-        }
-        return text;
+        return SecretBrief.brief(body, apiKey);
     }
 }

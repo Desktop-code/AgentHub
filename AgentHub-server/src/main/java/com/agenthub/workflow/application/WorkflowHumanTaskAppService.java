@@ -4,6 +4,7 @@ import cn.dev33.satoken.stp.StpUtil;
 import com.agenthub.audit.domain.OperLogWriter;
 import com.agenthub.common.error.BizException;
 import com.agenthub.common.error.ErrorCode;
+import com.agenthub.common.text.TextClip;
 import com.agenthub.common.web.OperatorContext;
 import com.agenthub.workflow.api.dto.WorkflowHumanTaskItemResp;
 import com.agenthub.workflow.domain.enums.HumanTaskStatus;
@@ -531,7 +532,13 @@ public class WorkflowHumanTaskAppService {
         return builder.toString();
     }
 
+    /**
+     * 人工任务备注摘要：500 字上限，null 保持 null。实现见 {@link TextClip#raw(String, int)}。
+     *
+     * @param text 备注原文（可空）
+     * @return 不超过 500 字的原文前缀
+     */
     private String truncate(String text) {
-        return text == null || text.length() <= 500 ? text : text.substring(0, 500);
+        return TextClip.raw(text, 500);
     }
 }

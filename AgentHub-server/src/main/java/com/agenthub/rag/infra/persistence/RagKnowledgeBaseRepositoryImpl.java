@@ -1,6 +1,8 @@
 package com.agenthub.rag.infra.persistence;
 
+import com.agenthub.common.api.PageQuery;
 import com.agenthub.common.api.PageResult;
+import com.agenthub.common.text.LikeText;
 import com.agenthub.rag.domain.model.RagKbQuery;
 import com.agenthub.rag.domain.model.RagKnowledgeBase;
 import com.agenthub.rag.domain.repository.RagKnowledgeBaseRepository;
@@ -36,8 +38,8 @@ public class RagKnowledgeBaseRepositoryImpl implements RagKnowledgeBaseRepositor
      */
     @Override
     public PageResult<RagKnowledgeBase> page(RagKbQuery query) {
-        long current = Math.max(query.getCurrent(), 1);
-        long size = Math.min(Math.max(query.getSize(), 1), 100);
+        long current = PageQuery.clampCurrent(query.getCurrent());
+        long size = PageQuery.clampSize(query.getSize());
         LambdaQueryWrapper<RagKnowledgeBaseEntity> wrapper = new LambdaQueryWrapper<RagKnowledgeBaseEntity>()
                 .orderByDesc(RagKnowledgeBaseEntity::getId);
         if (StringUtils.hasText(query.getStatus())) {
@@ -46,7 +48,7 @@ public class RagKnowledgeBaseRepositoryImpl implements RagKnowledgeBaseRepositor
         if (StringUtils.hasText(query.getVisibility())) {
             wrapper.eq(RagKnowledgeBaseEntity::getVisibility, query.getVisibility().trim().toUpperCase());
         }
-        String keyword = likeText(query.getKeyword());
+        String keyword = LikeText.contains(query.getKeyword());
         if (keyword != null) {
             wrapper.and(one -> one.like(RagKnowledgeBaseEntity::getName, keyword)
                     .or()
@@ -144,15 +146,6 @@ public class RagKnowledgeBaseRepositoryImpl implements RagKnowledgeBaseRepositor
         mapper.deleteById(id);
     }
 
-    /**
-     * 转义 LIKE 通配符：用户输入里的 % / _ 按字面匹配。
-     */
-    private String likeText(String raw) {
-        if (raw == null || raw.isBlank()) {
-            return null;
-        }
-        return raw.trim().replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_");
-    }
 
     private RagKnowledgeBase toDomain(RagKnowledgeBaseEntity entity) {
         RagKnowledgeBase kb = new RagKnowledgeBase();

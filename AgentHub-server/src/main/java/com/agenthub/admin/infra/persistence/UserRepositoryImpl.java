@@ -9,6 +9,7 @@ import com.agenthub.admin.infra.persistence.entity.SysUserRoleEntity;
 import com.agenthub.admin.infra.persistence.entity.UserRoleRow;
 import com.agenthub.admin.infra.persistence.mapper.UserMapper;
 import com.agenthub.admin.infra.persistence.mapper.UserRoleMapper;
+import com.agenthub.common.api.PageQuery;
 import com.agenthub.common.api.PageResult;
 import com.agenthub.common.web.OperatorContext;
 import com.baomidou.mybatisplus.core.conditions.query.LambdaQueryWrapper;
@@ -75,8 +76,8 @@ public class UserRepositoryImpl implements UserRepository {
     /** {@inheritDoc} */
     @Override
     public PageResult<User> page(UserQuery query, DataScopeSpec scope) {
-        long current = Math.max(query.getCurrent(), 1);
-        long size = Math.min(Math.max(query.getSize(), 1), 100);
+        long current = PageQuery.clampCurrent(query.getCurrent());
+        long size = PageQuery.clampSize(query.getSize());
         IPage<SysUserEntity> page = userMapper.selectPageByScope(
                 new Page<>(current, size), query.getUsername(), query.getStatus(), query.getDeptId(), scope);
         List<User> records = new ArrayList<>();

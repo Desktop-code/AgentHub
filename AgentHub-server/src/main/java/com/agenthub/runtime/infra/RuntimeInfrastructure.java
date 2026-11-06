@@ -1,7 +1,7 @@
 package com.agenthub.runtime.infra;
 
 import com.agenthub.runtime.infra.agentscope.RequiredArgProperties;
-import com.agenthub.runtime.infra.agentscope.RuntimeLimitsProperties;
+import com.agenthub.common.config.RuntimeLimitsProperties;
 import com.agenthub.runtime.infra.agentscope.TrialProperties;
 import com.agenthub.runtime.model.acl.impl.ModelAdapterFactory;
 import com.fasterxml.jackson.databind.ObjectMapper;
