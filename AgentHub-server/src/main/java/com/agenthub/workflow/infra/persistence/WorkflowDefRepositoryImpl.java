@@ -1,6 +1,8 @@
 package com.agenthub.workflow.infra.persistence;
 
+import com.agenthub.common.api.PageQuery;
 import com.agenthub.common.api.PageResult;
+import com.agenthub.common.text.LikeText;
 import com.agenthub.workflow.domain.model.WorkflowDef;
 import com.agenthub.workflow.domain.model.WorkflowDefQuery;
 import com.agenthub.workflow.domain.repository.WorkflowDefRepository;
@@ -35,15 +37,15 @@ public class WorkflowDefRepositoryImpl implements WorkflowDefRepository {
     /** {@inheritDoc} */
     @Override
     public PageResult<WorkflowDef> page(WorkflowDefQuery query) {
-        long current = Math.max(query.getCurrent(), 1);
-        long size = Math.min(Math.max(query.getSize(), 1), 100);
+        long current = PageQuery.clampCurrent(query.getCurrent());
+        long size = PageQuery.clampSize(query.getSize());
         LambdaQueryWrapper<WorkflowDefEntity> wrapper = new LambdaQueryWrapper<WorkflowDefEntity>()
                 .eq(WorkflowDefEntity::getTenantId, query.getTenantId())
                 .orderByDesc(WorkflowDefEntity::getId);
         if (query.getStatus() != null && !query.getStatus().isBlank()) {
             wrapper.eq(WorkflowDefEntity::getStatus, query.getStatus().trim());
         }
-        String keyword = likeText(query.getKeyword());
+        String keyword = LikeText.contains(query.getKeyword());
         if (keyword != null) {
             // 关键词同时扫 code 与中文名，方便运营检索
             wrapper.and(one -> one.like(WorkflowDefEntity::getCode, keyword)
@@ -134,15 +136,6 @@ public class WorkflowDefRepositoryImpl implements WorkflowDefRepository {
                 .set(WorkflowDefEntity::getUpdateTime, LocalDateTime.now()));
     }
 
-    /**
-     * MySQL 默认反斜杠转义 LIKE；这里抹掉用户输入里的通配符含义。
-     */
-    private String likeText(String raw) {
-        if (raw == null || raw.isBlank()) {
-            return null;
-        }
-        return raw.trim().replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_");
-    }
 
     private WorkflowDef toDomain(WorkflowDefEntity entity) {
         WorkflowDef def = new WorkflowDef();

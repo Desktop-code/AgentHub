@@ -1,5 +1,6 @@
 package com.agenthub.eval.infra.evalscope;
 
+import com.agenthub.common.text.TextClip;
 import com.agenthub.eval.domain.model.EvalScopeBridgeResult;
 import com.agenthub.eval.domain.model.EvalScopeExportRequest;
 import com.agenthub.eval.domain.model.EvalScopeStatus;
@@ -62,7 +63,7 @@ public class EvalScopeBridgeAdapter implements EvalScopeBridgePort {
         } catch (Exception ex) {
             log.warn("EvalScope 导出失败 run={}：{}", request.getRunId(), ex.toString());
             return EvalScopeBridgeResult.of(EvalScopeStatus.ERROR,
-                    clip("导出失败：" + ex.getClass().getSimpleName(), 512));
+                    TextClip.raw("导出失败：" + ex.getClass().getSimpleName(), 512));
         }
     }
 
@@ -86,11 +87,11 @@ public class EvalScopeBridgeAdapter implements EvalScopeBridgePort {
             return EvalScopeBridgeResult.okJob(jobId, "已创建外部任务");
         } catch (EvalScopeHttpException ex) {
             log.info("EvalScope 触发失败 run={}：{}", request.getRunId(), ex.getMessage());
-            return EvalScopeBridgeResult.of(EvalScopeStatus.ERROR, clip(ex.getMessage(), 512));
+            return EvalScopeBridgeResult.of(EvalScopeStatus.ERROR, TextClip.raw(ex.getMessage(), 512));
         } catch (RuntimeException ex) {
             log.warn("EvalScope 触发未预期异常 run={}：{}", request.getRunId(), ex.toString());
             return EvalScopeBridgeResult.of(EvalScopeStatus.ERROR,
-                    clip("EvalScope 异常：" + ex.getClass().getSimpleName(), 512));
+                    TextClip.raw("EvalScope 异常：" + ex.getClass().getSimpleName(), 512));
         }
     }
 
@@ -126,10 +127,4 @@ public class EvalScopeBridgeAdapter implements EvalScopeBridgePort {
         return null;
     }
 
-    private static String clip(String raw, int max) {
-        if (raw == null) {
-            return null;
-        }
-        return raw.length() <= max ? raw : raw.substring(0, max);
-    }
 }

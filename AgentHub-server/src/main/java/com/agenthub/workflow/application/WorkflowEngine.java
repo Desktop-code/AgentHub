@@ -2,6 +2,7 @@ package com.agenthub.workflow.application;
 
 import com.agenthub.common.error.BizException;
 import com.agenthub.common.error.ErrorCode;
+import com.agenthub.common.text.TextClip;
 import com.agenthub.workflow.domain.WorkflowNodeFailure;
 import com.agenthub.workflow.domain.enums.HumanTimeoutPolicy;
 import com.agenthub.workflow.domain.enums.WorkflowEdgeType;
@@ -782,11 +783,14 @@ public class WorkflowEngine {
                 + "，等待人工 " + waiting + "，共 " + rowByNode.size() + " 个";
     }
 
+    /**
+     * 节点错误摘要：500 字上限，null 保持 null。实现见 {@link TextClip#raw(String, int)}。
+     *
+     * @param text 原始原因（可能为空）
+     * @return 不超过 500 字的原文前缀
+     */
     private String truncate(String text) {
-        if (text == null) {
-            return null;
-        }
-        return text.length() <= 500 ? text : text.substring(0, 500);
+        return TextClip.raw(text, 500);
     }
 
     private String safe(String text) {

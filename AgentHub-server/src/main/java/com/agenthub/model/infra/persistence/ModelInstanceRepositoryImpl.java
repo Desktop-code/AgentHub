@@ -1,6 +1,8 @@
 package com.agenthub.model.infra.persistence;
 
+import com.agenthub.common.api.PageQuery;
 import com.agenthub.common.api.PageResult;
+import com.agenthub.common.text.LikeText;
 import com.agenthub.model.domain.model.InstanceQuery;
 import com.agenthub.model.domain.model.ModelInstance;
 import com.agenthub.model.domain.repository.ModelInstanceRepository;
@@ -34,8 +36,8 @@ public class ModelInstanceRepositoryImpl implements ModelInstanceRepository {
     /** {@inheritDoc} */
     @Override
     public PageResult<ModelInstance> page(InstanceQuery query) {
-        long current = Math.max(query.getCurrent(), 1);
-        long size = Math.min(Math.max(query.getSize(), 1), 100);
+        long current = PageQuery.clampCurrent(query.getCurrent());
+        long size = PageQuery.clampSize(query.getSize());
         LambdaQueryWrapper<ModelInstanceEntity> wrapper = new LambdaQueryWrapper<ModelInstanceEntity>()
                 .orderByDesc(ModelInstanceEntity::getId);
         if (query.getProviderId() != null) {
@@ -47,7 +49,7 @@ public class ModelInstanceRepositoryImpl implements ModelInstanceRepository {
         } else if (query.getCapability() != null && !query.getCapability().isBlank()) {
             wrapper.eq(ModelInstanceEntity::getCapability, query.getCapability());
         }
-        String keyword = likeText(query.getKeyword());
+        String keyword = LikeText.contains(query.getKeyword());
         if (keyword != null) {
             wrapper.and(one -> one.like(ModelInstanceEntity::getDisplayName, keyword)
                     .or()
@@ -185,15 +187,6 @@ public class ModelInstanceRepositoryImpl implements ModelInstanceRepository {
         return total == null ? 0 : total.intValue();
     }
 
-    /**
-     * MySQL 默认用反斜杠转义 LIKE。去掉用户输入里的通配符含义。
-     */
-    private String likeText(String raw) {
-        if (raw == null || raw.isBlank()) {
-            return null;
-        }
-        return raw.trim().replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_");
-    }
 
     private ModelInstance toDomain(ModelInstanceEntity entity) {
         ModelInstance instance = new ModelInstance();

@@ -1,5 +1,6 @@
 package com.agenthub.workflow.infra.persistence;
 
+import com.agenthub.common.api.PageQuery;
 import com.agenthub.workflow.domain.model.WorkflowRun;
 import com.agenthub.workflow.domain.repository.WorkflowRunRepository;
 import com.agenthub.workflow.infra.persistence.entity.WorkflowRunEntity;
@@ -104,7 +105,7 @@ public class WorkflowRunRepositoryImpl implements WorkflowRunRepository {
     /** {@inheritDoc} */
     @Override
     public List<WorkflowRun> listByWorkflowId(Long workflowId, int limit) {
-        int size = Math.min(Math.max(limit, 1), 50);
+        int size = (int) PageQuery.clampSize(limit, 50);
         return mapper.selectList(new LambdaQueryWrapper<WorkflowRunEntity>()
                         .eq(WorkflowRunEntity::getWorkflowId, workflowId)
                         .orderByDesc(WorkflowRunEntity::getId)
@@ -118,7 +119,7 @@ public class WorkflowRunRepositoryImpl implements WorkflowRunRepository {
     @Override
     public List<Long> recentIdsByWorkflowId(Long workflowId, int limit) {
         // 只查 id 列：obs 按定义过滤 trace 时不需要 graph_json 等大字段
-        int size = Math.min(Math.max(limit, 1), 500);
+        int size = (int) PageQuery.clampSize(limit, 500);
         return mapper.selectList(new LambdaQueryWrapper<WorkflowRunEntity>()
                         .select(WorkflowRunEntity::getId)
                         .eq(WorkflowRunEntity::getWorkflowId, workflowId)

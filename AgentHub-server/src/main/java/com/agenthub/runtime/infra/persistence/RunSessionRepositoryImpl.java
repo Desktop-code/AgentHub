@@ -1,5 +1,6 @@
 package com.agenthub.runtime.infra.persistence;
 
+import com.agenthub.common.api.PageQuery;
 import com.agenthub.common.api.PageResult;
 import com.agenthub.runtime.domain.model.RunSession;
 import com.agenthub.runtime.domain.model.RunStatus;
@@ -36,8 +37,8 @@ public class RunSessionRepositoryImpl implements RunSessionRepository {
     /** {@inheritDoc} */
     @Override
     public PageResult<RunSession> page(SessionQuery query) {
-        long current = Math.max(query.getCurrent(), 1);
-        long size = Math.min(Math.max(query.getSize(), 1), 100);
+        long current = PageQuery.clampCurrent(query.getCurrent());
+        long size = PageQuery.clampSize(query.getSize());
         // 近期会话按开始时间倒序。id 只作同一秒内的次序
         LambdaQueryWrapper<RunSessionEntity> wrapper = new LambdaQueryWrapper<RunSessionEntity>()
                 .orderByDesc(RunSessionEntity::getStartTime)

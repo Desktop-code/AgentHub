@@ -12,6 +12,7 @@ import com.agenthub.admin.infra.persistence.mapper.RoleDeptMapper;
 import com.agenthub.admin.infra.persistence.mapper.RoleMapper;
 import com.agenthub.admin.infra.persistence.mapper.RoleMenuMapper;
 import com.agenthub.admin.infra.persistence.mapper.UserRoleMapper;
+import com.agenthub.common.api.PageQuery;
 import com.agenthub.common.api.PageResult;
 import com.agenthub.common.web.OperatorContext;
 import com.baomidou.mybatisplus.core.conditions.query.LambdaQueryWrapper;
@@ -69,8 +70,8 @@ public class RoleRepositoryImpl implements RoleRepository {
     /** {@inheritDoc} */
     @Override
     public PageResult<Role> page(RoleQuery query) {
-        long current = Math.max(query.getCurrent(), 1);
-        long size = Math.min(Math.max(query.getSize(), 1), 100);
+        long current = PageQuery.clampCurrent(query.getCurrent());
+        long size = PageQuery.clampSize(query.getSize());
         LambdaQueryWrapper<SysRoleEntity> wrapper = new LambdaQueryWrapper<SysRoleEntity>()
                 .like(query.getCode() != null && !query.getCode().isBlank(), SysRoleEntity::getCode, query.getCode())
                 .like(query.getName() != null && !query.getName().isBlank(), SysRoleEntity::getName, query.getName())

@@ -4,6 +4,7 @@ import com.agenthub.billing.domain.model.PriceRule;
 import com.agenthub.billing.domain.repository.PriceRuleRepository;
 import com.agenthub.billing.infra.persistence.entity.PriceRuleEntity;
 import com.agenthub.billing.infra.persistence.mapper.PriceRuleMapper;
+import com.agenthub.common.api.PageQuery;
 import com.agenthub.common.api.PageResult;
 import com.baomidou.mybatisplus.core.conditions.query.LambdaQueryWrapper;
 import com.baomidou.mybatisplus.core.conditions.update.LambdaUpdateWrapper;
@@ -34,7 +35,7 @@ public class PriceRuleRepositoryImpl implements PriceRuleRepository {
     @Override
     public PageResult<PriceRule> page(long current, long size) {
         IPage<PriceRuleEntity> page = mapper.selectPage(
-                new Page<>(Math.max(current, 1), Math.min(Math.max(size, 1), 100)),
+                new Page<>(PageQuery.clampCurrent(current), PageQuery.clampSize(size)),
                 new LambdaQueryWrapper<PriceRuleEntity>().orderByDesc(PriceRuleEntity::getId));
         return PageResult.of(page.getTotal(), page.getCurrent(), page.getSize(),
                 page.getRecords().stream().map(this::toDomain).toList());

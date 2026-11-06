@@ -1,5 +1,6 @@
 package com.agenthub.rag.infra.persistence;
 
+import com.agenthub.common.api.PageQuery;
 import com.agenthub.common.api.PageResult;
 import com.agenthub.rag.domain.model.RagDocument;
 import com.agenthub.rag.domain.repository.RagDocumentRepository;
@@ -31,8 +32,8 @@ public class RagDocumentRepositoryImpl implements RagDocumentRepository {
     /** {@inheritDoc} */
     @Override
     public PageResult<RagDocument> page(Long kbId, String keyword, long current, long size) {
-        long pageCurrent = Math.max(current, 1);
-        long pageSize = Math.min(Math.max(size, 1), 100);
+        long pageCurrent = PageQuery.clampCurrent(current);
+        long pageSize = PageQuery.clampSize(size);
         LambdaQueryWrapper<RagDocumentEntity> wrapper = new LambdaQueryWrapper<RagDocumentEntity>()
                 .eq(RagDocumentEntity::getKbId, kbId)
                 // 关键字只做标题模糊匹配：正文在 rag_chunk 里，跨表搜索不属于列表查询的职责

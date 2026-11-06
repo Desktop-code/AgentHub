@@ -1,5 +1,6 @@
 package com.agenthub.tool.infra.mcp;
 
+import com.agenthub.common.text.TextClip;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ObjectNode;
@@ -115,7 +116,7 @@ final class McpJson {
             throw new McpCallException("MCP 调用返回空结果");
         }
         if (result.path("isError").asBoolean(false)) {
-            throw new McpCallException(clip(textContent(result), 200));
+            throw new McpCallException(TextClip.raw(textContent(result), 200));
         }
         String text = textContent(result);
         if (text != null && !text.isBlank()) {
@@ -193,7 +194,7 @@ final class McpJson {
     static JsonNode unwrap(JsonNode node) {
         if (node.hasNonNull("error")) {
             String msg = node.get("error").path("message").asText("MCP 返回错误");
-            throw new McpCallException(clip(msg, 200));
+            throw new McpCallException(TextClip.raw(msg, 200));
         }
         JsonNode result = node.get("result");
         if (result == null || result.isNull()) {
@@ -222,7 +223,7 @@ final class McpJson {
             if (title == null && row.has("annotations")) {
                 title = text(row.get("annotations").get("title"));
             }
-            list.add(new McpToolView(name, clip(title, TITLE_MAX), clip(text(row.get("description")), DESC_MAX), schema(json, row.get("inputSchema"))));
+            list.add(new McpToolView(name, TextClip.raw(title, TITLE_MAX), TextClip.raw(text(row.get("description")), DESC_MAX), schema(json, row.get("inputSchema"))));
         }
         return list;
     }
@@ -253,10 +254,4 @@ final class McpJson {
         return value == null || value.isBlank() ? null : value;
     }
 
-    private static String clip(String value, int max) {
-        if (value == null || value.length() <= max) {
-            return value;
-        }
-        return value.substring(0, max);
-    }
 }

@@ -1,5 +1,6 @@
 package com.agenthub.obs.infra.persistence;
 
+import com.agenthub.common.api.PageQuery;
 import com.agenthub.common.api.PageResult;
 import com.agenthub.obs.domain.model.ObsChannel;
 import com.agenthub.obs.domain.model.ObsStatus;
@@ -155,8 +156,8 @@ public class ObsTraceRepositoryImpl implements ObsTraceRepository {
     /** {@inheritDoc} */
     @Override
     public PageResult<ObsTrace> page(ObsTraceQuery query) {
-        long current = Math.max(query.getCurrent(), 1);
-        long size = Math.min(Math.max(query.getSize(), 1), 100);
+        long current = PageQuery.clampCurrent(query.getCurrent());
+        long size = PageQuery.clampSize(query.getSize());
         LambdaQueryWrapper<ObsTraceEntity> wrapper = new LambdaQueryWrapper<ObsTraceEntity>()
                 .orderByDesc(ObsTraceEntity::getStartTime)
                 .orderByDesc(ObsTraceEntity::getId);

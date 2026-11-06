@@ -1,5 +1,6 @@
 package com.agenthub.eval.infra.openjudge;
 
+import com.agenthub.common.text.TextClip;
 import com.agenthub.eval.domain.model.EvalArtifact;
 import com.agenthub.eval.domain.model.OpenJudgeJudge;
 import com.agenthub.eval.domain.model.OpenJudgeRequest;
@@ -65,13 +66,13 @@ public class OpenJudgeScorerAdapter implements OpenJudgeScorerPort {
             // 5xx / 超时 / 协议错误一律 ERROR；连接类在 health 已拦，evaluate 阶段仍可能掉线
             // 错误体来自 sidecar 原文，先抹 Key 再落 reason / rawJson（防 sidecar 回显请求体）
             String maskedMessage = redact(ex.getMessage(), mask(request));
-            OpenJudgeScoreResult result = OpenJudgeScoreResult.of(status, clip(maskedMessage, 512));
-            result.setRawJson(clip(redact(ex.getRawBody(), mask(request)), RAW_MAX_CHARS));
+            OpenJudgeScoreResult result = OpenJudgeScoreResult.of(status, TextClip.raw(maskedMessage, 512));
+            result.setRawJson(TextClip.raw(redact(ex.getRawBody(), mask(request)), RAW_MAX_CHARS));
             log.info("OpenJudge 评分失败 case={}：{}", request.getCaseKey(), maskedMessage);
             return result;
         } catch (RuntimeException ex) {
             OpenJudgeScoreResult result = OpenJudgeScoreResult.of(OpenJudgeStatus.ERROR,
-                    clip("OpenJudge 异常：" + ex.getClass().getSimpleName(), 512));
+                    TextClip.raw("OpenJudge 异常：" + ex.getClass().getSimpleName(), 512));
             log.warn("OpenJudge 未预期异常 case={}：{}", request.getCaseKey(), ex.getClass().getSimpleName());
             return result;
         }
@@ -192,7 +193,7 @@ public class OpenJudgeScorerAdapter implements OpenJudgeScorerPort {
             result.setScore(body.get("score").asDouble());
         }
         if (body.has("reason") && body.get("reason").isTextual()) {
-            result.setReason(clip(redact(body.get("reason").asText(), apiKey), 512));
+            result.setReason(TextClip.raw(redact(body.get("reason").asText(), apiKey), 512));
         } else {
             result.setReason("OpenJudge 评分成功");
         }
@@ -203,14 +204,8 @@ public class OpenJudgeScorerAdapter implements OpenJudgeScorerPort {
             meta.set("graders", body.get("graders"));
             result.setMetadata(meta);
         }
-        result.setRawJson(clip(redact(response.getRaw(), apiKey), RAW_MAX_CHARS));
+        result.setRawJson(TextClip.raw(redact(response.getRaw(), apiKey), RAW_MAX_CHARS));
         return result;
     }
 
-    private static String clip(String raw, int max) {
-        if (raw == null) {
-            return null;
-        }
-        return raw.length() <= max ? raw : raw.substring(0, max);
-    }
 }

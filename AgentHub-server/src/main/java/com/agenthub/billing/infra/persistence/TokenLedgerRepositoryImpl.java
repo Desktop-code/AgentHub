@@ -5,6 +5,7 @@ import com.agenthub.billing.domain.model.TokenLedger;
 import com.agenthub.billing.domain.repository.TokenLedgerRepository;
 import com.agenthub.billing.infra.persistence.entity.TokenLedgerEntity;
 import com.agenthub.billing.infra.persistence.mapper.TokenLedgerMapper;
+import com.agenthub.common.api.PageQuery;
 import com.agenthub.common.api.PageResult;
 import com.baomidou.mybatisplus.core.conditions.query.LambdaQueryWrapper;
 import com.baomidou.mybatisplus.core.metadata.IPage;
@@ -124,10 +125,10 @@ public class TokenLedgerRepositoryImpl implements TokenLedgerRepository {
     }
 
     private long page(long current) {
-        return Math.max(current, 1);
+        return PageQuery.clampCurrent(current);
     }
 
     private long size(long size) {
-        return Math.min(Math.max(size, 1), 100);
+        return PageQuery.clampSize(size);
     }
 }

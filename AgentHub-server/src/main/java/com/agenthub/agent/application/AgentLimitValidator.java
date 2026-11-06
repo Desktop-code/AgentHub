@@ -3,7 +3,7 @@ package com.agenthub.agent.application;
 import com.agenthub.agent.domain.model.AgentDef;
 import com.agenthub.common.error.BizException;
 import com.agenthub.common.error.ErrorCode;
-import com.agenthub.runtime.infra.agentscope.RuntimeLimitsProperties;
+import com.agenthub.common.config.RuntimeLimitsProperties;
 import org.springframework.stereotype.Component;
 
 /**

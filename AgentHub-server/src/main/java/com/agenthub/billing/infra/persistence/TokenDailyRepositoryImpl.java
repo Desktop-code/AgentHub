@@ -6,6 +6,7 @@ import com.agenthub.billing.domain.model.TokenDaily;
 import com.agenthub.billing.domain.repository.TokenDailyRepository;
 import com.agenthub.billing.infra.persistence.entity.TokenDailyEntity;
 import com.agenthub.billing.infra.persistence.mapper.TokenDailyMapper;
+import com.agenthub.common.api.PageQuery;
 import com.agenthub.common.api.PageResult;
 import com.baomidou.mybatisplus.core.conditions.query.LambdaQueryWrapper;
 import com.baomidou.mybatisplus.core.conditions.update.LambdaUpdateWrapper;
@@ -54,7 +55,7 @@ public class TokenDailyRepositoryImpl implements TokenDailyRepository {
             wrapper.eq(TokenDailyEntity::getChannel, query.getChannel());
         }
         IPage<TokenDailyEntity> page = mapper.selectPage(
-                new Page<>(Math.max(query.getCurrent(), 1), Math.min(Math.max(query.getSize(), 1), 100)), wrapper);
+                new Page<>(PageQuery.clampCurrent(query.getCurrent()), PageQuery.clampSize(query.getSize())), wrapper);
         return PageResult.of(page.getTotal(), page.getCurrent(), page.getSize(),
                 page.getRecords().stream().map(this::toDomain).toList());
     }

@@ -1,12 +1,17 @@
-package com.agenthub.runtime.infra.agentscope;
+package com.agenthub.common.config;
 
 import lombok.Getter;
 import lombok.Setter;
 import org.springframework.boot.context.properties.ConfigurationProperties;
 
 /**
- * 平台运行限制硬顶与默认。所属域：runtime。
+ * 平台运行限制硬顶与默认。所属域：common（配置类，无业务逻辑）。
  * 对应 agenthub.runtime.limits；Agent 可空覆盖，生效取 min(Agent或默认, max)。
+ * <p>
+ * 位置说明：本类只被 agent（校验 Agent 覆盖值）与 runtime（解析生效值）读取。
+ * 放在 common/config 是为了让 agent 不再依赖 runtime.infra，消除包级双向依赖；
+ * 前缀与 YAML 键 {@code agenthub.runtime.limits} 保持不变，仍由 RuntimeInfrastructure 的
+ * {@code @EnableConfigurationProperties} 注册。
  */
 @Getter
 @Setter

@@ -17,7 +17,6 @@ import com.agenthub.obs.domain.model.SpanType;
 import com.agenthub.obs.domain.service.ObsAttrs;
 import com.agenthub.runtime.domain.model.ChildPlanPendingView;
 import com.agenthub.runtime.domain.model.EventType;
-import com.agenthub.runtime.domain.model.GeneratedFile;
 import com.agenthub.runtime.domain.model.MaRunSpec;
 import com.agenthub.runtime.domain.model.MeterScope;
 import com.agenthub.runtime.domain.model.PendingPlan;
@@ -28,13 +27,11 @@ import com.agenthub.runtime.domain.model.RunSession;
 import com.agenthub.runtime.domain.model.RunStatus;
 import com.agenthub.runtime.domain.model.TitleSource;
 import com.agenthub.runtime.domain.model.TrialPlan;
-import com.agenthub.runtime.domain.model.TrialTrace;
 import com.agenthub.runtime.domain.model.TrialTurn;
 import com.agenthub.runtime.domain.repository.RunEventRepository;
 import com.agenthub.runtime.domain.repository.RunSessionRepository;
 import com.agenthub.runtime.domain.service.CauseDigest;
 import com.agenthub.runtime.domain.service.PlanJson;
-import com.agenthub.runtime.domain.service.GeneratedFileMarker;
 import com.agenthub.runtime.domain.service.PromptInjectionHolder;
 import com.agenthub.runtime.domain.service.SessionTitleTexts;
 import com.agenthub.runtime.domain.service.TrialFailure;
@@ -44,7 +41,6 @@ import com.agenthub.runtime.domain.service.TrialProgress;
 import com.agenthub.runtime.domain.service.TrialTexts;
 import com.agenthub.runtime.domain.service.VisionOcrTexts;
 import com.agenthub.runtime.infra.agentscope.ReActTrialExecutor;
-import com.agenthub.runtime.infra.agentscope.ToolResultClipper;
 import com.agenthub.runtime.infra.agentscope.VisionOcrExecutor;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -75,6 +71,8 @@ public class TrialRunAppService {
     private final PlanPendingRegistry pendingPlans;
     private final ChildPlanApprovalRegistry childApprovals;
     private final TrialEventWriter writer;
+    /** 本轮结果摊平成时间线事件（计划帧 / Router 分段 / 思考与工具 / 文件 / 助手答复） */
+    private final TrialTimelineWriter timeline;
     private final TrialFlight flight;
     private final OperatorContext operatorContext;
     private final OperLogWriter operLogWriter;
@@ -127,6 +125,7 @@ public class TrialRunAppService {
         this.pendingPlans = pendingPlans;
         this.childApprovals = childApprovals;
         this.writer = writer;
+        this.timeline = new TrialTimelineWriter(writer);
         this.flight = flight;
         this.operatorContext = operatorContext;
         this.operLogWriter = operLogWriter;
@@ -558,9 +557,9 @@ public class TrialRunAppService {
             RouterTrialExecutor.RoutedTurn routed = router.execute(root, spec, query, modelUser, userId,
                     session.getId(), progress);
             // 按子分段落库：决策块 + 每子「路由到」+ 该子 traces，禁止拼成单条时间线
-            seq = appendRouterSegments(session.getId(), seq, routed, written);
+            seq = timeline.appendRouterSegments(session.getId(), seq, routed, written);
             seq = appendNotices(session.getId(), seq, routed.notices(), written);
-            written.add(assistant(session.getId(), seq, routed.turn()));
+            written.add(timeline.assistant(session.getId(), seq, routed.turn()));
             if (agent != null) {
                 memory.afterAssistant(session, routed.turn().getAssistantText());
             }
@@ -596,8 +595,8 @@ public class TrialRunAppService {
                 agentOk.setAttrsJson(ObsAttrs.withBrief(null, "执行 Agent"));
                 trace.close(agentSpan, agentOk);
             }
-            seq = appendTraces(session.getId(), seq, turn, written);
-            written.add(assistant(session.getId(), seq, turn));
+            seq = timeline.appendTraces(session.getId(), seq, turn, written);
+            written.add(timeline.assistant(session.getId(), seq, turn));
             memory.afterAssistant(session, turn.getAssistantText());
             return turn;
         } catch (RuntimeException ex) {
@@ -688,10 +687,10 @@ public class TrialRunAppService {
             // 规划失败也要把已产生的帧写掉，否则时间线上看不到「为什么没有计划」
             log.warn("计划阶段失败 sessionId={} type={} cause={}",
                     session.getId(), ex.getClass().getSimpleName(), CauseDigest.of(ex), ex);
-            appendPlanFrames(session.getId(), seq, recorder.drain(), written);
+            timeline.appendPlanFrames(session.getId(), seq, recorder.drain(), written);
             throw ex;
         }
-        seq = appendPlanFrames(session.getId(), seq, recorder.drain(), written);
+        seq = timeline.appendPlanFrames(session.getId(), seq, recorder.drain(), written);
         seq = appendNotices(session.getId(), seq, planned.plan().getNotices(), written);
 
         PendingPlan pending = new PendingPlan(planned.planId(), session.getId(), agent.getId(), session.getUserId(),
@@ -729,137 +728,18 @@ public class TrialRunAppService {
             // 失败也要落计划/步骤帧：时间线要能看出「执行到第几步、失败在哪」
             log.warn("计划执行阶段失败 sessionId={} type={} cause={}",
                     session.getId(), ex.getClass().getSimpleName(), CauseDigest.of(ex), ex);
-            appendPlanFrames(session.getId(), seq, recorder.drain(), written);
+            timeline.appendPlanFrames(session.getId(), seq, recorder.drain(), written);
             throw ex;
         }
-        seq = appendPlanFrames(session.getId(), seq, recorder.drain(), written);
+        seq = timeline.appendPlanFrames(session.getId(), seq, recorder.drain(), written);
         // 计划模式的思考/工具已由 recorder 按发生顺序逐条登记并随帧落库，
         // 这里不能再走 appendTraces：那是整轮合并后的快照，再写一遍会重复，
         // 且会把所有步骤的推理堆到全部步骤之后，破坏「第 N 步 → 该步思考」的顺序。
-        written.add(assistant(session.getId(), seq, executed.turn()));
+        written.add(timeline.assistant(session.getId(), seq, executed.turn()));
         memory.afterAssistant(session, executed.turn().getAssistantText());
         return executed.turn();
     }
 
-    /**
-     * 把收集到的时间线帧写成事件。PLAN / STEP 带结构化 JSON 正文，前端按 planId / seq 还原结构；
-     * REASONING / TOOL 是计划阶段与各步内部的思考与工具，按发生顺序落在对应位置。
-     *
-     * @param frames 按发生顺序的帧
-     * @return 推进后的下一条序号
-     */
-    private int appendPlanFrames(Long sessionId, int seq, List<PlanProgressRecorder.Frame> frames,
-                                 List<RunEvent> written) {
-        if (frames == null) {
-            return seq;
-        }
-        for (PlanProgressRecorder.Frame frame : frames) {
-            written.add(writer.append(sessionId, seq++, frame.type(), frame.summary(), frame.content(), null, null));
-        }
-        return seq;
-    }
-
-    /**
-     * Router 思考按子分段落库：可选决策块 → 每子一条 ROUTE → 该子 reasoning/tool。
-     * 无 segments 时退回旧的单条 summary + 合并 traces（兼容）。
-     */
-    private int appendRouterSegments(Long sessionId, int seq, RouterTrialExecutor.RoutedTurn routed,
-                                     List<RunEvent> written) {
-        if (routed.decisionBlock() != null && !routed.decisionBlock().isBlank()) {
-            written.add(writer.append(sessionId, seq++, EventType.ROUTE, routed.decisionBlock(), null, null));
-        }
-        List<RouterTrialExecutor.RouteSegment> segments = routed.segments();
-        if (segments == null || segments.isEmpty()) {
-            if (routed.summary() != null && !routed.summary().isBlank()) {
-                written.add(writer.append(sessionId, seq++, EventType.ROUTE, routed.summary(), null, null));
-            }
-            return appendTraces(sessionId, seq, routed.turn(), written);
-        }
-        for (RouterTrialExecutor.RouteSegment segment : segments) {
-            if (segment.routeLine() != null && !segment.routeLine().isBlank()) {
-                written.add(writer.append(sessionId, seq++, EventType.ROUTE, segment.routeLine(), null, null));
-            }
-            if (segment.error() != null && !segment.error().isBlank()) {
-                written.add(writer.append(sessionId, seq++, EventType.SYSTEM,
-                        "子 Agent 失败：" + segment.error(), null, null));
-            }
-            if (segment.turn() != null) {
-                seq = appendTraces(sessionId, seq, segment.turn(), written);
-            }
-        }
-        return seq;
-    }
-
-    /**
-     * 按引擎顺序写思考和工具。空白思考跳过，避免没有中间步时造出假 reasoning。
-     * 工具行带脱敏参数。结果另起一段放正文。没有参数时不补空 JSON。
-     */
-    private int appendTraces(Long sessionId, int seq, TrialTurn turn, List<RunEvent> written) {
-        if (turn.getTraces() == null) {
-            return seq;
-        }
-        for (TrialTrace trace : turn.getTraces()) {
-            if (trace == null || trace.getType() == null) {
-                continue;
-            }
-            if (trace.getType() == EventType.REASONING) {
-                if (trace.getContent() == null || trace.getContent().isBlank()) {
-                    continue;
-                }
-                written.add(writer.append(sessionId, seq++, EventType.REASONING, trace.getContent(), null, null));
-                continue;
-            }
-            if (trace.getType() == EventType.TOOL) {
-                String line = TrialTexts.toolDisplay(trace.getName(), trace.getArguments());
-                if (!trace.isSuccess()) {
-                    line = line + " · 失败";
-                }
-                // 时间线正文与回灌同截并可见截断标记；obs TOOL span 仍用 traces 脱敏全文
-                String result = ToolResultClipper.clipText(trace.getContent(), turn.getToolResultMaxChars());
-                String body = result == null || result.isBlank() ? line : line + "\n\n" + result;
-                written.add(writer.append(sessionId, seq++, EventType.TOOL, line, body, null, null));
-            }
-        }
-        seq = appendFiles(sessionId, seq, turn, written);
-        return seq;
-    }
-
-    /**
-     * 把本轮生成的文件落成 FILE 事件。
-     *
-     * <p>为什么必须落库：产物卡片靠 SSE 实时出现，但事件一旦不落库，
-     * 刷新页面或换设备后这张卡片就消失了——用户在历史会话里找不到自己刚生成的文件。
-     * 正文用结构化 JSON，与 SSE 帧、内存快照共用同一字段形状，前端一套解析即可。
-     *
-     * <p>去重口径与前端一致：同名文件只保留最后一次生成的那条，
-     * 避免同一轮反复写同一路径时时间线上刷出一排重复卡片。
-     *
-     * @param sessionId 会话主键
-     * @param seq       下一条事件序号
-     * @param turn      本轮结果
-     * @param written   本轮已写事件
-     * @return 推进后的下一条序号
-     */
-    private int appendFiles(Long sessionId, int seq, TrialTurn turn, List<RunEvent> written) {
-        if (turn.getFiles() == null || turn.getFiles().isEmpty()) {
-            return seq;
-        }
-        for (GeneratedFile file : turn.getFiles()) {
-            if (file == null || file.fileName() == null || file.fileName().isBlank()) {
-                continue;
-            }
-            String summary = file.fileName() + "（" + file.humanSize() + "）";
-            written.add(writer.append(sessionId, seq++, EventType.FILE, summary,
-                    GeneratedFileMarker.payload(file.fileName(), file.size()), null, null));
-        }
-        return seq;
-    }
-
-    private RunEvent assistant(Long sessionId, int seq, TrialTurn turn) {
-        // 摘要给列表；正文走 content_text，保留 Markdown 换行，不在这里折行
-        return writer.append(sessionId, seq, EventType.ASSISTANT, turn.getAssistantText(),
-                turn.getPromptTokens(), turn.getCompletionTokens());
-    }
 
     private MessageResp succeed(RunSession session, TrialTurn turn, List<RunEvent> written, String userText) {
         return succeed(session, turn, written, userText, true);

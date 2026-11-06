@@ -1,5 +1,6 @@
 package com.agenthub.eval.infra.persistence;
 
+import com.agenthub.common.api.PageQuery;
 import com.agenthub.common.api.PageResult;
 import com.agenthub.eval.domain.model.EvalRun;
 import com.agenthub.eval.domain.model.EvalRunStatus;
@@ -74,8 +75,8 @@ public class EvalRunRepositoryImpl implements EvalRunRepository {
     @Override
     public PageResult<EvalRun> page(long tenantId, Long suiteId, Long agentId, String status,
                                     long current, long size) {
-        long pageNo = Math.max(current, 1);
-        long pageSize = Math.min(Math.max(size, 1), 100);
+        long pageNo = PageQuery.clampCurrent(current);
+        long pageSize = PageQuery.clampSize(size);
         LambdaQueryWrapper<EvalRunEntity> wrapper = new LambdaQueryWrapper<EvalRunEntity>()
                 .eq(EvalRunEntity::getTenantId, tenantId)
                 .eq(suiteId != null, EvalRunEntity::getSuiteId, suiteId)

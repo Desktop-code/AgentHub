@@ -5,7 +5,7 @@ import org.springframework.boot.context.properties.ConfigurationProperties;
 
 /**
  * 试跑落库与历史参数。所属域：runtime。对应 agenthub.runtime.trial。
- * 轮次/超时已收拢到 agenthub.runtime.limits，见 {@link RuntimeLimitsProperties}。
+ * 轮次/超时已收拢到 agenthub.runtime.limits，见 {@link com.agenthub.common.config.RuntimeLimitsProperties}。
  */
 @Data
 @ConfigurationProperties(prefix = "agenthub.runtime.trial")

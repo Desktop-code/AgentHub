@@ -8,7 +8,9 @@ import com.agenthub.agent.infra.persistence.entity.MaCandidateEntity;
 import com.agenthub.agent.infra.persistence.entity.MaDefEntity;
 import com.agenthub.agent.infra.persistence.mapper.MaCandidateMapper;
 import com.agenthub.agent.infra.persistence.mapper.MaDefMapper;
+import com.agenthub.common.api.PageQuery;
 import com.agenthub.common.api.PageResult;
+import com.agenthub.common.text.LikeText;
 import com.baomidou.mybatisplus.core.conditions.query.LambdaQueryWrapper;
 import com.baomidou.mybatisplus.core.conditions.query.QueryWrapper;
 import com.baomidou.mybatisplus.core.conditions.update.LambdaUpdateWrapper;
@@ -46,13 +48,13 @@ public class MaDefRepositoryImpl implements MaDefRepository {
     /** {@inheritDoc} */
     @Override
     public PageResult<MaDef> page(MaDefQuery query) {
-        long current = Math.max(query.getCurrent(), 1);
-        long size = Math.min(Math.max(query.getSize(), 1), 100);
+        long current = PageQuery.clampCurrent(query.getCurrent());
+        long size = PageQuery.clampSize(query.getSize());
         LambdaQueryWrapper<MaDefEntity> wrapper = new LambdaQueryWrapper<MaDefEntity>()
                 .eq(MaDefEntity::getTenantId, query.getTenantId())
                 .orderByDesc(MaDefEntity::getUpdateTime)
                 .orderByDesc(MaDefEntity::getId);
-        String keyword = likeText(query.getKeyword());
+        String keyword = LikeText.contains(query.getKeyword());
         if (keyword != null) {
             // 关键词同时扫 code 与中文名，方便运营检索
             wrapper.and(one -> one.like(MaDefEntity::getCode, keyword)
@@ -234,15 +236,6 @@ public class MaDefRepositoryImpl implements MaDefRepository {
                 .eq(MaCandidateEntity::getMaId, maId));
     }
 
-    /**
-     * MySQL 默认反斜杠转义 LIKE；这里抹掉用户输入里的通配符含义。
-     */
-    private String likeText(String raw) {
-        if (raw == null || raw.isBlank()) {
-            return null;
-        }
-        return raw.trim().replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_");
-    }
 
     private MaDef toDomain(MaDefEntity entity) {
         MaDef def = new MaDef();

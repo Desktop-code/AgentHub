@@ -1,5 +1,6 @@
 package com.agenthub.rag.infra.rerank;
 
+import com.agenthub.common.text.SecretBrief;
 import com.agenthub.model.application.ModelOutboundFactory;
 import com.agenthub.model.domain.model.ModelCapability;
 import com.agenthub.model.domain.model.ModelInstance;
@@ -8,10 +9,10 @@ import com.agenthub.model.domain.model.ModelProvider;
 import com.agenthub.model.domain.repository.ModelCredentialRepository;
 import com.agenthub.model.domain.repository.ModelInstanceRepository;
 import com.agenthub.model.domain.repository.ModelProviderRepository;
+import com.agenthub.model.domain.service.ModelCredentialResolver;
 import com.agenthub.model.domain.service.PurposeIoKind;
 import com.agenthub.model.domain.service.PurposeRoute;
 import com.agenthub.model.infra.adapter.DashScopeTextRerankSupport;
-import com.agenthub.spi.crypto.SecretContexts;
 import com.agenthub.spi.crypto.SecretStore;
 import com.agenthub.spi.rag.RerankClient;
 import com.agenthub.spi.rag.RerankException;
@@ -192,7 +193,7 @@ public class ModelCenterRerankClient implements RerankClient {
             throw new RerankException("Rerank 模型的凭证未配置 Key");
         }
         try {
-            return secretStore.decrypt(cipher, SecretContexts.modelCredential(instance.getProviderId()));
+            return ModelCredentialResolver.decryptKey(secretStore, cipher, instance.getProviderId());
         } catch (RuntimeException e) {
             log.warn("[RAG] 解密 Rerank 凭证失败 instanceId={}", instance.getId());
             throw new RerankException("Rerank 凭证解密失败，请到模型管理重置 Key");
@@ -200,13 +201,7 @@ public class ModelCenterRerankClient implements RerankClient {
     }
 
     private static String brief(String body, String apiKey) {
-        if (body == null || body.isBlank()) {
-            return "";
-        }
-        String text = body.replace('\n', ' ').replace('\r', ' ').trim();
-        if (apiKey != null && !apiKey.isBlank()) {
-            text = text.replace(apiKey, "***");
-        }
-        return text.length() > 180 ? text.substring(0, 180) : text;
+        // 折行 + 抹本次 Key + 截 180，实现见 common 的 SecretBrief（原先三处逐字复制）
+        return SecretBrief.brief(body, apiKey);
     }
 }
