@@ -185,6 +185,25 @@ public class TrialBindingLoader {
     }
 
     /**
+     * 解析语音槽（ASR / TTS）的可用实例。
+     *
+     * <p>只认 Agent 自己那个槽，<b>不做平台默认兜底</b>：
+     * 语音能力是否可用要能由「这个 Agent 绑了什么」一眼看出；
+     * 若悄悄借用平台默认实例，用户在 A 角色下能听、在 B 角色下也能听，
+     * 但配置页却看不出是谁提供的模型，出了问题也无从排查。
+     *
+     * @param agentId Agent
+     * @param purpose ASR 或 TTS；其它用途返回空
+     * @return 可用实例 id；未绑定或凭证不全时为空
+     */
+    public Optional<Long> findSpeechModel(Long agentId, ModelCapability purpose) {
+        if (purpose == null || !purpose.usesSpeech()) {
+            return Optional.empty();
+        }
+        return firstWiredInSlot(agentId, purpose);
+    }
+
+    /**
      * 本轮是否需要视觉预处理，以及所需实例是否就绪。集中在一处判断，
      * 让「前置校验」与「OCR 执行」用同一套口径，避免校验放过了执行又拒。
      *

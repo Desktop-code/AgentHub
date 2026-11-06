@@ -12,6 +12,7 @@ import com.agenthub.common.api.PageResult;
 import com.agenthub.common.error.BizException;
 import com.agenthub.common.error.ErrorCode;
 import com.agenthub.common.web.OperatorContext;
+import com.agenthub.model.domain.model.ModelCapability;
 import com.agenthub.runtime.api.dto.AgentOptionResp;
 import com.agenthub.runtime.api.dto.EventResp;
 import com.agenthub.runtime.api.dto.SessionPageReq;
@@ -106,9 +107,9 @@ public class TrialSessionAppService {
     /**
      * 试跑页下拉。只返回启用中的 Agent，避免再要求 agent:list。
      *
-     * <p>顺带带出「是否已绑定可用 VISION 模型」：前端据此置灰上传按钮。
-     * 逐个 Agent 判定的成本是一次绑定表查询 + 少量实例查询，100 条上限下可以接受；
-     * 比起让用户传完图再被拒，这点开销值得。
+     * <p>顺带带出「是否已绑定可用 VISION / ASR / TTS 模型」：前端据此置灰上传与「说话」按钮、
+     * 并决定朗读走模型还是浏览器。逐个 Agent 判定的成本是一次绑定表查询 + 少量实例查询，
+     * 100 条上限下可以接受；比起让用户传完图或说完话再被拒，这点开销值得。
      *
      * @return 最多 100 条
      */
@@ -124,19 +125,22 @@ public class TrialSessionAppService {
             resp.setCode(agent.getCode());
             resp.setRunMode(agent.getRunMode());
             resp.setVisionEnabled(loader.findVisionModel(agent.getId()).isPresent());
+            // 语音两用途各自独立：只绑识别也能听写，只绑合成也能朗读
+            resp.setAsrEnabled(loader.findSpeechModel(agent.getId(), ModelCapability.ASR).isPresent());
+            resp.setTtsEnabled(loader.findSpeechModel(agent.getId(), ModelCapability.TTS).isPresent());
             return resp;
         }).toList();
     }
 
     /**
-     * 单个 Agent 的多模态能力。抽屉直接按 agentId 打开时用它，
-     * 不必为了一个布尔值把整个下拉列表拉一遍。
+     * 单个 Agent 的多模态 / 语音能力。抽屉直接按 agentId 打开时用它，
+     * 不必为了几个布尔值把整个下拉列表拉一遍。
      *
      * @param agentId Agent
      * @return 能力视图
      * @throws BizException Agent 不存在
      */
-    public AgentOptionResp visionCapability(Long agentId) {
+    public AgentOptionResp capability(Long agentId) {
         AgentDef agent = agents.findById(agentId)
                 .orElseThrow(() -> new BizException(ErrorCode.NOT_FOUND, "Agent 不存在"));
         AgentOptionResp resp = new AgentOptionResp();
@@ -145,6 +149,8 @@ public class TrialSessionAppService {
         resp.setCode(agent.getCode());
         resp.setRunMode(agent.getRunMode());
         resp.setVisionEnabled(loader.findVisionModel(agent.getId()).isPresent());
+        resp.setAsrEnabled(loader.findSpeechModel(agent.getId(), ModelCapability.ASR).isPresent());
+        resp.setTtsEnabled(loader.findSpeechModel(agent.getId(), ModelCapability.TTS).isPresent());
         return resp;
     }
 

@@ -11,6 +11,10 @@ export interface TrialAgent {
   runMode: string
   /** 是否已绑定可用的 VISION 模型。false 时上传图片按钮置灰 */
   visionEnabled?: boolean
+  /** 是否已绑定可用的 ASR（语音识别）模型。false 时「说话」按钮置灰并说明原因 */
+  asrEnabled?: boolean
+  /** 是否已绑定可用的 TTS（语音合成）模型。false 时朗读降级浏览器，不禁用 */
+  ttsEnabled?: boolean
 }
 
 export interface TrialSession {

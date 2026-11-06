@@ -119,7 +119,36 @@
 
           <!-- 4. 终答。永远排在计划卡与步骤之后，不允许插队 -->
           <div v-if="row.flow.answer" class="answer-block">
-            <div class="section-label answer-label">最终回答</div>
+            <div class="answer-head">
+              <div class="section-label answer-label">最终回答</div>
+              <!--
+                只读最终回答：思考过程、工具原文不提供朗读入口。
+                这里只放图标控件（播放 / 暂停 / 停止），不写「朗读」等旁注文字；
+                自动朗读由输入区的喇叭开关负责，这条只是手动播放的最后一条回答。
+              -->
+              <div v-if="row.turn.status !== 'streaming'" class="speak-actions">
+                <el-tooltip :content="speakHintOf(planAnswerKey(row.turn))" placement="top">
+                  <button
+                    type="button"
+                    class="speak-icon"
+                    :class="{ active: isSpeaking(planAnswerKey(row.turn)) }"
+                    :aria-label="speakHintOf(planAnswerKey(row.turn))"
+                    @click="toggleSpeak(planAnswerKey(row.turn), row.flow.answer)"
+                  >
+                    <el-icon :class="{ 'is-loading': isPreparing(planAnswerKey(row.turn)) }">
+                      <Loading v-if="isPreparing(planAnswerKey(row.turn))" />
+                      <VideoPause v-else-if="isPlaying(planAnswerKey(row.turn))" />
+                      <VideoPlay v-else />
+                    </el-icon>
+                  </button>
+                </el-tooltip>
+                <el-tooltip v-if="isSpeaking(planAnswerKey(row.turn))" content="停止朗读" placement="top">
+                  <button type="button" class="speak-icon stop" aria-label="停止朗读" @click="stopSpeech">
+                    <el-icon><Close /></el-icon>
+                  </button>
+                </el-tooltip>
+              </div>
+            </div>
             <div class="md answer" v-html="markdown(row.flow.answer, row.turn.status === 'streaming')" />
             <span v-if="row.turn.status === 'streaming'" class="caret">|</span>
           </div>
@@ -235,7 +264,36 @@
               <pre v-show="isOpen(row.turn, VISION_KEY, false)" class="vision-body">{{ block.text }}</pre>
             </div>
             <div v-else-if="block.kind === 'assistant'" class="answer-block">
-              <div class="section-label answer-label">最终回答</div>
+              <div class="answer-head">
+                <div class="section-label answer-label">最终回答</div>
+                <!-- 同上：完成态才给图标控件，流式中隐藏，避免念到半句 -->
+                <div v-if="row.turn.status !== 'streaming'" class="speak-actions">
+                  <el-tooltip :content="speakHintOf(blockAnswerKey(row.turn, index))" placement="top">
+                    <button
+                      type="button"
+                      class="speak-icon"
+                      :class="{ active: isSpeaking(blockAnswerKey(row.turn, index)) }"
+                      :aria-label="speakHintOf(blockAnswerKey(row.turn, index))"
+                      @click="toggleSpeak(blockAnswerKey(row.turn, index), block.text)"
+                    >
+                      <el-icon :class="{ 'is-loading': isPreparing(blockAnswerKey(row.turn, index)) }">
+                        <Loading v-if="isPreparing(blockAnswerKey(row.turn, index))" />
+                        <VideoPause v-else-if="isPlaying(blockAnswerKey(row.turn, index))" />
+                        <VideoPlay v-else />
+                      </el-icon>
+                    </button>
+                  </el-tooltip>
+                  <el-tooltip
+                    v-if="isSpeaking(blockAnswerKey(row.turn, index))"
+                    content="停止朗读"
+                    placement="top"
+                  >
+                    <button type="button" class="speak-icon stop" aria-label="停止朗读" @click="stopSpeech">
+                      <el-icon><Close /></el-icon>
+                    </button>
+                  </el-tooltip>
+                </div>
+              </div>
               <div class="md answer" v-html="markdown(block.text, row.turn.status === 'streaming')" />
               <span
                 v-if="row.turn.status === 'streaming' && index === lastAssistantIndex(row.turn)"
@@ -280,19 +338,64 @@
       />
       <div class="composer-bar">
         <div class="composer-left">
-          <!-- 未绑定 VISION 模型时置灰并提示原因，避免用户传完图才在发送时被拒 -->
-          <el-tooltip :content="uploadHint" :disabled="canUpload" placement="top">
-            <span class="upload-wrap">
-              <el-button
-                class="upload-btn"
-                size="small"
-                :disabled="!canUpload || sending"
-                @click="pickImages"
-              >
-                <el-icon><Picture /></el-icon>
-                <span>图片</span>
-              </el-button>
-            </span>
+          <!--
+            自动朗读开关（喇叭）。开启后只朗读「之后完成」的最终回答（绑了 TTS 走模型音频，否则浏览器），
+            绝不补读历史记录；关闭不再自动读，且立刻停掉正在朗读的那一条。
+            开/关不用文字标注：开启时实心高亮，关闭时描边，靠形态与颜色一起区分。
+          -->
+          <el-tooltip :content="speakerHint" placement="top">
+            <button
+              type="button"
+              class="voice-icon-btn speaker-btn"
+              :class="{ on: autoSpeak }"
+              :aria-pressed="autoSpeak"
+              :aria-label="autoSpeak ? '关闭自动朗读' : '开启自动朗读'"
+              @click="toggleAutoSpeak"
+            >
+              <el-icon><Headset /></el-icon>
+            </button>
+          </el-tooltip>
+          <!--
+            语音听写：只留图标（时长与状态走 tooltip，不再排一行字）。
+            未绑定 ASR 时按钮保留图标颜色、降透明度并拦住点击，hover 仍说明原因；
+            禁止回退浏览器 Web Speech 识别。
+          -->
+          <el-tooltip :content="recordHint" placement="top">
+            <button
+              type="button"
+              class="voice-icon-btn mic-btn"
+              :class="{ recording: voiceRecording, muted: !canRecord && !voiceRecording && !transcribing }"
+              :aria-disabled="!canRecord && !voiceRecording"
+              :aria-label="voiceRecording ? '结束录音并识别' : '开始语音输入'"
+              @click="toggleRecording"
+            >
+              <el-icon :class="{ 'is-loading': transcribing }">
+                <Loading v-if="transcribing" />
+                <Microphone v-else />
+              </el-icon>
+            </button>
+          </el-tooltip>
+          <!-- 录音中才出现：同样是图标按钮，避免和「说话」并排成一行文字 -->
+          <el-tooltip v-if="voiceRecording" content="取消本次录音" placement="top">
+            <button type="button" class="voice-icon-btn cancel-btn" aria-label="取消本次录音" @click="cancelVoiceRecording">
+              <el-icon><Close /></el-icon>
+            </button>
+          </el-tooltip>
+          <!--
+            上传图片：同样只放图标（不入文字），与语音按钮同一套视觉；
+            未绑 VISION 时保留图标颜色、降透明度并拦住点击，hover 仍说明原因。
+          -->
+          <el-tooltip :content="uploadHint" placement="top">
+            <button
+              type="button"
+              class="voice-icon-btn image-btn"
+              :class="{ muted: !canUploadNow }"
+              :aria-disabled="!canUploadNow"
+              aria-label="上传图片"
+              @click="pickImages"
+            >
+              <el-icon><Picture /></el-icon>
+            </button>
           </el-tooltip>
           <!-- 原生 file input：支持多选，读取后转 data URI 提交给后端做 OCR -->
           <input
@@ -326,9 +429,12 @@
  * 折叠默认展开，仅当用户点过标题才收起；终答出现也不自动收起。
  */
 import { computed, nextTick, reactive, ref, watch } from 'vue'
-import { Picture } from '@element-plus/icons-vue'
+import { Microphone, Picture, Headset, VideoPlay, VideoPause, Loading, Close } from '@element-plus/icons-vue'
 import type { ChatTurn, RouterTraceView } from '@/types/runtime'
 import { ElMessage } from 'element-plus'
+import { transcribeAudio } from '@/api/voice'
+import { useVoiceRecorder } from '@/composables/voiceRecorder'
+import { useSpeechPlayer } from '@/composables/speechPlayer'
 import {
   hasRouterTrace,
   isPlanFlow,
@@ -366,6 +472,18 @@ const props = defineProps<{
    * false 时上传图片按钮置灰并给出 Hover 提示——后端也会拒，但让用户先看到原因体验更好。
    */
   visionEnabled?: boolean
+  /** 当前 Agent id。语音听写 / 合成都要落到具体 Agent 的模型槽；为空时语音入口不可用 */
+  agentId?: number
+  /**
+   * 当前 Agent 是否已绑定可用的 ASR 模型。
+   * false 时「说话」按钮置灰并说明需绑定语音识别模型——听写不做任何浏览器识别回退。
+   */
+  asrEnabled?: boolean
+  /**
+   * 当前 Agent 是否已绑定可用的 TTS 模型。
+   * false 时朗读<b>仍可用</b>：降级浏览器 speechSynthesis，只影响请求路径与提示文案。
+   */
+  ttsEnabled?: boolean
   /**
    * Router 试跑的编排卡数据（obs span 树归纳，只读且仅前端态）。
    * null 表示不展示：非 Router、无追踪权限或还没拿到数据时都由外层传 null。
@@ -468,8 +586,355 @@ const attachments = ref<Attachment[]>([])
 /** 自增 id，仅用于列表 key 与删除定位 */
 let attachmentSeq = 0
 
+/** 语音转写进行中：按钮转圈，避免用户连点重复上传 */
+const transcribing = ref(false)
+
+/** 听写是否可用：必须已绑定 ASR 模型且落到具体 Agent。未绑定时不做任何浏览器识别回退 */
+const canRecord = computed(() => props.asrEnabled === true && !!props.agentId && !props.sending && !transcribing.value)
+
+const {
+  recording: voiceRecording,
+  seconds: voiceSeconds,
+  start: startVoiceRecording,
+  stop: stopVoiceRecording,
+  cancel: cancelVoiceRecording
+} = useVoiceRecorder({
+  // 60 秒与后端 max-audio-bytes（10MB）是同一档量级：正常 webm/opus 远小于 10MB
+  maxSeconds: 60,
+  maxBytes: 10 * 1024 * 1024,
+  onComplete: handleRecorded,
+  onCancel: () => ElMessage.info('已取消录音'),
+  onError: (message) => ElMessage.warning(message)
+})
+
+/** 「说话」按钮的 Hover 说明。图标按钮没有可见文字，状态与原因全部靠它交代 */
+const recordHint = computed(() => {
+  if (!props.agentId) {
+    return '当前会话没有 Agent，无法使用语音输入'
+  }
+  if (props.asrEnabled !== true) {
+    return '未绑定语音识别模型，请前往 Agent 的「模型配置」Tab 绑定 ASR 模型'
+  }
+  if (transcribing.value) {
+    return '正在识别，请稍候'
+  }
+  if (voiceRecording.value) {
+    return `录音中 ${voiceSeconds.value}s，点击结束并识别（不会自动发送）`
+  }
+  return '点击开始录音，再点一次结束并识别（识别后不会自动发送）'
+})
+
+/** 点「说话」：未在录音则开始，录音中则结束并转写。 */
+async function toggleRecording() {
+  if (voiceRecording.value) {
+    stopVoiceRecording()
+    return
+  }
+  if (!canRecord.value) {
+    return
+  }
+  try {
+    await startVoiceRecording()
+  } catch (error) {
+    ElMessage.warning(errorMessage(error, '无法开始录音，请检查麦克风权限'))
+  }
+}
+
+/**
+ * 录音结束 → 调后端识别 → 把文字填进输入框。
+ * 明确不自动发送：用户确认文字后再点发送，避免识别错误直接进入会话。
+ *
+ * @param audio 整段录音
+ */
+async function handleRecorded(audio: Blob) {
+  const agentId = props.agentId
+  if (!agentId) {
+    return
+  }
+  transcribing.value = true
+  try {
+    const recognized = (await transcribeAudio(agentId, audio, recordingFileName(audio))).trim()
+    if (!recognized) {
+      ElMessage.warning('没有识别到内容，请靠近麦克风再说一次')
+      return
+    }
+    // 已有草稿时追加，避免覆盖用户手打的内容
+    text.value = text.value.trim() ? `${text.value.trim()} ${recognized}` : recognized
+  } catch (error) {
+    ElMessage.warning(errorMessage(error, '语音识别失败，请重试'))
+  } finally {
+    transcribing.value = false
+  }
+}
+
+/**
+ * 上传文件名：扩展名决定上游按什么容器解码，必须与录音 MIME 一致。
+ *
+ * @param audio 录音 Blob
+ * @return 带扩展名的文件名
+ */
+function recordingFileName(audio: Blob): string {
+  const type = audio.type.toLowerCase()
+  if (type.includes('wav')) {
+    return 'voice.wav'
+  }
+  if (type.includes('mpeg') || type.includes('mp3')) {
+    return 'voice.mp3'
+  }
+  if (type.includes('mp4') || type.includes('m4a')) {
+    return 'voice.m4a'
+  }
+  if (type.includes('ogg')) {
+    return 'voice.ogg'
+  }
+  return 'voice.webm'
+}
+
+/**
+ * 朗读播放器：同一条回答支持 播放 / 暂停 / 继续 / 停止。
+ * 绑定 TTS 走模型音频；未绑定或合成失败自动降级浏览器朗读。
+ */
+const {
+  activeKey: speakingAnswerKey,
+  state: speechState,
+  toggle: toggleSpeak,
+  stop: stopSpeech
+} = useSpeechPlayer({
+  getAgentId: () => props.agentId,
+  ttsEnabled: () => props.ttsEnabled === true,
+  // 非打断轻提示：合成失败降级、浏览器不支持等，不弹红色报错
+  onNotice: (message) => ElMessage.info(message)
+})
+
+/** 朗读按钮 Hover 说明：未绑定也能读，只是换浏览器引擎 */
+const speakHint = computed(() =>
+  props.ttsEnabled === true ? '使用 Agent 绑定的语音合成模型朗读' : '未绑定语音合成模型，将使用浏览器朗读'
+)
+
+/**
+ * 自动朗读开关（喇叭）。默认关闭：进入页面不会突然出声。
+ * 打开只影响「之后」完成的回答；会话历史与切换会话回放的旧回答一律不读。
+ */
+const autoSpeak = ref(false)
+
+/**
+ * 已经处理过的回答键。只用来防重复朗读，不参与「能不能读」的判断。
+ */
+const autoSpoken = new Set<string>()
+
+/**
+ * 本轮真正在本页跑过（出现过流式/待批准）的助手轮 key。
+ *
+ * <p>自动朗读只认这批轮次：历史回放、切换会话、刷新后续订拿到的旧回答从没在这里流过，
+ * 因此绝不会被自动念出来。这也解决了「打开开关立刻念起历史记录」的问题——
+ * 开关只影响此刻之后完成的回答。
+ */
+const liveTurns = new Set<string>()
+
+/** 喇叭开关的 Hover 说明：把边界讲清楚，避免用户以为打开会补读历史 */
+const speakerHint = computed(() =>
+  autoSpeak.value
+    ? '自动朗读已开启：只朗读之后完成的最终回答，点击关闭并停止当前朗读'
+    : '自动朗读已关闭：点击开启，之后完成的最终回答自动朗读（不会补读历史）'
+)
+
+/**
+ * 打开 / 关闭自动朗读。
+ *
+ * <p>打开不补读任何已有回答：历史记录不是用户此刻想听的内容，
+ * 一开开关就念起来会被当成 bug（也确实打断了用户）。
+ * 关闭时立刻停掉正在读的那一条，不等它读完。
+ */
+function toggleAutoSpeak(): void {
+  autoSpeak.value = !autoSpeak.value
+  if (!autoSpeak.value) {
+    stopSpeech()
+    return
+  }
+  // 打开时给一句反馈：否则用户看到按钮变色却听不到声音，会以为没生效。
+  // 只有确实有回答正在生成时才不说——那条一会自己会读出来。
+  if (!hasStreamingTurn()) {
+    ElMessage.info('自动朗读已开启，之后完成的回答会自动朗读')
+  }
+}
+
+/**
+ * 当前是否有回答正在生成 / 等待批准。用于开关反馈的文案取舍。
+ *
+ * @return true 表示还有一轮在跑
+ */
+function hasStreamingTurn(): boolean {
+  return props.turns.some(
+    (turn) => turn.role === 'assistant' && (turn.status === 'streaming' || turn.planPending === true)
+  )
+}
+
+/**
+ * @param key 回答键
+ * @return 该条是否正在播放/准备中/暂停
+ */
+function isSpeaking(key: string): boolean {
+  return speakingAnswerKey.value === key
+}
+
+/**
+ * @param key 回答键
+ * @return 该条是否还在等模型合成
+ */
+function isPreparing(key: string): boolean {
+  return speakingAnswerKey.value === key && speechState.value === 'preparing'
+}
+
+/**
+ * @param key 回答键
+ * @return 该条是否正在出声（暂停不算）
+ */
+function isPlaying(key: string): boolean {
+  return speakingAnswerKey.value === key && speechState.value === 'playing'
+}
+
+/**
+ * 单条朗读按钮的说明。图标按钮没有可见文字，含义全靠 tooltip 与 aria-label 交代。
+ *
+ * @param key 回答键
+ * @return 中文说明
+ */
+function speakHintOf(key: string): string {
+  if (speakingAnswerKey.value === key) {
+    if (speechState.value === 'preparing') {
+      return '正在合成语音，点击取消'
+    }
+    return speechState.value === 'paused' ? '继续朗读这条回答' : '暂停朗读'
+  }
+  return speakHint.value
+}
+
+/**
+ * 一条「已完成的最终回答」。自动朗读只认这个结构：
+ * 计划流用终答，非计划流用最后一段 assistant 块（与页面渲染口径一致）。
+ */
+interface SpeakTarget {
+  key: string
+  text: string
+}
+
+/**
+ * 取一条助手轮「最终回答」的朗读键与原文。计划流用终答，非计划流用最后一段 assistant 块
+ * （与页面渲染口径一致）；没有正文时返回 null。
+ *
+ * @param turn 助手轮
+ * @return 回答键与原文；无可读内容时为 null
+ */
+function answerOf(turn: ChatTurn): SpeakTarget | null {
+  if (isPlanFlow(turn)) {
+    const answer = turnSections(turn.blocks).answer
+    return answer ? { key: planAnswerKey(turn), text: answer } : null
+  }
+  // 非计划流：一段回答可能被拆成多块，只读最后一段正文，避免一段话被念两遍
+  let last: SpeakTarget | null = null
+  for (let index = 0; index < turn.blocks.length; index += 1) {
+    const block = turn.blocks[index]
+    if (block.kind === 'assistant' && block.text) {
+      last = { key: blockAnswerKey(turn, index), text: block.text }
+    }
+  }
+  return last
+}
+
+/**
+ * 自动朗读的唯一入口：先给「本页真的在跑」的轮次记账，再只读刚完成的那些。
+ *
+ * <p>为什么不用「所有已完成回答」：会话历史、切换会话、刷新后续订回放都会把旧回答塞进
+ * props.turns，按旧口径会在打开开关时把历史念一遍。这里以「曾在本页流式出现过」为闸，
+ * 历史轮从未流过，自然不会被读。
+ *
+ * <p>入册与朗读解耦：开关关闭期间完成的回答也记进 autoSpoken，之后再打开不会补念。
+ */
+function flushAutoSpeak(): void {
+  for (const turn of props.turns) {
+    if (turn.role !== 'assistant') {
+      continue
+    }
+    // 正在生成 / 等待批准：先记账，等它真正结束那一拍再读
+    if (turn.status === 'streaming' || turn.planPending) {
+      liveTurns.add(turn.key)
+      continue
+    }
+    // 历史回放：本页从没见过它流过，不读、也不记账（与开关无关）
+    if (!liveTurns.has(turn.key)) {
+      continue
+    }
+    const target = answerOf(turn)
+    if (!target || autoSpoken.has(target.key)) {
+      continue
+    }
+    autoSpoken.add(target.key)
+    if (!autoSpeak.value) {
+      continue
+    }
+    // 与手动朗读共用同一个播放器：新一条会顶掉上一条，不会叠着念
+    void toggleSpeak(target.key, target.text)
+  }
+}
+
+/**
+ * 自动朗读的触发点：轮次有任何变化就扫一遍。
+ * 只在「回答已结束」时才会命中，因此流式增量不会误读半句。
+ */
+watch(() => props.turns, flushAutoSpeak, { deep: true })
+
+/**
+ * 兜底触发：本轮发送结束（sending 由 true 变 false）后再扫一次。
+ * 有些链路的终态是先改 sending 再回填正文，单靠 turns 深监听会漏掉这一拍。
+ */
+watch(
+  () => props.sending,
+  (now) => {
+    if (!now) {
+      flushAutoSpeak()
+    }
+  }
+)
+
+/** 计划执行的终答键：与块渲染区分，避免两条回答共用同一个播放状态 */
+function planAnswerKey(item: ChatTurn): string {
+  return `plan:${item.key}`
+}
+
+/**
+ * 非计划流程里 assistant 块的朗读键。
+ *
+ * @param item  助手轮
+ * @param index 块序号
+ * @return 唯一键
+ */
+function blockAnswerKey(item: ChatTurn, index: number): string {
+  return `block:${item.key}:${index}`
+}
+
+/**
+ * @param error    捕获到的异常
+ * @param fallback 兜底文案
+ * @return 可展示的中文原因
+ */
+function errorMessage(error: unknown, fallback: string): string {
+  return error instanceof Error && error.message ? error.message : fallback
+}
+
+// 切 Agent 必须停掉正在进行的朗读与录音：上一条回答的声音不能串到新 Agent 的会话里
+watch(
+  () => props.agentId,
+  () => {
+    stopSpeech()
+    cancelVoiceRecording()
+  }
+)
+
 /** 上传按钮是否可用：需要已绑定 VISION 模型，且未超张数上限 */
 const canUpload = computed(() => props.visionEnabled === true && attachments.value.length < MAX_IMAGES)
+
+/** 图标按钮的实际可用态：除模型与张数外，发送中也不允许再选图（与旧按钮 disabled 口径一致） */
+const canUploadNow = computed(() => canUpload.value && !props.sending)
 
 /** 按钮禁用时的 Hover 说明。已绑定时不弹（由 el-tooltip 的 disabled 控制） */
 const uploadHint = computed(() =>
@@ -719,7 +1184,7 @@ function submit() {
 
 /** 点「图片」：走原生文件选择器，避免 el-upload 额外引入一条上传链路 */
 function pickImages() {
-  if (!canUpload.value) {
+  if (!canUploadNow.value) {
     return
   }
   filePicker.value?.click()
@@ -1286,6 +1751,62 @@ function removeAttachment(index: number) {
   margin-top: 14px;
 }
 
+/* 回答标题行：左侧标题保持原下划线，右侧朗读控制与标题同一基线 */
+.answer-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.answer-head .answer-label {
+  flex: 1;
+}
+
+/* 朗读控制：准备中 / 播放中 / 暂停共用同一组图标按钮，避免每态换一套 DOM 也不写旁注文字 */
+.speak-actions {
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+  padding-bottom: 8px;
+  white-space: nowrap;
+}
+
+/* 单条回答的播放 / 暂停 / 停止：图标按钮，默认低饱和，播放中才点亮主色 */
+.speak-icon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 24px;
+  height: 24px;
+  padding: 0;
+  color: var(--ah-text-secondary, #6b7280);
+  background: transparent;
+  border: none;
+  border-radius: 6px;
+  cursor: pointer;
+  transition: color 0.15s, background 0.15s;
+}
+
+.speak-icon .el-icon {
+  font-size: 16px;
+}
+
+.speak-icon:hover {
+  color: var(--el-color-primary, #635bff);
+  background: #f2f1ff;
+}
+
+/* 这一条正在出声 / 合成：保持主色，用户能一眼看出声音来自哪条回答 */
+.speak-icon.active {
+  color: var(--el-color-primary, #635bff);
+}
+
+.speak-icon.stop:hover {
+  color: var(--el-color-danger, #f56c6c);
+  background: #fff1f3;
+}
+
 .answer {
   margin-top: 8px;
   color: var(--ah-text);
@@ -1548,13 +2069,82 @@ function removeAttachment(index: number) {
   min-width: 0;
 }
 
-/* 置灰时仍要能触发 tooltip：disabled 的按钮不派发鼠标事件，故用外层 span 承接 */
-.upload-wrap {
+/* 图片按钮与语音按钮共用 .voice-icon-btn 的结构；这里只声明它自己的语义类 */
+
+/*
+ * 语音图标按钮（喇叭 / 说话 / 取消）：只放图标，不排文字。
+ * 图标比常见小按钮略大（16→18px）并统一用主色，disabled 不用灰线框，
+ * 而是「保留颜色 + 降透明度 + 拦截点击」，这样一眼能看出它属于哪个能力，而不是坏掉。
+ */
+.voice-icon-btn {
   display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 30px;
+  height: 30px;
+  padding: 0;
+  color: var(--el-color-primary, #635bff);
+  background: transparent;
+  border: 1px solid transparent;
+  border-radius: 8px;
+  cursor: pointer;
+  transition: color 0.15s, background 0.15s, opacity 0.15s;
 }
 
-.upload-btn {
-  gap: 4px;
+.voice-icon-btn .el-icon {
+  font-size: 18px;
+}
+
+.voice-icon-btn:hover {
+  background: #f2f1ff;
+}
+
+/* 喇叭开启：实心主色块。开/关不只差一点颜色，形态本身就不一样 */
+.speaker-btn.on {
+  color: #fff;
+  background: var(--el-color-primary, #635bff);
+}
+
+.speaker-btn.on:hover {
+  background: #5148e0;
+}
+
+/* 未绑 ASR：按钮仍可 hover 出说明，但点击不生效，仅降透明度 */
+.voice-icon-btn.muted {
+  color: var(--el-color-primary, #635bff);
+  opacity: 0.35;
+  cursor: not-allowed;
+}
+
+/* 禁用态不给 hover 底色：避免看起来像可点，实际点了没反应 */
+.voice-icon-btn.muted:hover {
+  background: transparent;
+}
+
+/* 录音中：红色 + 图标脉动，明确「正在采集」而不是普通点击态 */
+.voice-icon-btn.recording {
+  color: #d03050;
+  background: #fff1f3;
+}
+
+.voice-icon-btn.recording .el-icon {
+  animation: voice-pulse 1s ease-in-out infinite;
+}
+
+/* 取消录音：中性色，不与「正在录音」抢视觉 */
+.cancel-btn {
+  color: var(--ah-text-muted, #9ca3af);
+}
+
+@keyframes voice-pulse {
+  0%,
+  100% {
+    opacity: 1;
+  }
+
+  50% {
+    opacity: 0.35;
+  }
 }
 
 /* 原生 file input 只做逻辑承载，不占版面 */

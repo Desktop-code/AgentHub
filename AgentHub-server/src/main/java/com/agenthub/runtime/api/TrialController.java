@@ -82,7 +82,7 @@ public class TrialController {
     @SaCheckPermission(value = {RuntimePermissions.LIST, RuntimePermissions.RUN}, mode = SaMode.OR)
     @GetMapping("/agents/{agentId}/capability")
     public Result<AgentOptionResp> capability(@PathVariable Long agentId) {
-        return Result.ok(sessions.visionCapability(agentId));
+        return Result.ok(sessions.capability(agentId));
     }
 
     /**

@@ -106,8 +106,10 @@ public class ModelInstanceRepositoryImpl implements ModelInstanceRepository {
 
     /** {@inheritDoc} */
     @Override
-    public boolean displayNameExists(String displayName, Long excludeId) {
+    public boolean displayNameExists(Long providerId, String displayName, Long excludeId) {
+        // 只比同供应商：跨供应商同名（如都叫 qwen-tts）是合法场景，不能当成重复
         LambdaQueryWrapper<ModelInstanceEntity> wrapper = new LambdaQueryWrapper<ModelInstanceEntity>()
+                .eq(ModelInstanceEntity::getProviderId, providerId)
                 .eq(ModelInstanceEntity::getDisplayName, displayName);
         if (excludeId != null) {
             wrapper.ne(ModelInstanceEntity::getId, excludeId);

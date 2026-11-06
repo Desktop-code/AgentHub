@@ -27,6 +27,7 @@ import java.util.List;
 /**
  * 模型实例用例。所属域：model。实例必须绑定本供应商下一条启用中的凭证。
  * 唯一性定稿：<b>同供应商 + 同 Model ID + 同用途 + 未删除</b> 不可重复；
+ * 展示名只要求<b>同一供应商内</b>不重复，不同供应商允许同名（如两家都提供 qwen-tts）。
  * 同一 Model ID 允许按不同用途建多个实例（如同一个 deepseek-flash 既做 CHAT 又做 REWRITE）。
  * 展示名由用户自填，不再要求等于 Model ID。
  * 温度由 {@link com.agenthub.model.domain.service.ModelTemperaturePolicy} 按用途收口：
@@ -149,12 +150,12 @@ public class ModelInstanceAppService {
     }
 
     /**
-     * 入参 → 实例。校验顺序：供应商/凭证归属 → 用途 → 文本 → 展示名 → 模型用途唯一性 → 温度策略。
+     * 入参 → 实例。校验顺序：供应商/凭证归属 → 用途 → 文本 → 展示名（同供应商）→ 模型用途唯一性 → 温度策略。
      *
      * @param instance 目标实例（新建为空对象，更新为已存在实例）
      * @param req      保存入参
      * @return 已填好的实例
-     * @throws BizException 凭证停用、名称或「模型 ID + 用途」重复时
+     * @throws BizException 凭证停用、同供应商下名称重复或「模型 ID + 用途」重复时
      */
     private ModelInstance fromReq(ModelInstance instance, InstanceSaveReq req) {
         ModelProvider provider = lookup.requireProvider(req.getProviderId());
@@ -166,10 +167,10 @@ public class ModelInstanceAppService {
         ModelCapability capability = ModelChecks.capability(req.getCapability());
         String displayName = ModelChecks.requiredText(req.getDisplayName(), 64, "名称");
         String modelId = ModelChecks.requiredText(req.getModelId(), 128, "模型 ID");
-        // 新建 excludeId=null；更新排除自身
+        // 新建 excludeId=null；更新排除自身。展示名判重按供应商收口，跨供应商同名不算冲突
         Long excludeId = instance.getId();
-        if (instances.displayNameExists(displayName, excludeId)) {
-            throw new BizException(ErrorCode.DUPLICATE, "模型名称已存在");
+        if (instances.displayNameExists(provider.getId(), displayName, excludeId)) {
+            throw new BizException(ErrorCode.DUPLICATE, "该供应商下已存在同名模型「" + displayName + "」");
         }
         // 唯一键是「供应商 + 模型 ID + 用途」：同模型换个用途（CHAT→REWRITE）可以并存
         if (instances.modelIdCapabilityExists(provider.getId(), modelId, capability.name(), excludeId)) {

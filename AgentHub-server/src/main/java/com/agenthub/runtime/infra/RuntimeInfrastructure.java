@@ -19,7 +19,8 @@ import java.time.Duration;
  * 短期多轮记忆用 AgentScope 的进程内状态，不另建 memory 表。进程重启后这段记忆消失。
  */
 @Configuration
-@EnableConfigurationProperties({TrialProperties.class, RuntimeLimitsProperties.class, RequiredArgProperties.class})
+@EnableConfigurationProperties({TrialProperties.class, RuntimeLimitsProperties.class,
+        RequiredArgProperties.class, VoiceProperties.class})
 public class RuntimeInfrastructure {
 
     /**
