@@ -9,14 +9,17 @@ import com.agenthub.model.domain.model.ModelCredential;
 import com.agenthub.model.domain.model.ModelInstance;
 import com.agenthub.model.domain.model.ModelProtocol;
 import com.agenthub.model.domain.model.ModelProvider;
+import com.agenthub.model.domain.model.SpeechRequest;
 import com.agenthub.model.domain.repository.ModelInstanceRepository;
 import com.agenthub.model.domain.service.ModelCredentialResolver;
 import com.agenthub.model.domain.service.ModelPurposeMatrix;
 import com.agenthub.model.domain.service.ModelReferencePolicy;
 import com.agenthub.model.domain.service.PurposeRoute;
+import com.agenthub.model.domain.service.SpeechOptions;
 import com.agenthub.model.infra.adapter.ModelClientFactory;
 import com.agenthub.model.infra.adapter.ProbeCommand;
 import com.agenthub.model.infra.adapter.ProbeResult;
+import com.agenthub.model.infra.adapter.SpeechClient;
 import com.agenthub.spi.crypto.SecretStore;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.stereotype.Service;
@@ -37,6 +40,7 @@ public class ModelConnectivityAppService {
     private final ModelReferencePolicy references;
     private final SecretStore secretStore;
     private final ModelClientFactory clients;
+    private final SpeechClient speech;
     private final OperLogWriter operLogWriter;
 
     /**
@@ -45,16 +49,19 @@ public class ModelConnectivityAppService {
      * @param references    凭证必须属于该供应商
      * @param secretStore   解密出站 Key
      * @param clients       协议适配器
+     * @param speech        语音出站；ASR / TTS 不走进聊天探活，必须走专用端点
      * @param operLogWriter 操作日志
      */
     public ModelConnectivityAppService(ModelLookup lookup, ModelInstanceRepository instances,
                                        ModelReferencePolicy references, SecretStore secretStore,
-                                       ModelClientFactory clients, OperLogWriter operLogWriter) {
+                                       ModelClientFactory clients, SpeechClient speech,
+                                       OperLogWriter operLogWriter) {
         this.lookup = lookup;
         this.instances = instances;
         this.references = references;
         this.secretStore = secretStore;
         this.clients = clients;
+        this.speech = speech;
         this.operLogWriter = operLogWriter;
     }
 
@@ -77,8 +84,17 @@ public class ModelConnectivityAppService {
             }
         }
         String plainKey = decrypt(credential);
-        ProbeResult result = clients.require(protocol).probe(new ProbeCommand(
-                provider.getBaseUrl(), plainKey, instance.getModelId(), capability));
+        // 语音用途有专用端点（/audio/transcriptions、/audio/speech），不能拿 chat 探活冒充；
+        // 音色与输出格式跟实例走，和对话温度一样属于「实例级扩展」
+        ProbeResult result;
+        if (capability.usesSpeech()) {
+            result = speech.probe(new SpeechRequest(protocol, provider.getBaseUrl(), plainKey,
+                    instance.getModelId(), capability, SpeechOptions.voiceOf(instance.getExtraJson()),
+                    SpeechOptions.formatOf(instance.getExtraJson())));
+        } else {
+            result = clients.require(protocol).probe(new ProbeCommand(
+                    provider.getBaseUrl(), plainKey, instance.getModelId(), capability));
+        }
         // 探活结束后再落库，避免失败请求把事务挂在出站 HTTP 上
         String summary = ProbeSummary.of(result.message(), plainKey);
         return finish(id, instance, protocol, capability, result, summary);

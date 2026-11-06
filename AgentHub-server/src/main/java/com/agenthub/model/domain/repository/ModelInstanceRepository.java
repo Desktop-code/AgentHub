@@ -55,13 +55,17 @@ public interface ModelInstanceRepository {
     int countByCredentialId(Long credentialId);
 
     /**
-     * 展示名是否已被未删除实例占用（全局）。
+     * 展示名是否已被<b>同一供应商</b>下的未删除实例占用。
+     * <p>
+     * 为什么按供应商而不是全局判定：不同供应商常提供同名模型（如两家都叫 qwen-tts），
+     * 全局判重会误报「已存在」。跨供应商同名允许；同供应商同名仍拒绝，与列表按供应商分组展示一致。
      *
+     * @param providerId  供应商 id
      * @param displayName 展示名
      * @param excludeId   更新时排除自身；新建传 null
      * @return true 表示冲突
      */
-    boolean displayNameExists(String displayName, Long excludeId);
+    boolean displayNameExists(Long providerId, String displayName, Long excludeId);
 
     /**
      * 「同供应商 + 同 modelId + 同用途」是否已有未删除实例。

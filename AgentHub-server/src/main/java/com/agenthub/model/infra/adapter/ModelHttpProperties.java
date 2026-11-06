@@ -10,6 +10,11 @@ public class ModelHttpProperties {
 
     private int connectTimeoutMs = 3000;
     private int readTimeoutMs = 15000;
+    /**
+     * 语音出站（识别 / 合成）的读超时。合成整段回答比探活慢一个量级，
+     * 沿用 15 秒会把「正常但稍慢」的合成误判成失败，前端就白降级到浏览器朗读。
+     */
+    private int speechTimeoutMs = 60000;
 
     /**
      * @return 建立连接的上限，毫秒
@@ -37,5 +42,19 @@ public class ModelHttpProperties {
      */
     public void setReadTimeoutMs(int readTimeoutMs) {
         this.readTimeoutMs = readTimeoutMs;
+    }
+
+    /**
+     * @return 语音出站读超时，毫秒
+     */
+    public int getSpeechTimeoutMs() {
+        return speechTimeoutMs;
+    }
+
+    /**
+     * @param speechTimeoutMs 毫秒；至少 1
+     */
+    public void setSpeechTimeoutMs(int speechTimeoutMs) {
+        this.speechTimeoutMs = speechTimeoutMs;
     }
 }

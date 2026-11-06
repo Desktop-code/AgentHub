@@ -7,6 +7,16 @@ import axios, { type AxiosError } from 'axios'
 import { ElMessage } from 'element-plus'
 import type { Result } from '@/types'
 
+declare module 'axios' {
+  export interface AxiosRequestConfig {
+    /**
+     * 关掉全局错误提示，由调用方自行处理。
+     * 语音接口用它：合成失败要降级浏览器朗读并给「轻提示」，不适合再弹一条红色报错。
+     */
+    silent?: boolean
+  }
+}
+
 /** 与 Pinia 共用的本地键名，不要改成别的，否则刷新后对不上 */
 export const TOKEN_KEY = 'agenthub_token'
 
@@ -27,7 +37,10 @@ request.interceptors.response.use(
   (response) => {
     const body = response.data as Result<unknown>
     if (body && typeof body.code === 'number' && body.code !== 0) {
-      ElMessage.error(body.msg || '请求失败')
+      // 静默请求（语音）由调用方自己给提示，这里不再重复弹窗
+      if (!response.config.silent) {
+        ElMessage.error(body.msg || '请求失败')
+      }
       return Promise.reject(body)
     }
     return response
@@ -41,7 +54,9 @@ request.interceptors.response.use(
         location.href = '/login'
       }
     }
-    ElMessage.error(msg)
+    if (!error.config?.silent) {
+      ElMessage.error(msg)
+    }
     return Promise.reject(error)
   }
 )

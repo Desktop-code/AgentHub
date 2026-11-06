@@ -98,6 +98,9 @@
           :can-approve="canRun"
           :approving="approving"
           :vision-enabled="visionEnabled"
+          :agent-id="maMode ? undefined : activeId"
+          :asr-enabled="asrEnabled"
+          :tts-enabled="ttsEnabled"
           :router-trace="routerTrace"
           @send="send"
           @approve="approvePlan"
@@ -430,6 +433,18 @@ const sessionReady = computed(
  */
 const visionEnabled = ref(false)
 
+/**
+ * 当前 Agent 是否已绑定可用的语音识别模型。
+ * false 时「说话」按钮置灰并说明原因；听写禁止回退浏览器识别，宁可不给用。
+ */
+const asrEnabled = ref(false)
+
+/**
+ * 当前 Agent 是否已绑定可用的语音合成模型。
+ * false 不等于不能朗读：对话区会降级浏览器 speechSynthesis，这里只用于提示与请求路径。
+ */
+const ttsEnabled = ref(false)
+
 /** 已取消时说明原因；历史 SUCCESS 不挡发送。 */
 const blockedHint = computed(() =>
   session.value && session.value.status === 'CANCELLED' ? '会话已取消' : '请先新建会话或从左侧选择'
@@ -534,14 +549,14 @@ watch(ownerId, (id, prev) => {
   if (prev !== undefined) {
     resetConversation()
   }
-  // 切 Agent 必须重新判定视觉能力：上一个 Agent 绑了 VISION，不代表这个也绑了
-  void loadVisionCapability(id)
+  // 切 Agent 必须重新判定模型能力：上一个 Agent 绑了 VISION / ASR / TTS，不代表这个也绑了
+  void loadCapabilities(id)
   loadHistory(true)
 })
 
 onMounted(async () => {
   await loadAgents()
-  await loadVisionCapability(ownerId.value)
+  await loadCapabilities(ownerId.value)
   await loadHistory(true)
 })
 
@@ -569,24 +584,29 @@ async function loadAgents() {
 }
 
 /**
- * 判定当前 Agent 是否配了 VISION 模型，用于置灰上传按钮。
+ * 判定当前 Agent 的模型能力：视觉（上传图片）、语音识别（听写）、语音合成（朗读）。
  *
  * 整页模式优先复用下拉里已带回来的标记（列表接口顺带算好了）；
  * 抽屉模式没有下拉，单独请求一次能力接口。
- * 取不到时按「不可用」处理：宁可不给传，也不要让用户白传一次再被后端拒。
+ * 取不到时全部按「不可用」处理——除朗读外，前端会明确禁用并提示去绑模型，
+ * 而不是让用户传完图 / 说完话才被后端拒。朗读即使 tts=false 仍可用（降级浏览器）。
  *
  * @param agentId 当前 Agent；为空表示还没选
  */
-async function loadVisionCapability(agentId?: number) {
-  // 虚拟根没有 Agent，也就没有视觉槽；MA 三栏页不提供图片上传，同样直接关掉
+async function loadCapabilities(agentId?: number) {
+  // 虚拟根没有 Agent，也就没有模型槽；MA 三栏页不提供图片与语音，同样直接关掉
   if (maMode.value || props.variant === 'ma' || !agentId) {
     visionEnabled.value = false
+    asrEnabled.value = false
+    ttsEnabled.value = false
     return
   }
   if (props.variant === 'page') {
     const found = agents.value.find((item) => item.id === agentId)
     if (found) {
       visionEnabled.value = found.visionEnabled === true
+      asrEnabled.value = found.asrEnabled === true
+      ttsEnabled.value = found.ttsEnabled === true
       return
     }
   }
@@ -597,8 +617,12 @@ async function loadVisionCapability(agentId?: number) {
       return
     }
     visionEnabled.value = data.data?.visionEnabled === true
+    asrEnabled.value = data.data?.asrEnabled === true
+    ttsEnabled.value = data.data?.ttsEnabled === true
   } catch {
     visionEnabled.value = false
+    asrEnabled.value = false
+    ttsEnabled.value = false
   }
 }
 

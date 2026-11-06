@@ -9,6 +9,12 @@ server:
 spring:
   application:
     name: agenthub
+  servlet:
+    multipart:
+      # 对话页「按住说话」上传整段录音。Spring Boot 默认单文件 1MB 会直接把语音拒掉；
+      # 这里留到 12MB，服务端业务上限仍是 agenthub.runtime.voice.max-audio-bytes（默认 10MB）。
+      max-file-size: 12MB
+      max-request-size: 14MB
   profiles:
     # 默认 local 便于本机开发；生产用环境变量 SPRING_PROFILES_ACTIVE 覆盖。
     # 注意：application-local.yml 已从 src/main/resources 移出，放仓库外 AgentHub-server/config/，
@@ -81,6 +87,8 @@ agenthub:
     http:
       connect-timeout-ms: 3000
       read-timeout-ms: 15000
+      # 语音识别 / 合成出站的读超时。合成整段回答比探活慢，沿用 15 秒会误判成失败
+      speech-timeout-ms: ${AGENTHUB_MODEL_SPEECH_TIMEOUT_MS:60000}
   tool:
     mcp:
       # tools/list 的连接与读取上限，避免同步占住控制台请求
@@ -101,6 +109,12 @@ agenthub:
     # 单次 run 允许预建的 node_run 条数。
     max-node-runs-per-run: 500
   runtime:
+    voice:
+      # 单段录音体积上限（字节）。默认 10MB，约等于 60 秒 webm/opus；
+      # 与 spring.servlet.multipart.max-file-size（12MB）配合：先由业务闸门给人话文案，再由容器兜底。
+      max-audio-bytes: ${AGENTHUB_VOICE_MAX_AUDIO_BYTES:10485760}
+      # 单次语音合成的文字上限（字符）。超限明确报错，前端改用浏览器朗读（无字符上限）。
+      max-speech-chars: ${AGENTHUB_VOICE_MAX_SPEECH_CHARS:4000}
     # 平台硬顶 + 默认。Agent 列可空覆盖；空=跟 default；保存必须 ≤ max；生效 min(覆盖或default, max)
     limits:
       timeout-ms:

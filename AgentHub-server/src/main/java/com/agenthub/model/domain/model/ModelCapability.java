@@ -32,9 +32,9 @@ public enum ModelCapability {
     RERANK(ModelCapabilityGroup.RETRIEVAL),
     /** 视觉 / 版面理解（含原 OCR）；OPENAI_COMPAT 与 DashScope 兼容模式发 1x1 图片，其余仍「用途未适配」 */
     VISION(ModelCapabilityGroup.MULTIMODAL),
-    /** 语音识别；可配，连通测明确「用途未适配」 */
+    /** 语音识别（整段音频 → 文字）；出站走 /audio/transcriptions，禁止降级 CHAT */
     ASR(ModelCapabilityGroup.AUDIO),
-    /** 语音合成；可配，连通测明确「用途未适配」 */
+    /** 语音合成（整段文字 → 音频）；出站走 /audio/speech，禁止降级 CHAT */
     TTS(ModelCapabilityGroup.AUDIO),
     /** 安全护栏；可配，连通测明确「用途未适配」 */
     GUARDRAIL(ModelCapabilityGroup.SAFETY);
@@ -100,6 +100,34 @@ public enum ModelCapability {
      */
     public boolean usesVision() {
         return this == VISION;
+    }
+
+    /**
+     * 是否走「整段音频 → 文字」的语音识别出站（multipart 上传）。
+     *
+     * @return 语音识别用途
+     */
+    public boolean usesSpeechToText() {
+        return this == ASR;
+    }
+
+    /**
+     * 是否走「整段文字 → 音频」的语音合成出站。
+     *
+     * @return 语音合成用途
+     */
+    public boolean usesTextToSpeech() {
+        return this == TTS;
+    }
+
+    /**
+     * 语音类用途的合并判断。对话页按这个口径决定「是否已具备语音能力」，
+     * 避免 STT / TTS 各写一份判断后漂移。
+     *
+     * @return ASR 或 TTS
+     */
+    public boolean usesSpeech() {
+        return usesSpeechToText() || usesTextToSpeech();
     }
 
     /**

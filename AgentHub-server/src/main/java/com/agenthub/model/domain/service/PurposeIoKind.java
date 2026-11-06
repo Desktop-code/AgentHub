@@ -17,6 +17,16 @@ public enum PurposeIoKind {
      * 当前仅 OPENAI_COMPAT 与 DashScope 兼容模式开放；不得退化成纯文本 ping 冒充多模态可用。
      */
     VISION,
+    /**
+     * 语音识别：multipart 上传整段音频，走 /audio/transcriptions。
+     * 当前仅 OPENAI_COMPAT 与 DashScope 兼容模式开放；禁止用 Chat 路径冒充识别。
+     */
+    SPEECH_TO_TEXT,
+    /**
+     * 语音合成：提交整段文字，走 /audio/speech 收音频字节。
+     * 当前仅 OPENAI_COMPAT 与 DashScope 兼容模式开放；禁止用 Chat 路径冒充合成。
+     */
+    TEXT_TO_SPEECH,
     /** 本期未接专用路径；连通测与出站必须明确失败，禁冒充 Chat */
     UNSUPPORTED
 }
