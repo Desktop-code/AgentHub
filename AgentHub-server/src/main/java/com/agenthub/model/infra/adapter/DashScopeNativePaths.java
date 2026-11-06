@@ -9,10 +9,14 @@ public final class DashScopeNativePaths {
 
     /** 原生文本生成 */
     public static final String TEXT_GENERATION = "/services/aigc/text-generation/generation";
+    /** 原生多模态生成：视觉（qwen-vl）与同步语音识别（qwen3-asr-flash）共用 */
+    public static final String MULTIMODAL_GENERATION = "/services/aigc/multimodal-generation/generation";
     /** 原生向量嵌入 */
     public static final String TEXT_EMBEDDING = "/services/embeddings/text-embedding/text-embedding";
     /** 原生文本排序（qwen3-rerank / gte-rerank 等） */
     public static final String TEXT_RERANK = "/services/rerank/text-rerank/text-rerank";
+    /** 原生语音合成（qwen-audio-tts / cosyvoice 等） */
+    public static final String SPEECH_SYNTHESIZER = "/services/audio/tts/SpeechSynthesizer";
 
     private DashScopeNativePaths() {
     }

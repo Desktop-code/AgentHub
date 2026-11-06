@@ -26,7 +26,8 @@ public record PurposeRoute(
     }
 
     /**
-     * 构造未适配格：文案固定带协议×用途，便于控制台与单测断言。
+     * 构造未适配格：文案固定带协议×用途与「该协议不支持此用途」，便于控制台与单测断言。
+     * 必须让用户看懂是协议没有这个用途的端点，而不是「模型已存在但失败」。
      *
      * @param protocol   协议
      * @param capability 用途
@@ -34,8 +35,8 @@ public record PurposeRoute(
      * @return 未适配路由
      */
     public static PurposeRoute unsupported(ModelProtocol protocol, ModelCapability capability, String detail) {
-        String base = "用途未适配：" + protocol.name() + "×" + capability.name();
-        String msg = (detail == null || detail.isBlank()) ? base : base + "，" + detail;
+        String base = "用途未适配：" + protocol.name() + "×" + capability.name() + "（该协议不支持此用途）";
+        String msg = (detail == null || detail.isBlank()) ? base : base + "：" + detail;
         return new PurposeRoute(protocol, capability, PurposeIoKind.UNSUPPORTED, msg);
     }
 

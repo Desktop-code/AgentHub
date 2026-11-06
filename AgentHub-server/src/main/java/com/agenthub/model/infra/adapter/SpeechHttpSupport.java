@@ -86,6 +86,42 @@ public class SpeechHttpSupport {
     }
 
     /**
+     * POST JSON 并取响应正文（DashScope 原生语音合成 / 识别用）。
+     *
+     * @param url      完整地址
+     * @param apiKey   已解密 Key，用于鉴权与脱敏
+     * @param bodyJson JSON 正文
+     * @return 2xx 的响应正文（UTF-8）
+     * @throws BizException 非 2xx、超时或不可达；文案已脱敏
+     */
+    public String postJsonForText(String url, String apiKey, String bodyJson) {
+        HttpRequest request = request(url)
+                .header("Authorization", "Bearer " + apiKey)
+                .header("Content-Type", "application/json")
+                .POST(HttpRequest.BodyPublishers.ofString(bodyJson, StandardCharsets.UTF_8))
+                .build();
+        return new String(send(request, apiKey), StandardCharsets.UTF_8);
+    }
+
+    /**
+     * 下载语音合成的音频文件（DashScope 原生返回带签名的临时 URL）。
+     * <p>
+     * 临时 URL 自带签名，<b>不</b>再附带 Authorization：多带一个头在部分签名实现上会被拒；
+     * apiKey 只用于失败文案脱敏。
+     *
+     * @param url    音频地址（上游返回的临时 URL）
+     * @param apiKey 脱敏用 Key
+     * @return 音频字节
+     * @throws BizException 非 2xx、超时或不可达；文案不暴露完整 URL
+     */
+    public byte[] getBytes(String url, String apiKey) {
+        HttpRequest request = request(url)
+                .GET()
+                .build();
+        return send(request, apiKey);
+    }
+
+    /**
      * POST multipart（识别用）。表单只带模型名等文本字段 + 一个音频文件。
      *
      * @param url      完整地址

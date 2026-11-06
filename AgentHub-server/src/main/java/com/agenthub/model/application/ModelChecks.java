@@ -5,6 +5,7 @@ import com.agenthub.common.error.BizException;
 import com.agenthub.common.error.ErrorCode;
 import com.agenthub.model.domain.model.ModelCapability;
 import com.agenthub.model.domain.model.ModelProtocol;
+import com.agenthub.model.domain.service.SpeechParams;
 import com.fasterxml.jackson.databind.ObjectMapper;
 
 import java.net.URI;
@@ -15,6 +16,12 @@ import java.net.URI;
 public final class ModelChecks {
 
     private static final ObjectMapper JSON = new ObjectMapper();
+
+    /**
+     * extraJson 的总长度上限（字符）。8KB 的附加参数 + 温度 / max_tokens 等平台键后仍有余量；
+     * 附加参数自身的字节上限由 {@link SpeechParams#MAX_BYTES} 单独把关。
+     */
+    private static final int MAX_EXTRA_JSON_CHARS = 12000;
 
     private ModelChecks() {
     }
@@ -146,6 +153,10 @@ public final class ModelChecks {
     /**
      * 空串存 null。非空时必须是合法 JSON，避免库里留下半截文本。
      *
+     * <p>长度按「附加参数 8KB + 温度 / 视觉上限等平台键」留余量；
+     * 附加参数自身的校验（对象根、体积、控制字符、凭证 / 保留键）交给
+     * {@link com.agenthub.model.domain.service.SpeechParams#validate(String)}。
+     *
      * @param raw 扩展 JSON
      * @return 可入库的文本
      */
@@ -154,14 +165,16 @@ public final class ModelChecks {
             return null;
         }
         String text = raw.trim();
-        if (text.length() > 2000) {
-            throw new BizException(ErrorCode.BAD_REQUEST, "extraJson 最长 2000");
+        if (text.length() > MAX_EXTRA_JSON_CHARS) {
+            throw new BizException(ErrorCode.BAD_REQUEST, "extraJson 最长 " + MAX_EXTRA_JSON_CHARS);
         }
         try {
             JSON.readTree(text);
         } catch (Exception ex) {
             throw new BizException(ErrorCode.BAD_REQUEST, "extraJson 不是合法 JSON");
         }
+        // 附加参数的安全校验：非法即阻断保存，不在库里留下会被原样转发的脏键
+        SpeechParams.validate(text);
         return text;
     }
 }

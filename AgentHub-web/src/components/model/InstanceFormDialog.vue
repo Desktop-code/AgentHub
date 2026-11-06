@@ -54,6 +54,25 @@
           <p class="temp-hint">{{ temperatureHint }}</p>
         </div>
       </el-form-item>
+      <!-- 附加参数：仅 TTS 露出；切走用途只隐藏，已填内容仍随 extraJson 保存，不丢 -->
+      <el-form-item v-if="isTts" label="附加参数">
+        <div class="speech-params-field">
+          <el-input
+            v-model="form.speechParamsText"
+            type="textarea"
+            :rows="4"
+            spellcheck="false"
+            class="speech-params-input"
+            placeholder='{"voice":"longanhuan_v3.1"}'
+          />
+          <p class="speech-params-hint">
+            按「当前协议」官方文档填写可选合成参数（音色、语速、instruction 等），键名原样发送，平台不做转换。
+            留空走协议默认：DashScope 原生按模型族给默认音色，DashScope 兼容口默认 Cherry，OpenAI 兼容默认 alloy。
+          </p>
+          <!-- 实时提示：只在用户正在编辑且不是合法对象时出现，避免一打开弹窗就红字 -->
+          <p v-if="speechParamsError" class="speech-params-error">{{ speechParamsError }}</p>
+        </div>
+      </el-form-item>
       <!-- 视觉输出上限：选填，写入 extraJson.max_tokens；留空即用后端默认 1024 -->
       <el-form-item v-if="isVision" label="输出上限">
         <div class="max-tokens-field">
@@ -91,6 +110,9 @@
  *   只有点「恢复建议值」才显式套默认。
  * VISION 额外可填 max_tokens（写入 extraJson.max_tokens，留空即后端默认 1024）：
  * 部分视觉模型输出上限就是 1024，填更大值会被上游 400；平台按填的值原样发出，不做钳制。
+ * TTS 额外可填「附加参数」JSON 对象（写入 extraJson.speechParams）：
+ * 前端只校验 JSON 对象 / 体积 / 控制字符 / 凭证与系统保留键，不解释键名，
+ * 出站由后端浅合并进该协议 TTS 报文的可选参数位置。
  * 启停不在弹窗里改。
  */
 import { computed, reactive, ref, watch } from 'vue'
@@ -130,8 +152,23 @@ const form = reactive({
   capability: 'CHAT',
   temperature: temperatureProfileOf('CHAT').defaultTemperature,
   /** 视觉用途的输出上限；null 表示未配置，后端按 1024 默认出站 */
-  maxTokens: null as number | null
+  maxTokens: null as number | null,
+  /** TTS 附加参数 JSON 原文；只隐藏不丢弃，切走用途再保存同样原样带回 */
+  speechParamsText: ''
 })
+
+/** 附加参数体积上限，与后端 SpeechParams.MAX_BYTES 同值 */
+const SPEECH_PARAMS_MAX_BYTES = 8 * 1024
+
+/** 凭证类键：比较前统一去 - _ 空格并转小写，命中即拒绝保存 */
+const SPEECH_PARAMS_CREDENTIAL_KEYS = new Set([
+  'apikey', 'xapikey', 'authorization', 'auth', 'token', 'accesstoken', 'refreshtoken',
+  'secret', 'clientsecret', 'appsecret', 'accesskey', 'accesskeyid', 'accesskeysecret',
+  'password', 'passwd', 'credential', 'credentials', 'bearer'
+])
+
+/** 系统保留键：模型名 / 待朗读文本 / 音频二进制一律以平台值为准 */
+const SPEECH_PARAMS_RESERVED_KEYS = new Set(['model', 'input', 'file', 'text'])
 
 /**
  * 弹窗内可编辑字段的脏检查。温度滑块是「选择类」输入，纳入快照；
@@ -150,6 +187,12 @@ const temperatureLocked = computed(() => !temperatureProfile.value.sampling)
 
 /** 是否视觉用途：输出上限说明只在 VISION 展示，避免让 CHAT 用户误以为也受 1024 限制 */
 const isVision = computed(() => normalizeCapability(form.capability) === 'VISION')
+
+/** 是否语音合成用途：附加参数只给 TTS 露出，其它用途隐藏但内容保留在 form 里 */
+const isTts = computed(() => normalizeCapability(form.capability) === 'TTS')
+
+/** 附加参数的实时错误；仅用于提示，提交时还会再校验一次 */
+const speechParamsError = ref('')
 
 /** 红字提示：锁定用途说明原因，采样用途给建议区间 */
 const temperatureHint = computed(() => {
@@ -187,6 +230,9 @@ watch(
       : temperatureProfileOf(form.capability).defaultTemperature
     // 输出上限只对视觉用途有意义；切到其它用途时置空，避免把视觉专用值带进 CHAT 实例
     form.maxTokens = current ? parseMaxTokens(current.extraJson) : null
+    // 附加参数回填：只取 speechParams 子对象并按缩进展开，便于继续手改
+    form.speechParamsText = current ? formatSpeechParams(current.extraJson) : ''
+    speechParamsError.value = ''
     temperatureDirty.value = Boolean(current)
     if (!current) {
       pickFirstCredential()
@@ -280,14 +326,133 @@ function parseMaxTokens(extraJson: string | undefined): number | null {
 }
 
 /**
- * 写入 temperature（及视觉用途的 max_tokens），保留原 JSON 其它键。
+ * 附加参数实时校验：空框不报错（等价「未配置」）；有内容才提示，避免一打字就整片飘红。
+ */
+watch(
+  () => form.speechParamsText,
+  (text) => {
+    speechParamsError.value = text.trim() ? validateSpeechParams(text) : ''
+  }
+)
+
+/**
+ * 从 extraJson 读 TTS 附加参数并展开成可编辑文本。
  *
- * @param temperature 滑动条值
- * @param maxTokens   视觉输出上限；null 表示删除该键，后端按默认 1024 出站
- * @param previous    编辑前的 extraJson
+ * <p>只读 speechParams 子对象；缺键 / 非对象 / 坏 JSON 一律返回空串（等价「未配置」），
+ * 让用户看到空框而不是一段无法解析的垃圾文本。
+ *
+ * @param extraJson 库里的扩展 JSON
+ * @return 缩进后的 JSON 文本；未配置为空串
+ */
+function formatSpeechParams(extraJson: string | undefined): string {
+  if (!extraJson?.trim()) {
+    return ''
+  }
+  try {
+    const parsed = JSON.parse(extraJson) as { speechParams?: unknown }
+    const value = parsed?.speechParams
+    if (value && typeof value === 'object' && !Array.isArray(value)) {
+      return JSON.stringify(value, null, 2)
+    }
+  } catch {
+    // 忽略坏 JSON：后端保存前也会再校验
+  }
+  return ''
+}
+
+/**
+ * 统一键名归一：去掉 - _ 空格并转小写，用于凭证 / 保留键比对。
+ *
+ * @param key 用户写的键名
+ * @return 归一后的键名
+ */
+function normalizeSpeechKey(key: string): string {
+  return key.toLowerCase().replace(/[-_\s]/g, '')
+}
+
+/**
+ * 校验附加参数文本。空串合法（走协议默认）；非空必须是 JSON 对象。
+ * 与后端规则对齐：≤8KB、无控制字符、不含凭证类与系统保留键。
+ *
+ * @param text 输入框原文
+ * @return 中文错误文案；合法返回空串
+ */
+function validateSpeechParams(text: string): string {
+  const raw = text.trim()
+  if (!raw) {
+    return ''
+  }
+  let parsed: unknown
+  try {
+    parsed = JSON.parse(raw)
+  } catch {
+    return '附加参数不是合法 JSON，请检查括号、引号与逗号'
+  }
+  if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
+    return '附加参数必须是 JSON 对象，例如 {"voice":"longanhuan_v3.1"}'
+  }
+  // 体积按 UTF-8 字节算：中文参数容易「看着不长、实际超限」
+  const bytes = new TextEncoder().encode(JSON.stringify(parsed)).length
+  if (bytes > SPEECH_PARAMS_MAX_BYTES) {
+    return `附加参数最长 ${SPEECH_PARAMS_MAX_BYTES / 1024}KB，当前 ${bytes} 字节`
+  }
+  // 控制字符：只放过换行 / 回车 / 制表符，其余（含 NUL、退格、ESC）一律拒绝
+  if (/[\u0000-\u0008\u000B\u000C\u000E-\u001F\u007F]/.test(raw)) {
+    return '附加参数含非法控制字符，请检查后重填'
+  }
+  const blocked = findBlockedSpeechKey(parsed as Record<string, unknown>)
+  if (blocked) {
+    return blocked
+  }
+  return ''
+}
+
+/**
+ * 递归查凭证类 / 系统保留键，返回第一条中文提示。
+ *
+ * @param node 附加参数子树
+ * @return 提示文案；无违规为空串
+ */
+function findBlockedSpeechKey(node: unknown): string {
+  if (Array.isArray(node)) {
+    for (const item of node) {
+      const hit = findBlockedSpeechKey(item)
+      if (hit) return hit
+    }
+    return ''
+  }
+  if (!node || typeof node !== 'object') {
+    return ''
+  }
+  for (const [key, value] of Object.entries(node as Record<string, unknown>)) {
+    const normalized = normalizeSpeechKey(key)
+    if (SPEECH_PARAMS_CREDENTIAL_KEYS.has(normalized)) {
+      return `附加参数不能包含凭证类键「${key}」，凭证由平台按实例注入`
+    }
+    if (SPEECH_PARAMS_RESERVED_KEYS.has(normalized)) {
+      return `附加参数不能包含系统保留键「${key}」，模型名与待朗读文本以实例配置为准`
+    }
+    const hit = findBlockedSpeechKey(value)
+    if (hit) return hit
+  }
+  return ''
+}
+
+/**
+ * 写入 temperature / max_tokens / speechParams，保留原 JSON 其它键。
+ *
+ * @param temperature   滑动条值
+ * @param maxTokens     视觉输出上限；null 表示删除该键，后端按默认 1024 出站
+ * @param speechParams  附加参数原文；空串表示删除该键（走协议默认）
+ * @param previous      编辑前的 extraJson
  * @return 可提交的 JSON 字符串
  */
-function buildExtraJson(temperature: number, maxTokens: number | null, previous: string) {
+function buildExtraJson(
+  temperature: number,
+  maxTokens: number | null,
+  speechParams: string,
+  previous: string
+) {
   let base: Record<string, unknown> = {}
   if (previous.trim()) {
     try {
@@ -306,6 +471,13 @@ function buildExtraJson(temperature: number, maxTokens: number | null, previous:
     delete base.max_tokens
   } else {
     base.max_tokens = maxTokens
+  }
+  // 附加参数按对象存；清空即删键，后端按「未配置」处理而不是拿到空对象
+  const paramsText = speechParams.trim()
+  if (paramsText) {
+    base.speechParams = JSON.parse(paramsText) as Record<string, unknown>
+  } else {
+    delete base.speechParams
   }
   return JSON.stringify(base)
 }
@@ -326,6 +498,13 @@ function submit() {
     ElMessage.warning('请完整填写供应商、凭证、名称和模型 ID')
     return
   }
+  // 附加参数与用途无关地校验：切走 TTS 后内容仍会保存，不能借「已隐藏」绕过安全校验
+  const paramsError = validateSpeechParams(form.speechParamsText)
+  speechParamsError.value = paramsError
+  if (paramsError) {
+    ElMessage.error(paramsError)
+    return
+  }
   saving.value = true
   // 不采样用途提交 0：后端也会再夹一次，这里先保证前端不发「禁用控件残留值」
   const temperature = temperatureLocked.value ? 0 : form.temperature
@@ -335,7 +514,12 @@ function submit() {
     displayName: form.displayName.trim(),
     modelId: form.modelId.trim(),
     capability: form.capability,
-    extraJson: buildExtraJson(temperature, isVision.value ? form.maxTokens : null, previousExtraJson.value)
+    extraJson: buildExtraJson(
+      temperature,
+      isVision.value ? form.maxTokens : null,
+      form.speechParamsText,
+      previousExtraJson.value
+    )
   }
   // 编辑带上当前启停，避免后端把空 status 当成默认启用；新建不传，后端默认启用
   if (props.editing) {
@@ -405,5 +589,31 @@ function submit() {
 .max-tokens-unit {
   color: #6b7280;
   font-size: 12px;
+}
+
+/* 附加参数：整块占满表单宽度，textarea 用等宽字体便于看括号与引号 */
+.speech-params-field {
+  width: 100%;
+}
+
+.speech-params-input :deep(textarea) {
+  font-family: 'JetBrains Mono', 'Cascadia Code', Consolas, monospace;
+  font-size: 12px;
+  line-height: 18px;
+}
+
+/* 灰字说明与红字错误分成两行：说明常驻，错误只在非法时出现 */
+.speech-params-hint {
+  margin: 4px 0 0;
+  color: #6b7280;
+  font-size: 12px;
+  line-height: 18px;
+}
+
+.speech-params-error {
+  margin: 2px 0 0;
+  color: #ef4444;
+  font-size: 12px;
+  line-height: 18px;
 }
 </style>
