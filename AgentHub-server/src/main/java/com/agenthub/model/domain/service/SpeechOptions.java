@@ -33,14 +33,31 @@ public final class SpeechOptions {
     }
 
     /**
-     * 读取合成音色。
+     * 读取合成音色（通用默认值）。
+     *
+     * <p>语义上等价于「OpenAI 兼容默认」；DashScope 等有专属默认音色的协议
+     * 应改用 {@link #rawVoiceOf(String)} 判空后自行兜底，避免把 alloy 发给不认它的上游。
      *
      * @param extraJson 实例 extra_json，可空或非法
      * @return 音色；未配置返回 {@link #DEFAULT_VOICE}
      */
     public static String voiceOf(String extraJson) {
-        String value = text(extraJson, "voice");
+        String value = rawVoiceOf(extraJson);
         return value.isBlank() ? DEFAULT_VOICE : value;
+    }
+
+    /**
+     * 读取用户显式配置的音色原文，不套协议默认值。
+     * <p>
+     * DashScope 原生语音合成的音色是模型相关值（如 longanhuan_v3.1 / longxiaochun），
+     * OpenAI 兼容的 {@link #DEFAULT_VOICE}（alloy）在原生口不一定存在；
+     * 原生适配器需要先判断「用户到底配没配」，再决定用哪个协议默认值。
+     *
+     * @param extraJson 实例 extra_json，可空或非法
+     * @return 去空白后的音色；未配置或取不到为空串
+     */
+    public static String rawVoiceOf(String extraJson) {
+        return text(extraJson, "voice");
     }
 
     /**

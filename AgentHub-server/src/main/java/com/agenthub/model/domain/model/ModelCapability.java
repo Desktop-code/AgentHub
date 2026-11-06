@@ -30,13 +30,13 @@ public enum ModelCapability {
     EMBEDDING(ModelCapabilityGroup.RETRIEVAL),
     /** 重排序；须走协议×用途矩阵（如 DASHSCOPE text-rerank），禁冒充 Chat */
     RERANK(ModelCapabilityGroup.RETRIEVAL),
-    /** 视觉 / 版面理解（含原 OCR）；OPENAI_COMPAT 与 DashScope 兼容模式发 1x1 图片，其余仍「用途未适配」 */
+    /** 视觉 / 版面理解（含原 OCR）；三协议均按各自多模态报文发 1x1 图片探活 */
     VISION(ModelCapabilityGroup.MULTIMODAL),
-    /** 语音识别（整段音频 → 文字）；出站走 /audio/transcriptions，禁止降级 CHAT */
+    /** 语音识别（整段音频 → 文字）；出站走 /audio/transcriptions 或 DashScope 原生口，禁止降级 CHAT */
     ASR(ModelCapabilityGroup.AUDIO),
-    /** 语音合成（整段文字 → 音频）；出站走 /audio/speech，禁止降级 CHAT */
+    /** 语音合成（整段文字 → 音频）；出站走 /audio/speech 或 DashScope 原生 SpeechSynthesizer，禁止降级 CHAT */
     TTS(ModelCapabilityGroup.AUDIO),
-    /** 安全护栏；可配，连通测明确「用途未适配」 */
+    /** 安全护栏；可配，按协议审核 / 分类口探活（仅连通性，未接入运行时拦截） */
     GUARDRAIL(ModelCapabilityGroup.SAFETY);
 
     /** 旧码 → 新码；入参与库内遗留值读写都认 */
@@ -93,7 +93,7 @@ public enum ModelCapability {
     }
 
     /**
-     * 是否走视觉探活 / 出站。当前仅 OPENAI_COMPAT 有图文混排路径，
+     * 是否走视觉探活 / 出站。三协议均支持多模态报文，
      * 具体适配与否仍以 {@code ModelPurposeMatrix} 为准。
      *
      * @return 视觉用途

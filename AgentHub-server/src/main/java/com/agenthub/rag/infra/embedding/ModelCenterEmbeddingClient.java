@@ -1,12 +1,18 @@
 package com.agenthub.rag.infra.embedding;
 
 import com.agenthub.common.text.SecretBrief;
+import com.agenthub.model.application.ModelOutboundFactory;
+import com.agenthub.model.domain.model.ModelCapability;
 import com.agenthub.model.domain.model.ModelInstance;
+import com.agenthub.model.domain.model.ModelProtocol;
 import com.agenthub.model.domain.model.ModelProvider;
 import com.agenthub.model.domain.repository.ModelInstanceRepository;
 import com.agenthub.model.domain.repository.ModelProviderRepository;
 import com.agenthub.model.domain.repository.ModelCredentialRepository;
 import com.agenthub.model.domain.service.ModelCredentialResolver;
+import com.agenthub.model.domain.service.PurposeIoKind;
+import com.agenthub.model.domain.service.PurposeRoute;
+import com.agenthub.model.infra.adapter.DashScopeNativePaths;
 import com.agenthub.spi.crypto.SecretStore;
 import com.agenthub.spi.rag.EmbeddingClient;
 import com.agenthub.spi.rag.EmbeddingException;
@@ -27,13 +33,21 @@ import java.time.Duration;
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Locale;
 import java.util.Map;
 
 /**
  * 模型中心驱动的向量化客户端。所属域：rag 的 infra。
  * <p>
  * 调用链：KB.embedding_model_id → model_instance → model_provider（base_url）+ model_credential（密文）→
- * {@code POST {baseUrl}/embeddings}（OpenAI 兼容协议）。Key 出站前才解密，只留在本方法内存里，禁止进日志。
+ * 经 {@link ModelOutboundFactory}（同连通测矩阵）选路：
+ * <ul>
+ *   <li>OPENAI_COMPAT：{@code POST {baseUrl}/embeddings}；</li>
+ *   <li>DASHSCOPE 兼容模式：同上；</li>
+ *   <li>DASHSCOPE 原生：{@code POST /services/embeddings/text-embedding/text-embedding}，body 用 {@code input.texts}；</li>
+ *   <li>其它协议：矩阵返回「该协议不支持此用途」，禁止改打 Chat。</li>
+ * </ul>
+ * Key 出站前才解密，只留在本方法内存里，禁止进日志。
  * <p>
  * 批量契约（硬约束）：
  * <ul>
@@ -67,6 +81,7 @@ public class ModelCenterEmbeddingClient implements EmbeddingClient {
     private final ModelProviderRepository providers;
     private final ModelCredentialRepository credentials;
     private final SecretStore secretStore;
+    private final ModelOutboundFactory outbound;
     private final HttpClient httpClient;
     private final int readTimeoutMs;
 
@@ -77,13 +92,15 @@ public class ModelCenterEmbeddingClient implements EmbeddingClient {
      * @param providers     供应商（取 baseUrl / 协议）
      * @param credentials   凭证（取密文）
      * @param secretStore   解密
+     * @param outbound      协议×用途总闸
      * @param readTimeoutMs 单次出站上限；向量化比 chat 慢，默认放宽
      */
     @Autowired
     public ModelCenterEmbeddingClient(ModelInstanceRepository instances, ModelProviderRepository providers,
                                       ModelCredentialRepository credentials, SecretStore secretStore,
+                                      ModelOutboundFactory outbound,
                                       @Value("${agenthub.rag.embedding.read-timeout-ms:30000}") int readTimeoutMs) {
-        this(instances, providers, credentials, secretStore,
+        this(instances, providers, credentials, secretStore, outbound,
                 // 本地 Embedding（Uvicorn/vLLM 等）只认 HTTP/1.1；默认 HTTP/2 h2c 会丢 body → 条数 1 与 N 不一致 / 400
                 HttpClient.newBuilder()
                         .version(HttpClient.Version.HTTP_1_1)
@@ -103,11 +120,12 @@ public class ModelCenterEmbeddingClient implements EmbeddingClient {
      */
     ModelCenterEmbeddingClient(ModelInstanceRepository instances, ModelProviderRepository providers,
                                ModelCredentialRepository credentials, SecretStore secretStore,
-                               HttpClient httpClient, int readTimeoutMs) {
+                               ModelOutboundFactory outbound, HttpClient httpClient, int readTimeoutMs) {
         this.instances = instances;
         this.providers = providers;
         this.credentials = credentials;
         this.secretStore = secretStore;
+        this.outbound = outbound;
         this.httpClient = httpClient;
         this.readTimeoutMs = Math.max(readTimeoutMs, 1000);
     }
@@ -130,7 +148,18 @@ public class ModelCenterEmbeddingClient implements EmbeddingClient {
         List<String> batch = new ArrayList<>(texts);
         ModelInstance instance = requireInstance(modelInstanceId);
         ModelProvider provider = requireProvider(instance);
+        ModelProtocol protocol = parseProtocol(provider);
+        // 总闸：未适配立即失败，且下方不会拼 Chat URL
+        PurposeRoute route = outbound.resolve(protocol, ModelCapability.EMBEDDING);
+        if (!route.adapted() || route.kind() != PurposeIoKind.EMBEDDING) {
+            throw new EmbeddingException(route.message());
+        }
         String apiKey = decryptKey(instance);
+        // DashScope 原生基址没有 /embeddings，必须打 text-embedding 原生口
+        if (protocol == ModelProtocol.DASHSCOPE && !isCompatibleMode(provider.getBaseUrl())) {
+            return nativeDashScopeEmbed(provider.getBaseUrl(), apiKey, instance.getModelId(),
+                    batch, expectedDimension);
+        }
         String url = join(provider.getBaseUrl(), EMBEDDINGS_PATH);
 
         try {
@@ -195,6 +224,160 @@ public class ModelCenterEmbeddingClient implements EmbeddingClient {
             throw new EmbeddingException("向量化失败：HTTP " + status + " " + brief(response.body(), apiKey));
         }
         return parseVectors(response.body(), texts.size(), expectedDimension);
+    }
+
+    /**
+     * 解析协议文本；未知值明确报错，不静默当成 OpenAI 兼容。
+     *
+     * @param provider 供应商
+     * @return 协议枚举
+     * @throws EmbeddingException 协议为空或未知
+     */
+    private ModelProtocol parseProtocol(ModelProvider provider) {
+        if (provider.getProtocol() == null || provider.getProtocol().isBlank()) {
+            throw new EmbeddingException("Embedding 供应商未配置协议");
+        }
+        try {
+            return ModelProtocol.valueOf(provider.getProtocol().trim().toUpperCase(Locale.ROOT));
+        } catch (IllegalArgumentException ex) {
+            throw new EmbeddingException("Embedding 供应商协议非法：" + provider.getProtocol());
+        }
+    }
+
+    /**
+     * @param baseUrl 供应商地址
+     * @return 是否 DashScope compatible-mode 基址
+     */
+    private boolean isCompatibleMode(String baseUrl) {
+        return baseUrl != null && baseUrl.contains("compatible-mode");
+    }
+
+    /**
+     * DashScope 原生向量化：{@code POST /services/embeddings/text-embedding/text-embedding}。
+     * <p>
+     * 原生口 body 是 {@code input.texts}，与 OpenAI 的 {@code input: string[]} 不同；
+     * 逐条降级也必须保持原生报文，不能退回兼容路径。
+     *
+     * @param baseUrl           供应商地址
+     * @param apiKey            已解密 Key
+     * @param modelId           模型 id
+     * @param texts             待向量化文本
+     * @param expectedDimension 期望维度
+     * @return 与 texts 等长、顺序一致的向量
+     */
+    private float[][] nativeDashScopeEmbed(String baseUrl, String apiKey, String modelId,
+                                           List<String> texts, int expectedDimension) {
+        String url = DashScopeNativePaths.join(baseUrl, DashScopeNativePaths.TEXT_EMBEDDING);
+        try {
+            return requestNativeEmbeddings(url, apiKey, modelId, texts, expectedDimension);
+        } catch (EmbeddingException ex) {
+            if (texts.size() <= 1 || !isCountMismatch(ex)) {
+                throw ex;
+            }
+            log.warn("[RAG] 原生批量向量化条数不符，降级逐条 model={} size={} reason={}",
+                    modelId, texts.size(), ex.getMessage());
+            float[][] out = new float[texts.size()][];
+            for (int i = 0; i < texts.size(); i++) {
+                float[][] one = requestNativeEmbeddings(url, apiKey, modelId,
+                        List.of(texts.get(i)), expectedDimension);
+                if (one.length != 1) {
+                    throw new EmbeddingException("原生向量化返回条数 " + one.length + " 与请求 1 不一致");
+                }
+                out[i] = one[0];
+            }
+            return out;
+        }
+    }
+
+    /**
+     * 一次原生向量化 HTTP，解析 {@code output.embeddings[].embedding} 与 {@code text_index}。
+     *
+     * @param url               完整地址
+     * @param apiKey            已解密 Key
+     * @param modelId           模型 id
+     * @param texts             待向量化文本
+     * @param expectedDimension 期望维度
+     * @return 与 texts 等长、顺序一致的向量
+     */
+    private float[][] requestNativeEmbeddings(String url, String apiKey, String modelId,
+                                              List<String> texts, int expectedDimension) {
+        Map<String, Object> body = new LinkedHashMap<>();
+        body.put("model", modelId);
+        body.put("input", Map.of("texts", texts.toArray(new String[0])));
+        byte[] payload = toJsonBytes(body);
+        if (payload.length == 0) {
+            throw new EmbeddingException("向量化请求体为空，拒绝出站");
+        }
+        HttpRequest request = HttpRequest.newBuilder(URI.create(url))
+                .timeout(Duration.ofMillis(readTimeoutMs))
+                .header("Authorization", "Bearer " + apiKey)
+                .header("Content-Type", JSON_UTF8)
+                .header("Accept", "application/json")
+                .POST(HttpRequest.BodyPublishers.ofByteArray(payload))
+                .build();
+        HttpResponse<String> response;
+        try {
+            response = httpClient.send(request, HttpResponse.BodyHandlers.ofString(StandardCharsets.UTF_8));
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+            throw new EmbeddingException("向量化被中断", e);
+        } catch (Exception e) {
+            throw new EmbeddingException("向量化请求失败：" + e.getClass().getSimpleName(), e);
+        }
+        int status = response.statusCode();
+        if (status < 200 || status >= 300) {
+            throw new EmbeddingException("向量化失败：HTTP " + status + " " + brief(response.body(), apiKey));
+        }
+        return parseNativeVectors(response.body(), texts.size(), expectedDimension);
+    }
+
+    /**
+     * 解析 DashScope 原生响应：{@code output.embeddings[].embedding + text_index}。
+     * 条数、下标与维度都必须校验，禁止只取第一条。
+     *
+     * @param payload           响应 JSON
+     * @param expectedCount     请求文本条数
+     * @param expectedDimension 期望维；≤0 时不校验维
+     * @return 与请求等长的向量
+     */
+    float[][] parseNativeVectors(String payload, int expectedCount, int expectedDimension) {
+        if (payload == null || payload.isBlank()) {
+            throw new EmbeddingException("向量化返回空响应");
+        }
+        JsonNode root;
+        try {
+            root = JSON.readTree(payload);
+        } catch (Exception e) {
+            throw new EmbeddingException("向量化响应不是合法 JSON", e);
+        }
+        JsonNode embeddings = root.path("output").path("embeddings");
+        if (!embeddings.isArray() || embeddings.isEmpty()) {
+            throw new EmbeddingException("原生向量化响应缺少 output.embeddings 数组");
+        }
+        if (embeddings.size() != expectedCount) {
+            throw new EmbeddingException("向量化返回条数 " + embeddings.size()
+                    + " 与请求 " + expectedCount + " 不一致");
+        }
+        float[][] out = new float[expectedCount][];
+        int ordinal = 0;
+        for (JsonNode item : embeddings) {
+            JsonNode indexNode = item.get("text_index");
+            int index = indexNode == null || !indexNode.isNumber() ? ordinal : indexNode.asInt();
+            if (index < 0 || index >= expectedCount) {
+                throw new EmbeddingException("原生向量化返回的 text_index 越界：" + index);
+            }
+            if (out[index] != null) {
+                throw new EmbeddingException("原生向量化返回重复 text_index：" + index);
+            }
+            out[index] = readEmbedding(item.path("embedding"), expectedDimension);
+            ordinal++;
+        }
+        for (int i = 0; i < out.length; i++) {
+            if (out[i] == null) {
+                throw new EmbeddingException("原生向量化返回缺少第 " + i + " 条结果");
+            }
+        }
+        return out;
     }
 
     /**

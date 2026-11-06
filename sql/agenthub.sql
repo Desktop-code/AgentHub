@@ -617,7 +617,7 @@ CREATE TABLE `model_instance`  (
   `model_id` varchar(128) CHARACTER SET utf8mb4 COLLATE utf8mb4_general_ci NOT NULL COMMENT '厂商模型ID，如 qwen-plus',
   `capability` varchar(32) CHARACTER SET utf8mb4 COLLATE utf8mb4_general_ci NOT NULL COMMENT 'CHAT/ROUTER/REWRITE/SUMMARY/MEMORY/EMBEDDING/RERANK/VISION/ASR/TTS/GUARDRAIL',
   `status` tinyint(4) NOT NULL DEFAULT 1 COMMENT '1正常 0停用',
-  `extra_json` varchar(2000) CHARACTER SET utf8mb4 COLLATE utf8mb4_general_ci NULL DEFAULT NULL COMMENT '可选扩展JSON',
+  `extra_json` text CHARACTER SET utf8mb4 COLLATE utf8mb4_general_ci NULL COMMENT '可选扩展JSON：temperature / max_tokens / speechParams（TTS 附加参数）',
   `last_test_time` datetime NULL DEFAULT NULL COMMENT '最后连通测试时间',
   `last_test_ok` tinyint(4) NULL DEFAULT NULL COMMENT '1成功 0失败 空未测',
   `last_test_msg` varchar(255) CHARACTER SET utf8mb4 COLLATE utf8mb4_general_ci NULL DEFAULT NULL COMMENT '最近测试摘要，禁含Key',

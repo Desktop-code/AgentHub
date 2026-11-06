@@ -2,6 +2,7 @@ package com.agenthub.model.infra.adapter;
 
 import com.agenthub.model.domain.model.ModelProtocol;
 import com.agenthub.model.domain.service.ModelPurposeMatrix;
+import com.agenthub.model.domain.service.ProbePrompts;
 import com.agenthub.model.domain.service.PurposeIoKind;
 import com.agenthub.model.domain.service.PurposeRoute;
 import org.springframework.stereotype.Component;
@@ -12,8 +13,8 @@ import java.util.Map;
 /**
  * OpenAI 兼容探活。所属域：model。
  * 按 {@link ModelPurposeMatrix} 分流：CHAT→chat/completions，EMBEDDING→embeddings，
- * VISION→chat/completions（图文混排）；
- * 其余用途明确「用途未适配」，禁止降级 HTTP 可达冒充成功。
+ * VISION→chat/completions（图文混排），GUARDRAIL→moderations；
+ * 其余用途明确「该协议不支持此用途」，禁止降级 HTTP 可达冒充成功。
  */
 @Component
 public class OpenAiCompatClient implements ModelClient {
@@ -39,9 +40,12 @@ public class OpenAiCompatClient implements ModelClient {
         if (route.kind() == PurposeIoKind.CHAT) {
             String body = http.json(Map.of(
                     "model", command.modelId(),
-                    "messages", List.of(Map.of("role", "user", "content", "ping")),
+                    // 文案按原用途给，避免 ROUTER / REWRITE 等被记成 CHAT 探活
+                    "messages", List.of(Map.of("role", "user", "content",
+                            ProbePrompts.chat(command.capability()))),
                     "max_tokens", 1));
-            return http.postJson(http.join(command.baseUrl(), "/chat/completions"), command.apiKey(), body, "ok");
+            return http.postJson(http.join(command.baseUrl(), "/chat/completions"), command.apiKey(), body,
+                    command.capability().name() + " 连通");
         }
         if (route.kind() == PurposeIoKind.EMBEDDING) {
             String body = http.json(Map.of("model", command.modelId(), "input", "ping"));
@@ -49,6 +53,9 @@ public class OpenAiCompatClient implements ModelClient {
         }
         if (route.kind() == PurposeIoKind.VISION) {
             return probeVision(command);
+        }
+        if (route.kind() == PurposeIoKind.GUARDRAIL) {
+            return probeGuardrail(command);
         }
         return ProbeResult.unsupported(route.message());
     }
@@ -73,5 +80,23 @@ public class OpenAiCompatClient implements ModelClient {
                 // 个别厂商要求图片探活带 max_tokens，否则按默认长输出计费
                 "max_tokens", 16));
         return http.postJson(http.join(command.baseUrl(), "/chat/completions"), command.apiKey(), body, "视觉连通");
+    }
+
+    /**
+     * 安全护栏探活：OpenAI 官方 {@code /moderations}。
+     * <p>
+     * 只验证「鉴权 + 审核模型 + 端点」可达；本仓对话链路尚无拦截点，
+     * 因此成功文案明确写「仅连通性」，避免被理解成已上线内容审查。
+     *
+     * @param command 已解密的出站参数
+     * @return 探活结果
+     */
+    private ProbeResult probeGuardrail(ProbeCommand command) {
+        // 输入用固定短句，不发送任何用户内容；模型名由实例配置决定（如 omni-moderation-latest）
+        String body = http.json(Map.of(
+                "model", command.modelId(),
+                "input", "ping"));
+        return http.postJson(http.join(command.baseUrl(), "/moderations"), command.apiKey(), body,
+                "安全审核连通（仅连通性，未接入运行时拦截）");
     }
 }

@@ -16,6 +16,7 @@ import com.agenthub.model.domain.service.ModelPurposeMatrix;
 import com.agenthub.model.domain.service.ModelReferencePolicy;
 import com.agenthub.model.domain.service.PurposeRoute;
 import com.agenthub.model.domain.service.SpeechOptions;
+import com.agenthub.model.domain.service.SpeechParams;
 import com.agenthub.model.infra.adapter.ModelClientFactory;
 import com.agenthub.model.infra.adapter.ProbeCommand;
 import com.agenthub.model.infra.adapter.ProbeResult;
@@ -25,6 +26,7 @@ import lombok.extern.slf4j.Slf4j;
 import org.springframework.stereotype.Service;
 
 import java.time.LocalDateTime;
+import java.util.Map;
 
 /**
  * 连通测试。所属域：model。只编排解密和适配器，不拼 HTTP 报文。
@@ -89,8 +91,12 @@ public class ModelConnectivityAppService {
         ProbeResult result;
         if (capability.usesSpeech()) {
             result = speech.probe(new SpeechRequest(protocol, provider.getBaseUrl(), plainKey,
-                    instance.getModelId(), capability, SpeechOptions.voiceOf(instance.getExtraJson()),
-                    SpeechOptions.formatOf(instance.getExtraJson())));
+                    instance.getModelId(), capability, SpeechOptions.rawVoiceOf(instance.getExtraJson()),
+                    SpeechOptions.formatOf(instance.getExtraJson()),
+                    // 与对话试跑一致：附加参数只在 TTS 时带入，探活即验证用户填的参数能否被上游接受
+                    capability == ModelCapability.TTS
+                            ? SpeechParams.parse(instance.getExtraJson())
+                            : Map.of()));
         } else {
             result = clients.require(protocol).probe(new ProbeCommand(
                     provider.getBaseUrl(), plainKey, instance.getModelId(), capability));

@@ -30,6 +30,10 @@ public class InstanceSaveReq {
 
     private Integer status;
 
-    @Size(max = 2000, message = "最长 2000")
+    /**
+     * 扩展 JSON：平台键（temperature / max_tokens）+ TTS 附加参数 speechParams。
+     * 上限与 ModelChecks 保持一致（附加参数 8KB + 平台键余量）；JSON 结构与安全校验在应用层收口。
+     */
+    @Size(max = 12000, message = "最长 12000")
     private String extraJson;
 }

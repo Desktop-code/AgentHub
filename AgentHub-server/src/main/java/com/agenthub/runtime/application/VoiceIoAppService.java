@@ -17,6 +17,7 @@ import com.agenthub.model.domain.service.ModelPurposeMatrix;
 import com.agenthub.model.domain.service.PurposeRoute;
 import com.agenthub.model.domain.service.SpeechGateway;
 import com.agenthub.model.domain.service.SpeechOptions;
+import com.agenthub.model.domain.service.SpeechParams;
 import com.agenthub.runtime.domain.model.SpeechAudio;
 import com.agenthub.runtime.domain.service.VoiceAudioPolicy;
 import com.agenthub.runtime.domain.service.VoiceTextPolicy;
@@ -25,6 +26,7 @@ import com.agenthub.spi.crypto.SecretStore;
 import org.springframework.stereotype.Service;
 
 import java.util.Locale;
+import java.util.Map;
 import java.util.Optional;
 
 /**
@@ -149,7 +151,11 @@ public class VoiceIoAppService {
         }
         String apiKey = decrypt(credential);
         return new SpeechRequest(protocol, provider.getBaseUrl(), apiKey, instance.getModelId(), purpose,
-                SpeechOptions.voiceOf(instance.getExtraJson()), SpeechOptions.formatOf(instance.getExtraJson()));
+                SpeechOptions.rawVoiceOf(instance.getExtraJson()), SpeechOptions.formatOf(instance.getExtraJson()),
+                // 附加参数只对 TTS 有意义；ASR 传空，避免把合成参数混进识别请求
+                purpose == ModelCapability.TTS
+                        ? SpeechParams.parse(instance.getExtraJson())
+                        : Map.of());
     }
 
     /**
