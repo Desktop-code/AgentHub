@@ -27,6 +27,7 @@ Agent 中台：以「配置驱动」的方式管理模型、工具、知识库�
 - 出站走统一防腐层：`OPENAI_COMPAT`、`DASHSCOPE`（兼容模式与灵积原生自动分流）、`ANTHROPIC` 三协议适配为同一套请求 / 响应 / 流式事件模型，配统一 SSE 写出与 `done` 兜底，客户端断开可取消。
 - 连通测试按「协议 × 用途」矩阵分流：生成族走各协议聊天口，嵌入 / 重排走专用端点，视觉走多模态报文，语音走兼容或 DashScope 原生专用口，护栏按协议审核 / 分类口探活；协议确实没有该用途端点时明确报「该协议不支持此用途」，不拿对话接口冒充。
 - `TTS` 实例可另填「附加参数」JSON 对象（存 `extra_json.speechParams`，≤8KB，仅 TTS 露出）：平台只校验 JSON 对象、体积、控制字符与凭证 / 系统保留键，**不做键名转换**，出站时原样浅合并进该协议 TTS 报文的可选参数位置（兼容口合并到请求体顶层，DashScope 原生合并到 `input`）；`model` / `input` / 文本 / 音频与凭证始终以平台值为准，厂家不认的键由对方报错并脱敏回显。
+- **平台级实例**：`EMBEDDING` / `RERANK` 可各指定**一条**平台级实例（`platform_locked`），供记忆的语义召回与重排使用，不按 Agent 绑定解析；同用途第二条由库层唯一索引 `uk_platform_slot` 拦住。`EMBEDDING` 连通测试成功即写维度快照 `embedding_dim`，这是记忆向量集合的建集维度；没有平台级 Embedding 时记忆不做语义召回，自动回落 MySQL。
 
 **工具**
 
@@ -54,7 +55,12 @@ Agent 中台：以「配置驱动」的方式管理模型、工具、知识库�
 
 **记忆**
 
-短期记忆（Redis 热数据 + MySQL 持久化双写）、长期记忆（`fact_key` 归并去重）、Agent 工作记忆三层；上下文窗口按轮次 / 字符 / 空闲时间规划，触顶先滚动摘要再裁剪旧轮。长期记忆只在显式「记住」、会话结束、滚动摘要三处抽取，不每轮都抽。
+- 三层：短期记忆（Redis 热数据 + MySQL 持久化双写）、长期记忆（`fact_key` 归并）、Agent 工作记忆；上下文窗口按轮次 / 字符 / 空闲时间规划，触顶先滚动摘要再裁剪旧轮。
+- 长期记忆只在**显式「记住」**、**会话结束**（空闲超时 / 懒结案 / 取消 / 删除进行中会话）、**滚动摘要成功后**三处抽取，每轮成功或失败都不抽；显式「记住」异步投递，不占本轮首字延迟。
+- **合并口径**：写库前先做 `fact_key` 同义归一（居住 / 饮食 / 饮品偏好族各收敛到一个规范键），同键只留一条并保留更高的 `importance`；用户纠错（「不是评估是苹果」）与对助手更正值的确认会作为正常抽取输入覆盖旧值，助手单方面的纠错独白不入库。
+- **LONG 语义召回（Milvus）**：`memory_item` 是唯一真源，Milvus 里的专用集合（`agenthub_memory_long`，与 RAG 的 `agenthub_kb_*` 物理隔离）只是可重建副本。新写入在事务内标记 `vector_sync_status=PENDING`，提交后异步双写；失败记 `FAILED` + 次数 + 脱敏原因，由有界补同步（手动接口 / 可选定时 / 重建后自动续补）收口。集合字段含 `expired_time`（毫秒时间戳，无过期写 `0`）、`importance`、`content`（截断副本）；过期清理与删除会同步删掉向量点。
+- **降级**：没有平台级 Embedding、集合未就绪、出站超时或失败时，召回直接回落 MySQL Top N（`importance` 降序 + 最新更新），不空手也不编造；向量侧任何失败都不回滚业务库。
+- **换维**：平台级 Embedding 换成不同维度时 Milvus 不支持原地改维，只能走**受控重建**（危险确认 + 目标集合名校验 → 删集合 → 按快照维重建 → 存量打回 `PENDING` → 有界续补）；代码不会静默 `DROP` 生产集合。
 
 **Agent 自动评测**
 
@@ -119,8 +125,9 @@ AgentHub/
 ├── scripts/
 │   └── openjudge-sidecar/ OpenJudge 本机 HTTP sidecar（Python，软评分）
 ├── sql/
-│   ├── agenthub.sql       全量建表
-│   └── data-init.sql      菜单、权限、内置工具、L1/L2 提示词等种子
+│   ├── agenthub.sql       全量建表（含记忆向量同步列与平台级模型列）
+│   ├── data-init.sql      菜单、权限、内置工具、L1/L2 提示词等种子
+│   └── schema-delta-*.sql 当期结构增量（存量库升级，可重复执行）
 ├── docs/                  架构设计、各域设计定稿与编码规范
 ├── docker-compose.yml     依赖（MySQL / Redis / Milvus 依赖链）+ 业务容器
 └── .env.example           compose 与环境变量模板
@@ -167,6 +174,8 @@ mysql -u root -p agenthub < sql/data-init.sql    # 菜单 / 权限 / 内置工�
 ```
 
 `sql/agenthub.sql` 是完整结构导出，文件内含 `DROP TABLE IF EXISTS`，**只用于初始化新库**：对已有数据的库重复执行会清空表数据。后续结构变更以 `sql/` 根目录当期增量脚本为准，禁止 `DROP` 既有表。`sql/temp/` 是历史增量脚本归档，不提交。
+
+**存量库升级**：不要重跑全量脚本。按 `sql/` 根目录当期增量执行，例如平台级 Embedding / Rerank 与维度快照用 `sql/schema-delta-model-platform-lock.sql`（含 `platform_locked` / `embedding_dim` / `platform_slot` 与唯一索引，可重复执行）；`memory_item` 的 `vector_sync_status` / `vector_sync_fail_count` / `vector_sync_error` 与 `idx_vector_sync` 已进全量 `agenthub.sql`，存量库需按当期增量补齐后，再对平台级 Embedding 做一次连通测试写入维度快照。
 
 ### 4. 配置本机参数（不进仓库）
 
@@ -218,6 +227,8 @@ npm run dev
 - **主密钥轮换**：配置 `agenthub.crypto.previous-keys` 后启动，旧密文会被自动重写为新密钥，迁移完成再移除旧密钥。
 - **运行工作区**：会话级文件工具（`workspaceWriteFile` / `ReadFile` / `ListFiles`）的落盘根目录由 `agenthub.workspace.root-path`（环境变量 `AGENTHUB_WORKSPACE_ROOT_PATH`）决定，默认 `./workspace-test`（相对进程工作目录，已 gitignore）；留空则回落到系统临时目录的 `agenthub_workspace`。该目录只放 Agent 运行产物，不参与备份。
 - **会话标题开关**：`agenthub.runtime.trial.auto-title-enabled`（环境变量 `AGENTHUB_AUTO_TITLE_ENABLED`，默认 `true`）。关掉只是不再异步生成标题，左栏退回展示首问预览，不影响运行。
+- **空闲批抽**：`agenthub.memory.long-extract-batch-enabled` 随仓默认 `true`（代码缺键时兜底 `false`）；`agenthub.memory.session-close-initial-delay-ms` 默认 `3600000`（1 小时），避免重启后立刻打库 / 出站。本机想快速验证空闲收口，用 `application-local.yml` 或 `AGENTHUB_MEMORY_SESSION_CLOSE_INITIAL_DELAY_MS=30000` 覆盖，不要把默认值改短后提交。
+- **记忆向量**：集合名 `agenthub.memory.milvus-collection`（默认 `agenthub_memory_long`，必须落在 `agenthub_memory_` 命名空间）；就绪只看平台级 Embedding 与其 `embedding_dim` 快照，`agenthub.memory.embedding-dimension` 仅排障对照、不参与建集。补同步默认不自动跑（`vector-reconcile-schedule-enabled=false`），需要时调 `POST /api/memory/vector/reconcile` 或显式打开定时。
 - **时间与鉴权约定**：时区 `Asia/Shanghai`，Token 走 `Authorization: Bearer <token>`，权限码统一 `{域}:{资源}:{动作}` 且菜单种子 / 后端注解 / 前端按钮同码。
 
 ## 常见端口
@@ -238,7 +249,7 @@ npm run dev
 
 ## 文档
 
-- `docs/架构设计.md`：分层总图、运行主链路、三种运行模式、模型防腐、提示词三层、RAG 双流水、工具闸门、记忆分层、可观测与部署拓扑（含 mermaid 图）。
+- `docs/架构设计.md`：分层总图、运行主链路、三种运行模式、模型防腐（含平台级实例）、提示词三层、RAG 双流水、工具闸门、记忆分层（含 LONG 向量旁路与受控重建）、可观测与部署拓扑（含 mermaid 图）。
 - `scripts/openjudge-sidecar/README.md`：sidecar 契约、启动、排障与进 git 范围。
 
 ## 开源协议与致谢 (License & Acknowledgements)
