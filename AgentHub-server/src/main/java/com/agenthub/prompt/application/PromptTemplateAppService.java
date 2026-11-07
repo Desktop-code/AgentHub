@@ -17,11 +17,16 @@ import com.agenthub.prompt.domain.model.PromptTemplateQuery;
 import com.agenthub.prompt.domain.repository.PromptCacheInvalidator;
 import com.agenthub.prompt.domain.repository.PromptSegmentRepository;
 import com.agenthub.prompt.domain.repository.PromptTemplateRepository;
+import com.agenthub.prompt.domain.service.PromptPlatformLocks;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
 import java.util.ArrayList;
+import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Map;
+import java.util.Objects;
+import java.util.Set;
 
 /**
  * L2 用途模板用例。所属域：prompt。
@@ -104,6 +109,8 @@ public class PromptTemplateAppService {
             // 左栏是固定用途槽位：同 purpose+locale 只允许一个 template_key，
             // 新建草稿必须落在该用途已有键（或首个键）上，禁止再造第二个键
             assertSingleKeyPerPurpose(purpose, locale, key);
+            // 新版本必须带上平台锁定段：缺失时从同用途生效版补齐，内容不允许自行改写
+            applyPlatformLocks(purpose, locale, null, segs);
             int next = templates.maxVersion(key, locale) + 1;
             PromptTemplate row = new PromptTemplate();
             row.setTemplateKey(key);
@@ -124,8 +131,11 @@ public class PromptTemplateAppService {
 
         PromptTemplate existing = require(req.getId());
         PromptChecks.requireDraft(existing.getStatus());
+        String purpose = PromptChecks.purpose(req.getPurpose());
+        // 已有草稿的锁定段以库内当前正文为基准：任何改写都拒绝，防止「保存时改掉平台契约」
+        applyPlatformLocks(purpose, existing.getLocale(), existing, segs);
         existing.setName(PromptChecks.requiredText(req.getName(), 100, "name"));
-        existing.setPurpose(PromptChecks.purpose(req.getPurpose()));
+        existing.setPurpose(purpose);
         existing.setProtocol(PromptChecks.optionalText(req.getProtocol(), 32, "protocol"));
         existing.setRemark(PromptChecks.optionalText(req.getRemark(), 512, "remark"));
         // templateKey / locale / version 随版本行固定，草稿更新不改键
@@ -200,6 +210,112 @@ public class PromptTemplateAppService {
         }
     }
 
+    /**
+     * 应用平台锁定段规则。所属域：prompt。
+     * <p>
+     * 口径（只对 {@link PromptPlatformLocks} 声明的用途生效，目前是 MEMORY）：
+     * <ul>
+     *   <li>锁定段的内容以「库内基准」为准：已有草稿取草稿当前正文，新建版本取同用途生效版正文；</li>
+     *   <li>提交的锁定段正文与基准不一致 → 拒绝保存。平台锁定段不允许页面改写，
+     *       变更必须走 SQL 种子/增量脚本；</li>
+     *   <li>提交缺必选锁定段（如 MEMORY 的 {@code output_format}）→ 从基准补齐，
+     *       基准也没有则拒绝并提示先执行增量 SQL；</li>
+     *   <li>锁定段一律强制 {@code mutable=0}（禁止 Agent 覆盖）、{@code required=1}（缺段阻断出站）。</li>
+     * </ul>
+     *
+     * @param purpose  用途码（已规范化）
+     * @param locale   语言
+     * @param existing 已有草稿；新建版本时为空
+     * @param segs     本次提交的段落（会被原地补齐与纠正锁定位）
+     * @throws BizException 锁定段内容被改写，或缺少基准无法补齐
+     */
+    private void applyPlatformLocks(String purpose, String locale, PromptTemplate existing,
+                                    List<PromptSegment> segs) {
+        Set<String> lockedKeys = PromptPlatformLocks.lockedKeys(purpose);
+        if (lockedKeys.isEmpty() || segs == null) {
+            return;
+        }
+        Map<String, PromptSegment> reference = lockedReference(purpose, locale, existing);
+        Map<String, PromptSegment> incoming = new LinkedHashMap<>();
+        for (PromptSegment seg : segs) {
+            incoming.put(seg.getSegKey(), seg);
+            if (!lockedKeys.contains(seg.getSegKey())) {
+                continue;
+            }
+            PromptSegment ref = reference.get(seg.getSegKey());
+            // 有基准就必须逐字一致：锁定段允许「沿用」，不允许「保存时顺手改一个字」
+            if (ref != null && !Objects.equals(normalize(seg.getContent()), normalize(ref.getContent()))) {
+                throw new BizException(ErrorCode.BAD_REQUEST,
+                        "平台锁定段落不可修改：" + displayOf(seg)
+                                + "（记忆抽取的契约与输出格式由平台统一维护）");
+            }
+            seg.setMutable(0);
+            seg.setRequired(1);
+        }
+        // 必选锁定段缺失时从基准补齐，避免出现「新版本少一段、运行时直接阻断」的残稿
+        for (String requiredKey : PromptPlatformLocks.requiredKeys(purpose)) {
+            if (incoming.containsKey(requiredKey)) {
+                continue;
+            }
+            PromptSegment ref = reference.get(requiredKey);
+            if (ref == null) {
+                throw new BizException(ErrorCode.BAD_REQUEST,
+                        "提示词模板缺少平台锁定段：" + requiredKey + "，请先执行对应的增量 SQL");
+            }
+            PromptSegment injected = new PromptSegment();
+            injected.setSegKey(requiredKey);
+            injected.setDisplayName(ref.getDisplayName());
+            injected.setSortNo(ref.getSortNo());
+            injected.setMutable(0);
+            injected.setRequired(1);
+            injected.setContent(ref.getContent());
+            segs.add(injected);
+            incoming.put(requiredKey, injected);
+        }
+    }
+
+    /**
+     * 锁定段的库内基准：同用途当前生效版优先，无生效版时才退回草稿自身。
+     * <p>
+     * 为什么不优先用草稿自身：旧草稿可能是从历史版本复制来的（例如 MEMORY v1 的
+     * key/value/confidence 旧格式）。若把草稿自己的锁定段当基准，就能把它原样发布上线，
+     * 与新锁定口径冲突。平台锁定段只有一份真源——当前生效版。
+     * <p>
+     * 两条都没有时返回空表，由 {@link #applyPlatformLocks} 决定是拒绝还是放行（无锁定用途）。
+     */
+    private Map<String, PromptSegment> lockedReference(String purpose, String locale, PromptTemplate existing) {
+        for (PromptTemplate row : templates.listPublishedByPurpose(purpose, locale)) {
+            if (row.getIsActive() != null && row.getIsActive() == 1) {
+                return index(segments.listByTemplateId(row.getId()));
+            }
+        }
+        // 用途还没有生效版（首稿未发布）：只能以草稿自身为基准，避免连首稿都存不下去
+        if (existing != null) {
+            return index(segments.listByTemplateId(existing.getId()));
+        }
+        return Map.of();
+    }
+
+    private Map<String, PromptSegment> index(List<PromptSegment> rows) {
+        Map<String, PromptSegment> byKey = new LinkedHashMap<>();
+        if (rows == null) {
+            return byKey;
+        }
+        for (PromptSegment row : rows) {
+            byKey.put(row.getSegKey(), row);
+        }
+        return byKey;
+    }
+
+    private static String normalize(String text) {
+        return text == null ? "" : text.trim();
+    }
+
+    private static String displayOf(PromptSegment seg) {
+        return seg.getDisplayName() == null || seg.getDisplayName().isBlank()
+                ? seg.getSegKey() : seg.getDisplayName();
+    }
+
     private List<PromptSegment> toSegments(List<PromptSegmentReq> reqs) {
         List<PromptSegment> list = new ArrayList<>();
         if (reqs == null) {
@@ -246,6 +362,8 @@ public class PromptTemplateAppService {
             item.setSortNo(seg.getSortNo());
             item.setMutable(seg.getMutable());
             item.setRequired(seg.getRequired());
+            // 记忆抽取的契约/格式由平台锁定：前端据此禁用编辑并显示「平台锁定 · 不可修改」
+            item.setContentLocked(PromptPlatformLocks.contentLocked(domain.getPurpose(), seg.getSegKey()));
             item.setContent(seg.getContent());
             item.setCreateTime(seg.getCreateTime());
             item.setUpdateTime(seg.getUpdateTime());

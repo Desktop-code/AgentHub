@@ -12,6 +12,7 @@ import com.agenthub.prompt.domain.model.PromptTemplateRef;
 import com.agenthub.prompt.domain.model.PromptTemplateSnapshot;
 import com.agenthub.prompt.domain.repository.PromptSnapshotProvider;
 import com.agenthub.prompt.domain.service.PromptOverrideReader;
+import com.agenthub.prompt.domain.service.PromptPlatformLocks;
 import com.agenthub.prompt.domain.service.PromptVariables;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import org.slf4j.Logger;
@@ -26,9 +27,11 @@ import java.time.format.DateTimeFormatter;
 import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.LinkedHashMap;
+import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
+import java.util.Set;
 
 /**
  * 提示词统一组装门面。所属域：prompt。
@@ -293,6 +296,104 @@ public class PromptAssembler {
                 result.getTemplateKey(), result.getTemplateVersion(), result.getSegmentCount(),
                 result.getOverriddenSegmentCount(), head.length(), assembled.length(), truncated);
         return result;
+    }
+
+    /**
+     * 只拼某用途生效模板的**锁定段**（mutable=0），再追加一段可选的业务要求。
+     * <p>
+     * 专用场景：记忆抽取（MEMORY）。记忆的抽取契约与输出格式是平台红线，
+     * Agent 只能追加场景要求，不能钉死旧版、也不能用 L3 覆盖段替换格式；
+     * 因此这里**不拼 L1、不读 override**，避免旧 Agent 的 key/value/confidence 覆盖值回流。
+     * <p>
+     * 与 {@link #assemble(PromptContext)} 的共同点：都按平台已发布模板的相位顺序取段、
+     * 都做一次性变量替换；区别只在于本方法只取锁定段且不注入 L1。
+     * <p>
+     * 阻断规则：用途无生效模板、缺 required 锁定段、缺该用途必须存在的锁定段（如 MEMORY 的
+     * {@code output_format}）都直接抛 {@link ErrorCode#PROMPT_UNAVAILABLE}，绝不拿半截提示词出站。
+     *
+     * @param purpose     用途码（大小写不敏感）
+     * @param locale      语言；空白按默认
+     * @param promptExtra 追加要求（append-only），可空
+     * @return 锁定段正文 + 可选的【补充要求】
+     * @throws BizException 模板未发布、用途不匹配或缺锁定段
+     */
+    public String assembleLockedByPurpose(String purpose, String locale, String promptExtra) {
+        PromptPurpose parsed = PromptPurpose.tryParse(purpose)
+                .orElseThrow(() -> new BizException(ErrorCode.PROMPT_UNAVAILABLE,
+                        "未配置模板的用途：" + purpose));
+        String resolvedLocale = localeOf(locale);
+        PromptTemplateRef ref = snapshots.activeRefByPurpose(parsed.name(), resolvedLocale)
+                .orElseThrow(() -> new BizException(ErrorCode.PROMPT_UNAVAILABLE,
+                        "用途未配置模板：" + parsed.name() + "（" + resolvedLocale + "）"));
+        PromptTemplateSnapshot template = requireSnapshot(ref);
+        if (!parsed.name().equalsIgnoreCase(template.getPurpose())) {
+            throw new BizException(ErrorCode.PROMPT_UNAVAILABLE,
+                    "提示词模板用途不匹配：请求 " + parsed.name() + "，模板 " + template.getPurpose());
+        }
+
+        Map<String, String> values = lockedOnlyVariables(parsed, resolvedLocale);
+        // 运行时白名单：非空时只拼列出的锁定段（MEMORY 排除只锁定编辑的 memory_style 旧格式）
+        Set<String> runtimeKeys = PromptPlatformLocks.runtimeKeys(parsed.name());
+        StringBuilder body = new StringBuilder();
+        Set<String> lockedKeys = new LinkedHashSet<>();
+        for (PromptSegmentSnapshot segment : template.orderedSegmentsByPhase()) {
+            // 只认锁定段：开放段属于可被 L3 覆盖的业务语气，不能进入记忆抽取的格式红线
+            if (segment.soft()) {
+                continue;
+            }
+            // 遗留锁定段（如 memory_style）只锁编辑、不出站：旧 key/value/confidence 不得回流
+            if (!runtimeKeys.isEmpty() && !runtimeKeys.contains(segment.getSegKey())) {
+                continue;
+            }
+            if (segment.mandatory() && isBlank(segment.getContent())) {
+                throw new BizException(ErrorCode.PROMPT_UNAVAILABLE,
+                        "提示词模板缺必选段：" + segment.getSegKey() + "（" + template.getTemplateKey()
+                                + " v" + template.getVersion() + "）");
+            }
+            if (isBlank(segment.getContent())) {
+                continue;
+            }
+            appendBlock(body, PromptVariables.render(segment.getContent(), values));
+            lockedKeys.add(segment.getSegKey());
+        }
+        // 平台要求的锁定段必须真实存在：旧版 MEMORY 模板只有抽取契约、没有输出格式，
+        // 若继续出站，模型会自行编造字段（历史上就是 key/value/confidence），必须阻断换新版模板。
+        for (String requiredKey : PromptPlatformLocks.requiredKeys(parsed.name())) {
+            if (!lockedKeys.contains(requiredKey)) {
+                throw new BizException(ErrorCode.PROMPT_UNAVAILABLE,
+                        "提示词模板缺平台锁定段：" + requiredKey + "（" + template.getTemplateKey()
+                                + " v" + template.getVersion() + "），请先执行对应增量 SQL");
+            }
+        }
+        if (body.length() == 0) {
+            throw new BizException(ErrorCode.PROMPT_UNAVAILABLE,
+                    "提示词模板没有可用的锁定段：" + template.getTemplateKey() + " v" + template.getVersion());
+        }
+        String extra = promptExtra == null ? "" : promptExtra.trim();
+        if (!extra.isEmpty()) {
+            appendBlock(body, EXTRA_MARK + "\n" + extra);
+        }
+        // 只记版本与长度：正文含平台契约，不整段进日志
+        log.info("锁定段提示词已组装 purpose={} locale={} tpl={} v={} locked={} extraChars={} chars={}",
+                parsed.name(), resolvedLocale, template.getTemplateKey(), template.getVersion(),
+                lockedKeys.size(), extra.length(), body.length());
+        return body.toString();
+    }
+
+    /**
+     * 锁定段组装用的变量表：只给已注册变量，避免模板里写了 {{current_time}} 时直接炸。
+     * 用户输入不在本方法参与（待抽正文由调用方作为用户消息单独传入）。
+     */
+    private Map<String, String> lockedOnlyVariables(PromptPurpose purpose, String locale) {
+        Map<String, String> values = new HashMap<>(PromptVariables.registry().size());
+        values.put(PromptVariables.PURPOSE, purpose.name());
+        values.put(PromptVariables.LOCALE, locale);
+        values.put(PromptVariables.AGENT_NAME, "");
+        values.put(PromptVariables.USER_QUERY, "");
+        values.put(PromptVariables.HISTORY, "");
+        values.put(PromptVariables.ROUTE_TABLE, "");
+        values.put(PromptVariables.CURRENT_TIME, LocalDateTime.now(ZONE).format(TIME_FORMAT));
+        return values;
     }
 
     /**
