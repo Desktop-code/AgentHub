@@ -330,7 +330,7 @@
           <template #default="{ row }">{{ ojStatusText(row.openjudgeStatus) }}</template>
         </el-table-column>
         <el-table-column label="分数" min-width="60" align="center">
-          <template #default="{ row }">{{ row.scores.openjudge.score }}</template>
+          <template #default="{ row }">{{ ojScoreOf(row) }}</template>
         </el-table-column>
         <el-table-column prop="latencyMs" label="耗时ms" min-width="60" align="center" />
         <el-table-column label="执行链路" min-width="100" align="center">
@@ -518,7 +518,7 @@
  * Trace 统一走 TraceLinkDrawer（禁跳 /ops/traces）；套件/Agent 名由 FE 字典拼接。
  * 跑批进度用轮询 GET run（禁 SSE）；卸载须 clearInterval。
  */
-import { onBeforeUnmount, reactive, ref } from 'vue'
+import { onActivated, onBeforeUnmount, onDeactivated, reactive, ref } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { Search } from '@element-plus/icons-vue'
 import PageHeader from '@/components/PageHeader.vue'
@@ -601,6 +601,12 @@ const resultLoading = ref(false)
 const reportJson = ref<unknown>(null)
 const reportText = ref('')
 let pollTimer: ReturnType<typeof setInterval> | null = null
+/**
+ * 页面是否已被 KeepAlive 失活（切到别的菜单页签）。
+ * <p>失活时组件不卸载、脚本继续跑，若不看这个标记，任何入口（如迟到的详情回调）
+ * 都可能把轮询重新拉起来，切走后又在后台打接口。
+ */
+let deactivated = false
 
 const suiteCreateOpen = ref(false)
 const suiteSaving = ref(false)
@@ -1048,12 +1054,31 @@ async function onCancel(row: EvalRunRow) {
   await loadRuns()
 }
 
+/**
+ * 打开跑批详情抽屉。
+ *
+ * <p>顺序刻意是「先开抽屉、后补数据」：套件 / Agent 字典只用于把 id 翻成名字，
+ * 取不到（无权限、弱网、接口报错）也绝不能挡住看详情——早先字典 await 在开抽屉之前，
+ * 一旦字典请求抛错，点「详情」就毫无反应，表现得像按钮坏了。
+ *
+ * @param row 跑批行
+ */
 async function openRunDetail(row: EvalRunRow) {
-  await ensureSuiteOptions()
-  await ensureAgents()
   runDetailTitle.value = buildRunDetailTitle(row)
   runDetailOpen.value = true
-  await refreshRunDetail(row.id)
+  // 字典是尽力而为：标题先退化成 #id，取到后再刷一次标题
+  await Promise.all([
+    ensureSuiteOptions().catch(() => undefined),
+    ensureAgents().catch(() => undefined)
+  ])
+  runDetailTitle.value = buildRunDetailTitle(row)
+  try {
+    await refreshRunDetail(row.id)
+  } catch {
+    // 首次拉取失败：提示已由 request 拦截器弹出；此时不起轮询，
+    // 否则每 2s 重复打同一个失败请求，把控制台刷满
+    return
+  }
   startPoll(row.id)
 }
 
@@ -1071,17 +1096,28 @@ async function refreshRunDetail(id: number) {
       getEvalRun(id),
       pageEvalRunResults(id, { current: 1, size: 100 })
     ])
-    runDetail.value = runRes.data.data
-    runResults.value = resultRes.data.data.records
-    runDetailTitle.value = buildRunDetailTitle(runDetail.value)
-    if (runDetail.value.report) {
-      reportJson.value = runDetail.value.report
-      reportText.value = JSON.stringify(runDetail.value.report, null, 2)
+    const detail = runRes.data.data
+    // 后端返回空（已被删 / 权限收窄）时给空态并停表：直接读 status 会抛 TypeError，
+    // 整个抽屉连同后续轮询一起崩掉，看起来就是「详情打不开」
+    if (!detail) {
+      runDetail.value = null
+      runResults.value = []
+      reportJson.value = null
+      reportText.value = ''
+      stopPoll()
+      return
+    }
+    runDetail.value = detail
+    runResults.value = resultRes.data?.data?.records ?? []
+    runDetailTitle.value = buildRunDetailTitle(detail)
+    if (detail.report) {
+      reportJson.value = detail.report
+      reportText.value = JSON.stringify(detail.report, null, 2)
     } else {
       reportJson.value = null
       reportText.value = ''
     }
-    if (runDetail.value.status && !isTerminal(runDetail.value.status)) {
+    if (detail.status && !isTerminal(detail.status)) {
       // keep polling
     } else {
       stopPoll()
@@ -1121,6 +1157,10 @@ function copyReport() {
 
 function startPoll(id: number) {
   stopPoll()
+  // 已失活（切到别的菜单）：此时不挂表，等 onActivated 按需恢复，避免后台白打请求
+  if (deactivated) {
+    return
+  }
   pollTimer = setInterval(() => {
     if (!runDetail.value || isTerminal(runDetail.value.status)) {
       stopPoll()
@@ -1294,6 +1334,27 @@ function ojLabel(row: EvalBadCaseRow) {
   return score != null ? `${st} ${score}` : st
 }
 
+/**
+ * 详情表「分数」列：取 scores.openjudge.score。
+ *
+ * <p>为什么必须做空判断：分数不是必然存在的。
+ * <ul>
+ *   <li>该 case 试跑失败 / 出错时后端直接把 scores 置空（scores = null）；</li>
+ *   <li>本跑批未选打分模型，或 Judge 被跳过 / 报错时，只有 scores.rule，没有 openjudge 节点；</li>
+ *   <li>执行中尚未落评分。 </li>
+ * </ul>
+ * 早先这里直接写 {@code row.scores.openjudge.score}，一旦有任一失败行，
+ * 表格渲染就会抛 TypeError，把整个详情抽屉打成空白（表现为「详情打不开」）。
+ *
+ * @param row 结果行
+ * @return 分数文本；缺失统一显示 —，不显示 0（0 分与「没打分」是两件事）
+ */
+function ojScoreOf(row: EvalResultRow) {
+  const scores = row.scores as { openjudge?: { score?: number | null } } | null | undefined
+  const score = scores?.openjudge?.score
+  return score == null ? '—' : String(score)
+}
+
 function ruleFailSummary(details: unknown) {
   if (!Array.isArray(details)) return '—'
   const fail = details.find((d) => d && typeof d === 'object' && (d as { ok?: boolean }).ok === false) as
@@ -1310,6 +1371,43 @@ function finalAnswerOf(artifact: unknown) {
 }
 
 onBeforeUnmount(() => stopPoll())
+
+/**
+ * KeepAlive 失活：本页 cacheName=EvalConsole（router meta），被缓存后组件**不卸载**，
+ * 只用 onBeforeUnmount 收尾会导致切走菜单仍在每 2s 打一次跑批详情接口。
+ * 因此失活必须停表；页面状态（详情 / 结果 / 报告）保留，回来看还是原样。
+ */
+onDeactivated(() => {
+  deactivated = true
+  stopPoll()
+})
+
+/**
+ * KeepAlive 恢复：只在「详情抽屉还开着 + 该跑批仍未终态」时恢复轮询。
+ * <p>离开期间后端可能已经把跑批跑完，所以先补一次详情再起表，避免回来看到陈旧状态；
+ * 首次挂载也会触发一次 activated，此时抽屉未打开，天然是空操作。
+ */
+onActivated(() => {
+  deactivated = false
+  const detail = runDetail.value
+  if (!runDetailOpen.value || !detail || !detail.status) {
+    return
+  }
+  const id = detail.id
+  // 先补一次详情：离开期间后端可能已把跑批跑完，回来不该还停在旧状态
+  refreshRunDetail(id)
+    .then(() => {
+      const fresh = runDetail.value
+      // 只在「补完之后仍未终态」时才恢复轮询；已收尾的保持静止，不空转
+      if (fresh && fresh.status && !isTerminal(fresh.status)) {
+        startPoll(id)
+      }
+    })
+    .catch(() => {
+      // 补取失败：提示已由 request 拦截器给出；此时不起轮询，
+      // 否则会每 2s 重复打同一个失败请求，把控制台刷满
+    })
+})
 
 void loadSuites()
 void ensureAgents()

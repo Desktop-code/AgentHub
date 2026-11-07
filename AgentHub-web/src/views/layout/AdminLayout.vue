@@ -156,7 +156,14 @@
         </main>
       </div>
     </div>
+    <!--
+      试跑抽屉：首次打开后才挂载（v-if=mounted），之后常驻。
+      目的是让壳首屏不预取 TrialPanel 整树（ChatPanel / maRunView / 编排泳道），
+      这一块的 chunk 体积远超壳本身，而大多数会话并不会运行。
+      异步组件与 composable 共用同一个 chunk，`openAgentTrial` 会等它就绪再置可见。
+    -->
     <AgentTrialDrawer
+      v-if="trialDrawerMounted"
       v-model="trialOpen"
       :agent-id="trialTarget.agentId"
       :agent-name="trialTarget.name"
@@ -173,7 +180,7 @@
  * 试跑抽屉挂在壳上，列表和详情共用，不占路由。侧栏不渲染 /agent/trial。
  * 壳上挂载 sessionKeepAlive：可见时每 10min 打 /me 做滑动续期保活。
  */
-import { computed, ref, watch } from 'vue'
+import { computed, defineAsyncComponent, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import type { LocationQuery, LocationQueryValue } from 'vue-router'
 import {
@@ -184,15 +191,22 @@ import {
   House
 } from '@element-plus/icons-vue'
 import AppLogo from '@/components/AppLogo.vue'
-import AgentTrialDrawer from '@/components/agent/AgentTrialDrawer.vue'
-import { resolveMenuIcon } from '@/components/menu/menuIcons'
-import { openAgentTrial, TRIAL_MENU_PATH, useAgentTrial } from '@/composables/agentTrial'
+import { resolveMenuIcon, preloadMenuIcons } from '@/components/menu/menuIcons'
+import { openAgentTrial, preloadTrialDrawer, TRIAL_MENU_PATH, useAgentTrial } from '@/composables/agentTrial'
 import { useSessionKeepAlive } from '@/composables/sessionKeepAlive'
 import { useWorkflowFocus } from '@/composables/workflowFocus'
 import { useTagsViewStore } from '@/stores/tagsView'
 import { useUserStore } from '@/stores/user'
 import TagsView from './components/TagsView.vue'
 import type { MenuNode } from '@/types'
+
+/**
+ * 试跑抽屉按需分包：壳首屏不引用 TrialPanel 整树，
+ * 首次 `openAgentTrial` 触发挂载时才真正下载（见 composables/agentTrial）。
+ * 不设 loadingComponent：抽屉在 chunk 到位前不挂载，也就没有可展示的壳，
+ * 首开的等待由 `openAgentTrial` 内部「等 chunk 就绪再置可见」吸收，不会出现空抽屉。
+ */
+const AgentTrialDrawer = defineAsyncComponent(() => preloadTrialDrawer())
 
 /** 长页面（试跑等）可见时每 10min 打 /me，配合后端滑动续期；401 仍清票跳登录 */
 useSessionKeepAlive()
@@ -238,7 +252,7 @@ const route = useRoute()
 const router = useRouter()
 const user = useUserStore()
 const tags = useTagsViewStore()
-const { open: trialOpen, target: trialTarget } = useAgentTrial()
+const { open: trialOpen, target: trialTarget, mounted: trialDrawerMounted } = useAgentTrial()
 const collapsed = ref(localStorage.getItem(COLLAPSE_KEY) === '1')
 /** 目录默认收起。用户点开后记在这里，true 才是展开。 */
 const directoryOpen = ref<Record<string, boolean>>({})
@@ -328,6 +342,41 @@ function collectLeafLinks(nodes: MenuNode[]): NavItem[] {
 function iconOf(name?: string) {
   return resolveMenuIcon(name)
 }
+
+/**
+ * 菜单里出现「非常驻图标」时，提前把候选集 chunk 拉下来。
+ *
+ * <p>非常驻图标是异步组件，渲染时才下载会先画一帧兜底图标；
+ * 菜单数据到手就发起下载，等侧栏真正绘制时基本已就位。
+ *
+ * @param nodes 后端菜单树（未裁剪）
+ */
+function preloadMenuIconChunk(nodes: MenuNode[]) {
+  const names: string[] = []
+  const walk = (list: MenuNode[]) => {
+    for (const node of list) {
+      if (node.icon) {
+        names.push(node.icon)
+      }
+      if (node.children?.length) {
+        walk(node.children)
+      }
+    }
+  }
+  walk(nodes)
+  void preloadMenuIcons(names)
+}
+
+// 菜单树一变（登录后首次到手 / 重新拉取权限）就预载非常驻图标；全都在常驻表里则不发请求
+watch(
+  () => user.profile?.menus,
+  (menus) => {
+    if (menus?.length) {
+      preloadMenuIconChunk(menus)
+    }
+  },
+  { immediate: true }
+)
 
 function isOpen(id: string) {
   return directoryOpen.value[id] === true

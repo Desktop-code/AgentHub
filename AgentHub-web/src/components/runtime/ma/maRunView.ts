@@ -850,12 +850,17 @@ function groupDuration(group: MaRunGroup, now: number): number {
 /**
  * 构建 MA 运行页的三栏视图模型。
  *
+ * <p>耗时用「构建这一刻」的快照计算，**刻意不接收每秒变化的 now**：
+ * 否则父级每秒重建整批视图模型，整页跟着秒闪。运行中那点继续增长的耗时
+ * 交给卡片 / 右栏各自的秒表叶子接着走。
+ *
  * @param turns  试跑时间线（用户轮 + 助手轮）
  * @param traces 会话下所有轮次的 trace（已按时间升序或乱序均可）
- * @param now    当前毫秒，用于运行中耗时
  * @return 按提问顺序排列的运行轮次
  */
-export function buildMaRunGroups(turns: ChatTurn[], traces: MaTurnTrace[], now: number): MaRunGroup[] {
+export function buildMaRunGroups(turns: ChatTurn[], traces: MaTurnTrace[]): MaRunGroup[] {
+  /** 本次归纳的时间锚点：只用于给运行中步骤一个起点快照，不制造响应式依赖 */
+  const now = Date.now()
   const groups: MaRunGroup[] = []
   let current: MaRunGroup | undefined
   for (const turn of turns) {

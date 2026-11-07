@@ -442,28 +442,36 @@
   font-size: 12px;
   font-weight: 500;
   border-radius: 4px !important;
-  border: 1px solid #e5e7eb !important;
+  /* 这里**不能**再给 border 加 !important：选中态的描边色由 Element Plus 自己的
+     checked-border-color 变量下发（见下方三块），加了 !important 会把彩色描边钉死成灰色 */
+  border: 1px solid #e5e7eb;
   color: #6b7280;
   background: #f3f4f6;
   box-shadow: none !important;
 }
 
-.run-mode-group .el-radio-button.is-react.is-active .el-radio-button__inner {
-  color: var(--el-color-primary);
-  background: var(--el-color-primary-light-9);
-  border-color: var(--el-color-primary-light-5) !important;
+/*
+ * 三种运行模式各自配色：写到 Element Plus 自己的 checked-* 变量上，而不是去和
+ * `.el-radio-button.is-active ... + .el-radio-button__inner` 抢选择器权重。
+ * 原因：Element Plus 改按需引入后，组件 CSS 晚于本文件加载，同权重规则会被它盖掉，
+ * 三个按钮就全成了主色；改在变量上只要求「本块选择器更具体」，与加载顺序无关。
+ */
+.run-mode-group .el-radio-button.is-react {
+  --el-radio-button-checked-text-color: var(--el-color-primary);
+  --el-radio-button-checked-bg-color: var(--el-color-primary-light-9);
+  --el-radio-button-checked-border-color: var(--el-color-primary-light-5);
 }
 
-.run-mode-group .el-radio-button.is-plan.is-active .el-radio-button__inner {
-  color: var(--el-color-success);
-  background: var(--el-color-success-light-9);
-  border-color: var(--el-color-success-light-5) !important;
+.run-mode-group .el-radio-button.is-plan {
+  --el-radio-button-checked-text-color: var(--el-color-success);
+  --el-radio-button-checked-bg-color: var(--el-color-success-light-9);
+  --el-radio-button-checked-border-color: var(--el-color-success-light-5);
 }
 
-.run-mode-group .el-radio-button.is-router.is-active .el-radio-button__inner {
-  color: var(--el-color-warning);
-  background: var(--el-color-warning-light-9);
-  border-color: var(--el-color-warning-light-5) !important;
+.run-mode-group .el-radio-button.is-router {
+  --el-radio-button-checked-text-color: var(--el-color-warning);
+  --el-radio-button-checked-bg-color: var(--el-color-warning-light-9);
+  --el-radio-button-checked-border-color: var(--el-color-warning-light-5);
 }
 
 .run-mode-group .el-radio-button.is-disabled .el-radio-button__inner {

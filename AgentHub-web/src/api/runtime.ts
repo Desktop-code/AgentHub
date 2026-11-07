@@ -26,9 +26,11 @@ export function getTrialCapability(agentId: number) {
 }
 
 /**
- * 历史会话。服务端只返回当前用户在该 Agent 或该方案下的记录。
+ * 历史会话（真分页）。服务端只返回当前用户在该 Agent 或该方案下的当前页。
  *
  * <p>agentId / maId 由服务端强制二选一：绑根与虚拟根的会话空间不混在一起。
+ * size 是<b>页大小</b>（上限 100），不再是总量硬顶；total 为同过滤条件的全量条数，
+ * 左栏据此判断还有没有下一页。
  */
 export function pageTrialSessions(params: { current: number; size: number; agentId?: number; maId?: number }) {
   return request.get<Result<PageResult<TrialSession>>>('/api/runtime/trial/sessions', { params })
@@ -227,30 +229,132 @@ export async function streamTrialMessage(
   const reader = response.body.getReader()
   const decoder = new TextDecoder()
   let buffer = ''
-  while (true) {
-    const { done, value } = await reader.read()
-    if (done) {
-      break
+  // 正文增量按帧合批：同帧内多个 delta 只写一次响应式，渲染次数从「chunk 率」降到「帧率」
+  const batcher = createTextBatcher(handlers)
+  try {
+    while (true) {
+      const { done, value } = await reader.read()
+      if (done) {
+        break
+      }
+      buffer += decoder.decode(value, { stream: true })
+      buffer = takeFrames(buffer, handlers, batcher)
     }
-    buffer += decoder.decode(value, { stream: true })
-    buffer = takeFrames(buffer, handlers)
+    if (buffer.trim()) {
+      takeFrames(`${buffer}\n\n`, handlers, batcher)
+    }
+  } finally {
+    // 正常结束、异常、中止都要把缓冲里的正文落地，否则最后半帧的字会丢
+    batcher.flush()
   }
-  if (buffer.trim()) {
-    takeFrames(`${buffer}\n\n`, handlers)
+}
+
+/** 正文增量事件类型：只有这两种是「可以合批的纯文本」 */
+type TrialTextKind = 'reasoning' | 'assistant'
+
+/**
+ * 正文增量合批器。
+ *
+ * <p>为什么合批：模型 chunk 有 20~60/s，每个 delta 直接写响应式会让整棵对话树按 chunk 率重渲；
+ * 合成到一帧后每次写入都会带上本帧全部新字，渲染次数降到帧率级，且不改变最终文本。
+ *
+ * <p>顺序保证：用**单条有序队列**按到达顺序堆放，只把「连续同类型」的片段拼起来
+ * （例如一串 reasoning 后接一串 assistant 就产生两段）。不能按类型各开一个缓冲再分别回放，
+ * 那样 reasoning 与 assistant 交替到达时会把块顺序打乱。
+ *
+ * <p>不丢字：任何非文本事件（tool / plan / step / done / error 等）派发前先 flush，
+ * 流结束在 finally 里再 flush 一次；后台标签页 rAF 被暂停时直接同步落地。
+ */
+interface TrialTextBatcher {
+  /** 收下一个 delta；同类型连续片段会被合并 */
+  push: (kind: TrialTextKind, text: string) => void
+  /** 立刻把缓冲按顺序交付给 handlers，并清掉已排队的帧 */
+  flush: () => void
+}
+
+/**
+ * 创建正文合批器。
+ *
+ * @param handlers 下游回调；这里只负责延后交付，不改任何语义
+ * @return 合批器句柄
+ */
+function createTextBatcher(handlers: TrialStreamHandlers): TrialTextBatcher {
+  /** 有序队列：元素是「连续的同类正文」，同帧同类型只产生一段 */
+  const queue: { kind: TrialTextKind; text: string }[] = []
+  let frame = 0
+
+  /** 按到达顺序把队列交付出去；交付中即使新增也只会在下一轮 */
+  const deliver = () => {
+    if (!queue.length) {
+      return
+    }
+    const pending = queue.splice(0, queue.length)
+    for (const item of pending) {
+      if (item.kind === 'assistant') {
+        handlers.onAssistant?.(item.text)
+      } else {
+        handlers.onReasoning?.(item.text)
+      }
+    }
+  }
+
+  /** 下一帧交付；环境没有 rAF（或标签页在后台）时同步交付，避免正文长时间停在缓冲里 */
+  const schedule = () => {
+    if (frame) {
+      return
+    }
+    if (typeof requestAnimationFrame !== 'function' || document.hidden) {
+      deliver()
+      return
+    }
+    frame = requestAnimationFrame(() => {
+      frame = 0
+      deliver()
+    })
+  }
+
+  return {
+    push(kind, text) {
+      if (!text) {
+        return
+      }
+      const last = queue[queue.length - 1]
+      // 连续同类型才合并：中间夹了别的类型就必须另起一段，否则块顺序会错
+      if (last && last.kind === kind) {
+        last.text += text
+      } else {
+        queue.push({ kind, text })
+      }
+      schedule()
+    },
+    flush() {
+      if (frame) {
+        cancelAnimationFrame(frame)
+        frame = 0
+      }
+      deliver()
+    }
   }
 }
 
 /** 拆完整的 SSE 帧，最后一段可能还没结束。 */
-function takeFrames(buffer: string, handlers: TrialStreamHandlers) {
+function takeFrames(buffer: string, handlers: TrialStreamHandlers, batcher?: TrialTextBatcher) {
   const parts = buffer.split('\n\n')
   const rest = parts.pop() ?? ''
   for (const frame of parts) {
-    dispatchFrame(frame, handlers)
+    dispatchFrame(frame, handlers, batcher)
   }
   return rest
 }
 
-function dispatchFrame(frame: string, handlers: TrialStreamHandlers) {
+/**
+ * 派发单帧。
+ *
+ * @param frame   完整 SSE 帧
+ * @param handlers 增量回调
+ * @param batcher 正文合批器；正文事件进缓冲，其它事件先 flush 再派发以保证顺序
+ */
+function dispatchFrame(frame: string, handlers: TrialStreamHandlers, batcher?: TrialTextBatcher) {
   let event = 'message'
   const dataLines: string[] = []
   for (const line of frame.split('\n')) {
@@ -270,11 +374,25 @@ function dispatchFrame(frame: string, handlers: TrialStreamHandlers) {
   } catch {
     data = raw
   }
+  // 正文增量：进合批缓冲，本帧不立刻写响应式；其余事件一律先 flush 再派发，保证与正文的相对顺序
+  if (batcher) {
+    if (event === 'reasoning' && typeof data === 'string') {
+      batcher.push('reasoning', data)
+      return
+    }
+    if (event === 'assistant' && typeof data === 'string') {
+      batcher.push('assistant', data)
+      return
+    }
+    batcher.flush()
+  }
+
   if (event === 'phase' && typeof data === 'string') {
     handlers.onPhase?.(data)
   } else if (event === 'route' && typeof data === 'string') {
     handlers.onRoute?.(data)
   } else if (event === 'reasoning' && typeof data === 'string') {
+    // 没有合批器时（理论上只有直连测试）保持原样：立即交付
     handlers.onReasoning?.(data)
   } else if (event === 'assistant' && typeof data === 'string') {
     handlers.onAssistant?.(data)

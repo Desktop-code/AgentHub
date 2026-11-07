@@ -11,6 +11,7 @@ import type {
   TrialStepView
 } from '@/types/runtime'
 import { renderSimpleMarkdown } from '@/utils/simpleMarkdown'
+import { nextBlockId } from '@/components/runtime/trialTimeline'
 
 /**
  * 按 seq 回放。用户单独成气泡，其后的步骤并进一张助手卡片。
@@ -213,7 +214,7 @@ export function appendText(turn: ChatTurn, kind: 'reasoning' | 'assistant', text
     last.text += text
     return
   }
-  turn.blocks.push({ kind, text })
+  turn.blocks.push({ id: nextBlockId(turn), kind, text })
 }
 
 /**
@@ -232,7 +233,7 @@ export function appendVision(turn: ChatTurn, text: string) {
     return
   }
   // 识别结果排在所有块之前：它是本轮的事实素材，读起来应当在思考与终答之前
-  turn.blocks.unshift({ kind: 'vision', text: body })
+  turn.blocks.unshift({ id: nextBlockId(turn), kind: 'vision', text: body })
 }
 
 /** 工具按一次调用一块。参数行和结果分开。 */
@@ -243,6 +244,7 @@ export function appendTool(turn: ChatTurn, line: string, result?: string) {
     return
   }
   turn.blocks.push({
+    id: nextBlockId(turn),
     kind: 'tool',
     text: text || detail,
     detail: detail && detail !== text ? detail : undefined
@@ -273,7 +275,7 @@ export function appendFile(turn: ChatTurn, file: TrialFileView) {
     existing.text = fileNameOf(next.fileName)
     return
   }
-  turn.blocks.push({ kind: 'file', text: fileNameOf(name), file: next })
+  turn.blocks.push({ id: nextBlockId(turn), kind: 'file', text: fileNameOf(name), file: next })
 }
 
 /**
@@ -490,7 +492,7 @@ export function appendRoute(turn: ChatTurn, summary: string) {
   if (active === text) {
     return
   }
-  turn.blocks.push({ kind: 'route', text })
+  turn.blocks.push({ id: nextBlockId(turn), kind: 'route', text })
 }
 
 /**
@@ -822,7 +824,7 @@ export function markRouterTrace(turn: ChatTurn) {
   if (turn.blocks.some((block) => block.kind === 'ROUTER_TRACE')) {
     return
   }
-  turn.blocks.unshift({ kind: 'ROUTER_TRACE', text: '正在调度…' })
+  turn.blocks.unshift({ id: nextBlockId(turn), kind: 'ROUTER_TRACE', text: '正在调度…' })
 }
 
 /**
@@ -870,7 +872,9 @@ function pushBlock(turn: ChatTurn, block: AssistantBlock) {
     appendFile(turn, block.file)
     return
   }
-  turn.blocks.push(block)
+  // 其余块（vision / system / error / ROUTER_TRACE）直接入列：补齐稳定 id 再 push，
+  // 否则模板只能退回下标 key，插入视觉块时会整表重挂
+  turn.blocks.push({ ...block, id: block.id || nextBlockId(turn) })
 }
 
 function blockFromEvent(item: TrialEvent): AssistantBlock | undefined {
@@ -1110,7 +1114,7 @@ export function upsertPlan(turn: ChatTurn, next: TrialPlanView) {
       summary: next.summary,
       steps: next.steps
     }
-    turn.blocks.push({ kind: 'plan', text: plan.summary || planText(plan), plan })
+    turn.blocks.push({ id: nextBlockId(turn), kind: 'plan', text: plan.summary || planText(plan), plan })
   }
   turn.planId = next.planId
   // 待批准是唯一需要人工介入的状态；其它状态按钮都应消失
@@ -1130,5 +1134,5 @@ export function upsertStep(turn: ChatTurn, next: TrialStepView) {
     existing.text = next.line || stepText(next)
     return
   }
-  turn.blocks.push({ kind: 'step', text: next.line || stepText(next), step: next })
+  turn.blocks.push({ id: nextBlockId(turn), kind: 'step', text: next.line || stepText(next), step: next })
 }

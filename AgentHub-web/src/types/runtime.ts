@@ -67,6 +67,14 @@ export interface TrialMessageResult {
 
 /** 助手卡片里的一块。没有引擎中间步时不会出现 reasoning。 */
 export interface AssistantBlock {
+  /**
+   * 块级稳定 id（前端态，随会话快照一起持久化）。
+   *
+   * <p>只用于渲染身份，不参与任何落库/回放语义。为什么必须要有：
+   * 视觉块与编排调度卡是 {@code unshift} 插到块列表队首的，若用数组下标当 {@code v-for} 的 key，
+   * 一插队就让后面所有块的 key 整体位移，Vue 只能整块卸装重建——DOM 重挂、Markdown 槽缓存全失效、滚动跳动。
+   */
+  id?: string
   kind:
     | 'reasoning'
     | 'tool'
@@ -147,6 +155,13 @@ export interface ChatTurn {
   planPending?: boolean
   /** 该轮对应计划的 planId；批准时用它定位要续跑的计划 */
   planId?: string
+  /**
+   * 块 id 的自增序号（前端态）。每分配一块 +1，随快照持久化。
+   *
+   * <p>为什么不放到模块级全局计数器：刷新恢复、切换会话、同页多轮并存时，
+   * 只有「每轮各记各的」才能保证 id 不撞、也不因别的会话推进而跳号。
+   */
+  blockSeq?: number
 }
 
 /**

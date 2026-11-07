@@ -56,6 +56,13 @@ body,
 /* 主滚动容器有条时预留槽位，减轻宽度跳动（布局 .main 亦设 scrollbar-gutter） */
 html {
   scrollbar-gutter: stable;
+  /*
+   * 视口永不横向滚动：控制台没有「横向翻页」的需求，
+   * 而悬浮层（tooltip / popover 等 teleport 到 body 的绝对定位元素）一旦算出超宽，
+   * 就会在窗口最底部冒出横向滚动条（如 Trace 页右上角放大按钮的 tooltip）。
+   * 纵向滚动仍发生在 .main 内部，不受影响。
+   */
+  overflow-x: hidden;
 }
 
 * {
@@ -113,8 +120,10 @@ body.el-popup-parent--hidden .main {
   overflow: hidden;
 }
 
-/* 主按钮悬浮略深，避免沿用变量里偏浅的 light-3 */
-.el-button--primary {
+/* 主按钮悬浮略深，避免沿用变量里偏浅的 light-3。
+   选择器带上 .el-button 是为了压过 Element Plus 自己的 .el-button--primary
+   （按需引入后组件 CSS 晚到，同权重会被它盖掉） */
+.el-button.el-button--primary {
   --el-button-hover-bg-color: var(--ah-primary-hover);
   --el-button-hover-border-color: var(--ah-primary-hover);
   --el-button-active-bg-color: var(--ah-primary-active);
@@ -205,7 +214,9 @@ body.el-popup-parent--hidden .main {
   margin-right: 4px;
 }
 
-.btn-query {
+/* 筛选操作按钮：查询淡蓝 / 重置白底描边 / 新建 primary，三者同尺寸。
+   带 .el-button 前缀压过 Element Plus 的 .el-button 基础变量（按需引入后组件 CSS 晚到） */
+.el-button.btn-query {
   --el-button-bg-color: #ecf5ff;
   --el-button-text-color: #409eff;
   --el-button-border-color: #b3d8ff;
@@ -217,7 +228,7 @@ body.el-popup-parent--hidden .main {
   --el-button-active-border-color: #8cc5ff;
 }
 
-.btn-reset {
+.el-button.btn-reset {
   --el-button-bg-color: #ffffff;
   --el-button-text-color: var(--ah-text);
   --el-button-border-color: var(--ah-border);
@@ -234,19 +245,21 @@ body.el-popup-parent--hidden .main {
   padding: 0 14px;
 }
 
-/* ========== 业务大卡片 el-card ========== */
-.el-card {
+/* ========== 业务大卡片 el-card ==========
+   单类名的覆盖统一加 :root 前缀：Element Plus 改按需引入后组件 CSS 晚于本文件加载，
+   同权重会被它反压（卡片描边 / 内边距会悄悄回到默认值），提一层根选择器才稳 */
+:root .el-card {
   --el-card-border-color: var(--ah-border);
   border: 1px solid var(--ah-border);
   border-radius: 8px;
   box-shadow: 0 2px 12px 0 rgba(0, 0, 0, 0.04);
 }
 
-.el-card.is-never-shadow {
+:root .el-card.is-never-shadow {
   box-shadow: 0 2px 12px 0 rgba(0, 0, 0, 0.04);
 }
 
-.el-card__header {
+:root .el-card__header {
   border-bottom: 1px solid var(--ah-border-soft);
   padding: 14px 16px;
 }
@@ -262,8 +275,9 @@ body.el-popup-parent--hidden .main {
   padding: 4px 8px 12px;
 }
 
-/* ========== 表格：去竖线，极细横线 ========== */
-.el-table {
+/* ========== 表格：去竖线，极细横线 ==========
+   同样加 :root 前缀，压过 Element Plus 的 .el-table 默认变量（表头 / 悬浮底色） */
+:root .el-table {
   --el-table-border-color: var(--ah-border-soft);
   --el-table-header-bg-color: #fafafa;
   --el-table-header-text-color: #909399;

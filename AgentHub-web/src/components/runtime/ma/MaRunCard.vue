@@ -33,7 +33,7 @@
  * <p>职责：一张卡只承载一个协作节点（路由 / 子 Agent / 结论）。
  * 约束：不渲染思考、工具调用与工具结果；子 Agent 卡不接摘要，摘要由父层归纳好后传入。
  */
-import { computed } from 'vue'
+import { computed, onBeforeUnmount, ref, watch } from 'vue'
 import { Loading } from '@element-plus/icons-vue'
 import type { MaRunCard } from '@/components/runtime/ma/maRunView'
 import { formatDuration } from '@/components/runtime/ma/maRunView'
@@ -42,6 +42,62 @@ const props = defineProps<{
   /** 卡片数据；状态变化由父层原地替换对象 */
   card: MaRunCard
 }>()
+
+/**
+ * 运行中耗时的本地基准：父层每次重建卡片都会带来新的 durationMs，
+ * 以那次为锚点在本卡内继续累加。这样父级不再需要每秒刷新整批视图模型，
+ * 「进行中 Xs」仍能一秒一跳。
+ */
+const baseDuration = ref(props.card.durationMs)
+/** 基准采样时刻（本地时钟） */
+const baseAt = ref(Date.now())
+/** 本地 1Hz 心跳；只有运行中才开，避免整页每秒重渲 */
+const tick = ref(Date.now())
+let tickTimer: number | undefined
+
+/** 启动本卡秒表；重复调用不叠加定时器 */
+function startTick() {
+  if (tickTimer !== undefined) {
+    return
+  }
+  tickTimer = window.setInterval(() => {
+    tick.value = Date.now()
+  }, 1000)
+}
+
+/** 停止本卡秒表并释放句柄 */
+function stopTick() {
+  if (tickTimer !== undefined) {
+    window.clearInterval(tickTimer)
+    tickTimer = undefined
+  }
+}
+
+// 父层重建卡片即视为新快照：重置基准，并按运行态决定是否继续走秒
+watch(
+  () => props.card,
+  (card) => {
+    baseDuration.value = card.durationMs
+    baseAt.value = Date.now()
+    tick.value = baseAt.value
+    if (card.status === 'running') {
+      startTick()
+    } else {
+      stopTick()
+    }
+  },
+  { immediate: true }
+)
+
+onBeforeUnmount(stopTick)
+
+/** 展示用耗时：运行中在父层快照上继续累加，结束后直接用父层终值 */
+const liveDuration = computed(() => {
+  if (props.card.status !== 'running') {
+    return props.card.durationMs
+  }
+  return baseDuration.value + Math.max(0, tick.value - baseAt.value)
+})
 
 /** 状态文案：每张卡都必须能一眼看出「在跑 / 完成 / 失败」 */
 const statusText = computed(() => {
@@ -59,7 +115,7 @@ const statusText = computed(() => {
 
 /** 右上角耗时：运行中给「进行中」，结束后给「耗时」；拿不到时间就不占位 */
 const timeText = computed(() => {
-  const duration = formatDuration(props.card.durationMs)
+  const duration = formatDuration(liveDuration.value)
   if (props.card.status === 'running') {
     return duration ? `进行中 ${duration}` : '进行中'
   }

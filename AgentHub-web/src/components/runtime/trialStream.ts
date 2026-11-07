@@ -9,14 +9,17 @@
  * 分三个层次，覆盖三种打断：
  * 1. 关面板（组件卸载、页面还在）：{@link streams} 里存着本轮的响应式时间线，
  *    SSE 读流不中断，重开直接接上同一份数据 —— 真渐进。
- * 2. 刷新页面：JS 全部重来，SSE 连接随之消失。用 sessionStorage 节流快照
+ * 2. 刷新页面：JS 全部重来，SSE 连接随之消失。用 sessionStorage 快照
  *    保住刷新前已收到的内容，先立刻显示，再轮询 events 等整轮落库接管。
+ *    快照不压在增量回调里：流式期只登记「有变化」，序列化与写盘推迟到空闲帧
+ *    （见 {@link saveSnapshot}），页面卸载前再同步补写一次。
  * 3. 换标签页 / 换设备：什么都不共享，只能等 events 落库（后端不落中间增量，前端无法弥补）。
  *
  * 约束：存的是 ChatTurn 的响应式代理，禁止深拷贝（拷贝会断开 SSE 回调的写入目标）。
  */
 import { ref } from 'vue'
 import type { ChatTurn } from '@/types/runtime'
+import { ensureBlockIds, snapshotSignature } from '@/components/runtime/trialTimeline'
 
 /** 一轮进行中（或刚结束、等落库事件接管）的流式状态。 */
 export interface LiveTurn {
@@ -43,13 +46,27 @@ const running = ref<Set<number>>(new Set())
 
 /** 最多保留几轮流式状态，超出淘汰已收尾的最旧项。 */
 const MAX_LIVE = 8
-/** 快照写盘节流间隔。增量可能每秒几十次，逐次写 sessionStorage 会拖慢渲染。 */
+/**
+ * 快照写盘的最小间隔。
+ * <p>真正落盘在空闲帧做（见 {@link scheduleFlush}），这里只做「别写太勤」的兜底：
+ * 会话越长，单次 stringify 越贵，即便不阻塞渲染也没必要每秒重复写多遍。
+ */
 const SNAPSHOT_THROTTLE_MS = 1200
+/** 空闲回调兜底超时：主线程持续忙时也不能无限期拖着不落盘 */
+const SNAPSHOT_IDLE_TIMEOUT_MS = 800
 /** 快照键前缀。只存会话主键与时间线，不含密钥：正文与思考在入库前已脱敏。 */
 const SNAPSHOT_PREFIX = 'agenthub_trial_live_'
 
 /** 各会话上次写快照的时间戳，用于节流。 */
 const lastSavedTime = new Map<number, number>()
+/** 各会话已落盘内容的浅签名：签名没变就不再重复 stringify（见 {@link snapshotSignature}）。 */
+const savedSignature = new Map<number, string>()
+/** 有变化但还没落盘的会话；序列化统一推迟到空闲帧，避免压在 SSE 增量/渲染帧上。 */
+const pendingSessions = new Set<number>()
+/** 已排队的写盘回调，同一时刻只排一个；0 也视为有效句柄，故用 null 表示「没排队」 */
+let flushHandle: number | null = null
+/** pagehide 兜底是否已注册 */
+let pageHideBound = false
 
 /**
  * 登记一轮新的流式。必须在组件把「用户气泡 + 助手卡」并入 turns 之后调用。
@@ -169,7 +186,8 @@ export function finishLive(sessionId: number) {
     return
   }
   entry.finished = true
-  saveSnapshotNow(sessionId)
+  // 收尾是一次性成本：同步落最后一次，保证刷新后能看到完整回答
+  saveSnapshot(sessionId, true)
 }
 
 /**
@@ -179,43 +197,162 @@ export function finishLive(sessionId: number) {
 export function dropLive(sessionId: number) {
   streams.delete(sessionId)
   lastSavedTime.delete(sessionId)
+  // 三类簿记一起清：否则排队中的空闲回调会把已删的快照又写回去
+  savedSignature.delete(sessionId)
+  pendingSessions.delete(sessionId)
   markTurnRunning(sessionId, false)
   clearSnapshot(sessionId)
 }
 
 /**
- * 节流写快照。在 SSE 增量回调里调用：同一次渲染周期内多次调用只落一次盘。
+ * 登记「本轮内容有变化，需要落快照」。在 SSE 增量回调里调用。
+ *
+ * <p>热路径约束：这里**不做 JSON 序列化**。只算一个结构浅签名（轮数 + 块数 + 末尾轮文本长度），
+ * 与上次落盘比一比；有变化就登记到待写集合，真正的 {@code JSON.stringify} + {@code setItem}
+ * 推迟到浏览器空闲帧。整棵历史时间线只在「真的写盘」那一刻序列化一次。
+ *
  * @param sessionId 会话主键
- * @param force     true 表示跳过节流立即写（收尾时用）
+ * @param force     true 表示跳过空闲帧与节流立即同步写（收尾用）
  */
 export function saveSnapshot(sessionId: number, force = false) {
   if (sessionId == null || sessionId < 0) {
     return
   }
-  const now = Date.now()
-  const last = lastSavedTime.get(sessionId) ?? 0
-  if (!force && now - last < SNAPSHOT_THROTTLE_MS) {
-    return
-  }
-  lastSavedTime.set(sessionId, now)
-  saveSnapshotNow(sessionId)
-}
-
-    /** 真正写盘。取 streams 里的当前数组，序列化失败只损失刷新后的首屏，不影响页面运行。 */
-function saveSnapshotNow(sessionId: number) {
   const entry = streams.get(sessionId)
   if (!entry) {
     return
+  }
+  const signature = snapshotSignature(entry.turns)
+  if (signature === savedSignature.get(sessionId)) {
+    // 内容一字未变（例如只推进了 phase 之外的字段）：不排队、不序列化
+    return
+  }
+  bindPageHideFlush()
+  if (force) {
+    writeSnapshot(sessionId)
+    return
+  }
+  pendingSessions.add(sessionId)
+  scheduleFlush()
+}
+
+/**
+ * 真正写盘：取 streams 里的当前数组，序列化后写 sessionStorage。
+ *
+ * @param sessionId 会话主键
+ * @return true 表示确实写入了（内容没变或写失败都返回 false）
+ */
+function writeSnapshot(sessionId: number): boolean {
+  const entry = streams.get(sessionId)
+  if (!entry) {
+    // 已 dropLive：绝不能把删掉的快照又写回去
+    pendingSessions.delete(sessionId)
+    return false
+  }
+  const signature = snapshotSignature(entry.turns)
+  if (signature === savedSignature.get(sessionId)) {
+    pendingSessions.delete(sessionId)
+    return false
   }
   try {
     sessionStorage.setItem(`${SNAPSHOT_PREFIX}${sessionId}`, JSON.stringify(entry.turns))
   } catch {
     // 配额满或隐私模式：退化成「刷新后只能等 events」，不抛给页面
+    pendingSessions.delete(sessionId)
+    return false
+  }
+  savedSignature.set(sessionId, signature)
+  lastSavedTime.set(sessionId, Date.now())
+  pendingSessions.delete(sessionId)
+  return true
+}
+
+/**
+ * 排队一次空闲写盘。已有排队时不重复排。
+ *
+ * @param delayMs 大于 0 表示还在节流窗口内，用定时器等到窗口结束再写
+ */
+function scheduleFlush(delayMs = 0) {
+  if (flushHandle != null) {
+    return
+  }
+  if (delayMs > 0) {
+    flushHandle = window.setTimeout(() => {
+      flushHandle = null
+      flushPending()
+    }, delayMs)
+    return
+  }
+  // 优先空闲帧：此时主线程不在渲染/网络回调里，序列化不会挤占一帧
+  const idle = idleCallback()
+  if (idle) {
+    flushHandle = idle(() => {
+      flushHandle = null
+      flushPending()
+    }, { timeout: SNAPSHOT_IDLE_TIMEOUT_MS })
+    return
+  }
+  // 老浏览器没有 requestIdleCallback：退回下一个宏任务，同样不与当前帧抢时间
+  flushHandle = window.setTimeout(() => {
+    flushHandle = null
+    flushPending()
+  }, 0)
+}
+
+/** 逐个处理待写会话；仍在节流窗口内的留到窗口结束再写。 */
+function flushPending() {
+  const now = Date.now()
+  let wait = 0
+  for (const sessionId of [...pendingSessions]) {
+    const remaining = SNAPSHOT_THROTTLE_MS - (now - (lastSavedTime.get(sessionId) ?? 0))
+    if (remaining > 0) {
+      wait = wait ? Math.min(wait, remaining) : remaining
+      continue
+    }
+    writeSnapshot(sessionId)
+  }
+  if (pendingSessions.size) {
+    scheduleFlush(wait)
   }
 }
 
 /**
+ * 取 requestIdleCallback；不存在时返回 undefined，由调用方退回宏任务。
+ * @return 已绑定 window 的空闲回调
+ */
+function idleCallback(): ((run: () => void, options: { timeout: number }) => number) | undefined {
+  if (typeof window === 'undefined') {
+    return undefined
+  }
+  const win = window as Window & {
+    requestIdleCallback?: (run: () => void, options?: { timeout: number }) => number
+  }
+  return typeof win.requestIdleCallback === 'function'
+    ? win.requestIdleCallback.bind(win)
+    : undefined
+}
+
+/**
+ * 刷新 / 关闭页面前把待写快照同步落盘。
+ * <p>空闲回调在卸载过程中不保证执行，缺了这一步就等于丢掉最后 ≤1.2s 已收到的内容，
+ * 而「刷新后先看到刷新前的内容」正是本快照存在的理由。
+ */
+function bindPageHideFlush() {
+  if (pageHideBound || typeof window === 'undefined') {
+    return
+  }
+  pageHideBound = true
+  window.addEventListener('pagehide', () => {
+    for (const sessionId of [...pendingSessions]) {
+      writeSnapshot(sessionId)
+    }
+  })
+}
+
+/**
  * 读刷新前留在 sessionStorage 的快照。
+ * <p>老快照没有块级 id：这里补齐，避免渲染退回下标 key（插入视觉块时会整表重挂）。
+ *
  * @param sessionId 会话主键
  * @return 时间线；没有或已损坏时为 undefined
  */
@@ -232,7 +369,7 @@ export function loadSnapshot(sessionId?: number): ChatTurn[] | undefined {
     if (!Array.isArray(parsed) || !parsed.length) {
       return undefined
     }
-    return parsed as ChatTurn[]
+    return ensureBlockIds(parsed as ChatTurn[])
   } catch {
     return undefined
   }

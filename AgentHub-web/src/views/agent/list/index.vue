@@ -206,33 +206,43 @@
               />
             </div>
             <!-- loading 只反映左栏自身分页；网格用 listLoading，两者不可混用 -->
-            <div v-loading="railLoading" class="rail-list">
+            <div ref="railListRef" v-loading="railLoading" class="rail-list" @scroll.passive="onRailScroll">
               <el-empty v-if="!railLoading && !railRows.length" description="没有符合筛选的 Agent" />
-              <button
-                v-for="row in railRows"
-                :key="row.id"
-                type="button"
-                class="rail-card"
-                :class="{
-                  'is-current': row.id === activeId,
-                  'is-flying': flyingId === row.id
-                }"
-                :data-agent-id="row.id"
-                :disabled="flipBusy || trialOpen"
-                :aria-current="row.id === activeId ? 'true' : undefined"
-                @click="openDetail(row)"
-              >
-                <span class="rail-name" :title="row.name">{{ row.name }}</span>
-                <span class="rail-code" :title="row.code">{{ row.code }}</span>
-                <span class="badges">
-                  <el-tag size="small" effect="plain" :type="row.runMode === 'ROUTER' ? 'warning' : row.runMode === 'PLAN_AND_EXECUTE' ? 'success' : 'primary'">
-                    {{ runModeLabel(row.runMode) }}
-                  </el-tag>
-                  <el-tag size="small" effect="plain" :class="row.status === 1 ? 'badge-on' : 'badge-off'">
-                    {{ row.status === 1 ? '启用' : '停用' }}
-                  </el-tag>
-                </span>
-              </button>
+              <!--
+                虚拟列表：只渲染可视窗口内的卡（P2-2）。
+                .rail-window 撑出「全部行」的总高度以维持正确滚动条，
+                内部 .rail-window-track 用 translateY 定位到窗口起点。
+                外层 .rail-list 仍是唯一滚动容器（哨兵 IntersectionObserver 的 root 也是它）。
+              -->
+              <div v-else class="rail-window" :style="{ height: `${railWindow.total}px` }">
+                <div class="rail-window-track" :style="{ transform: `translateY(${railWindow.offset}px)` }">
+                  <button
+                    v-for="row in railVisibleRows"
+                    :key="row.id"
+                    type="button"
+                    class="rail-card"
+                    :class="{
+                      'is-current': row.id === activeId,
+                      'is-flying': flyingId === row.id
+                    }"
+                    :data-agent-id="row.id"
+                    :disabled="flipBusy || trialOpen"
+                    :aria-current="row.id === activeId ? 'true' : undefined"
+                    @click="openDetail(row)"
+                  >
+                    <span class="rail-name" :title="row.name">{{ row.name }}</span>
+                    <span class="rail-code" :title="row.code">{{ row.code }}</span>
+                    <span class="badges">
+                      <el-tag size="small" effect="plain" :type="row.runMode === 'ROUTER' ? 'warning' : row.runMode === 'PLAN_AND_EXECUTE' ? 'success' : 'primary'">
+                        {{ runModeLabel(row.runMode) }}
+                      </el-tag>
+                      <el-tag size="small" effect="plain" :class="row.status === 1 ? 'badge-on' : 'badge-off'">
+                        {{ row.status === 1 ? '启用' : '停用' }}
+                      </el-tag>
+                    </span>
+                  </button>
+                </div>
+              </div>
               <!--
                 分页哨兵：必须真实占据 1px 且不可 display:none，
                 否则不产生交叉、IntersectionObserver 永不回调。
@@ -305,6 +315,7 @@ import { runModeLabel, snapFromCard } from '@/composables/agentViewFlip'
 import { useBrowseFlip } from '@/composables/useBrowseFlip'
 import { confirmLeaveDraft } from '@/composables/draftGuard'
 import { CARD_HEIGHT_NORMAL, lastPage, useGridPageSize } from '@/composables/gridPageSize'
+import { computeVirtualWindow, scrollTopForIndex } from '@/composables/virtualWindow'
 import { useUserStore } from '@/stores/user'
 import { maTrialPathOrEmpty } from '@/utils/maTrial'
 import type { AgentCard, AgentCardPatch, AgentSave } from '@/types/agent'
@@ -369,6 +380,141 @@ const railLoading = ref(false)
 /** 底部哨兵节点。 */
 const railSentinelRef = ref<HTMLElement | null>(null)
 const total = ref(0)
+
+/**
+ * 左栏虚拟列表（P2-2）。所属域：前端壳（Agent 列表）。
+ *
+ * <p>左栏是无限滚动、最多可累积 20 页 × 100 条 = 2000 张卡；不做窗口化时
+ * 这 2000 个按钮全部常驻 DOM，每次追加一页都要为新增 100 张卡做完整 patch。
+ * 这里只渲染「视口 + 上下缓冲」那一小段，DOM 数量与总条数解耦。
+ *
+ * <p>三个约束：
+ * 1. 行高必须定值：卡片内容（名称 / 编码 / 两个 tag）全部单行省略，高度不随数据变化；
+ *    真实行高仍**实测一次**再用于计算，避免 CSS 调整后与估算值错位。
+ * 2. `.rail-list` 保持唯一滚动容器：分页哨兵的 IntersectionObserver 以它为 root，
+ *    滚动位置、`centerInScroller`、飞卡落点测量也都基于它。
+ * 3. 飞卡落点可能不在渲染窗口内：`revealRailCard` 先滚到目标行再测坐标（见下）。
+ */
+const railListRef = ref<HTMLElement | null>(null)
+/** 左栏滚动位置（rAF 节流后写入，避免每次滚动都触发一次组件更新链） */
+const railScrollTop = ref(0)
+/** 左栏可视高度（随窗口 / 侧栏折叠变化） */
+const railViewport = ref(0)
+/**
+ * 单行占位 = 卡片高度 + 卡片间距。先给估值，首帧渲染后实测覆盖；
+ * 估值只影响「还没量到」的那一帧，量到后窗口会立即重算。
+ * 估值口径：卡片 padding 12×2 + 名称 21 + 间距 4 + 编码 18 + 间距 4 + tag 20 + 边框 2 ≈ 93，加卡片间距 10。
+ */
+const RAIL_ROW_ESTIMATE = 103
+const railRowSize = ref(RAIL_ROW_ESTIMATE)
+/** 卡片之间的间距，与 `.rail-list` 的 gap 保持一致（总高度要扣掉尾隙） */
+const RAIL_GAP = 10
+
+/** 当前渲染窗口；无行时为空窗口（total 0，模板走 el-empty） */
+const railWindow = computed(() =>
+  computeVirtualWindow({
+    scrollTop: railScrollTop.value,
+    viewport: railViewport.value,
+    rowSize: railRowSize.value,
+    gap: RAIL_GAP,
+    count: railRows.value.length
+  })
+)
+
+/** 只渲染窗口内的行；其余靠占位高度撑出滚动条 */
+const railVisibleRows = computed(() => railRows.value.slice(railWindow.value.start, railWindow.value.end))
+
+/** 滚动节流句柄：一帧最多写一次 scrollTop */
+let railScrollFrame = 0
+
+/**
+ * 左栏滚动：把 scrollTop 合批到下一帧再写响应式。
+ *
+ * <p>滚动事件频率可达每秒上百次，直接写 ref 会让整个窗口 computed 与模板每事件重算一次；
+ * 合批到 rAF 后每帧只算一次（与运行页滚动跟随同一套思路）。
+ */
+function onRailScroll(): void {
+  if (railScrollFrame) {
+    return
+  }
+  railScrollFrame = requestAnimationFrame(() => {
+    railScrollFrame = 0
+    railScrollTop.value = railListRef.value?.scrollTop ?? 0
+  })
+}
+
+/**
+ * 同步左栏尺寸：视口高度 + 单行实测高度。
+ *
+ * <p>读 `clientHeight` 会触发布局，因此只在「显式时机」调（切层、滚动、尺寸变化、落点定位），
+ * 不在渲染函数里调。
+ */
+function syncRailMetrics(): void {
+  const list = railListRef.value
+  if (!list) {
+    return
+  }
+  const viewport = list.clientHeight
+  if (viewport > 0 && viewport !== railViewport.value) {
+    railViewport.value = viewport
+  }
+  // 卡片高度实测：取窗口内第一张卡（没有卡时保持上一个值/估值）
+  const card = list.querySelector<HTMLElement>('.rail-card')
+  if (card) {
+    const height = card.offsetHeight
+    // offsetHeight 取整，加间距得到跨行步长；容差 1px 防抖动导致的重算循环
+    if (height > 0 && Math.abs(height + RAIL_GAP - railRowSize.value) > 1) {
+      railRowSize.value = height + RAIL_GAP
+    }
+  }
+  railScrollTop.value = list.scrollTop
+}
+
+/**
+ * 把左栏滚到指定行（用于深链定位与飞卡落点）。
+ *
+ * <p>只写 `scrollTop` 并同步 `railScrollTop`，让窗口在同一 tick 内切到该段；
+ * 调用方等 nextTick 后即可查到 DOM。
+ *
+ * @param index 目标行在 railRows 中的下标
+ */
+function scrollRailToIndex(index: number): void {
+  const list = railListRef.value
+  if (!list || index < 0) {
+    return
+  }
+  const top = scrollTopForIndex(index, {
+    viewport: list.clientHeight,
+    rowSize: railRowSize.value,
+    gap: RAIL_GAP,
+    count: railRows.value.length
+  })
+  list.scrollTop = top
+  railScrollTop.value = list.scrollTop
+}
+
+/** 左栏尺寸观察器：容器高度变化（折叠侧栏 / 窗口缩放 / 切层）时重算窗口 */
+let railResizeObserver: ResizeObserver | null = null
+
+function disconnectRailResize(): void {
+  railResizeObserver?.disconnect()
+  railResizeObserver = null
+}
+
+function observeRailResize(): void {
+  disconnectRailResize()
+  const list = railListRef.value
+  if (!list || typeof ResizeObserver === 'undefined') {
+    // 无 ResizeObserver 时退化为「切层与滚动时同步」，窗口在切层后会自愈
+    syncRailMetrics()
+    return
+  }
+  railResizeObserver = new ResizeObserver(() => {
+    syncRailMetrics()
+  })
+  railResizeObserver.observe(list)
+  syncRailMetrics()
+}
 
 /** 卡片墙容器（.grid-wrap）：一屏容量按它的宽高实测 */
 const gridWrapRef = ref<HTMLElement | null>(null)
@@ -571,6 +717,11 @@ function clearRailState(): void {
   railPage.value = 1
   railTotal.value = 0
   railHasMore.value = true
+  // 与 resetRail 同理：清空数据必须同步清滚动位置，避免下次进入停在旧偏移
+  railScrollTop.value = 0
+  if (railListRef.value) {
+    railListRef.value.scrollTop = 0
+  }
 }
 
 /** 外部进页 / 侧栏点「Agent 管理」时同步；飞卡中忽略，避免拆 DOM。 */
@@ -671,11 +822,29 @@ function railScroller(): HTMLElement | null {
  * 必须「先滚动、后量坐标」：.rail-list 是 overflow:auto，被裁剪时
  * getBoundingClientRect 会给到视口外坐标，幽灵会飞到屏幕外再落下。
  *
+ * <p>左栏是虚拟列表（P2-2）：落点卡只要不在当前渲染窗口内，DOM 里就没有这个节点。
+ * 这里按「先滚到目标行 → 等窗口重算并渲染 → 再量坐标」的顺序补齐，
+ * 保证飞卡落点与旧实现一致（旧实现是全量渲染，节点一定存在）。
+ *
  * 注意：只允许滚 .rail-list 这类子级滚动容器。
  * 若改滚外层 .main，起飞元素（网格卡 / 左栏卡）会跟着位移，
  * 而飞卡执行器已在 prepare 之前量过 first，起点会失真。
  */
 async function revealRailCard(id: number): Promise<HTMLElement | null> {
+  /*
+   * 先量真实行高/视口再算滚动位置：若带着估值算完再被实测纠正，
+   * 落点卡的坐标会在飞行途中平移，幽灵最后一段会错位。
+   */
+  syncRailMetrics()
+  // 目标行不在渲染窗口内时，先把滚动位置挪过去；等一帧让 DOM 落地再查节点
+  if (!findRowEl(id, 'rail')) {
+    const index = railRows.value.findIndex((row) => row.id === id)
+    if (index >= 0) {
+      scrollRailToIndex(index)
+      await nextTick()
+      await nextFrame()
+    }
+  }
   const card = findRowEl(id, 'rail')
   if (!card) {
     return null
@@ -685,6 +854,25 @@ async function revealRailCard(id: number): Promise<HTMLElement | null> {
   }
   return card
 }
+
+/*
+ * 主从图层显示后才第一次拿到高度（网格态是 display:none，clientHeight 恒为 0）。
+ * 切到主从、或深链直接从主从进页时，绑定尺寸观察器并把窗口尺寸同步一次，
+ * 否则窗口会按 0 高度算，只渲染兜底那一行。
+ */
+watch(
+  viewMode,
+  (mode) => {
+    if (mode !== 'master') {
+      return
+    }
+    void nextTick(() => {
+      observeRailResize()
+      syncRailMetrics()
+    })
+  },
+  { immediate: true }
+)
 
 /** 首次测量前不取数，避免先按默认条数拉一次再按实测 pageSize 重拉；序号用于丢弃过期请求 */
 async function loadRows() {
@@ -845,6 +1033,14 @@ async function loadRailMore(): Promise<void> {
     disconnectRailObserver()
   } finally {
     railLoading.value = false
+    /*
+     * 追加一页后补一次尺寸同步：
+     * ① 首帧渲染出卡片时才能实测真实行高（估值 → 实测）；
+     * ② 追加会让占位总高度变长，窗口需按新高度重算。
+     * 放在 finally：失败时也要把「视口高度」这一项同步上，否则空列表切层后窗口为 0。
+     */
+    await nextTick()
+    syncRailMetrics()
   }
 }
 
@@ -859,6 +1055,14 @@ async function resetRail(): Promise<void> {
   railTotal.value = 0
   railHasMore.value = true
   railSource.value = []
+  /*
+   * 虚拟列表按 scrollTop 算窗口：清空数据后必须同时把滚动位置归零，
+   * 否则下一次进入会停在上一次的偏移上，窗口算到不存在的行、列表看起来是空的。
+   */
+  railScrollTop.value = 0
+  if (railListRef.value) {
+    railListRef.value.scrollTop = 0
+  }
   /*
    * 清空后哨兵位置会变，必须等 DOM 更新再重新 observe；
    * 否则哨兵已滚出视口时观察器不再回调，第一页之后永远加载不出第二页。
@@ -947,6 +1151,11 @@ function teardownRail(): void {
   window.clearTimeout(railSearchTimer)
   railSearchTimer = 0
   disconnectRailObserver()
+  disconnectRailResize()
+  if (railScrollFrame) {
+    cancelAnimationFrame(railScrollFrame)
+    railScrollFrame = 0
+  }
 }
 
 /*
@@ -959,6 +1168,10 @@ onActivated(() => {
     // 重新可见后哨兵可能已不在观察范围内，重建一次
     if (viewMode.value === 'master' && railHasMore.value) {
       observeRailSentinel()
+    }
+    // 尺寸观察器在失活时被断开，回到页面要重新绑定（否则窗口不随折叠/缩放变化）
+    if (viewMode.value === 'master') {
+      observeRailResize()
     }
   })
 })
@@ -1370,6 +1583,26 @@ function onTrial(payload: { agentId: number; name: string; runMode: string }) {
   min-height: 0;
   overflow: auto;
   padding: 2px;
+}
+
+/*
+ * 虚拟列表占位层（P2-2）。
+ * `flex: none` 是硬要求：flex 子项默认可收缩，一旦被压缩，
+ * 占位高度就不再等于「全部行」的总高度，滚动条长度与窗口偏移会一起错。
+ * 不设 overflow：渲染出来的那一小段要能正常溢出到占位层之外显示。
+ */
+.rail-window {
+  flex: none;
+  position: relative;
+  width: 100%;
+}
+
+/* 渲染窗口：整体平移到对应位置，间距与旧实现保持一致（10px） */
+.rail-window-track {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  width: 100%;
 }
 
 /*

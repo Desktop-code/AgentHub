@@ -19,8 +19,12 @@
         清空当前
       </el-button>
     </div>
-    <p v-if="!groups.length" class="session-hint">提问后才会保存到历史会话</p>
-    <div v-loading="historyLoading" class="session-list">
+    <p v-if="!groups.length && !historyLoading" class="session-hint">提问后才会保存到历史会话</p>
+    <!--
+      滚动容器：触底自动加载下一页（主交互）；
+      底部同时保留「加载更多」按钮，兼顾键盘/触控板不便滚到底的情况。
+    -->
+    <div ref="listRef" v-loading="historyLoading" class="session-list" @scroll.passive="onScroll">
       <section v-for="group in groups" :key="group.label" class="session-group">
         <div class="group-label">{{ group.label }}</div>
         <div
@@ -56,6 +60,14 @@
           </span>
         </div>
       </section>
+
+      <!-- 分页尾部：还有下一页就出按钮（触底也会自动触发）；到底了给明确结束提示 -->
+      <div v-if="hasMore" class="session-more-row">
+        <el-button link type="primary" :loading="loadingMore" @click="emit('loadMore')">
+          {{ loadingMore ? '加载中…' : '加载更多' }}
+        </el-button>
+      </div>
+      <p v-else-if="groups.length" class="session-end">没有更多了</p>
     </div>
   </aside>
 </template>
@@ -64,21 +76,22 @@
 /**
  * 试跑左栏「历史会话」纯展示组件。所属域：runtime（前端）。
  *
- * 职责：按「今日/昨日/本周/更早」分组渲染会话行，提供新会话、清空当前、行内重命名/删除入口；
- * 以及「本轮执行中」的转圈状态。
+ * 职责：按「今日 / 7天内 / 30天内 / 更早」分组渲染会话行，提供新会话、清空当前、行内重命名/删除入口；
+ * 以及「本轮执行中」的转圈状态、历史会话的触底分页（发 loadMore 事件）。
  *
  * 约束（结构边界）：
- * - **不持有任何状态、不发请求**：分组、标题文案、执行中判定全部由父组件（TrialPanel）算好传入，
- *   本组件只负责渲染与转发点击，保证拆分前后行为完全等价；
+ * - **不持有业务状态、不发请求**：分组、标题文案、执行中判定、页码与 total 全部由父组件（TrialPanel）
+ *   算好传入，本组件只负责渲染与转发点击 / 触底，保证拆分前后行为完全等价；
  * - 结果 / 失败的提示由父组件统一处理，这里不弹 toast；
  * - `.sessions` 的宽度与右边框由父级 scoped 样式控制（父级样式可作用于子组件根元素），
  *   本文件只负责内部元素样式。
  */
+import { nextTick, ref, watch } from 'vue'
 import { MoreFilled, Loading } from '@element-plus/icons-vue'
 import type { SessionGroup } from './sessionGroup'
 import type { TrialSession } from '@/types/runtime'
 
-defineProps<{
+const props = defineProps<{
   /** 已分好组、排好序的会话列表；空数组显示提示文案 */
   groups: SessionGroup[]
   /** 当前选中的会话 id；与行 id 相等时展示选中态 */
@@ -93,8 +106,12 @@ defineProps<{
   sending: boolean
   /** 当前会话是否在续订中 */
   resuming: boolean
-  /** 历史列表加载中 */
+  /** 历史列表加载中（第 1 页 / 重置） */
   historyLoading: boolean
+  /** 是否还有下一页（服务端 total > 已加载条数） */
+  hasMore?: boolean
+  /** 正在加载下一页（只驱动底部按钮的 loading，不盖整栏） */
+  loadingMore?: boolean
   /** 是否前端临时草稿会话（未落库）：临时会话不可清空/重命名/删除 */
   isTemp: (item: TrialSession) => boolean
   /** 该行是否正在执行（决定转圈与「不显示更多菜单」） */
@@ -116,7 +133,50 @@ const emit = defineEmits<{
   (e: 'open', id: number): void
   /** 行内下拉：rename / remove */
   (e: 'command', command: string, item: TrialSession): void
+  /** 触底或点「加载更多」：请求下一页 */
+  (e: 'loadMore'): void
 }>()
+
+/** 滚动容器；触底判定与「内容不足一屏时自动补一页」都要读它 */
+const listRef = ref<HTMLElement>()
+/** 距底部多少像素内触发加载：留一点余量，让下一页在用户滚到底前就开始取 */
+const NEAR_BOTTOM_PX = 96
+
+/**
+ * 滚动触底：接近底部且还有下一页时发一次 loadMore。
+ * 并发保护在父组件（loadingMore / 无下一页直接 return），这里不重复建状态。
+ *
+ * @param evt 滚动事件（监听在自身容器上）
+ */
+function onScroll(evt: Event) {
+  const el = evt.target as HTMLElement | null
+  if (!el || !props.hasMore || props.loadingMore) {
+    return
+  }
+  if (el.scrollTop + el.clientHeight >= el.scrollHeight - NEAR_BOTTOM_PX) {
+    emit('loadMore')
+  }
+}
+
+/**
+ * 内容没占满一屏时，用户根本滚不动，触底事件不会发生。
+ * 这里在分组 / 是否有下一页变化后补一次判定：仍然没滚动条就主动取下一页，
+ * 直到填满或没有下一页。父组件每页都会推进「已加载条数」，因此不会死循环。
+ */
+watch(
+  () => [props.groups, props.hasMore, props.loadingMore, props.historyLoading] as const,
+  async () => {
+    await nextTick()
+    const el = listRef.value
+    // 首屏 / 重置还在加载时不要抢占：等它落地后本 watch 会因 hasMore / groups 变化再判一次
+    if (!el || !props.hasMore || props.loadingMore || props.historyLoading) {
+      return
+    }
+    if (el.scrollHeight <= el.clientHeight + 4) {
+      emit('loadMore')
+    }
+  }
+)
 </script>
 
 <style scoped>
@@ -146,6 +206,20 @@ const emit = defineEmits<{
   flex: 1;
   min-height: 0;
   overflow: auto;
+}
+
+/* 分页尾部：留出点击区，避免贴边误触最后一行 */
+.session-more-row {
+  display: flex;
+  justify-content: center;
+  padding: 6px 0 10px;
+}
+
+.session-end {
+  margin: 4px 0 10px;
+  color: var(--ah-text-muted);
+  font-size: 12px;
+  text-align: center;
 }
 
 .session-group + .session-group {

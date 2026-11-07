@@ -40,7 +40,7 @@
 
         <!-- 3) 模型回答：正文直接用 Markdown 给到用户，与对话页同一套渲染 -->
         <div v-if="group.answer" class="ma-turn__answer" @click="emit('select', group.key)">
-          <div class="md answer" v-html="markdown(group.answer, group.status === 'running')" />
+          <div class="md answer" v-html="markdown(group)" />
           <span v-if="group.status === 'running'" class="ma-turn__caret">|</span>
         </div>
         <p
@@ -99,7 +99,7 @@
 import { computed, nextTick, onMounted, ref, watch } from 'vue'
 import type { MaRunGroup } from '@/components/runtime/ma/maRunView'
 import MaRunCard from '@/components/runtime/ma/MaRunCard.vue'
-import { renderSimpleMarkdown, renderStreamingMarkdown } from '@/utils/simpleMarkdown'
+import { renderMarkdownMemo } from '@/utils/simpleMarkdown'
 
 const props = defineProps<{
   /** 全部运行轮次，按提问顺序 */
@@ -116,8 +116,6 @@ const props = defineProps<{
   blockedHint?: string
   /** 是否已与后端断开、只能等落库 */
   detached?: boolean
-  /** 每秒刷新的当前时间戳 */
-  now: number
 }>()
 
 const emit = defineEmits<{
@@ -149,12 +147,14 @@ function errorsOf(group: MaRunGroup): string[] {
 /**
  * 回答正文渲染：流式时用流式渲染（未闭合的代码块也能看），结束后用普通渲染。
  *
- * @param value     正文
- * @param streaming 是否仍在流式输出
+ * <p>带位置键缓存：汇总改流式后正文每帧都在变，同内容重复解析会把中栏拖卡；
+ * 缓存键按轮次隔离，与 ChatPanel 的槽位缓存互不干扰。
+ *
+ * @param group 运行轮次
  * @return HTML 字符串
  */
-function markdown(value: string, streaming = false): string {
-  return streaming ? renderStreamingMarkdown(value) : renderSimpleMarkdown(value)
+function markdown(group: MaRunGroup): string {
+  return renderMarkdownMemo(`ma-answer-${group.key}`, group.answer, group.status === 'running')
 }
 
 /** 滚到底部 */

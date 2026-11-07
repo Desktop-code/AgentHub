@@ -226,6 +226,7 @@ X-App-Secret: ********
       :workflow-id="trialTarget.id"
       :default-release-id="trialTarget.defaultReleaseId ?? null"
       :can-act="canHumanAct"
+      :page-active="pageActive"
     />
   </div>
 </template>
@@ -239,7 +240,7 @@ defineOptions({ name: 'WorkflowList' })
  * 查看历史发布版本、发起试跑、跳转调用追踪查看运行记录。
  * <p>边界：本页不自建执行引擎；试跑复用编辑页抽屉，运行详情仍在后端 run 表。
  */
-import { computed, onActivated, onMounted, reactive, ref } from 'vue'
+import { computed, onActivated, onDeactivated, onMounted, reactive, ref } from 'vue'
 import { useRouter } from 'vue-router'
 import { ArrowDown, MoreFilled, Plus, RefreshRight, Search } from '@element-plus/icons-vue'
 import { ElMessage, ElMessageBox, type FormInstance, type FormRules } from 'element-plus'
@@ -319,6 +320,12 @@ const removingId = ref<number | null>(null)
 /** 试跑抽屉目标；为空时不渲染抽屉，防止旧 target 串行 */
 const trialOpen = ref(false)
 const trialTarget = ref<WorkflowDefRow | null>(null)
+
+/**
+ * 本页是否在前台。KeepAlive 缓存根切走 / 切回时翻转，
+ * 透传给试跑抽屉，让它停 / 起轮询与秒表（抽屉是子组件，收不到 deactivated）。
+ */
+const pageActive = ref(true)
 
 const releaseOpen = ref(false)
 const releaseLoading = ref(false)
@@ -616,11 +623,21 @@ onMounted(loadRows)
  */
 let activatedOnce = false
 onActivated(() => {
+  pageActive.value = true
   if (!activatedOnce) {
     activatedOnce = true
     return
   }
   void loadRows()
+})
+
+/**
+ * 本页是 KeepAlive 缓存根（meta.cacheName=WorkflowList），切走菜单不会卸载。
+ * <p>试跑抽屉是子组件、收不到 deactivated，因此把失活状态传给它，
+ * 由抽屉自己停掉 `GET workflow/run` 轮询与 1Hz 秒表。
+ */
+onDeactivated(() => {
+  pageActive.value = false
 })
 </script>
 
