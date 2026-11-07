@@ -405,6 +405,14 @@ agenthub:
       timeout-ms: ${AGENTHUB_EVAL_EVALSCOPE_TIMEOUT_MS:60000}
       export-dir: ${AGENTHUB_EVAL_EVALSCOPE_EXPORT_DIR:./workspace-test}
       note: ""
+  # Token 日汇总定时：只扫「今天」，同维覆盖 / 无流水清零，与控制台重算共用 rebuildRange
+  billing:
+    # 总闸；关则整轮立即返回，不查库
+    daily-rollup-enabled: ${AGENTHUB_BILLING_DAILY_ROLLUP_ENABLED:true}
+    # Spring cron（含秒）：默认每小时的 10 / 30 / 50 分；时区固定 Asia/Shanghai（见 Job 注解）
+    daily-rollup-cron: ${AGENTHUB_BILLING_DAILY_ROLLUP_CRON:0 10,30,50 * * * ?}
+    # 定时写入 created_by / updated_by 的系统占位用户 id（非真实登录用户）
+    daily-rollup-operator-id: ${AGENTHUB_BILLING_DAILY_ROLLUP_OPERATOR_ID:0}
   security:
     # local | oauth2 | passthrough；后两者本期只保留枚举，不接企业身份
     mode: local
