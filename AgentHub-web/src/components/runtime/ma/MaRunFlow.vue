@@ -31,13 +31,8 @@
           连接已断开，等待本轮结束
         </p>
 
-        <!-- 2) 模型思考：保持原有卡片排版，只显示执行过程；汇总算在路由卡上 -->
+        <!-- 2) 模型思考：直接铺协作卡（路由 → 子 Agent），不再单独加「运行」标题行 -->
         <div v-if="group.cards.length" class="ma-run" @click="emit('select', group.key)">
-          <div class="ma-run__head">
-            <span class="ma-run__label" aria-hidden="true">运</span>
-            <span class="ma-run__title">运行</span>
-            <span v-if="turnTime(group)" class="ma-run__time">{{ turnTime(group) }}</span>
-          </div>
           <div class="ma-run__cards">
             <MaRunCard v-for="card in group.cards" :key="card.key" :card="card" />
           </div>
@@ -103,7 +98,6 @@
  */
 import { computed, nextTick, onMounted, ref, watch } from 'vue'
 import type { MaRunGroup } from '@/components/runtime/ma/maRunView'
-import { formatDuration } from '@/components/runtime/ma/maRunView'
 import MaRunCard from '@/components/runtime/ma/MaRunCard.vue'
 import { renderSimpleMarkdown, renderStreamingMarkdown } from '@/utils/simpleMarkdown'
 
@@ -138,22 +132,6 @@ const scroller = ref<HTMLElement>()
 
 /** 最后一轮 key：决定新内容到达时是否自动跟随滚动 */
 const lastKey = computed(() => props.groups[props.groups.length - 1]?.key ?? '')
-
-/**
- * 运行区标题右侧的耗时。
- *
- * <p>运行中显示已运行时长；结束后有总耗时才显示，拿不到时间就不占位。
- */
-function turnTime(group: MaRunGroup): string {
-  const duration = formatDuration(group.durationMs)
-  if (group.status === 'running') {
-    return duration ? `进行中 ${duration}` : '进行中'
-  }
-  if (group.status === 'error') {
-    return duration ? `失败 · ${duration}` : '失败'
-  }
-  return duration ? `耗时 ${duration}` : ''
-}
 
 /**
  * 本轮的失败块：与对话页一致，失败正文用红字单独给出，不混进回答。
@@ -294,47 +272,10 @@ function submit() {
   text-align: right;
 }
 
-/* 2) 模型思考：无外框，与提问拉开距离；块内只有路由 / 子 Agent 卡 */
+/* 2) 模型思考：无外框、无左侧缩进，与提问拉开距离；块内只有路由 / 子 Agent 卡 */
 .ma-run {
   margin-top: 12px;
-  padding-left: 32px;
   cursor: pointer;
-}
-
-.ma-run__head {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  margin-bottom: 8px;
-}
-
-/* 「运」标记：与对话页的方形标记同尺寸，强调这是模型侧的执行过程 */
-.ma-run__label {
-  display: grid;
-  flex: none;
-  place-items: center;
-  width: 22px;
-  height: 22px;
-  margin-left: -32px;
-  border: 1px solid #e4e6ee;
-  border-radius: 6px;
-  background: #fff;
-  color: var(--ah-text-secondary, #6b7280);
-  font-size: 11px;
-  font-weight: 700;
-}
-
-.ma-run__title {
-  color: var(--ah-text-secondary, #6b7280);
-  font-size: 12px;
-  font-weight: 600;
-}
-
-.ma-run__time {
-  color: var(--ah-text-muted, #9ca3af);
-  font-size: 11px;
-  white-space: nowrap;
-  font-variant-numeric: tabular-nums;
 }
 
 /* 卡片纵向 flex-col：中栏主宽，卡片本身不横排 */

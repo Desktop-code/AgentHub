@@ -239,7 +239,7 @@ defineOptions({ name: 'WorkflowList' })
  * 查看历史发布版本、发起试跑、跳转调用追踪查看运行记录。
  * <p>边界：本页不自建执行引擎；试跑复用编辑页抽屉，运行详情仍在后端 run 表。
  */
-import { computed, onMounted, reactive, ref } from 'vue'
+import { computed, onActivated, onMounted, reactive, ref } from 'vue'
 import { useRouter } from 'vue-router'
 import { ArrowDown, MoreFilled, Plus, RefreshRight, Search } from '@element-plus/icons-vue'
 import { ElMessage, ElMessageBox, type FormInstance, type FormRules } from 'element-plus'
@@ -607,6 +607,21 @@ function goAppManage() {
 }
 
 onMounted(loadRows)
+
+/**
+ * KeepAlive 页签切回时重拉列表。
+ * <p>典型场景：编辑页发布 / 删除后返回列表，组件没有重新挂载，
+ * 只靠 onMounted 会一直显示发布前的状态与版本号。
+ * <p>首次激活紧随 onMounted 触发，跳过以免重复请求。
+ */
+let activatedOnce = false
+onActivated(() => {
+  if (!activatedOnce) {
+    activatedOnce = true
+    return
+  }
+  void loadRows()
+})
 </script>
 
 <style scoped>

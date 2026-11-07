@@ -152,10 +152,6 @@
       class="ma-drawer"
     >
       <el-form ref="formRef" :model="form" :rules="formRules" :disabled="!canEdit" label-width="112px" class="ma-form">
-        <!-- 真源说明：保存只落 ma_def / ma_candidate，旧 agent_route 行保持原样 -->
-        <p class="source-note">
-          唯一真源：本页保存只更新「方案 + 候选」，不再回写旧的 Agent 子路由；Agent「编排」Tab 已改为只读并深链到此处。
-        </p>
         <!-- 区块 1：基本信息。标题加粗 + 顶部实线，和下一块拉开层次 -->
         <section class="form-block form-block--first">
           <h3 class="form-block__title">基本信息</h3>
@@ -339,8 +335,11 @@
       </el-form>
 
       <template #footer>
-        <el-button @click="drawerVisible = false">关闭</el-button>
-        <el-button v-if="canEdit" type="primary" :loading="saving" @click="submit">保存</el-button>
+        <!-- 无改动时取消/保存都禁用；有改动才可取消（还原基线）或保存 -->
+        <el-button :disabled="!formDirty" @click="cancelEdit">取消</el-button>
+        <el-button v-if="canEdit" type="primary" :loading="saving" :disabled="!formDirty" @click="submit">
+          保存
+        </el-button>
       </template>
     </el-drawer>
   </div>
@@ -361,7 +360,7 @@ defineOptions({ name: 'MaList' })
  * <p>边界：不新建 Agent、不复制执行器；试跑仍走旧 ROUTER 执行器与旧试跑权限，
  * 只是执行读源改成 ma_def（模板 / 候选 / 判路由模型）。
  */
-import { computed, onMounted, reactive, ref, watch } from 'vue'
+import { computed, nextTick, onMounted, reactive, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { ElMessage, ElMessageBox, type FormInstance, type FormRules } from 'element-plus'
 import { Plus, RefreshRight, Search } from '@element-plus/icons-vue'
@@ -549,6 +548,97 @@ const form = reactive<MaFormState>({
   candidates: []
 })
 
+/** 打开抽屉时的完整表单基线（含候选展示字段）；取消时整份还原，脏检查也据此比对 */
+const formBaseline = ref<MaFormState | null>(null)
+
+/**
+ * 深拷贝当前表单，作为基线或还原源。
+ *
+ * @return 与 {@link MaFormState} 同结构的纯数据副本
+ */
+function cloneFormState(): MaFormState {
+  return {
+    id: form.id,
+    code: form.code,
+    name: form.name,
+    template: form.template,
+    rootAgentId: form.rootAgentId,
+    enabled: form.enabled,
+    config: {
+      ...form.config,
+      maChildRunModesAllowed: [...(form.config.maChildRunModesAllowed || [])]
+    },
+    candidates: form.candidates.map((item) => ({ ...item }))
+  }
+}
+
+/**
+ * 把基线/当前表单压成可稳定比对的快照（忽略候选回显名称等非提交字段）。
+ *
+ * @param state 待比对的表单状态
+ * @return 可 JSON 序列化的比对对象
+ */
+function editableSnapshot(state: MaFormState = form) {
+  const modes = [...(state.config.maChildRunModesAllowed || [])].slice().sort()
+  return {
+    code: state.code,
+    name: state.name,
+    template: state.template,
+    rootAgentId: state.rootAgentId,
+    config: {
+      maContextPolicy: state.config.maContextPolicy,
+      answerMode: state.config.answerMode,
+      maxRouteChildren: state.config.maxRouteChildren,
+      maChildRunModesAllowed: modes,
+      multiIntentEnabled: state.config.multiIntentEnabled,
+      maAllowParentHistoryWhenSingle: state.config.maAllowParentHistoryWhenSingle,
+      maCriticMaxRounds: state.config.maCriticMaxRounds,
+      maCriticAgentId: state.config.maCriticAgentId ?? null,
+      competeStrategy: state.config.competeStrategy
+    },
+    candidates: state.candidates.map((item) => ({
+      agentId: item.agentId,
+      intentDesc: item.intentDesc,
+      sortNo: item.sortNo ?? null,
+      enabled: item.enabled
+    }))
+  }
+}
+
+/** 打开/回填完成后记下基线，保证刚打开时取消与保存都不可点 */
+async function markFormBaseline() {
+  await nextTick()
+  formBaseline.value = cloneFormState()
+}
+
+/** 相对打开时是否有改动（基本信息 / 编排参数 / 候选池） */
+const formDirty = computed(() => {
+  if (!formBaseline.value) return false
+  return JSON.stringify(editableSnapshot()) !== JSON.stringify(editableSnapshot(formBaseline.value))
+})
+
+/**
+ * 取消：把基本信息、编排参数、候选池还原到打开抽屉时的数据，抽屉保持打开。
+ * 仅在有改动时可点；还原后取消/保存再次禁用。
+ */
+function cancelEdit() {
+  if (!formDirty.value || !formBaseline.value) return
+  const baseline = formBaseline.value
+  form.id = baseline.id
+  form.code = baseline.code
+  form.name = baseline.name
+  form.template = baseline.template
+  form.rootAgentId = baseline.rootAgentId
+  form.enabled = baseline.enabled
+  form.config = {
+    ...baseline.config,
+    maChildRunModesAllowed: [...(baseline.config.maChildRunModesAllowed || [])]
+  }
+  form.candidates = baseline.candidates.map((item) => ({ ...item }))
+  // 清掉校验红字，避免还原后仍残留「必填」提示
+  void nextTick(() => formRef.value?.clearValidate())
+}
+
 const formRules: FormRules = {
   code: [{ required: true, message: '方案编码不能为空', trigger: 'blur' }],
   name: [{ required: true, message: '方案名称不能为空', trigger: 'blur' }],
@@ -652,6 +742,7 @@ async function openCreate() {
   form.config = defaultConfig()
   form.candidates = []
   drawerVisible.value = true
+  await markFormBaseline()
 }
 
 /**
@@ -679,6 +770,7 @@ async function openEdit(row: MaDefRow) {
     }
     fillForm(detail)
     drawerVisible.value = true
+    await markFormBaseline()
   } catch {
     // 拦截器已给出中文错误
   }
@@ -976,17 +1068,6 @@ watch(
 
 .full-width {
   width: 100%;
-}
-
-/* 抽屉顶部真源说明：轻提示，不抢区块标题的层级 */
-.source-note {
-  margin: 0 0 16px;
-  padding: 8px 12px;
-  border-radius: 8px;
-  background: var(--ah-fill-light, #f5f6fa);
-  color: var(--ah-text-secondary, #5b6172);
-  font-size: 12px;
-  line-height: 1.6;
 }
 
 /* 抽屉三块：实线分隔 + 加粗标题，靠间距和线把「基本信息 / 编排参数 / 候选池」切清楚 */

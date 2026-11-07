@@ -1952,11 +1952,25 @@ async function goList() {
   void router.push('/orchestration/workflow')
 }
 
-// 同一页面切换到另一条工作流（页签复用一个组件）时重新载入
+/**
+ * 当前路由是否仍停在本编辑页（/orchestration/workflow/:id）。
+ * <p>KeepAlive 失活后 watch 仍会执行：跳到 /agent/list/12、/rag/kb/3/docs 等
+ * 同样带 :id 的路由时，workflowId 会被解析成对方的 id，
+ * 若不加闸就会去请求 /api/workflow/defs/12 并弹「工作流不存在」。
+ */
+function onWorkflowEditorRoute(): boolean {
+  return route.path === `/orchestration/workflow/${workflowId.value}`
+}
+
+// 同一页面切换到另一条工作流（页签复用一个组件）时重新载入；其它路由一律忽略
 watch(workflowId, (next, prev) => {
-  if (next && next !== prev) {
-    void loadAll()
+  if (!next || next === prev) {
+    return
   }
+  if (!onWorkflowEditorRoute()) {
+    return
+  }
+  void loadAll()
 })
 
 onMounted(async () => {
