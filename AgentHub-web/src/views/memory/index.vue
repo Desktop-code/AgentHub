@@ -122,10 +122,21 @@
             <el-tag :type="statusTag(row).type" size="small">{{ statusTag(row).label }}</el-tag>
           </template>
         </el-table-column>
+        <!-- 向量同步状态：只读；FAILED 时用 tooltip 补失败次数与短原因 -->
+        <el-table-column label="同步状态" width="140">
+          <template #default="{ row }">
+            <el-tooltip :disabled="!syncTip(row)" :content="syncTip(row)" placement="top">
+              <el-tag :type="syncTag(row).type" size="small" effect="plain">
+                {{ syncTag(row).label }}
+              </el-tag>
+            </el-tooltip>
+          </template>
+        </el-table-column>
         <el-table-column prop="sessionId" label="Session" width="100" />
         <el-table-column prop="expiredTime" label="过期时间" min-width="170" />
-        <el-table-column label="操作" width="100" fixed="right">
+        <el-table-column label="操作" width="140" fixed="right">
           <template #default="{ row }">
+            <el-button link type="primary" @click="openDetail(row)">详情</el-button>
             <el-button
               v-if="user.hasPerm('memory:item:remove')"
               link
@@ -145,6 +156,38 @@
         @change="onPageChange"
       />
     </el-card>
+
+    <!-- 详情只读：同步状态/失败次数/短原因在这里完整展示，不提供重试入口 -->
+    <el-dialog v-model="detailVisible" title="记忆详情" width="720px">
+      <div v-loading="detailLoading">
+        <el-descriptions v-if="detailRow" :column="2" border>
+          <el-descriptions-item label="标题">{{ detailRow.title || '—' }}</el-descriptions-item>
+          <el-descriptions-item label="范围">{{ scopeLabel(detailRow.scope) }}</el-descriptions-item>
+          <el-descriptions-item label="事实键">{{ detailRow.factKey || '—' }}</el-descriptions-item>
+          <el-descriptions-item label="归属">{{ ownerLabel(detailRow) }}</el-descriptions-item>
+          <el-descriptions-item label="重要性">{{ importanceTag(detailRow.importance).label }}</el-descriptions-item>
+          <el-descriptions-item label="状态">{{ statusTag(detailRow).label }}</el-descriptions-item>
+          <el-descriptions-item label="同步状态">
+            <el-tag :type="syncTag(detailRow).type" size="small" effect="plain">
+              {{ syncTag(detailRow).label }}
+            </el-tag>
+          </el-descriptions-item>
+          <el-descriptions-item label="失败次数">
+            {{ detailRow.vectorSyncFailCount ?? '—' }}
+          </el-descriptions-item>
+          <el-descriptions-item label="失败原因" :span="2">
+            {{ detailRow.vectorSyncError || '—' }}
+          </el-descriptions-item>
+          <el-descriptions-item label="Session">{{ detailRow.sessionId ?? '—' }}</el-descriptions-item>
+          <el-descriptions-item label="过期时间">{{ detailRow.expiredTime || '—' }}</el-descriptions-item>
+          <el-descriptions-item label="创建时间">{{ detailRow.createTime || '—' }}</el-descriptions-item>
+          <el-descriptions-item label="更新时间">{{ detailRow.updateTime || '—' }}</el-descriptions-item>
+          <el-descriptions-item label="记忆内容" :span="2">
+            <div class="detail-content">{{ detailRow.content }}</div>
+          </el-descriptions-item>
+        </el-descriptions>
+      </div>
+    </el-dialog>
   </div>
 </template>
 
@@ -159,7 +202,7 @@ import { computed, onMounted, reactive, ref } from 'vue'
 import { RefreshRight, Search } from '@element-plus/icons-vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { pageAgents } from '@/api/agent'
-import { deleteMemoryItem, pageMemoryItems } from '@/api/memory'
+import { deleteMemoryItem, getMemoryItem, pageMemoryItems } from '@/api/memory'
 import { pageUsers } from '@/api/user'
 import PageHeader from '@/components/PageHeader.vue'
 import TablePager from '@/components/TablePager.vue'
@@ -180,6 +223,10 @@ const rows = ref<MemoryItem[]>([])
 const total = ref(0)
 /** 是否已通过必选维度发起过查询。 */
 const searched = ref(false)
+/** 详情弹窗：只读展示同步状态三字段，不给任何写操作 */
+const detailVisible = ref(false)
+const detailLoading = ref(false)
+const detailRow = ref<MemoryItem | null>(null)
 
 /** 分页：对外请求用 pageNum / pageSize，与后端别名对齐。 */
 const query = reactive({ pageNum: 1, pageSize: 10 })
@@ -297,6 +344,54 @@ function statusTag(row: MemoryItem) {
   if (code === 0) return { type: 'success' as const, label: '已生效' }
   if (code === 1) return { type: 'info' as const, label: '已过期' }
   return { type: 'danger' as const, label: '已覆盖/删除' }
+}
+
+/**
+ * 向量同步状态 Tag：PENDING / SYNCED / FAILED 三态可辨；
+ * 未知或空值统一兜底「未知」，不把原始枚举直接甩给用户。
+ */
+function syncTag(row: MemoryItem) {
+  const status = (row.vectorSyncStatus || '').toUpperCase()
+  if (status === 'PENDING') return { type: 'warning' as const, label: '待同步' }
+  if (status === 'SYNCED') return { type: 'success' as const, label: '已同步' }
+  if (status === 'FAILED') return { type: 'danger' as const, label: '同步失败' }
+  return { type: 'info' as const, label: '未知' }
+}
+
+/**
+ * FAILED 时的悬浮说明：只展示失败次数与后端已脱敏的短原因；
+ * 非 FAILED 或两者都为空时返回空串，tooltip 自动禁用。
+ */
+function syncTip(row: MemoryItem): string {
+  if ((row.vectorSyncStatus || '').toUpperCase() !== 'FAILED') {
+    return ''
+  }
+  const parts: string[] = []
+  if (row.vectorSyncFailCount != null) {
+    parts.push(`已失败 ${row.vectorSyncFailCount} 次`)
+  }
+  if (row.vectorSyncError) {
+    parts.push(`原因：${row.vectorSyncError}`)
+  }
+  return parts.join('；')
+}
+
+/**
+ * 打开详情：先用列表行即时渲染，再拉详情覆盖；
+ * 详情接口失败时保留列表数据，不阻断只读查看。
+ */
+async function openDetail(row: MemoryItem) {
+  detailRow.value = row
+  detailVisible.value = true
+  detailLoading.value = true
+  try {
+    const { data } = await getMemoryItem(row.id)
+    detailRow.value = data.data
+  } catch {
+    // 只读详情失败时保持列表快照，错误提示交给全局请求拦截器
+  } finally {
+    detailLoading.value = false
+  }
 }
 
 async function loadAgents() {
@@ -429,5 +524,14 @@ onMounted(async () => {
   display: flex;
   justify-content: flex-end;
   margin-top: 12px;
+}
+
+/* 详情正文保留换行与长词换行，避免撑破弹窗 */
+.detail-content {
+  max-height: 260px;
+  overflow-y: auto;
+  white-space: pre-wrap;
+  word-break: break-word;
+  line-height: 1.6;
 }
 </style>

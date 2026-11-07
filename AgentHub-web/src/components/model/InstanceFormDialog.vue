@@ -1,20 +1,50 @@
 <template>
   <el-dialog :model-value="modelValue" :title="editing ? '编辑模型' : '新建模型'" width="560px" @close="emit('update:modelValue', false)">
     <el-form label-width="96px">
+      <!--
+        平台级实例的「向量空间 / 出站身份」已锁定：供应商、凭证、模型 ID、用途一律只读。
+        后端 assertPlatformImmutable 同样强校验，这里禁用以避免用户改完必然保存失败。
+      -->
+      <el-alert
+        v-if="platformLocked"
+        type="warning"
+        show-icon
+        :closable="false"
+        class="platform-alert"
+        title="该实例已是平台级"
+        description="供应商 / 凭证 / 模型 ID / 用途已锁定；如需更换请先取消平台级或走换绑流程。仅名称可改。"
+      />
       <el-form-item label="供应商" required>
-        <el-select v-model="form.providerId" style="width: 100%" @change="onProviderChange">
+        <el-select
+          v-model="form.providerId"
+          style="width: 100%"
+          :disabled="platformLocked"
+          @change="onProviderChange"
+        >
           <el-option v-for="item in providers" :key="item.id" :label="item.name" :value="item.id" />
         </el-select>
       </el-form-item>
       <el-form-item label="凭证" required>
-        <el-select v-model="form.credentialId" style="width: 100%">
+        <el-select v-model="form.credentialId" style="width: 100%" :disabled="platformLocked">
           <el-option v-for="item in credentialOptions" :key="item.id" :label="`${item.name}（${item.apiKeyMask}）`" :value="item.id" />
         </el-select>
       </el-form-item>
       <el-form-item label="名称" required><el-input v-model="form.displayName" maxlength="64" /></el-form-item>
-      <el-form-item label="模型 ID" required><el-input v-model="form.modelId" maxlength="128" placeholder="qwen-plus / gpt-4o-mini" /></el-form-item>
+      <el-form-item label="模型 ID" required>
+        <el-input
+          v-model="form.modelId"
+          maxlength="128"
+          placeholder="qwen-plus / gpt-4o-mini"
+          :disabled="platformLocked"
+        />
+      </el-form-item>
       <el-form-item label="用途" required>
-        <el-select v-model="form.capability" style="width: 100%" @change="onCapabilityChange">
+        <el-select
+          v-model="form.capability"
+          style="width: 100%"
+          :disabled="platformLocked"
+          @change="onCapabilityChange"
+        >
           <el-option-group v-for="group in CAPABILITY_GROUPS" :key="group.key" :label="group.label">
             <el-option
               v-for="item in group.codes"
@@ -190,6 +220,13 @@ const isVision = computed(() => normalizeCapability(form.capability) === 'VISION
 
 /** 是否语音合成用途：附加参数只给 TTS 露出，其它用途隐藏但内容保留在 form 里 */
 const isTts = computed(() => normalizeCapability(form.capability) === 'TTS')
+
+/**
+ * 编辑的是否为平台级实例：供应商 / 凭证 / 模型 ID / 用途只读。
+ * 这几个字段决定「向量空间与出站身份」，后端 assertPlatformImmutable 强校验，
+ * 前端禁用以避免用户改完必然被拒；更换请走取消平台级或换绑流程。
+ */
+const platformLocked = computed(() => props.editing?.platformLocked === 1)
 
 /** 附加参数的实时错误；仅用于提示，提交时还会再校验一次 */
 const speechParamsError = ref('')
@@ -532,6 +569,11 @@ function submit() {
 </script>
 
 <style scoped>
+/* 平台级只读提示：紧贴表单顶部，说明为何四项禁用，避免用户以为是权限问题 */
+.platform-alert {
+  margin-bottom: 12px;
+}
+
 .temp-field {
   width: 100%;
 }

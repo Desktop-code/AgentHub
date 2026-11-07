@@ -21,6 +21,8 @@ export interface ProviderCard {
   remark?: string
   credentialCount: number
   apiKeyMask?: string
+  /** 名下存在平台级实例：删除入口改为锁标识，后端同样拒绝删除。 */
+  platformLocked?: boolean | null
   createTime?: string
   updateTime?: string
   credentials: CredentialRow[]
@@ -37,6 +39,10 @@ export interface InstanceRow {
   modelId: string
   capability: string
   status: number
+  /** 1=平台级全局实例（EMBEDDING / RERANK 各最多一条）；0/空=普通。 */
+  platformLocked?: number | null
+  /** 最近一次连通测试成功快照的向量维度；仅 EMBEDDING 有值。 */
+  embeddingDim?: number | null
   extraJson?: string
   /** 最近连通时间；空表示还没测过。 */
   lastTestTime?: string
@@ -132,7 +138,9 @@ export const PURPOSE_SLOT_HINT: Record<string, string> = {
 /** 记忆配置页单槽提示文案：入口已在本页，不再外链到模型配置 */
 export const MEMORY_SLOT_HINT: Record<string, string> = {
   SUMMARY: '滚动摘要 / 窗口压缩用哪台模型；绑定即时保存，空则走平台默认 → 环境默认 → 可降对话模型',
-  MEMORY: '长期记忆抽取（空闲批抽 / 显式记住）用哪台模型；绑定即时保存，不借摘要模型'
+  MEMORY:
+    '长期记忆抽取（空闲批抽 / 显式记住）用哪台模型；绑定即时保存，不借摘要模型。' +
+    '分类（L1）与抽取（L2）默认共用这一台：若该模型带推理/思考，系统会自动调整分类请求（放大输出上限并关闭 think），无需再绑第二个模型'
 }
 
 /** 每槽绑定上限 */

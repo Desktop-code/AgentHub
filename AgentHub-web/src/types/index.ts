@@ -137,3 +137,23 @@ export interface OperLogRow {
   detailJson?: string
   createTime?: string
 }
+
+/**
+ * 结构化确认弹窗的键值行。所属域：前端通用组件契约。
+ * tone 让「维度不一致」「不可撤销」这类关键值直接在弹窗里变色，不靠正文里的感叹号。
+ */
+export interface ConfirmRow {
+  label: string
+  /** 值允许较长（集合名、实例名），弹窗内自动换行 */
+  value: string
+  tone?: 'default' | 'warning' | 'danger'
+}
+
+/**
+ * 结构化确认弹窗的提示块。type 决定底色与图标：
+ * info=补充说明，warning=有代价但可继续，danger=不可撤销 / 会造成不可用。
+ */
+export interface ConfirmNotice {
+  type: 'info' | 'warning' | 'danger'
+  text: string
+}
