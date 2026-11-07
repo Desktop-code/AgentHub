@@ -23,9 +23,6 @@
         <div class="entry-main">
           <span class="entry-label">{{ bound ? boundLabel : '未配置提示词模板' }}</span>
           <el-tag v-if="bound" size="small" effect="plain" type="success" class="entry-tag">已钉版本</el-tag>
-          <span v-else-if="legacyLength" class="entry-note">
-            当前使用业务提示词正文（{{ legacyLength }} 字）
-          </span>
         </div>
         <el-button type="primary" plain size="small" :disabled="disabled" @click="openDialog">
           配置提示词
@@ -41,7 +38,7 @@
       v-model="dialogOpen"
       purpose="CHAT"
       :binding="props.prompt"
-      :legacy-prompt="modelValue"
+      :legacy-prompt="dialogLegacyPrompt"
       :locale="locale"
       :agent-name="agentName"
       :disabled="disabled"
@@ -62,6 +59,9 @@
  * <p>
  * 数据边界：本组件不直接调写接口，四列与业务提示词都通过 v-model / emit 交回父级表单，
  * 由父级随基本信息一起保存（取消时整表回滚）。
+ * <p>
+ * 旧正文边界：挂上模板后 {@code system_prompt} 不再作为独立业务段存在，本组件不再展示、
+ * 也不再要求用户处理它；父级保存链路会把残留正文并入「追加要求」并清空该列。
  */
 import { computed, ref, watch } from 'vue'
 import PromptL3Dialog from '@/components/agent/PromptL3Dialog.vue'
@@ -94,7 +94,13 @@ const { ensureLoaded, promptTemplateName } = usePromptTemplateCatalog()
 const isRouterMode = computed(() => props.runMode === 'ROUTER')
 /** 是否已挂模板；仅 templateId 非空才算绑定 */
 const bound = computed(() => !!props.prompt?.templateId)
-const legacyLength = computed(() => (props.modelValue || '').trim().length)
+
+/**
+ * 传给弹窗的业务提示词正文。
+ * <p>已挂模板时不再传：模板与整段业务正文是两条并行轨，弹窗只该编辑四列；
+ * 库里若还残留旧正文，由父级保存时并入「追加要求」并清空，不再作为一区让用户处理。
+ */
+const dialogLegacyPrompt = computed(() => (bound.value ? '' : props.modelValue || ''))
 
 /** 摘要文案：有名称用名称，拉取失败时退化为 id，避免出现空白行 */
 const boundLabel = computed(() => {
@@ -156,8 +162,9 @@ function clearPromptBinding() {
 
 /**
  * 保存前由父级调用：返回阻止保存的原因。
- * 旧实现会校验内嵌表单，现在编辑态在弹窗内且弹窗自带保存闸，
- * 页面保存只需校验「已绑模板却残留旧正文」这一跨区约束（后端也会拒）。
+ * <p>旧实现还会校验「已绑模板却残留旧正文」，现在这条跨区约束已取消：
+ * 挂模板后旧正文由父级保存链路并入「追加要求」并清空 system_prompt，不再需要人工迁移。
+ * 现在只剩「未挂模板时的业务正文安全校验」（长度、疑似密钥、外连诱导）。
  *
  * @return 校验报告，格式与父级期望一致
  */
@@ -167,14 +174,10 @@ function reveal() {
   if (isRouterMode.value) {
     return { errors, warnings }
   }
+  // 已挂模板：正文不再是出站依据，也没有「必须先迁移」的闸门
   if (bound.value) {
-    // 绑模板后旧正文必须迁移：后端也会拒，这里提前说清该点哪里
-    if (legacyLength.value > 0) {
-      errors.push('已绑定模板：请先把「系统提示词」正文迁移到追加要求，或丢弃旧正文后再保存')
-    }
     return { errors, warnings }
   }
-  // 未绑模板：业务正文仍按既有安全规则校验（长度、疑似密钥、外连诱导）
   return checkUserPrompt(props.modelValue || '')
 }
 
@@ -216,11 +219,6 @@ defineExpose({ reveal })
 
 .entry-tag {
   flex: none;
-}
-
-.entry-note {
-  color: var(--ah-text-muted, #9ca3af);
-  font-size: 12px;
 }
 
 .entry-hint {

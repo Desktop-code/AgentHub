@@ -20,13 +20,19 @@
  */
 import type { ObsSpan } from '@/types/obs'
 
-/** 并行模板：只有这两种模板的多 AGENT 才允许并排 */
-const PARALLEL_AGENT_TEMPLATES = ['ROUTER_PARALLEL', 'FIXED_PARALLEL']
+/**
+ * 并行模板：只有这几种模板的多 AGENT 才允许并排。
+ * <p>COMPETE（同题竞争）也属于并行：多个候选吃同一份原问同时开跑，等齐后选优，
+ * 落库时 ROUTE 名称固定为 `compete`（见 RouterTrialExecutor 的竞争分支）。
+ */
+const PARALLEL_AGENT_TEMPLATES = ['ROUTER_PARALLEL', 'FIXED_PARALLEL', 'COMPETE']
 
 /** ROUTE 名称兜底：旧 trace 没有 ma.template 时按名字识别模板，避免固定串行被画成并行 */
 const ROUTE_NAME_TEMPLATES: Array<{ keyword: string; template: string }> = [
   { keyword: 'fixed-parallel', template: 'FIXED_PARALLEL' },
   { keyword: 'fixed-sequence', template: 'FIXED_SEQUENCE' },
+  // 竞争选优：ROUTE 名称就是 compete，漏了它整条链会被画成串行
+  { keyword: 'compete', template: 'COMPETE' },
   { keyword: 'router-then-sequence', template: 'ROUTER_THEN_SEQUENCE' },
   { keyword: 'critic-loop', template: 'CRITIC_LOOP' }
 ]

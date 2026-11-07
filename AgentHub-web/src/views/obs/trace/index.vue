@@ -15,74 +15,36 @@
       </template>
     </PageHeader>
 
-    <div class="filter-bar">
-      <el-form class="filter-form" inline @submit.prevent="onSearch">
-        <!-- 工作流入口：与「标题」同属筛选条件，放在前面；未选择定义时按全部运行记录查询 -->
-        <el-form-item v-if="workflowMode" label="工作流">
-          <el-select
-            v-if="workflowOptions.length > 0 || workflowLoading"
-            :model-value="workflowId ?? undefined"
-            class="wf-select"
-            filterable
-            clearable
-            placeholder="全部"
-            :loading="workflowLoading"
-            @change="onWorkflowSelect"
-          >
-            <el-option v-for="item in workflowOptions" :key="item.id" :label="item.label" :value="item.id" />
-          </el-select>
-          <!-- 无 workflow:def:view 时下拉拿不到选项：至少回显跳转带来的定义名，避免只看到裸 id -->
-          <el-tag v-else-if="workflowId != null" effect="plain">{{ workflowName || `#${workflowId}` }}</el-tag>
-          <el-tag v-else effect="plain">全部</el-tag>
-        </el-form-item>
-        <el-form-item v-if="!workflowMode" label="智能体">
+    <!--
+      筛选已收进各列表头（不再单独一条筛选栏）：
+      会话列右上是智能体筛选，标题下方是会话模糊搜索；问题/运行记录列同理。
+      所有筛选都是「选完即查 / 输入即查」，因此不再需要查询、重置按钮。
+    -->
+    <div class="board" :class="{ 'board--workflow': workflowMode }">
+      <section v-if="!workflowMode" class="col">
+        <div class="col-head col-head--row">
+          <h2>会话</h2>
+          <!-- 智能体筛选居右；选中即查询 -->
           <el-select
             v-model="agentId"
+            class="head-select"
             clearable
             filterable
-            placeholder="全部"
-            class="filter-select"
+            placeholder="全部智能体"
+            @change="onAgentChange"
           >
             <el-option v-for="item in agents" :key="item.id" :label="item.name" :value="item.id" />
           </el-select>
-        </el-form-item>
-        <el-form-item v-if="!workflowMode" label="会话">
-          <el-input
-            v-model="sessionQ"
-            class="filter-input"
-            clearable
-            placeholder="预览或会话编号"
-          />
-        </el-form-item>
-        <el-form-item :label="workflowMode ? '标题' : '问题'">
-          <el-input
-            v-model="traceQ"
-            class="filter-input"
-            clearable
-            :placeholder="workflowMode ? '搜索运行标题' : '搜索问题'"
-          />
-        </el-form-item>
-        <el-form-item>
-          <el-button class="btn-query" @click="onSearch">
-            <el-icon class="btn-icon"><Search /></el-icon>
-            查询
-          </el-button>
-          <el-button class="btn-reset" @click="onReset">
-            <el-icon class="btn-icon"><RefreshRight /></el-icon>
-            重置
-          </el-button>
-        </el-form-item>
-      </el-form>
-      <!-- 工作流入口说明：未选择定义时提示当前查询范围是全部工作流运行记录 -->
-      <span v-if="workflowMode" class="wf-hint">{{ workflowHint }}</span>
-    </div>
-
-    <!-- 三栏：会话 25% / 问题 25% / 执行链路 50%；工作流入口下会话列无意义，退化为两栏 -->
-    <div class="board" :class="{ 'board--workflow': workflowMode }">
-      <section v-if="!workflowMode" class="col">
-        <div class="col-head">
-          <h2>会话</h2>
         </div>
+        <!-- 会话模糊搜索：输入即查（首个字符就开始），回车立即查 -->
+        <el-input
+          v-model="sessionQ"
+          class="col-search"
+          clearable
+          placeholder="输入会话编号或标题"
+          @input="onSessionKeyword"
+          @keyup.enter="applySessionSearch"
+        />
         <div v-loading="sessionLoading" class="col-body col-body--scroll">
           <button
             v-for="row in sessions"
@@ -134,9 +96,41 @@
       </section>
 
       <section class="col">
-        <div class="col-head">
+        <div class="col-head col-head--row">
           <h2>{{ workflowMode ? '运行记录' : '问题' }}</h2>
+          <!-- 工作流入口：定义筛选居右；选中即按该定义重查（写回路由，由路由 watch 统一收口） -->
+          <template v-if="workflowMode">
+            <el-select
+              v-if="workflowOptions.length > 0 || workflowLoading"
+              :model-value="workflowId ?? undefined"
+              class="head-select"
+              filterable
+              clearable
+              placeholder="全部工作流"
+              :loading="workflowLoading"
+              @change="onWorkflowSelect"
+            >
+              <el-option v-for="item in workflowOptions" :key="item.id" :label="item.label" :value="item.id" />
+            </el-select>
+            <!-- 无 workflow:def:view 时下拉拿不到选项：至少回显跳转带来的定义名，避免只看到裸 id -->
+            <el-tag v-else-if="workflowId != null" effect="plain">{{ workflowName || `#${workflowId}` }}</el-tag>
+            <el-tag v-else effect="plain">全部</el-tag>
+          </template>
         </div>
+        <!--
+          问题搜索框只在「已选中会话」或「工作流入口」时出现：
+          未选会话时问题列本来就没有内容，先摆一个不可用的搜索框只会让人误以为框坏了。
+        -->
+        <el-input
+          v-if="canQueryTraces"
+          v-model="traceQ"
+          class="col-search"
+          clearable
+          :placeholder="workflowMode ? '输入运行标题' : '输入问题内容'"
+          @input="onTraceKeyword"
+          @keyup.enter="applyTraceSearch"
+        />
+        <span v-if="workflowMode" class="col-hint">{{ workflowHint }}</span>
         <div v-loading="traceLoading" class="col-body col-body--scroll">
           <button
             v-for="row in traces"
@@ -301,10 +295,10 @@ defineOptions({ name: 'CallTrace' })
  * 未选定义时默认分页查询全部工作流运行记录。
  * 右栏瀑布流常驻；顶部拓扑仅在放大抽屉中展示。
  */
-import { computed, onActivated, onMounted, reactive, ref, watch } from 'vue'
+import { computed, onActivated, onBeforeUnmount, onDeactivated, onMounted, reactive, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { ElMessage } from 'element-plus'
-import { FullScreen, RefreshRight, Search } from '@element-plus/icons-vue'
+import { FullScreen } from '@element-plus/icons-vue'
 import { pageAgents } from '@/api/agent'
 import { pageEvalSuites, promoteFromTrace } from '@/api/eval'
 import { listObsSpans, pageObsSessions, pageObsTraces, pageObsTracesByWorkflow } from '@/api/obs'
@@ -341,6 +335,8 @@ const workflows = ref<WorkflowDefRow[]>([])
 const workflowLoading = ref(false)
 /** 已应用的路由条件快照：KeepAlive 下再次从列表跳转时据此判断是否需要重拉 */
 let appliedQueryKey: string | null = null
+/** 本次路由条件变化是否改了入口类型（Agent ↔ 工作流）；换定义不算 */
+let routeTypeChanged = false
 
 const agents = ref<AgentCard[]>([])
 const agentId = ref<number | undefined>()
@@ -453,6 +449,8 @@ function applyRouteQuery(): boolean {
   if (appliedQueryKey === key) {
     return false
   }
+  // 记录类型是否真的换了：只有 Agent ↔ 工作流 才该丢掉搜索关键字，换定义不该丢
+  routeTypeChanged = traceType.value !== type
   appliedQueryKey = key
   traceType.value = type
   workflowId.value = effectiveId
@@ -463,7 +461,10 @@ function applyRouteQuery(): boolean {
 /** 条件变化后的统一收口：清空选中与步骤，按当前类型重新查 */
 function reloadForRouteChange() {
   selectedSessionId.value = null
-  traceQ.value = ''
+  // 仅切换入口类型时清关键字；换工作流定义时保留，让「定义 + 标题」可以组合筛选
+  if (routeTypeChanged) {
+    traceQ.value = ''
+  }
   traceQuery.current = 1
   resetDetail()
   if (workflowMode.value) {
@@ -583,30 +584,60 @@ function reloadSessions() {
   loadSessions()
 }
 
-/** 点查询：会话与问题条件同时生效；有选中会话时刷新问题列表。工作流模式只重查运行记录。 */
-function onSearch() {
-  if (workflowMode.value) {
-    reloadTraces()
-    return
-  }
+/**
+ * 列头搜索的防抖时长。没有独立「查询」按钮后，输入即查必须防抖，
+ * 否则一个词会打出好几个请求；但首字符就已经触发，不等用户输完。
+ */
+const SEARCH_DEBOUNCE = 200
+let sessionSearchTimer = 0
+let traceSearchTimer = 0
+
+/** 会话搜索：立即按当前关键字重查（回车 / 清空 / 点按钮都走这里）。 */
+function applySessionSearch() {
+  window.clearTimeout(sessionSearchTimer)
+  sessionSearchTimer = 0
   reloadSessions()
-  if (selectedSessionId.value != null) {
-    reloadTraces()
-  }
 }
 
-/** 清空智能体 / 会话 / 问题筛选后重新拉取。工作流模式保留定义条件，只清关键字。 */
-function onReset() {
-  agentId.value = undefined
-  sessionQ.value = ''
-  traceQ.value = ''
-  if (workflowMode.value) {
-    reloadTraces()
+/** 会话模糊搜索：每输入一个字符就排一次查询，连续输入只保留最后一次。 */
+function onSessionKeyword() {
+  window.clearTimeout(sessionSearchTimer)
+  sessionSearchTimer = window.setTimeout(applySessionSearch, SEARCH_DEBOUNCE)
+}
+
+/** 问题 / 运行记录搜索：立即按当前关键字重查。 */
+function applyTraceSearch() {
+  window.clearTimeout(traceSearchTimer)
+  traceSearchTimer = 0
+  reloadTraces()
+}
+
+/** 问题 / 运行记录模糊搜索：输入即查；未选会话时无可查项，直接跳过。 */
+function onTraceKeyword() {
+  if (!canQueryTraces.value) {
     return
   }
+  window.clearTimeout(traceSearchTimer)
+  traceSearchTimer = window.setTimeout(applyTraceSearch, SEARCH_DEBOUNCE)
+}
+
+/**
+ * 切换智能体筛选：选中即查询（回到第 1 页），并清空已选会话与链路。
+ *
+ * <p>必须清选中：旧会话可能不属于新智能体，留着会让右栏显示与筛选不一致的链路。
+ */
+function onAgentChange() {
   selectedSessionId.value = null
   resetDetail()
   reloadSessions()
+}
+
+/** 清掉防抖定时器：失活 / 卸载时调用，避免后台补发请求。 */
+function clearSearchTimers() {
+  window.clearTimeout(sessionSearchTimer)
+  window.clearTimeout(traceSearchTimer)
+  sessionSearchTimer = 0
+  traceSearchTimer = 0
 }
 
 /**
@@ -662,7 +693,7 @@ async function loadSessions() {
 
 function pickSession(row: ObsSession) {
   selectedSessionId.value = row.id
-  // 保留顶栏「问题」筛选，点会话后按当前关键字拉问题列表
+  // 保留问题列头搜索框里的关键字，点会话后按当前关键字拉问题列表
   traceQuery.current = 1
   traceJump.value = '1'
   resetDetail()
@@ -846,6 +877,11 @@ onActivated(() => {
   }
 })
 
+// 失活 / 卸载时清掉搜索防抖：否则切走前的最后几个字符会在后台补发一次请求
+onDeactivated(clearSearchTimers)
+
+onBeforeUnmount(clearSearchTimers)
+
 watch(
   () => [route.query.type, route.query.workflowId, route.query.workflowName],
   () => {
@@ -873,9 +909,8 @@ watch(
   overflow: hidden;
 }
 
-/* 页头与筛选条不参与弹性收缩：列表区独占剩余高度并在内部滚动 */
-.page :deep(.ph-toolbar),
-.page :deep(.filter-bar) {
+/* 页头不参与弹性收缩：列表区独占剩余高度并在内部滚动 */
+.page :deep(.ph-toolbar) {
   flex: none;
 }
 
@@ -893,16 +928,29 @@ watch(
   grid-template-columns: 35% 65%;
 }
 
-.wf-select {
-  width: 220px;
+/* 列头右侧的筛选控件：不参与收缩，宽度统一，避免各列标题行高低不一 */
+.head-select {
+  flex: none;
+  width: 168px;
 }
 
-.wf-hint {
+/* 列头下方的模糊搜索：跟随列宽，不撑高其它列；高度显式锁死，保证两列搜索框等高 */
+.col-search {
   flex: none;
-  margin-left: auto;
+  height: 32px;
+  --el-input-height: 32px;
+}
+
+.col-search :deep(.el-input__wrapper) {
+  height: 32px;
+}
+
+/* 工作流范围说明：一行小字，弱化展示 */
+.col-hint {
+  flex: none;
   color: var(--ah-text-secondary);
   font-size: 12px;
-  white-space: nowrap;
+  line-height: 1.4;
 }
 
 .type-switch {
@@ -924,8 +972,15 @@ watch(
   box-shadow: var(--ah-shadow);
 }
 
+/*
+ * 列头统一 32px 高（= 下方输入框 / 下拉的高度）：
+ * 会话列头有智能体下拉、问题列头只有标题，若不锁高度，两列的搜索框会上下错开一截。
+ */
 .col-head {
+  display: flex;
+  align-items: center;
   flex: none;
+  min-height: 32px;
 }
 
 .col-head--row {
@@ -933,9 +988,14 @@ watch(
   align-items: center;
   justify-content: space-between;
   gap: 8px;
-  /* 给放大按钮留出内边，避免被 .col 的 overflow:hidden 裁半 */
-  padding-right: 12px;
+  /* 左右内边距必须为 0：列头右侧的筛选控件要和下面列宽的搜索框右边缘严格对齐 */
+  padding: 0;
   box-sizing: border-box;
+}
+
+/* 仅执行链路列头留内边：放大按钮靠右，避免被 .col 的 overflow:hidden 裁半 */
+.col--span .col-head--row {
+  padding-right: 12px;
 }
 
 .col-head h2 {

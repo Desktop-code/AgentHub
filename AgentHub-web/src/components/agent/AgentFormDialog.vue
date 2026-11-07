@@ -71,7 +71,7 @@ import { QuestionFilled } from '@element-plus/icons-vue'
 import { ElMessage } from 'element-plus'
 import AgentPromptEditor from '@/components/agent/AgentPromptEditor.vue'
 import type { AgentSave, PromptBinding } from '@/types/agent'
-import { checkUserPrompt } from '@/utils/promptSafety'
+import { checkUserPrompt, settleLegacyPrompt, PROMPT_MAX_CHARS } from '@/utils/promptSafety'
 
 /** 新建默认运行配置：Router 那组（多意图开 / 拼接 / N=3 / ROUTER_PARALLEL）与计划那组（自动执行 / 8 步 / 0 重试），与后端 defaults 对齐 */
 function defaultRuntimeConfig() {
@@ -180,6 +180,17 @@ function submit() {
     ElMessage.error(report.errors.join('；'))
     return
   }
+  // 若先写了业务正文再挂模板：正文并入追加要求、system_prompt 置空，避免后端「双轨」闸门拒绝
+  const settled = settleLegacyPrompt(
+    form.systemPrompt,
+    form.prompt.promptExtra || '',
+    form.prompt.templateId ?? null
+  )
+  // 合并后超长当场拦下，避免提交后被后端按追加区上限 400
+  if (settled.promptExtra.length > PROMPT_MAX_CHARS) {
+    ElMessage.error(`并入业务正文后「追加要求」超过长度，最长 ${PROMPT_MAX_CHARS}，请先精简`)
+    return
+  }
   saving.value = true
   emit(
     'submit',
@@ -188,13 +199,13 @@ function submit() {
       code: form.code.trim(),
       runMode: form.runMode,
       description: form.description.trim(),
-      systemPrompt: form.systemPrompt,
+      systemPrompt: settled.systemPrompt,
       // 未挂模板时提交空四列（templateId 为空即「不挂模板」），后端按此清空
       prompt: {
         templateId: form.prompt.templateId ?? null,
         templateVersion: form.prompt.templateVersion ?? null,
         override: form.prompt.override || {},
-        promptExtra: form.prompt.promptExtra || ''
+        promptExtra: settled.promptExtra
       },
       remark: form.remark.trim(),
       runtimeConfig: defaultRuntimeConfig()

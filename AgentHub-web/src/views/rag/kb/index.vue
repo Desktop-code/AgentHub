@@ -1,4 +1,4 @@
-<template>
+﻿<template>
   <div class="page">
     <!-- 页头：按全局规范用 PageHeader（浅灰底无卡片），新建入口只在 #extra -->
     <PageHeader title="知识库" description="创建知识库即初始化向量集合；供后续 Agent 绑定检索使用。">
@@ -17,13 +17,13 @@
           <el-input v-model="query.keyword" class="filter-input" clearable placeholder="名称或描述" />
         </el-form-item>
         <el-form-item label="状态">
-          <el-select v-model="query.status" class="filter-select" clearable placeholder="全部">
+          <el-select v-model="query.status" class="filter-select" clearable placeholder="全部" @change="onSearch">
             <el-option label="就绪" value="READY" />
             <el-option label="初始化失败" value="INIT_FAILED" />
           </el-select>
         </el-form-item>
         <el-form-item label="可见性">
-          <el-select v-model="query.visibility" class="filter-select" clearable placeholder="全部">
+          <el-select v-model="query.visibility" class="filter-select" clearable placeholder="全部" @change="onSearch">
             <el-option label="公开" value="PUBLIC" />
             <el-option label="私有" value="PRIVATE" />
           </el-select>
@@ -47,7 +47,7 @@
       <el-table v-loading="loading" :data="rows" empty-text="还没有知识库">
         <!-- 最左序号列：跨页连续，纯展示，不参与接口排序 -->
         <el-table-column v-bind="indexColumnProps" />
-        <el-table-column label="名称" min-width="160" show-overflow-tooltip>
+        <el-table-column label="名称" min-width="160" align="center" show-overflow-tooltip>
           <template #default="{ row }">
             <!-- 名称本身就是进入该库文档管理页的入口，比只靠「操作」列更符合直觉 -->
             <el-button
@@ -62,21 +62,21 @@
             <span v-else>{{ row.name }}</span>
           </template>
         </el-table-column>
-        <el-table-column label="状态" min-width="110">
+        <el-table-column label="状态" min-width="110" align="center">
           <template #default="{ row }">
             <el-tag size="small" effect="plain" :class="statusClass(row.status)">
               {{ KB_STATUS_LABEL[row.status] || row.status }}
             </el-tag>
           </template>
         </el-table-column>
-        <el-table-column label="检索能力" min-width="120">
+        <el-table-column label="检索能力" min-width="120" align="center">
           <template #default="{ row }">
             <!-- 能力为 null 表示集合没建成功，不显示「仅向量」以免误导 -->
             <span v-if="row.storeCapability">{{ KB_CAPABILITY_LABEL[row.storeCapability] || row.storeCapability }}</span>
             <span v-else class="muted">—</span>
           </template>
         </el-table-column>
-        <el-table-column label="Embedding" min-width="180">
+        <el-table-column label="Embedding" min-width="180" align="center">
           <template #default="{ row }">
             <div class="cell-stack">
               <span :title="row.embeddingModelName || ''">{{ row.embeddingModelName || `#${row.embeddingModelId}` }}</span>
@@ -84,11 +84,11 @@
             </div>
           </template>
         </el-table-column>
-        <el-table-column label="可见性" min-width="100">
+        <el-table-column label="可见性" min-width="100" align="center">
           <template #default="{ row }">{{ KB_VISIBILITY_LABEL[row.visibility] || row.visibility }}</template>
         </el-table-column>
-        <el-table-column label="创建时间" min-width="160">
-          <template #default="{ row }">{{ row.createTime || '—' }}</template>
+        <el-table-column label="创建时间" min-width="160" align="center">
+          <template #default="{ row }">{{ formatDateTime(row.createTime) }}</template>
         </el-table-column>
         <el-table-column label="操作" min-width="290" align="center">
           <template #default="{ row }">
@@ -117,8 +117,8 @@
       <TablePager v-model:current="query.current" v-model:size="query.size" :total="total" @change="load" />
     </el-card>
 
-    <!-- 新建：Embedding 与维度在此确定，建库后不可改 -->
-    <el-dialog v-model="create.open" title="新建知识库" width="560px" :close-on-click-modal="false">
+    <!-- 新建：Embedding 与维度在此确定，建库后不可改；点遮罩 / ESC 即可关闭 -->
+    <el-dialog v-model="create.open" title="新建知识库" width="560px">
       <el-form label-width="96px">
         <el-form-item label="名称" required>
           <el-input v-model="create.form.name" maxlength="100" show-word-limit />
@@ -141,11 +141,15 @@
               :value="item.id"
             />
           </el-select>
-          <div class="hint">维度取自模型实例的扩展 JSON（dimension），缺失时用下方手填值。</div>
+          <div class="hint">维度由模型返回，选中后自动带出；建库后锁定不可修改。</div>
         </el-form-item>
-        <el-form-item label="维度">
-          <el-input-number v-model="create.form.vectorDimension" :min="1" :max="65536" controls-position="right" />
-          <span class="hint inline">建库后锁定，不可修改</span>
+        <!--
+          维度只在选中模型后出现：没选模型时没有任何来源可算，提前摆一个数字反而像在让人手填。
+          值全部由模型侧给出（连通测试返回的维度 → 扩展 JSON → 无），用户不可编辑。
+        -->
+        <el-form-item v-if="create.form.embeddingModelId" label="维度">
+          <el-input :model-value="dimensionText" disabled class="dimension-input" />
+          <div class="hint" :class="{ 'hint-error': !dimensionResolved }">{{ dimensionHint }}</div>
         </el-form-item>
         <el-form-item label="Rerank">
           <el-select v-model="create.form.rerankModelId" class="full" clearable placeholder="可选，用途为 RERANK 的实例">
@@ -180,8 +184,13 @@
       </template>
     </el-dialog>
 
-    <!-- 编辑：不含 Embedding / 维度 / 隔离模式 -->
-    <el-dialog v-model="edit.open" title="编辑知识库" width="560px" :close-on-click-modal="false">
+    <!-- 编辑：不含 Embedding / 维度 / 隔离模式；点遮罩可关闭，但有未保存修改时先确认 -->
+    <el-dialog
+      v-model="edit.open"
+      title="编辑知识库"
+      width="560px"
+      :before-close="beforeEditClose"
+    >
       <el-form label-width="96px">
         <el-form-item label="名称" required>
           <el-input v-model="edit.form.name" maxlength="100" show-word-limit />
@@ -248,6 +257,8 @@ import TablePager from '@/components/TablePager.vue'
 import { useListIndexColumn } from '@/composables/listIndex'
 import { useObjectDirty } from '@/composables/useFormDirty'
 import { useUserStore } from '@/stores/user'
+import { confirmDiscardUnsaved } from '@/utils/unsavedConfirm'
+import { formatDateTime } from '@/utils/datetime'
 import type { InstanceRow } from '@/types/model'
 import {
   KB_CAPABILITY_LABEL,
@@ -261,6 +272,8 @@ const DEFAULT_RETRIEVAL_CONFIG =
   '{"topK":5,"vectorTopK":20,"bm25TopK":20,"rrfK":60,"rrfTopN":20,"scoreThreshold":0.5,"rewriteEnabled":false,"rerankEnabled":false}'
 /** 默认入库参数，② 期使用 */
 const DEFAULT_INGEST_CONFIG = '{"chunkSize":450,"chunkOverlap":100,"minChunkSize":150}'
+/** 维度初始占位：0 表示「还没选模型 / 模型未返回」，提交前必须 > 0 */
+const UNKNOWN_DIMENSION = 0
 
 const user = useUserStore()
 const router = useRouter()
@@ -291,7 +304,7 @@ const create = reactive({
     name: '',
     description: '',
     embeddingModelId: undefined as number | undefined,
-    vectorDimension: 768,
+    vectorDimension: UNKNOWN_DIMENSION,
     rerankModelId: undefined as number | undefined,
     isolationMode: 'PHYSICAL',
     visibility: 'PRIVATE',
@@ -320,6 +333,47 @@ const edit = reactive({
  */
 const editDirtyTracker = useObjectDirty(() => edit.form)
 const editDirty = editDirtyTracker.isDirty
+
+/**
+ * 编辑弹窗关闭前拦截：允许点遮罩 / ESC 关闭，但有未保存修改时先确认，避免静默丢改动。
+ *
+ * @param done Element Plus 的关闭回调；调用即真正关闭
+ */
+async function beforeEditClose(done: () => void) {
+  if (!editDirty.value) {
+    done()
+    return
+  }
+  if (await confirmDiscardUnsaved('知识库修改')) {
+    done()
+  }
+}
+
+/**
+ * 维度提示文案。维度有三个来源，按可信度取第一个命中的：
+ * ① 模型连通测试返回的 embeddingDim（模型真实回答的维度）；
+ * ② 模型实例扩展 JSON 里登记的 dimension；
+ * ③ 都没有 → 不猜，提示去模型管理做一次连通测试。
+ */
+const dimensionHint = computed(() => {
+  if (!create.form.embeddingModelId) {
+    return '选择 Embedding 模型后自动带出'
+  }
+  const target = embeddingOptions.value.find((item) => item.id === create.form.embeddingModelId)
+  if (probedDimension(target)) {
+    return '由模型连通测试返回；建库后锁定，不可修改'
+  }
+  if (parseDimension(target?.extraJson)) {
+    return '取自模型实例的扩展 JSON（未测过连通性）；建议先在模型管理测一次'
+  }
+  return '该模型实例还没有维度：请先在「模型管理」对它做一次连通测试'
+})
+
+/** 维度是否已确定；未确定时不允许提交，避免建出写不进向量的集合 */
+const dimensionResolved = computed(() => create.form.vectorDimension > 0)
+
+/** 维度展示文本：未确定时给明确占位，而不是显示 0 */
+const dimensionText = computed(() => (dimensionResolved.value ? String(create.form.vectorDimension) : '未获取'))
 
 /**
  * 打开某知识库的文档管理二级页。
@@ -399,15 +453,27 @@ async function loadModelOptions() {
 }
 
 /**
- * 选中 Embedding 后尝试从 extraJson 带出维度，省得管理员手填。
- * 解析失败不提示：后端会以模型元数据为准，手填值只是兜底。
+ * 选中 Embedding 后计算维度，供建库使用。
+ *
+ * <p>维度已改为只读，必须算准：优先用模型连通测试返回的 embeddingDim（真实返回），
+ * 其次用扩展 JSON 登记的 dimension；两者都没有就留 0，由保存前校验拦下并提示去测连通性。
+ *
+ * @param id 选中的模型实例 id
  */
 function onEmbeddingChange(id: number) {
   const target = embeddingOptions.value.find((item) => item.id === id)
-  const dimension = parseDimension(target?.extraJson)
-  if (dimension) {
-    create.form.vectorDimension = dimension
-  }
+  create.form.vectorDimension = probedDimension(target) ?? parseDimension(target?.extraJson) ?? 0
+}
+
+/**
+ * 读取模型连通测试返回的维度快照（仅 EMBEDDING 用途有值）。
+ *
+ * @param instance 模型实例行，可空
+ * @return 合法维度或 undefined
+ */
+function probedDimension(instance?: InstanceRow) {
+  const value = instance?.embeddingDim
+  return typeof value === 'number' && value > 0 ? value : undefined
 }
 
 /** 从模型实例 extraJson 读取维度，兼容三个键名，与后端 RagModelLookup 一致 */
@@ -435,7 +501,7 @@ async function openCreate() {
     name: '',
     description: '',
     embeddingModelId: undefined,
-    vectorDimension: 768,
+    vectorDimension: UNKNOWN_DIMENSION,
     rerankModelId: undefined,
     isolationMode: 'PHYSICAL',
     visibility: 'PRIVATE',
@@ -454,6 +520,11 @@ async function saveCreate() {
   }
   if (!create.form.embeddingModelId) {
     ElMessage.warning('请选择 Embedding 模型')
+    return
+  }
+  // 维度必须由模型侧给出：宁可拦下并引导去测连通性，也不猜一个值建出写不进向量的集合
+  if (!dimensionResolved.value) {
+    ElMessage.warning('该 Embedding 模型还没有维度，请先到「模型管理」对它做一次连通测试')
     return
   }
   create.saving = true
@@ -590,7 +661,18 @@ onMounted(load)
 .cell-stack {
   display: flex;
   flex-direction: column;
+  align-items: center;
   line-height: 1.5;
+}
+
+/* 维度已改为只读展示，固定宽度避免撑满整行 */
+.dimension-input {
+  width: 160px;
+}
+
+/* 维度未获取时用警示色，和普通灰色说明区分 */
+.hint-error {
+  color: var(--el-color-warning, #e6a23c);
 }
 
 .muted {
@@ -603,10 +685,6 @@ onMounted(load)
   color: var(--ah-text-muted, #9ca3af);
   font-size: 12px;
   line-height: 1.5;
-}
-
-.hint.inline {
-  margin: 0 0 0 8px;
 }
 
 .mono :deep(textarea) {

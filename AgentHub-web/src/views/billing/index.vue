@@ -11,7 +11,7 @@
 
     <!-- 筛选区：日期 / Agent / 模型 / 渠道 / 操作，控件同高、同右边距 -->
     <div class="filter-bar">
-      <el-form class="filter-form" inline @submit.prevent="search">
+      <el-form class="filter-form billing-filter" inline @submit.prevent="search">
         <el-form-item label="日期">
           <el-date-picker
             v-model="dates"
@@ -24,12 +24,26 @@
           />
         </el-form-item>
         <el-form-item label="Agent 名称">
-          <el-select v-model="filter.agentId" clearable filterable placeholder="全部" class="filter-select">
+          <el-select
+            v-model="filter.agentId"
+            clearable
+            filterable
+            placeholder="全部"
+            class="filter-select"
+            @change="search"
+          >
             <el-option v-for="item in agents" :key="item.id" :label="item.name" :value="item.id" />
           </el-select>
         </el-form-item>
         <el-form-item label="模型名称">
-          <el-select v-model="filter.modelInstanceId" clearable filterable placeholder="全部" class="filter-select">
+          <el-select
+            v-model="filter.modelInstanceId"
+            clearable
+            filterable
+            placeholder="全部"
+            class="filter-select"
+            @change="search"
+          >
             <el-option
               v-for="item in instances"
               :key="item.id"
@@ -39,7 +53,7 @@
           </el-select>
         </el-form-item>
         <el-form-item label="渠道">
-          <el-select v-model="filter.channel" clearable placeholder="全部" class="filter-select">
+          <el-select v-model="filter.channel" clearable placeholder="全部" class="filter-select" @change="search">
             <el-option v-for="item in CHANNEL_OPTIONS" :key="item.value" :label="item.label" :value="item.value" />
           </el-select>
         </el-form-item>
@@ -714,9 +728,13 @@ function clearDateFilter() {
   void loadLedgers()
 }
 
-/** 改日期范围后不自动查询，统一走「查询」按钮，避免多次请求。 */
+/**
+ * 日期范围变化即查询：筛选类选择（下拉 / 日期）统一采用「选完就查」，
+ * 只保留「查询」按钮作为显式重查入口。清空日期同样触发一次（回到近 N 天趋势）。
+ */
 function onDateRangeChange() {
   activeDate.value = ''
+  search()
 }
 
 /** 清空筛选条件后重新查询。 */
@@ -877,6 +895,33 @@ async function loadOptions<T>(load: () => Promise<{ data: { data: { records: T[]
   height: 32px;
 }
 
+/*
+ * 本页筛选控件偏多（日期 + 3 个下拉 + 2 个按钮），宽度必须收一点，
+ * 否则在 1366 宽的屏上「查询 / 重置」会被 .filter-form 的 flex-wrap 挤到第二行。
+ * 按 1366（主区可用约 1070px）反算过总宽，留了余量。
+ */
+.billing-filter {
+  gap: 10px;
+}
+
+.billing-filter .filter-date {
+  width: 180px;
+}
+
+.billing-filter .filter-select {
+  width: 132px;
+}
+
+/* 按钮不参与收缩，也不换行到下一行；本页按钮收窄一点，省出横向空间 */
+.billing-filter :deep(.el-form-item:last-child) {
+  flex: none;
+}
+
+.billing-filter :deep(.el-button) {
+  min-width: 76px;
+  padding: 0 10px;
+}
+
 .filter-bar :deep(.el-date-editor),
 .filter-bar :deep(.el-select__wrapper) {
   height: 32px;
@@ -892,9 +937,7 @@ async function loadOptions<T>(load: () => Promise<{ data: { data: { records: T[]
   gap: 12px;
 }
 
-.filter-date {
-  width: 260px;
-}
+/* 日期框宽度统一由上方 .billing-filter 规则给定，这里不再重复 */
 
 /* 数字列右对齐，末位对齐更易扫读 */
 .total-cell {
