@@ -18,9 +18,33 @@ public final class LongExtractTriggers {
      * @return 是否当轮抽取
      */
     public static boolean explicit(MemoryPolicy policy, String text) {
+        return explicit(policy, MemoryTexts.wantsRemember(text));
+    }
+
+    /**
+     * 显式通道已由调用方完成 L0 正则判定时的版本。
+     * <p>
+     * 生产链路用注入的 {@code RememberIntentDetector}（可吃 yml 正则）判 L0，
+     * 再调用本重载；这样开关判定只有一处，规则来源却可以配置。
+     *
+     * @param policy        策略
+     * @param wantsRemember L0 是否命中
+     * @return 是否允许进入显式抽取
+     */
+    public static boolean explicit(MemoryPolicy policy, boolean wantsRemember) {
+        return explicitEnabled(policy) && wantsRemember;
+    }
+
+    /**
+     * 只判显式通道的两个开关（enable_long + long_extract_on_explicit），不判正文。
+     * 供 L1 异步分类前与池线程重读策略时复用。
+     *
+     * @param policy 策略
+     * @return 显式通道是否打开
+     */
+    public static boolean explicitEnabled(MemoryPolicy policy) {
         return on(policy == null ? null : policy.getEnableLong())
-                && on(policy == null ? null : policy.getLongExtractOnExplicit())
-                && MemoryTexts.wantsRemember(text);
+                && on(policy == null ? null : policy.getLongExtractOnExplicit());
     }
 
     /**

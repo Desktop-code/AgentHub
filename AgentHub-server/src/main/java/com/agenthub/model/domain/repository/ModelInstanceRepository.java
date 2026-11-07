@@ -2,11 +2,13 @@ package com.agenthub.model.domain.repository;
 
 import com.agenthub.common.api.PageResult;
 import com.agenthub.model.domain.model.InstanceQuery;
+import com.agenthub.model.domain.model.ModelCapability;
 import com.agenthub.model.domain.model.ModelInstance;
 
 import java.time.LocalDateTime;
 import java.util.List;
 import java.util.Optional;
+import java.util.Set;
 
 /**
  * 模型实例仓储。所属域：model。
@@ -43,10 +45,35 @@ public interface ModelInstanceRepository {
     List<ModelInstance> listEnabledByCapability(String capability);
 
     /**
+     * 按用途解析「平台级」实例（platform_locked=1）。包含已停用行，由调用方决定是否可用，
+     * 便于把「无平台级」与「平台级已停用」区分为不同未就绪原因。
+     *
+     * @param capability 规范用途；实现会同时匹配库内遗留码（如 EMBED → EMBEDDING）
+     * @return 平台级实例；不存在为空
+     */
+    Optional<ModelInstance> findPlatformLocked(ModelCapability capability);
+
+    /**
      * @param providerId 供应商 id
      * @return 未删除实例数，用于删除供应商前的引用检查
      */
     int countByProviderId(Long providerId);
+
+    /**
+     * 该供应商下仍处于平台级锁定的实例数。删除供应商前用它拦住「厂商卡片连带平台级实例」。
+     *
+     * @param providerId 供应商 id
+     * @return 未删除且 platform_locked=1 的实例数
+     */
+    int countPlatformLockedByProvider(Long providerId);
+
+    /**
+     * 批量取「名下存在平台级实例」的供应商 id 集合。供应商卡片列表用它把删除按钮换成锁标识，
+     * 避免 N 次单条计数。
+     *
+     * @return 含未删除且 platform_locked=1 实例的供应商 id；无则空集合
+     */
+    Set<Long> platformLockedProviderIds();
 
     /**
      * @param credentialId 凭证 id
@@ -104,6 +131,24 @@ public interface ModelInstanceRepository {
      * @param message  已去掉 Key 的摘要，最长 255
      */
     void recordProbe(Long id, LocalDateTime testedTime, int ok, String message);
+
+    /**
+     * 写入最近一次连通测试成功快照的向量维度；null 表示清空（最近一次成功也没有解析出维度）。
+     * 只由连通测试调用，编辑实例不覆盖。
+     *
+     * @param id        实例 id
+     * @param dimension 向量维度，可空
+     */
+    void recordEmbeddingDim(Long id, Integer dimension);
+
+    /**
+     * 设置/取消平台级锁定。唯一索引 uk_platform_slot 会在数据库层兜住同用途第二条。
+     *
+     * @param id             实例 id
+     * @param platformLocked 1=平台级，0=普通
+     * @param operatorId     操作人
+     */
+    void updatePlatformLock(Long id, Integer platformLocked, Long operatorId);
 
     /**
      * @param id         实例 id

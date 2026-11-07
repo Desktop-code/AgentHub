@@ -148,6 +148,10 @@ public class MemoryItemController {
         resp.setStatus(item.getStatus());
         resp.setExpiredTime(item.getExpiredTime());
         resp.setRemark(item.getRemark());
+        // 同步状态只读透出：列表/详情都展示，不允许通过条目写接口回写
+        resp.setVectorSyncStatus(item.getVectorSyncStatus());
+        resp.setVectorSyncFailCount(item.getVectorSyncFailCount());
+        resp.setVectorSyncError(item.getVectorSyncError());
         resp.setCreateTime(item.getCreateTime());
         resp.setUpdateTime(item.getUpdateTime());
         return resp;

@@ -5,6 +5,7 @@ import com.agenthub.common.api.PageResult;
 import com.agenthub.common.api.Result;
 import com.agenthub.model.api.dto.ConnectivityResp;
 import com.agenthub.model.api.dto.InstancePageReq;
+import com.agenthub.model.api.dto.InstancePlatformLockReq;
 import com.agenthub.model.api.dto.InstanceResp;
 import com.agenthub.model.api.dto.InstanceSaveReq;
 import com.agenthub.model.api.dto.InstanceStatusReq;
@@ -110,5 +111,20 @@ public class ModelInstanceController {
     @PostMapping("/{id}/test")
     public Result<ConnectivityResp> test(@PathVariable Long id) {
         return Result.ok(connectivity.test(id));
+    }
+
+    /**
+     * 设置 / 取消平台级实例。已有同用途平台级时需 {@code confirmRebind=true} 才执行换绑。
+     *
+     * @param id  实例 id
+     * @param req locked + confirmRebind
+     * @return 详情
+     */
+    @SaCheckPermission(ModelPermissions.INSTANCE_PLATFORM)
+    @PutMapping("/{id}/platform-lock")
+    public Result<InstanceResp> platformLock(@PathVariable Long id,
+                                             @Valid @RequestBody InstancePlatformLockReq req) {
+        return Result.ok(instances.setPlatformLock(id, Boolean.TRUE.equals(req.getLocked()),
+                Boolean.TRUE.equals(req.getConfirmRebind())));
     }
 }

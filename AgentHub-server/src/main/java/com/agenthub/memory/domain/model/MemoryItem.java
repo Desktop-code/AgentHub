@@ -28,6 +28,15 @@ public class MemoryItem {
     private Integer status;
     private LocalDateTime expiredTime;
     private String remark;
+    /**
+     * 向量同步状态（PENDING / SYNCED / FAILED）。只靠状态位，不记同步时间。
+     * 见 {@link MemoryVectorSyncStatus}：写/改 → PENDING，成功或无需动作 → SYNCED。
+     */
+    private String vectorSyncStatus;
+    /** 连续失败次数；达到上限后不再被补同步捞取 */
+    private Integer vectorSyncFailCount;
+    /** 最近一次失败原因（脱敏、截断，禁止存正文与密钥） */
+    private String vectorSyncError;
     private Long createdBy;
     private LocalDateTime createTime;
     private Long updatedBy;

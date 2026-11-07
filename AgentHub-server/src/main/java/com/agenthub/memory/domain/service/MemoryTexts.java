@@ -22,7 +22,32 @@ public final class MemoryTexts {
 
     private static final Pattern SECRET = Pattern.compile(
             "(?i)(api[_-]?key\\s*[:=]|secret\\s*[:=]|password\\s*[:=]|sk-[a-z0-9]{8,}|bearer\\s+[a-z0-9\\-._]{8,})");
-    private static final Pattern REMEMBER = Pattern.compile("记住|以后默认|以后都按|请记住|帮我记住");
+
+    /**
+     * L0 显式「记住」的默认正则片段。
+     * <p>
+     * yml {@code agenthub.memory.remember-patterns} 非空时整体替换本列表；
+     * 这是代码默认值，不在 Agent 记忆页暴露，避免把快筛规则做成业务配置。
+     */
+    public static final List<String> DEFAULT_REMEMBER_PATTERNS = List.of(
+            "记住", "请记住", "帮我记住", "以后默认", "以后都按",
+            "记一下", "帮我记着", "别忘了", "存一下");
+
+    /**
+     * L0 误伤排除：这些短语里包含「记住」类词，但语义是询问/否定，必须先判排除。
+     */
+    public static final List<String> DEFAULT_REMEMBER_EXCLUSIONS = List.of(
+            "记不住", "记住了吗", "还记得吗");
+
+    /**
+     * ttl_days 的硬上限（约 100 年）。超过一律按永久（0）处理：
+     * 异常大值在库里等于永久，但会让 {@code now.plusDays} 溢出并把条目写成过去时间，反而立刻过期。
+     */
+    public static final int MAX_TTL_DAYS = 36500;
+
+    private static final Pattern REMEMBER = Pattern.compile(String.join("|", DEFAULT_REMEMBER_PATTERNS));
+    private static final Pattern REMEMBER_EXCLUSION =
+            Pattern.compile(String.join("|", DEFAULT_REMEMBER_EXCLUSIONS));
     private static final ObjectMapper JSON = new ObjectMapper();
 
     private MemoryTexts() {
@@ -57,11 +82,22 @@ public final class MemoryTexts {
     }
 
     /**
+     * L0 快筛：用户这句话是否像在明确要求「记住」。
+     * <p>
+     * 先判排除再判命中：「记住了吗」包含「记住」，但它是询问，不能进抽取。
+     * 本方法<b>不按长度丢弃</b>，「记住它」这种极短指令必须能命中。
+     *
      * @param text 用户本轮原文
      * @return 是否像明确要求记住
      */
     public static boolean wantsRemember(String text) {
-        return text != null && REMEMBER.matcher(text).find();
+        if (text == null || text.isBlank()) {
+            return false;
+        }
+        if (REMEMBER_EXCLUSION.matcher(text).find()) {
+            return false;
+        }
+        return REMEMBER.matcher(text).find();
     }
 
     /**
@@ -75,6 +111,25 @@ public final class MemoryTexts {
         }
         long seconds = Duration.between(LocalDateTime.now(), expiredTime).getSeconds();
         return (int) Math.max(seconds, 1);
+    }
+
+    /**
+     * 由抽取给出的 ttl_days 算出库里的 expired_time。
+     *
+     * <p>口径：{@code ttl_days <= 0}（含缺省、非法）表示<b>永久</b>，返回 null，
+     * 与「{@code expired_time IS NULL} 视为不过期」的召回条件一致；
+     * 正整数按天累加，并压到 {@link #MAX_TTL_DAYS} 以内。
+     *
+     * @param ttlDays 有效天数，0/负数=永久
+     * @param now     基准时间，空则取当前
+     * @return 过期时间；永久返回 null
+     */
+    public static LocalDateTime expiredTimeOf(int ttlDays, LocalDateTime now) {
+        if (ttlDays <= 0) {
+            return null;
+        }
+        int days = Math.min(ttlDays, MAX_TTL_DAYS);
+        return (now == null ? LocalDateTime.now() : now).plusDays(days);
     }
 
     /**
@@ -196,7 +251,46 @@ public final class MemoryTexts {
         draft.setTitle(blankToNull(firstText(node, "title", "name", "label")));
         draft.setContent(content);
         draft.setImportance(node.path("importance").asInt(node.path("score").asInt(50)));
+        draft.setTtlDays(ttlDaysOf(node));
         return draft;
+    }
+
+    /**
+     * 解析 ttl_days。缺省、非数字、负数、超过上限一律按 0（永久）。
+     *
+     * <p>为什么非法也按永久而不是丢弃：抽取模型偶尔把「永久」写成 -1 或 "长期"，
+     * 因为一个格式小错就丢掉整条偏好，比多留一条永久记忆代价更大；过短的错值已被 0 兜住，
+     * 不会出现「刚写进去就过期」。
+     *
+     * @param node 单条草稿对象
+     * @return 有效天数；0 表示永久
+     */
+    private static int ttlDaysOf(JsonNode node) {
+        for (String field : List.of("ttl_days", "ttlDays", "ttl")) {
+            JsonNode value = node.get(field);
+            if (value == null || value.isNull()) {
+                continue;
+            }
+            int days;
+            if (value.isNumber()) {
+                days = value.asInt(0);
+            } else {
+                String text = value.asText("").trim();
+                if (text.isEmpty()) {
+                    continue;
+                }
+                try {
+                    days = Integer.parseInt(text);
+                } catch (NumberFormatException ex) {
+                    return 0;
+                }
+            }
+            if (days <= 0 || days > MAX_TTL_DAYS) {
+                return 0;
+            }
+            return days;
+        }
+        return 0;
     }
 
     private static String firstText(JsonNode node, String... fields) {
@@ -240,12 +334,14 @@ public final class MemoryTexts {
     /**
      * 抽取模型给出的一条偏好。所属域：memory。
      * factKey 为稳定事实键；写入前须经 {@link FactKeyNormalizer} 归一。
+     * ttlDays 为有效天数：0=永久（expired_time 留空），正整数按天算过期时间。
      */
     public static final class PreferenceDraft {
         private String factKey;
         private String title;
         private String content;
         private int importance;
+        private int ttlDays;
 
         public String getFactKey() {
             return factKey;
@@ -277,6 +373,20 @@ public final class MemoryTexts {
 
         public void setImportance(int importance) {
             this.importance = importance;
+        }
+
+        /**
+         * @return 有效天数；0 表示永久
+         */
+        public int getTtlDays() {
+            return ttlDays;
+        }
+
+        /**
+         * @param ttlDays 有效天数；0 或负数表示永久
+         */
+        public void setTtlDays(int ttlDays) {
+            this.ttlDays = ttlDays;
         }
     }
 }

@@ -20,6 +20,8 @@ public class ProviderResp {
     private String remark;
     private Integer credentialCount;
     private String apiKeyMask;
+    /** 名下是否存在平台级实例：前端据此把厂商卡片的删除 × 换成锁标识。 */
+    private Boolean platformLocked;
     private LocalDateTime createTime;
     private LocalDateTime updateTime;
     private List<CredentialResp> credentials = new ArrayList<>();

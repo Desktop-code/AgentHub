@@ -4,6 +4,7 @@ import com.agenthub.common.api.PageQuery;
 import com.agenthub.common.api.PageResult;
 import com.agenthub.common.text.LikeText;
 import com.agenthub.model.domain.model.InstanceQuery;
+import com.agenthub.model.domain.model.ModelCapability;
 import com.agenthub.model.domain.model.ModelInstance;
 import com.agenthub.model.domain.repository.ModelInstanceRepository;
 import com.agenthub.model.infra.persistence.entity.ModelInstanceEntity;
@@ -15,8 +16,10 @@ import com.baomidou.mybatisplus.extension.plugins.pagination.Page;
 import org.springframework.stereotype.Repository;
 
 import java.time.LocalDateTime;
+import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Optional;
+import java.util.Set;
 
 /**
  * 实例仓储实现。所属域：model。关键词里的 % 和 _ 不当作通配符。
@@ -90,6 +93,46 @@ public class ModelInstanceRepositoryImpl implements ModelInstanceRepository {
                 .eq(ModelInstanceEntity::getStatus, 1)
                 .orderByAsc(ModelInstanceEntity::getId);
         return mapper.selectList(wrapper).stream().map(this::toDomain).toList();
+    }
+
+    /** {@inheritDoc} */
+    @Override
+    public Optional<ModelInstance> findPlatformLocked(ModelCapability capability) {
+        if (capability == null) {
+            return Optional.empty();
+        }
+        // 同时匹配规范码与库内遗留码（EMBED → EMBEDDING），避免洗库前进度表解析不到
+        LambdaQueryWrapper<ModelInstanceEntity> wrapper = new LambdaQueryWrapper<ModelInstanceEntity>()
+                .in(ModelInstanceEntity::getCapability, ModelCapability.storageCodes(capability))
+                .eq(ModelInstanceEntity::getPlatformLocked, 1)
+                .orderByAsc(ModelInstanceEntity::getId);
+        return mapper.selectList(wrapper).stream().findFirst().map(this::toDomain);
+    }
+
+    /** {@inheritDoc} */
+    @Override
+    public int countPlatformLockedByProvider(Long providerId) {
+        // 平台级实例受全局唯一索引保护，这里只数未删除行；逻辑删行不挡厂商卡片删除
+        Long count = mapper.selectCount(new LambdaQueryWrapper<ModelInstanceEntity>()
+                .eq(ModelInstanceEntity::getProviderId, providerId)
+                .eq(ModelInstanceEntity::getPlatformLocked, 1));
+        return count == null ? 0 : count.intValue();
+    }
+
+    /** {@inheritDoc} */
+    @Override
+    public Set<Long> platformLockedProviderIds() {
+        // 一次查全部平台级行（全局最多 2 条），只取供应商 id，避免按卡片逐条计数
+        List<ModelInstanceEntity> rows = mapper.selectList(new LambdaQueryWrapper<ModelInstanceEntity>()
+                .select(ModelInstanceEntity::getProviderId)
+                .eq(ModelInstanceEntity::getPlatformLocked, 1));
+        Set<Long> providerIds = new LinkedHashSet<>();
+        for (ModelInstanceEntity row : rows) {
+            if (row != null && row.getProviderId() != null) {
+                providerIds.add(row.getProviderId());
+            }
+        }
+        return providerIds;
     }
 
     /** {@inheritDoc} */
@@ -177,6 +220,24 @@ public class ModelInstanceRepositoryImpl implements ModelInstanceRepository {
 
     /** {@inheritDoc} */
     @Override
+    public void recordEmbeddingDim(Long id, Integer dimension) {
+        // 维度快照只由连通测试写；单独一条 UPDATE，失败/未解析时清空，避免留下过期维
+        mapper.update(null, new LambdaUpdateWrapper<ModelInstanceEntity>()
+                .eq(ModelInstanceEntity::getId, id)
+                .set(ModelInstanceEntity::getEmbeddingDim, dimension));
+    }
+
+    /** {@inheritDoc} */
+    @Override
+    public void updatePlatformLock(Long id, Integer platformLocked, Long operatorId) {
+        mapper.update(null, new LambdaUpdateWrapper<ModelInstanceEntity>()
+                .eq(ModelInstanceEntity::getId, id)
+                .set(ModelInstanceEntity::getPlatformLocked, platformLocked)
+                .set(ModelInstanceEntity::getUpdatedBy, operatorId));
+    }
+
+    /** {@inheritDoc} */
+    @Override
     public void logicalDelete(Long id, Long operatorId) {
         mapper.update(null, new LambdaUpdateWrapper<ModelInstanceEntity>()
                 .eq(ModelInstanceEntity::getId, id)
@@ -199,12 +260,14 @@ public class ModelInstanceRepositoryImpl implements ModelInstanceRepository {
         instance.setModelId(entity.getModelId());
         instance.setCapability(entity.getCapability());
         instance.setStatus(entity.getStatus());
+        instance.setPlatformLocked(entity.getPlatformLocked());
         instance.setExtraJson(entity.getExtraJson());
         instance.setDeleted(entity.getDeleted());
         // 域/API 仍用 lastTestTime / createTime；库列已是 last_test_time / create_time
         instance.setLastTestTime(entity.getLastTestTime());
         instance.setLastTestOk(entity.getLastTestOk());
         instance.setLastTestMsg(entity.getLastTestMsg());
+        instance.setEmbeddingDim(entity.getEmbeddingDim());
         instance.setCreatedBy(entity.getCreatedBy());
         instance.setCreateTime(entity.getCreateTime());
         instance.setUpdatedBy(entity.getUpdatedBy());

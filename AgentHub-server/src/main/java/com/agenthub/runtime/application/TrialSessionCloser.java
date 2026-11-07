@@ -71,11 +71,12 @@ public class TrialSessionCloser {
                 break;
             }
             try {
-                if (!SessionIdle.due(session, idleSec(session.getAgentId()), now, flight.running(session.getId()))) {
+                int idleSec = idleSec(session.getAgentId());
+                if (!SessionIdle.due(session, idleSec, now, flight.running(session.getId()))) {
                     continue;
                 }
                 // 先终态：抽取失败不得把会话打回 RUNNING
-                closeIdle(session, now);
+                closeIdle(session, now, idleSec);
                 memory.onClosed(session);
                 handled++;
                 sleepBetween();
@@ -139,13 +140,18 @@ public class TrialSessionCloser {
 
     /**
      * 空闲到期：标 SUCCESS + ended_at，不抽模型。
+     *
+     * @param session 到期会话
+     * @param now     本轮扫描时间
+     * @param idleSec 本次判定用的策略空闲秒数，仅用于日志对账（确认读的不是写死的 7200）
      */
-    private void closeIdle(RunSession session, LocalDateTime now) {
+    private void closeIdle(RunSession session, LocalDateTime now, int idleSec) {
         session.setStatus(RunStatus.SUCCESS.name());
         session.setEndTime(now);
         session.setErrorSummary("空闲自动结束");
         sessions.updateOutcome(session, 0L);
-        log.info("空闲收口终态 sessionId={} status=SUCCESS", session.getId());
+        log.info("空闲收口终态 sessionId={} agentId={} status=SUCCESS idleSec={}",
+                session.getId(), session.getAgentId(), idleSec);
     }
 
     private void sleepBetween() {
@@ -160,6 +166,13 @@ public class TrialSessionCloser {
         }
     }
 
+    /**
+     * 读本 Agent 策略里的空闲秒数（ctx_idle_ttl_sec）。平台默认 7200、最小 60，
+     * 一律走 {@link MemoryPolicyAppService#effective}（会 clamp），禁止在这里写死 7200。
+     *
+     * @param agentId Agent，可空
+     * @return 空闲秒数；Agent 缺失或没有策略时是平台默认值
+     */
     private int idleSec(Long agentId) {
         if (agentId == null) {
             return 0;

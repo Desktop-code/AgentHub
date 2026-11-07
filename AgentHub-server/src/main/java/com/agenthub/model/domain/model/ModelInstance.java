@@ -18,6 +18,11 @@ public class ModelInstance {
     private String modelId;
     private String capability;
     private Integer status;
+    /**
+     * 是否平台级全局实例：1 是，0/空 否。
+     * EMBEDDING、RERANK 各最多一条；设平台级后不可删除/停用/改关键参数。
+     */
+    private Integer platformLocked;
     private String extraJson;
     /**
      * 逻辑删除标记：0 未删，1 已删。
@@ -27,6 +32,11 @@ public class ModelInstance {
     private LocalDateTime lastTestTime;
     private Integer lastTestOk;
     private String lastTestMsg;
+    /**
+     * 最近一次连通测试成功快照的向量维度；仅 EMBEDDING 用途写。
+     * memory 域只读本值建集/写入，快照缺失即 isReady=false。
+     */
+    private Integer embeddingDim;
     private Long createdBy;
     private LocalDateTime createTime;
     private Long updatedBy;

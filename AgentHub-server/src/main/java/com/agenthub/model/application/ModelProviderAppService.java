@@ -24,6 +24,7 @@ import org.springframework.transaction.annotation.Transactional;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 import java.util.stream.Collectors;
 
 /**
@@ -73,10 +74,13 @@ public class ModelProviderAppService {
     public List<ProviderResp> list() {
         Map<Long, List<ModelCredential>> grouped = credentials.listAll().stream()
                 .collect(Collectors.groupingBy(ModelCredential::getProviderId));
+        // 一次取「含平台级实例」的供应商集合：卡片用它在右上角显示锁，避免逐卡计数
+        Set<Long> lockedProviderIds = instances.platformLockedProviderIds();
         List<ProviderResp> result = new ArrayList<>();
         for (ModelProvider provider : providers.listAll()) {
             List<ModelCredential> rows = grouped.getOrDefault(provider.getId(), List.of());
             ProviderResp resp = toResp(provider, rows);
+            resp.setPlatformLocked(lockedProviderIds.contains(provider.getId()));
             result.add(resp);
         }
         return result;
@@ -88,7 +92,9 @@ public class ModelProviderAppService {
      */
     public ProviderResp get(Long id) {
         ModelProvider provider = lookup.requireProvider(id);
-        return toResp(provider, credentials.listByProviderId(id));
+        ProviderResp resp = toResp(provider, credentials.listByProviderId(id));
+        resp.setPlatformLocked(instances.countPlatformLockedByProvider(id) > 0);
+        return resp;
     }
 
     /**
@@ -168,6 +174,11 @@ public class ModelProviderAppService {
     @Transactional
     public void delete(Long id) {
         ModelProvider existing = lookup.requireProvider(id);
+        // 平台级实例可能被记忆/检索链路依赖：厂商卡片不可删，先走换绑或取消平台级
+        if (instances.countPlatformLockedByProvider(id) > 0) {
+            throw new BizException(ErrorCode.BAD_REQUEST,
+                    "该供应商下存在平台级模型实例，不能删除；请先换绑或取消平台级");
+        }
         references.assertProviderDeletable(instances.countByProviderId(id));
         Long operatorId = operatorContext.requireUserId();
         List<ModelCredential> rows = credentials.listByProviderId(id);

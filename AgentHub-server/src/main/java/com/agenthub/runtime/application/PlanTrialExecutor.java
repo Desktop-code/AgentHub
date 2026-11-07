@@ -104,8 +104,9 @@ public class PlanTrialExecutor {
         int maxSteps = runtime.maxPlanStepsOrDefault();
         EffectiveLimits limits = limitResolver.resolve(agent);
         // 记忆段在装配时进链（位于工具目录之前），规划与各步执行都用同一份依据
+        // 召回用本轮用户原文：LONG 走语义检索，取不到自动回落 MySQL Top N
         TrialMemoryCoordinator.Augmented recalled = memory.recallDurable(
-                memorySession(agent.getId(), userId, sessionId));
+                memorySession(agent.getId(), userId, sessionId), userText);
         TrialPlan plan = loader.loadSingleAgent(agent, userText, recalled.memoryBlock());
         plan.setToolArgsFacts(recalled.injectedFacts());
         memory.publishInjection(plan);
@@ -301,7 +302,7 @@ public class PlanTrialExecutor {
                 // 每步重装提示词：用本轮用户原文判触发关键词，保证硬触发的 Skill 在每一步都在场；
                 // 记忆段同样在装配时进链，与规划阶段同一位置（工具目录之前）
                 TrialMemoryCoordinator.Augmented recalled = memory.recallDurable(
-                        memorySession(agent.getId(), pending.userId(), pending.sessionId()));
+                        memorySession(agent.getId(), pending.userId(), pending.sessionId()), pending.userText());
                 TrialPlan plan = loader.loadSingleAgent(agent, pending.userText(), recalled.memoryBlock());
                 // 本步提示在已装配提示末尾追加「只做这一步」，平台前缀与锁定段仍在最前
                 plan.setSystemPrompt(prompts.stepPrompt(plan.getSystemPrompt(), steps, step,

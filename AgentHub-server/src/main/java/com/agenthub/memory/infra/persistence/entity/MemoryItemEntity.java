@@ -36,6 +36,15 @@ public class MemoryItemEntity extends MemoryAuditEntity {
     private Integer status;
     private LocalDateTime expiredTime;
     private String remark;
+    /**
+     * 向量同步状态。列见 sql/temp/schema-delta-memory-vector-sync.sql。
+     * 只靠状态位判断是否要补同步，禁止新增同步时间列。
+     */
+    private String vectorSyncStatus;
+    /** 连续失败次数；达到上限后停在 FAILED，不再被补同步捞取 */
+    private Integer vectorSyncFailCount;
+    /** 最近一次失败原因（脱敏截断）；不存正文、不存密钥 */
+    private String vectorSyncError;
 
     @TableLogic
     private Integer deleted;

@@ -285,6 +285,9 @@ INSERT INTO sys_role_menu (role_id, menu_id) VALUES (1, 128);
 INSERT INTO sys_role_menu (role_id, menu_id) VALUES (1, 130);
 INSERT INTO sys_role_menu (role_id, menu_id) VALUES (1, 131);
 INSERT INTO sys_role_menu (role_id, menu_id) VALUES (1, 132);
+-- 刀10：平台级 Embedding / Rerank（模型中心「设为平台级」按钮）
+INSERT INTO sys_menu (id, parent_id, type, name, path, component, redirect, permission, icon, sort, visible, status, open_type, deleted, created_by, create_time, updated_by, update_time) VALUES (133, 28, 3, '设平台级', NULL, NULL, NULL, 'model:instance:platform', NULL, 10, 1, 1, 0, 0, NULL, '2026-11-07 18:52:00', NULL, '2026-11-07 18:52:00');
+INSERT INTO sys_role_menu (role_id, menu_id) VALUES (1, 133);
 
 
 -- tool 

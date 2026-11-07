@@ -27,6 +27,8 @@ public class ModelInstanceEntity extends ModelAuditEntity {
     private String modelId;
     private String capability;
     private Integer status;
+    /** 1=平台级全局实例（EMBEDDING/RERANK 各最多一条）；0/空=普通实例。 */
+    private Integer platformLocked;
     private String extraJson;
     /** 最近一次连通测试时间；未测为空。库列 last_test_time。 */
     private LocalDateTime lastTestTime;
@@ -34,6 +36,8 @@ public class ModelInstanceEntity extends ModelAuditEntity {
     private Integer lastTestOk;
     /** 最近测试摘要，禁止含 Key。 */
     private String lastTestMsg;
+    /** 最近一次连通测试成功快照的向量维度；仅 EMBEDDING 写。库列 embedding_dim。 */
+    private Integer embeddingDim;
 
     @TableLogic
     private Integer deleted;

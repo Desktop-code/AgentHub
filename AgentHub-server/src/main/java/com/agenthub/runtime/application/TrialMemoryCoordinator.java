@@ -3,6 +3,7 @@ package com.agenthub.runtime.application;
 import com.agenthub.common.error.BizException;
 import com.agenthub.common.text.UserFacingText;
 import com.agenthub.memory.application.ContextWindowFacade;
+import com.agenthub.memory.application.ExplicitMemoryExtractor;
 import com.agenthub.memory.application.LongExtractService;
 import com.agenthub.memory.application.MemoryPolicyAppService;
 import com.agenthub.memory.application.MemoryRecallFacade;
@@ -15,6 +16,7 @@ import com.agenthub.runtime.domain.model.MemoryFact;
 import com.agenthub.runtime.domain.model.RunSession;
 import com.agenthub.runtime.domain.model.TrialPlan;
 import com.agenthub.runtime.domain.service.CauseDigest;
+import com.agenthub.runtime.domain.service.LongMemoryNote;
 import com.agenthub.runtime.domain.service.PromptInjectionHolder;
 import com.agenthub.runtime.domain.service.TrialFailure;
 import org.slf4j.Logger;
@@ -26,7 +28,7 @@ import java.util.List;
 
 /**
  * 试跑和记忆、窗口的挂钩。所属域：runtime。
- * 用户轮先处理显式记住和窗口，再把摘要、近轮、短期记忆拼进用户消息。
+ * 用户轮只<b>投递</b>显式记住任务（异步，不等结果），随后处理窗口，再把摘要、近轮、短期记忆拼进用户消息。
  * 空闲收口后、取消、删除前才走会话级 LONG 抽取。每一轮成功或失败不抽。清空只丢热窗口并清批抽标记。
  * 抽取幂等 / 失败短路在 LongExtractService；本类只拼正文并转发。
  */
@@ -39,21 +41,25 @@ public class TrialMemoryCoordinator {
     private final ContextWindowFacade windows;
     private final MemoryRecallFacade recall;
     private final LongExtractService extracts;
+    private final ExplicitMemoryExtractor explicitMemory;
     private final SessionTurnSource events;
 
     /**
-     * @param policies 策略
-     * @param windows  滑动窗口
-     * @param recall   SHORT / LONG / AGENT
-     * @param extracts 长期偏好
-     * @param events   会话结束时重放正文
+     * @param policies       策略
+     * @param windows        滑动窗口
+     * @param recall         SHORT / LONG / AGENT
+     * @param extracts       会话级长期偏好（空闲/取消/删除）
+     * @param explicitMemory 显式记住的异步投递（N6：不得在请求线程等模型）
+     * @param events         会话结束时重放正文
      */
     public TrialMemoryCoordinator(MemoryPolicyAppService policies, ContextWindowFacade windows,
-                                  MemoryRecallFacade recall, LongExtractService extracts, SessionTurnSource events) {
+                                  MemoryRecallFacade recall, LongExtractService extracts,
+                                  ExplicitMemoryExtractor explicitMemory, SessionTurnSource events) {
         this.policies = policies;
         this.windows = windows;
         this.recall = recall;
         this.extracts = extracts;
+        this.explicitMemory = explicitMemory;
         this.events = events;
     }
 
@@ -69,7 +75,18 @@ public class TrialMemoryCoordinator {
         MemoryPolicy policy = policies.effective(session.getAgentId());
         long userId = session.getUserId() == null ? 0L : session.getUserId();
         try {
-            extracts.onExplicit(policy, session.getAgentId(), userId, session.getId(), userText);
+            // 用户再次开口 = 本会话进入新一轮：清掉上一次空闲批抽的终态标记
+            // （DONE / FAILED / SKIPPED 任一都可能存在），让本次聊完再次空闲时表中无行、可以再抽一次。
+            // 只删 memory_session_extract 的那一行，不改状态枚举、不碰显式「记住」通道；
+            // 同一次空闲被扫两次仍由「已有终态 → already_processed」防重（期间没有用户轮，标记不会被清）。
+            // agentId 为空是虚拟根，本方法正常不会被调用（调用方按 agent == null 直接跳过），这里仅作防御。
+            if (session.getAgentId() != null) {
+                extracts.clearSessionMarker(session.getId());
+            }
+            // 显式记住：主线程只做正则+开关判定，命中后投递到 memory 池即返回。
+            // 这里绝不能再同步调抽取——那会 block 最长 60s，把本轮首字延迟整段吃掉（N6 红线）。
+            // 刚抽出的偏好本轮不注入，下一轮 recallDurable 才读到，属预期行为。
+            explicitMemory.dispatch(policy, session.getAgentId(), userId, session.getId(), userText);
             WindowState state = windows.onUser(policy, session.getAgentId(), userId, session.getId(), userText);
             List<MemoryItem> shorts = recall.shorts(policy, session.getAgentId(), session.getId());
             return windows.renderUser(state, userText, shorts);
@@ -80,27 +97,40 @@ public class TrialMemoryCoordinator {
     }
 
     /**
-     * 取本轮要注入系统提示的长期记忆：工作记忆 + 用户偏好。
+     * 取本轮要注入的长期记忆：工作记忆 →【长期记忆说明】→ 用户偏好（本轮召回条目）。
      * <p>
      * <b>不再自己拼到系统提示尾部</b>：记忆在提示词里的位置是「业务段收口之后、Skill 与工具目录之前」，
      * 由 {@code PromptInjectionComposer} 统一安放。本方法只负责取数与成段，调用方把 block 交给装配器。
      * 原先的尾部追加以导致模型先读完工具清单才看到偏好，「该不该调工具」的判断带不上偏好。
      * <p>
+     * 【长期记忆说明】是平台内置锁定文案（classpath 资源，见 {@link LongMemoryNote}）：
+     * 只在长期记忆开启时拼，且与本轮是否召回到条目无关；关闭时整段不出现。
+     * <p>
      * 同时带回本轮真正注入的 LONG 条目，供工具必填参数闸门判断「能否用已注入的长期记忆补参」。
      *
-     * @param session      会话
-     * @return 记忆段正文（无内容时为空串）与已注入记忆；策略关闭长期记忆时两者都为空
+     * @param session 会话
+     * @param query   本轮用户查询（含 OCR 文本）；空则 LONG 直接走 MySQL Top N，不做语义召回
+     * @return 记忆段正文（关闭长期记忆且无工作记忆时为空串）与已注入记忆；策略关闭长期记忆时无召回条目
      */
-    public Augmented recallDurable(RunSession session) {
+    public Augmented recallDurable(RunSession session, String query) {
         MemoryPolicy policy = policies.effective(session.getAgentId());
         long userId = session.getUserId() == null ? 0L : session.getUserId();
         // 虚拟根没有 Agent：长期记忆按 0 号归属读取（等价「无 Agent 记忆」），
         // 不能直接拆 Long 导致空指针；会话内热窗口仍按会话 id 独立。
         long agentId = session.getAgentId() == null ? 0L : session.getAgentId();
-        MemoryRecallFacade.Durable durable = recall.durable(policy, agentId, userId);
+        MemoryRecallFacade.Durable durable = recall.durable(policy, agentId, userId, query);
+        // 长期记忆开关：只决定是否拼平台说明，不决定是否拼工作记忆（工作记忆走 AGENT 范围）
+        boolean longEnabled = policy.getEnableLong() != null && policy.getEnableLong() == 1;
         StringBuilder block = new StringBuilder();
         if (!durable.agent().isBlank()) {
             block.append("【工作记忆】\n").append(durable.agent());
+        }
+        // 位置固定：已有工作记忆之后、本轮召回条目之前；没有条目也要出现，避免模型自称无权记忆
+        if (longEnabled) {
+            if (block.length() > 0) {
+                block.append("\n\n");
+            }
+            block.append(LongMemoryNote.text());
         }
         if (!durable.pref().isBlank()) {
             if (block.length() > 0) {

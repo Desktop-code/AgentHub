@@ -17,8 +17,14 @@ import java.util.List;
 import java.util.Optional;
 
 /**
- * 试跑注入用的记忆召回。所属域：memory。
+ * 试跑注入用的记忆召回门面（唯一入口）。所属域：memory。
  * 默认只取未过期 SHORT。LONG / AGENT 要策略打开，并且有条数和字符上限。
+ * <p>
+ * LONG 的取数全部收口在 {@link MemoryLongRecall}：向量候选（实例 9 + 记忆 collection）→
+ * MySQL 对齐剔删/过期 → 实例 12 可解析则重排 → Top N；未就绪/异常/超时/空 query 自动回落
+ * MySQL「importance 降序 + 更新时间」Top N。本类只再套一层字符预算，保证「条数」与「字数」两个口径
+ * 都只有一处实现。
+ * <p>
  * Redis miss 时从库回补再写入。读 Redis 失败则退回数据库，不把试跑直接打死。
  */
 @Component
@@ -29,16 +35,20 @@ public class MemoryRecallFacade {
     private final ShortMemoryCache cache;
     private final MemoryItemRepository items;
     private final MemoryProperties properties;
+    private final MemoryLongRecall longRecall;
 
     /**
      * @param cache      SHORT 热路径
-     * @param items      回补和 LONG / AGENT
-     * @param properties 注入字符上限
+     * @param items      回补与 AGENT 范围读取
+     * @param properties 注入字符上限 / Top N
+     * @param longRecall LONG 召回编排（向量 + 对齐 + 重排 + 降级）
      */
-    public MemoryRecallFacade(ShortMemoryCache cache, MemoryItemRepository items, MemoryProperties properties) {
+    public MemoryRecallFacade(ShortMemoryCache cache, MemoryItemRepository items, MemoryProperties properties,
+                              MemoryLongRecall longRecall) {
         this.cache = cache;
         this.items = items;
         this.properties = properties;
+        this.longRecall = longRecall;
     }
 
     /**
@@ -56,27 +66,47 @@ public class MemoryRecallFacade {
     }
 
     /**
+     * 取本轮要注入的长期偏好。query 非空且向量链路可用时走语义召回，否则回落 MySQL Top N。
+     *
      * @param policy  策略
      * @param agentId Agent
      * @param userId  平台用户
+     * @param query   本轮用户查询；空表示不做语义召回
      * @return 工作记忆和用户偏好两段文本，不该注入时为空串；LONG 同时带回条目供工具补参
      */
-    public Durable durable(MemoryPolicy policy, long agentId, long userId) {
+    public Durable durable(MemoryPolicy policy, long agentId, long userId, String query) {
         String agent = "";
         String pref = "";
         List<MemoryItem> prefItems = List.of();
         int budget = Math.max(properties.getRecallMaxChars(), 1);
         if (policy.getEnableLong() != null && policy.getEnableLong() == 1) {
-            List<MemoryItem> rows = items.listActive(agentId, userId, MemoryScope.LONG.name(),
-                    policy.getMaxLongItems(), LocalDateTime.now());
+            // Top N：策略上限与平台硬顶取小，避免策略配大后一次注入几十条
+            int topN = Math.min(properties.longRecallTopN(), Math.max(policy.getMaxLongItems(), 1));
+            // 召回编排只此一处：向量优先、失败自动回落 MySQL，不在调用方各写一套
+            List<MemoryItem> rows = longRecall.topN(agentId, userId, query, topN);
             // 与注入正文用同一批行，保证「注入过」与「可用于补参」完全一致
-            prefItems = limit(rows, policy.getMaxLongItems(), budget);
+            prefItems = limit(rows, topN, budget);
             pref = render(prefItems);
+            log.debug("LONG召回 agentId={} userId={} topN={} 候选={} 注入={} chars={} byVector={}",
+                    agentId, userId, topN, rows.size(), prefItems.size(), pref.length(),
+                    query != null && !query.isBlank());
         }
         List<MemoryItem> work = items.listActive(agentId, null, MemoryScope.AGENT.name(),
                 policy.getMaxLongItems(), LocalDateTime.now());
         agent = render(limit(work, policy.getMaxLongItems(), budget));
         return new Durable(agent, pref, prefItems);
+    }
+
+    /**
+     * 无查询文本的兼容入口（调试页/后台排查）：等价于不做语义召回，直接走 MySQL Top N。
+     *
+     * @param policy  策略
+     * @param agentId Agent
+     * @param userId  平台用户
+     * @return 同 {@link #durable(MemoryPolicy, long, long, String)}
+     */
+    public Durable durable(MemoryPolicy policy, long agentId, long userId) {
+        return durable(policy, agentId, userId, null);
     }
 
     private List<MemoryItem> readShort(long agentId, long sessionId, MemoryPolicy policy) {
