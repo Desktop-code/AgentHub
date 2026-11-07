@@ -554,6 +554,9 @@ CREATE TABLE `memory_item`  (
   `status` tinyint(4) NOT NULL DEFAULT 1 COMMENT '1正常 0停用',
   `expired_time` datetime NULL DEFAULT NULL COMMENT '过期时间；SHORT 常用',
   `remark` varchar(500) CHARACTER SET utf8mb4 COLLATE utf8mb4_general_ci NULL DEFAULT NULL,
+  `vector_sync_status` varchar(16) CHARACTER SET utf8mb4 COLLATE utf8mb4_general_ci NOT NULL DEFAULT 'PENDING' COMMENT '向量同步状态：PENDING 待同步 / SYNCED 无需动作 / FAILED 失败待重试',
+  `vector_sync_fail_count` int(11) NOT NULL DEFAULT 0 COMMENT '向量同步失败次数；达到上限后停在 FAILED 只打日志',
+  `vector_sync_error` varchar(200) CHARACTER SET utf8mb4 COLLATE utf8mb4_general_ci NULL DEFAULT NULL COMMENT '最近一次向量同步失败原因（脱敏截断，不含正文与密钥）',
   `deleted` tinyint(4) NOT NULL DEFAULT 0,
   `created_by` bigint(20) NULL DEFAULT NULL,
   `create_time` datetime NOT NULL DEFAULT CURRENT_TIMESTAMP COMMENT '创建时间',
@@ -567,7 +570,8 @@ CREATE TABLE `memory_item`  (
   INDEX `idx_status`(`status`) USING BTREE,
   INDEX `idx_expired_time`(`expired_time`) USING BTREE,
   INDEX `idx_deleted`(`deleted`) USING BTREE,
-  INDEX `idx_long_fact`(`scope`, `agent_id`, `user_id`, `fact_key`, `deleted`) USING BTREE
+  INDEX `idx_long_fact`(`scope`, `agent_id`, `user_id`, `fact_key`, `deleted`) USING BTREE,
+  INDEX `idx_vector_sync`(`scope`, `vector_sync_status`, `vector_sync_fail_count`, `id`) USING BTREE
 ) ENGINE = InnoDB AUTO_INCREMENT = 1 CHARACTER SET = utf8mb4 COLLATE = utf8mb4_general_ci COMMENT = '记忆条目' ROW_FORMAT = Dynamic;
 
 -- ----------------------------
@@ -617,16 +621,20 @@ CREATE TABLE `model_instance`  (
   `model_id` varchar(128) CHARACTER SET utf8mb4 COLLATE utf8mb4_general_ci NOT NULL COMMENT '厂商模型ID，如 qwen-plus',
   `capability` varchar(32) CHARACTER SET utf8mb4 COLLATE utf8mb4_general_ci NOT NULL COMMENT 'CHAT/ROUTER/REWRITE/SUMMARY/MEMORY/EMBEDDING/RERANK/VISION/ASR/TTS/GUARDRAIL',
   `status` tinyint(4) NOT NULL DEFAULT 1 COMMENT '1正常 0停用',
+  `platform_locked` tinyint(4) NOT NULL DEFAULT 0 COMMENT '是否平台锁定：1=平台级全局实例（EMBEDDING/RERANK 各最多一条）',
   `extra_json` text CHARACTER SET utf8mb4 COLLATE utf8mb4_general_ci NULL COMMENT '可选扩展JSON：temperature / max_tokens / speechParams（TTS 附加参数）',
   `last_test_time` datetime NULL DEFAULT NULL COMMENT '最后连通测试时间',
   `last_test_ok` tinyint(4) NULL DEFAULT NULL COMMENT '1成功 0失败 空未测',
   `last_test_msg` varchar(255) CHARACTER SET utf8mb4 COLLATE utf8mb4_general_ci NULL DEFAULT NULL COMMENT '最近测试摘要，禁含Key',
+  `embedding_dim` int(11) NULL DEFAULT NULL COMMENT '最近一次连通测试成功快照的向量维度（仅 EMBEDDING 用途写）',
   `deleted` tinyint(4) NOT NULL DEFAULT 0 COMMENT '0未删 1已删',
   `created_by` bigint(20) NULL DEFAULT NULL COMMENT '创建人用户ID',
   `create_time` datetime NOT NULL DEFAULT CURRENT_TIMESTAMP COMMENT '创建时间',
   `updated_by` bigint(20) NULL DEFAULT NULL COMMENT '更新人用户ID',
   `update_time` datetime NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP COMMENT '更新时间',
+  `platform_slot` varchar(32) CHARACTER SET utf8mb4 COLLATE utf8mb4_general_ci GENERATED ALWAYS AS (IF(`platform_locked` = 1 AND `deleted` = 0, `capability`, NULL)) STORED COMMENT '平台级唯一槽：EMBEDDING/RERANK 各最多一条（NULL 不参与唯一）',
   PRIMARY KEY (`id`) USING BTREE,
+  UNIQUE INDEX `uk_platform_slot`(`platform_slot`) USING BTREE,
   INDEX `idx_provider_id`(`provider_id`) USING BTREE,
   INDEX `idx_credential_id`(`credential_id`) USING BTREE,
   INDEX `idx_capability`(`capability`) USING BTREE,

@@ -5,6 +5,7 @@
     存储仍走 agent_model_bind(purpose=SUMMARY|MEMORY)，与「模型配置」共用同一套槽交互。
     SUMMARY 跟「上下文压缩」，MEMORY 仅当「启用长期记忆」为开时展示（关闭整块隐藏）。
     开关类（启用长期记忆 / 允许抽取 / 批抽 / 显式记住）一律即时落库，不点亮页底取消/保存。
+    空闲秒数（ctx_idle_ttl_sec）只在批抽打开时挪到「空闲/删除时批抽」旁，避免同一列出现两个输入框。
   -->
   <div v-loading="loading" class="memory-panel">
     <el-alert v-if="error" :title="error" type="error" show-icon :closable="false" class="block-alert" />
@@ -37,7 +38,8 @@
                 :disabled="!canEdit"
               />
             </el-form-item>
-            <el-form-item label="窗口空闲 TTL">
+            <!-- 同一字段（ctx_idle_ttl_sec）只保留一个编辑点：批抽打开时移到「空闲/删除时批抽」旁 -->
+            <el-form-item v-if="!idleBatchEditable" label="窗口空闲 TTL">
               <el-input-number
                 v-model="policy.ctxIdleTtlSec"
                 :min="60"
@@ -132,6 +134,24 @@
                   @change="(on: string | number | boolean) => saveSwitch('longExtractOnSessionEnd', on === true)"
                 />
               </el-form-item>
+              <!--
+                空闲秒数：调度 sweep 按本 Agent 策略的 ctx_idle_ttl_sec 判到期，不写死 7200。
+                与「窗口空闲 TTL」是同一列，所以两处只出现一个编辑点，避免同一值两个输入框。
+              -->
+              <el-form-item v-if="idleBatchEditable" label="空闲时间（秒）">
+                <el-input-number
+                  v-model="policy.ctxIdleTtlSec"
+                  :min="IDLE_TTL_MIN_SEC"
+                  :max="IDLE_TTL_MAX_SEC"
+                  :step="60"
+                  controls-position="right"
+                  :disabled="!canEdit"
+                />
+              </el-form-item>
+              <p v-if="idleBatchEditable" class="trigger-hint">
+                默认 7200（2 小时），最小 60；会话超过该时长没有新消息才收口并批抽。
+                调短（如 120）可快速验证，改完记得保存。
+              </p>
               <el-form-item label="显式记住">
                 <el-switch
                   :model-value="policy.longExtractOnExplicit === 1"
@@ -181,6 +201,13 @@
               @remove="emit('remove-model', $event)"
               @prompt="(purpose, row) => emit('prompt-model', purpose, row)"
             />
+            <!--
+              推理模型备注：L1 分类复用这颗 MEMORY，不再新增模型槽。
+              说明清楚「只有一个槽」和「系统自动调整」，避免用户以为要再绑一个分类模型。
+            -->
+            <p class="slot-note">
+              分类（L1）与抽取（L2）默认使用同一模型；若该模型带推理/思考，系统会自动调整分类请求，无需再绑第二个模型。
+            </p>
           </div>
         </section>
       </el-form>
@@ -259,6 +286,46 @@ let active = true
 
 /** 长期记忆是否开启；为 true 时才展开抽取相关配置。 */
 const longEnabled = computed(() => policy.value?.enableLong === 1)
+
+/**
+ * 空闲秒数下限 / 上限，与后端 MemoryPolicyAppService 的 bounded 校验、
+ * MemoryProperties 的 ctxIdleTtlMaxSec 硬顶保持一致。
+ */
+const IDLE_TTL_MIN_SEC = 60
+const IDLE_TTL_MAX_SEC = 86400
+
+/**
+ * 空闲秒数是否在「长期记忆」区块内编辑。
+ * <p>同一列 ctx_idle_ttl_sec 既驱动上下文窗口 TTL，也驱动空闲收口 + 批抽；
+ * 批抽打开时把它挪到开关旁，其余情况仍在「短期记忆」里，保证任何时候只有一个输入框。
+ */
+const idleBatchEditable = computed(
+  () => longEnabled.value && policy.value?.longExtractOnSessionEnd === 1
+)
+
+/**
+ * 校验空闲秒数。el-input-number 的 min 只约束步进按钮，手输清空 / 越界仍会进模型值，
+ * 这里在提交前再挡一次，错误文案用中文，避免后端 400 直接甩给用户。
+ *
+ * @return 合法为 true；不合法时已弹出中文提示并返回 false
+ */
+function validIdleTtl(): boolean {
+  const raw = policy.value?.ctxIdleTtlSec
+  if (raw === null || raw === undefined || !Number.isFinite(Number(raw))) {
+    ElMessage.error('空闲时间（秒）不能为空')
+    return false
+  }
+  const sec = Number(raw)
+  if (!Number.isInteger(sec)) {
+    ElMessage.error('空闲时间（秒）必须是整数')
+    return false
+  }
+  if (sec < IDLE_TTL_MIN_SEC || sec > IDLE_TTL_MAX_SEC) {
+    ElMessage.error(`空闲时间（秒）必须在 ${IDLE_TTL_MIN_SEC} 到 ${IDLE_TTL_MAX_SEC} 之间`)
+    return false
+  }
+  return true
+}
 
 /**
  * 策略行的「可编辑草稿」快照：只含填写 / 选择类字段。
@@ -459,6 +526,10 @@ async function save(): Promise<boolean> {
   if (!props.canEdit || !isDirty.value) {
     return false
   }
+  // 空闲秒数手输可能被清空或越界：提交前先做中文校验，不合法就不发请求
+  if (!validIdleTtl()) {
+    return false
+  }
   const body = buildBody()
   if (!body) {
     return false
@@ -538,10 +609,30 @@ defineExpose({ save, cancel, isDirty, saving, load, deactivate })
   border-top: 1px dashed var(--ah-border, #eceef4);
 }
 
+/* 槽位下方备注：单槽复用说明（L1 分类与 L2 抽取共用同一模型），弱化但不能看不见 */
+.slot-note {
+  margin: 8px 0 0;
+  padding: 8px 10px;
+  border-radius: 6px;
+  background: var(--ah-fill-light, #f7f8fc);
+  color: var(--ah-text-secondary, #8b90a0);
+  font-size: 12px;
+  line-height: 1.6;
+}
+
 .switch-note {
   margin-left: 12px;
   color: var(--ah-text-secondary, #8b90a0);
   font-size: 12px;
+}
+
+/* 触发开关下的字段说明：与开关竖排，宽度不超过开关堆 */
+.trigger-hint {
+  max-width: 420px;
+  margin: -4px 0 12px;
+  color: var(--ah-text-secondary, #8b90a0);
+  font-size: 12px;
+  line-height: 1.6;
 }
 
 /* label+控件对齐的 2～3 列网格 */

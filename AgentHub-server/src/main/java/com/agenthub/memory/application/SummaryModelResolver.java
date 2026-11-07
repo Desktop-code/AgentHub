@@ -1,6 +1,8 @@
 package com.agenthub.memory.application;
 
 import com.agenthub.agent.application.PurposeModelResolver;
+import com.agenthub.agent.domain.model.AgentModelBind;
+import com.agenthub.agent.domain.model.AgentStatus;
 import com.agenthub.agent.domain.model.PurposeResolveResult;
 import com.agenthub.common.error.BizException;
 import com.agenthub.common.error.ErrorCode;
@@ -88,5 +90,32 @@ public class SummaryModelResolver {
         return purposes.resolve(agentId, ModelCapability.MEMORY, preferred,
                         properties.memoryFallbackInstanceId(), true)
                 .orElseThrow(() -> new BizException(ErrorCode.BAD_REQUEST, "没有可用的记忆抽取模型"));
+    }
+
+    /**
+     * 取 MEMORY 用途槽绑定的 L3 追加区（场景说明）。
+     * <p>
+     * 只取 {@code prompt_extra}，不读模板版本 / 段覆盖：抽取契约与输出格式由平台
+     * 「记忆抽取模板」的锁定段统一维护，Agent 只能追加要求，不能整份替换。
+     * 没有绑定、绑定停用或追加区为空时返回空串（等同只用平台锁定段）。
+     *
+     * @param agentId Agent，可空
+     * @return 场景说明；无则空串
+     */
+    public String memoryPromptExtra(Long agentId) {
+        if (agentId == null || agentId <= 0) {
+            return "";
+        }
+        for (AgentModelBind bind : purposes.listSlotBinds(agentId, ModelCapability.MEMORY)) {
+            // listSlotBinds 已按用途过滤，但会保留停用行；停用的 L3 不该再拼进出站
+            if (bind.getStatus() == null || bind.getStatus() != AgentStatus.ENABLED) {
+                continue;
+            }
+            String extra = bind.getPromptExtra();
+            if (extra != null && !extra.isBlank()) {
+                return extra.trim();
+            }
+        }
+        return "";
     }
 }

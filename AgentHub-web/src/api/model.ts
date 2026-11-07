@@ -85,9 +85,17 @@ export function changeInstanceStatus(id: number, status: number) {
   return request.put<Result<InstanceRow>>(`/api/model/instances/${id}/status`, { status })
 }
 
-/** 删除实例。 */
+/** 删除实例。平台级实例后端会拒绝，需先取消平台级或换绑。 */
 export function deleteInstance(id: number) {
   return request.delete<Result<null>>(`/api/model/instances/${id}`)
+}
+
+/**
+ * 设置 / 取消平台级实例（EMBEDDING、RERANK 全局各最多一条）。
+ * 同用途已有平台级时，前端二次确认后必须带 confirmRebind=true 才执行换绑。
+ */
+export function setInstancePlatformLock(id: number, data: { locked: boolean; confirmRebind?: boolean }) {
+  return request.put<Result<InstanceRow>>(`/api/model/instances/${id}/platform-lock`, data)
 }
 
 /** 连通测试。超时要盖住服务端 15 秒读超时。 */

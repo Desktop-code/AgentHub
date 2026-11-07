@@ -3,6 +3,7 @@ package com.agenthub.model.application;
 import com.agenthub.audit.domain.OperLogWriter;
 import com.agenthub.common.error.BizException;
 import com.agenthub.common.error.ErrorCode;
+import com.agenthub.memory.application.MemoryPlatformModelHook;
 import com.agenthub.model.api.dto.ConnectivityResp;
 import com.agenthub.model.domain.model.ModelCapability;
 import com.agenthub.model.domain.model.ModelCredential;
@@ -44,6 +45,7 @@ public class ModelConnectivityAppService {
     private final ModelClientFactory clients;
     private final SpeechClient speech;
     private final OperLogWriter operLogWriter;
+    private final MemoryPlatformModelHook platformHook;
 
     /**
      * @param lookup        实例、供应商、凭证
@@ -53,11 +55,12 @@ public class ModelConnectivityAppService {
      * @param clients       协议适配器
      * @param speech        语音出站；ASR / TTS 不走进聊天探活，必须走专用端点
      * @param operLogWriter 操作日志
+     * @param platformHook  维度快照更新后失效记忆向量就绪缓存
      */
     public ModelConnectivityAppService(ModelLookup lookup, ModelInstanceRepository instances,
                                        ModelReferencePolicy references, SecretStore secretStore,
                                        ModelClientFactory clients, SpeechClient speech,
-                                       OperLogWriter operLogWriter) {
+                                       OperLogWriter operLogWriter, MemoryPlatformModelHook platformHook) {
         this.lookup = lookup;
         this.instances = instances;
         this.references = references;
@@ -65,6 +68,7 @@ public class ModelConnectivityAppService {
         this.clients = clients;
         this.speech = speech;
         this.operLogWriter = operLogWriter;
+        this.platformHook = platformHook;
     }
 
     /**
@@ -119,8 +123,15 @@ public class ModelConnectivityAppService {
     private ConnectivityResp finish(Long id, ModelInstance instance, ModelProtocol protocol,
                                     ModelCapability capability, ProbeResult result, String summary) {
         instances.recordProbe(id, LocalDateTime.now(), result.success() ? 1 : 0, summary);
-        log.info("连通测试 instanceId={} protocol={} capability={} success={} latencyMs={}",
-                id, protocol.name(), capability.name(), result.success(), result.latencyMs());
+        // 维度快照只由「本次成功」覆盖：失败保留上一次成功快照，不把可用配置打回未就绪
+        if (capability.usesEmbedding() && result.success()) {
+            instances.recordEmbeddingDim(id, result.embeddingDim());
+            // 快照变了：失效平台级解析/就绪缓存，下一次 ensure 按新维度校验
+            platformHook.onSnapshotUpdated(capability);
+        }
+        log.info("连通测试 instanceId={} protocol={} capability={} success={} latencyMs={} embeddingDim={}",
+                id, protocol.name(), capability.name(), result.success(), result.latencyMs(),
+                result.embeddingDim());
         operLogWriter.write("model", "test", "model_instance", String.valueOf(id),
                 "连通测试 " + instance.getDisplayName() + (result.success() ? " 成功" : " 失败"));
         ConnectivityResp resp = new ConnectivityResp();

@@ -9,6 +9,16 @@
       选定平台已发布的用途模板后，仅「可覆盖段落」可在此填写业务要求；锁定段由平台维护，运行时原样注入。
     </p>
 
+    <!-- MEMORY 的运行时口径与页面预览不同：只认平台生效模板的锁定段，模板版本/段覆盖不参与抽取 -->
+    <el-alert
+      v-if="purpose === 'MEMORY'"
+      type="info"
+      :closable="false"
+      show-icon
+      class="memory-runtime-hint"
+      title="记忆抽取运行时以平台「记忆抽取模板」的锁定段（抽取契约 + 输出格式）为准；本页只有「追加要求」会随抽取发出，旧版可覆盖段与覆盖值不再生效。"
+    />
+
     <el-form label-width="96px">
       <el-form-item label="提示词模板">
         <div class="template-row">
@@ -549,6 +559,10 @@ defineExpose({
 <style scoped>
 .l3-form {
   width: 100%;
+}
+
+.memory-runtime-hint {
+  margin-bottom: 12px;
 }
 
 .l3-lead {

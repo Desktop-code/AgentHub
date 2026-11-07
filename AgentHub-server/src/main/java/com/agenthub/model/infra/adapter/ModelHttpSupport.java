@@ -80,6 +80,25 @@ public class ModelHttpSupport {
     }
 
     /**
+     * 向量嵌入探活专用 POST：成功后顺带解析响应里的向量长度，作为维度快照。
+     * 解析失败不影响 success，只让 embeddingDim 为 null（memory 域据此判未就绪）。
+     *
+     * @param url       完整地址
+     * @param apiKey    用于鉴权与脱敏
+     * @param body      JSON
+     * @param okMessage 2xx 时的说明
+     * @return 探活结果，成功时可能带 embeddingDim
+     */
+    public ProbeResult postEmbedding(String url, String apiKey, String body, String okMessage) {
+        HttpRequest request = request(url)
+                .header("Authorization", "Bearer " + apiKey)
+                .header("Content-Type", "application/json")
+                .POST(HttpRequest.BodyPublishers.ofString(body, StandardCharsets.UTF_8))
+                .build();
+        return send(request, apiKey, okMessage, true);
+    }
+
+    /**
      * 带额外头的 POST。Anthropic 不用 Bearer。
      *
      * @param url       完整地址
@@ -131,13 +150,22 @@ public class ModelHttpSupport {
     }
 
     private ProbeResult send(HttpRequest request, String apiKey, String okMessage) {
+        return send(request, apiKey, okMessage, false);
+    }
+
+    /**
+     * @param parseEmbeddingDim 2xx 时是否解析向量维度快照（仅 embeddings 端点传 true）
+     */
+    private ProbeResult send(HttpRequest request, String apiKey, String okMessage, boolean parseEmbeddingDim) {
         long started = System.nanoTime();
         try {
             HttpResponse<String> response = httpClient.send(request, HttpResponse.BodyHandlers.ofString(StandardCharsets.UTF_8));
             long latency = elapsed(started);
             int status = response.statusCode();
             if (status >= 200 && status < 300) {
-                return new ProbeResult(true, latency, okMessage);
+                // 维度快照只取这一次成功响应的真实长度，禁止按配置猜
+                Integer dim = parseEmbeddingDim ? EmbeddingProbeDim.parse(response.body()) : null;
+                return new ProbeResult(true, latency, okMessage, dim);
             }
             if (status == 401 || status == 403) {
                 return new ProbeResult(false, latency, "鉴权失败");

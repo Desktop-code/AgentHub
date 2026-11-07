@@ -186,10 +186,9 @@
       <!-- L1：只有语言与正文，按 locale 版本发布 -->
       <el-form v-if="selectedKind === 'L1'" label-width="90px" class="drawer-form">
         <el-form-item label="语言">
-          <!-- 新草稿可选语言；一旦落库，版本行的 locale 固定，不可再改 -->
+          <!-- 当前阶段仅开放 zh-CN；一旦落库，版本行的 locale 固定，不可再改 -->
           <el-select v-model="l1Form.locale" :disabled="!!l1Form.id || drawer.readonly" style="width: 100%">
             <el-option label="zh-CN" value="zh-CN" />
-            <el-option label="en-US" value="en-US" />
           </el-select>
         </el-form-item>
         <el-form-item label="正文" required>
@@ -235,27 +234,40 @@
           <span class="seg-note">按 sort_no 升序拼接；锁定 Core 段不允许 Agent 覆盖</span>
         </div>
 
+        <p v-if="l2Form.purpose === 'MEMORY'" class="memory-lock-hint">
+          记忆抽取模板的「抽取契约」「输出格式」是平台锁定段：这里只读展示，保存不会改写；
+          运行时只拼这两段锁定正文，Agent 只能在「追加要求」里补充业务约定。
+        </p>
+
         <div v-if="!l2Form.segments.length" class="seg-empty">还没有段落，点下方「新增段落」开始</div>
 
         <div v-for="(seg, index) in l2Form.segments" :key="index" class="seg-card">
           <div class="seg-card-head">
             <div class="seg-card-left">
               <span class="seg-index">#{{ index + 1 }}</span>
-              <el-tag v-if="seg.mutable === 1" type="primary" size="small" effect="plain">开放 Soft</el-tag>
+              <el-tag
+                v-if="seg.contentLocked"
+                type="danger"
+                size="small"
+                effect="dark"
+              >
+                平台锁定 · 不可修改
+              </el-tag>
+              <el-tag v-else-if="seg.mutable === 1" type="primary" size="small" effect="plain">开放 Soft</el-tag>
               <el-tag v-else type="danger" size="small" effect="plain">锁定 Core</el-tag>
             </div>
             <div class="seg-card-right">
               <span class="seg-sort-label">sort_no</span>
               <el-input-number
                 v-model="seg.sortNo"
-                :disabled="drawer.readonly"
+                :disabled="drawer.readonly || seg.contentLocked"
                 :min="0"
                 :controls="false"
                 size="small"
                 class="seg-sort"
               />
               <el-button
-                v-if="!drawer.readonly"
+                v-if="!drawer.readonly && !seg.contentLocked"
                 link
                 type="danger"
                 size="small"
@@ -267,22 +279,30 @@
           </div>
 
           <el-form-item label="展示名" required class="seg-item">
-            <el-input v-model="seg.displayName" :disabled="drawer.readonly" placeholder="如「角色设定」" />
+            <el-input
+              v-model="seg.displayName"
+              :disabled="drawer.readonly || seg.contentLocked"
+              placeholder="如「角色设定」"
+            />
           </el-form-item>
           <el-form-item label="seg_key" required class="seg-item">
-            <el-input v-model="seg.segKey" :disabled="drawer.readonly" placeholder="如 role" />
+            <el-input
+              v-model="seg.segKey"
+              :disabled="drawer.readonly || seg.contentLocked"
+              placeholder="如 role"
+            />
           </el-form-item>
           <div class="seg-flags">
             <el-checkbox
               :model-value="seg.mutable === 1"
-              :disabled="drawer.readonly"
+              :disabled="drawer.readonly || seg.contentLocked"
               @change="(checked: boolean) => (seg.mutable = checked ? 1 : 0)"
             >
               允许覆盖（开放 Soft）
             </el-checkbox>
             <el-checkbox
               :model-value="seg.required === 1"
-              :disabled="drawer.readonly"
+              :disabled="drawer.readonly || seg.contentLocked"
               @change="(checked: boolean) => (seg.required = checked ? 1 : 0)"
             >
               必选段
@@ -291,25 +311,30 @@
           <el-form-item label="正文" required class="seg-item">
             <el-input
               v-model="seg.content"
-              :disabled="drawer.readonly"
+              :disabled="drawer.readonly || seg.contentLocked"
               type="textarea"
               :rows="5"
               placeholder="段落正文"
             />
           </el-form-item>
-          <p v-if="seg.mutable === 1" class="seg-footnote">允许 Agent 配置者覆盖</p>
+          <p v-if="seg.contentLocked" class="seg-footnote">
+            平台锁定 · 不可修改：记忆抽取运行时只拼锁定段，Agent 只能在「追加要求」补充，不能替换本段。
+          </p>
+          <p v-else-if="seg.mutable === 1" class="seg-footnote">允许 Agent 配置者覆盖</p>
         </div>
 
-        <el-button v-if="!drawer.readonly" class="seg-add" @click="addSegment">
+        <el-button v-if="!drawer.readonly && l2Form.purpose !== 'MEMORY'" class="seg-add" @click="addSegment">
           <el-icon class="btn-icon"><Plus /></el-icon>
           新增段落
         </el-button>
+        <p v-else-if="!drawer.readonly" class="form-tip">
+          记忆抽取模板只有平台锁定段（抽取契约 + 输出格式），不再新增段落；场景补充请到 Agent「记忆管理」的「追加要求」里填写。
+        </p>
         <p v-if="drawer.readonly" class="form-tip">已发布版本只读；改文案请点「新版本」开下一稿。</p>
       </el-form>
 
-      <template #footer>
-        <el-button @click="requestCloseDrawer">关闭</el-button>
-        <el-button @click="previewFromDrawer">预览</el-button>
+      <!-- 只读查看无页脚；编辑态才留保存 / 发布。关抽屉走右上 × 或遮罩，由 before-close 统一拦截 -->
+      <template v-if="canSaveDraft || canPublishFromDrawer" #footer>
         <!-- 未改任何字段时不提供保存：没有草稿可提交，避免「点了没反应」 -->
         <el-button
           v-if="canSaveDraft"
@@ -425,6 +450,8 @@ interface EditableSegment {
   sortNo: number
   mutable: number
   required: number
+  /** true=平台锁定正文（记忆抽取契约/格式），前端只读展示，保存由后端再兜一道 */
+  contentLocked?: boolean
   content: string
 }
 
@@ -554,20 +581,17 @@ const drawerDirty = drawerDirtyTracker.isDirty
 
 /**
  * 关闭抽屉前的统一出口：有未保存草稿时先确认，避免点 × / 遮罩就静默丢稿。
+ * Element Plus 的 before-close 必须主动调用 done() 才会关；返回值无效，不调 done 则保持打开。
  *
- * @return true 表示允许关闭
+ * @param done 关闭回调
  */
-async function beforeDrawerClose() {
+async function beforeDrawerClose(done: () => void) {
   if (drawer.readonly || !drawerDirty.value) {
-    return true
+    done()
+    return
   }
-  return confirmDiscardUnsaved('提示词草稿')
-}
-
-/** 页脚「关闭」按钮：走同一套拦截，保证与右上 × 行为一致。 */
-async function requestCloseDrawer() {
-  if (await beforeDrawerClose()) {
-    drawer.open = false
+  if (await confirmDiscardUnsaved('提示词草稿')) {
+    done()
   }
 }
 
@@ -977,6 +1001,7 @@ function fillL2Form(detail: PromptTemplate) {
       sortNo: item.sortNo,
       mutable: item.mutable,
       required: item.required,
+      contentLocked: item.contentLocked === true,
       content: item.content
     }))
 }
@@ -1000,7 +1025,11 @@ async function onCreateDraft() {
   }
 
   // L2：槽位为空直接开首稿；有版本时复制最新版内容（含段落），键与用途固定不变
-  const focusRow = versions.value.find((row) => row.id === currentVersionId.value) ?? versions.value[0]
+  // MEMORY 例外：始终以当前生效版为基准，避免把旧版的 key/value/confidence 格式带入新稿
+  const focusRow =
+    selectedPurpose.value === 'MEMORY'
+      ? versions.value.find((row) => isRowActive(row)) ?? versions.value[0]
+      : versions.value.find((row) => row.id === currentVersionId.value) ?? versions.value[0]
   if (focusRow) {
     const detail = await fetchTemplateDetail(focusRow.id)
     if (!detail) return
@@ -1033,7 +1062,13 @@ async function openNewVersion(row: VersionRow) {
     markDrawerClean()
     return
   }
-  const detail = await fetchTemplateDetail(row.id)
+  // MEMORY 的契约/格式是平台锁定段：新版本必须基于当前生效版复制，
+  // 否则从旧版 v1 复制会带出 key/value/confidence 旧格式与可覆盖段。
+  const baseRow =
+    selectedPurpose.value === 'MEMORY'
+      ? versions.value.find((item) => isRowActive(item)) ?? row
+      : row
+  const detail = await fetchTemplateDetail(baseRow.id)
   if (!detail) return
   fillL2Form(detail)
   l2Form.id = undefined
@@ -1262,23 +1297,6 @@ async function openPreview(row: VersionRow) {
   preview.kind = 'L2'
   preview.title = `预览 · ${detail.templateKey} v${detail.version}`
   preview.text = composeL2Text(detail.segments || [])
-  preview.withL1 = false
-  preview.open = true
-}
-
-/** 抽屉内预览：L1 取表单正文，L2 取表单里尚未保存的段落（所见即所得） */
-function previewFromDrawer() {
-  if (selectedKind.value === 'L1') {
-    preview.kind = 'L1'
-    preview.title = `预览 · 平台约束${l1Form.id ? ` v${versionOf(l1Form.id)}` : '（未保存草稿）'}`
-    preview.text = l1Form.content || '（正文为空）'
-    preview.withL1 = false
-    preview.open = true
-    return
-  }
-  preview.kind = 'L2'
-  preview.title = `预览 · ${l2Form.templateKey || '未命名'}${l2Form.id ? ` v${versionOf(l2Form.id)}` : '（未保存草稿）'}`
-  preview.text = composeL2Text(l2Form.segments)
   preview.withL1 = false
   preview.open = true
 }
@@ -1528,6 +1546,18 @@ onMounted(() => {
 .seg-note {
   color: var(--ah-text-muted);
   font-size: 12px;
+}
+
+/* 记忆抽取的锁定提示：用浅红底与普通说明区分，避免和可编辑段落的灰色说明混淆 */
+.memory-lock-hint {
+  margin: 8px 0 12px;
+  padding: 8px 10px;
+  border-left: 3px solid var(--el-color-danger);
+  border-radius: 4px;
+  background: #fff5f5;
+  color: var(--ah-text-secondary);
+  font-size: 12px;
+  line-height: 1.7;
 }
 
 .seg-empty {

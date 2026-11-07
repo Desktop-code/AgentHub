@@ -33,6 +33,11 @@ export interface PromptSegment {
   sortNo: number
   mutable: number
   required: number
+  /**
+   * true 表示该段正文由平台锁定（记忆抽取的「抽取契约」「输出格式」），
+   * 页面只读展示「平台锁定 · 不可修改」，保存时后端也会拒绝改写。
+   */
+  contentLocked?: boolean
   content: string
   createTime?: string
   updateTime?: string

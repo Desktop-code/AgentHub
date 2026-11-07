@@ -25,6 +25,13 @@ spring:
     date-format: yyyy-MM-dd HH:mm:ss.SSS
     serialization:
       write-dates-as-timestamps: false
+  task:
+    scheduling:
+      # @Scheduled：空闲收口批抽、过期记忆清理、记忆向量补同步、billing 当日日汇总（每小时 10/30/50）。
+      # 默认池只有 1 个线程，一次空闲批抽最长可能占用几分钟，会把清理和其它任务一起堵住；
+      # 给到 3 个线程即可互不饿死，且不引入额外业务并发。
+      pool:
+        size: 3
   datasource:
     # 生产建议 useSSL=true 并配 truststore；库与后端同机/同网时可按需关闭。
     # 容器编排里库不对外暴露端口，链路不经公网。
@@ -235,28 +242,95 @@ agenthub:
     ctx-max-turns-cap: 50
     ctx-max-chars: 16000
     ctx-max-chars-cap: 64000
+    # 无策略行时的默认空闲秒数；策略页可改（最小 60）。同一列同时用于：
+    #   1) 上下文窗口 Redis TTL；2) 空闲多久后收口会话并批抽 LONG（调度读策略，不写死本值）
     ctx-idle-ttl-sec: 7200
     ctx-idle-ttl-max-sec: 86400
     # 注入进提示词的记忆正文上限，和窗口字符分开计
     recall-max-chars: 4000
+    # LONG 注入条数 Top N：importance 降序、再按 update_time 新近排序后取前 N。
+    # 默认 5；硬顶 recall-long-top-n-cap=20。只影响「注入多少条」，不删库内条目。
+    recall-long-top-n: 5
+    recall-long-top-n-cap: 20
+    # 召回 importance 下限（0~100）。默认 0 = 不过滤；越界钳制到 [0,100]。
+    # 向量路径与 MySQL 降级路径共用同一门槛：低于下限的条目先丢弃，再截 Top N。
+    recall-importance-min: ${AGENTHUB_MEMORY_RECALL_IMPORTANCE_MIN:0}
+    # 召回近义去重开关。默认 false = 与未上线该能力时行为完全一致；只影响注入，不删库、不合并 fact_key。
+    recall-near-dup-enabled: ${AGENTHUB_MEMORY_RECALL_NEAR_DUP_ENABLED:false}
+    # 近义去重阈值（0~1），默认 0.92；越界钳制到 [0,1]。
+    # 向量路径按正文相似度判近义；MySQL-only 路径没有向量分，改用正文规范化指纹判等。
+    recall-near-dup-similarity: ${AGENTHUB_MEMORY_RECALL_NEAR_DUP_SIMILARITY:0.92}
+    # 记忆专用 Milvus collection（与 RAG 的 agenthub_kb_* 物理分离，禁止混用）
+    # 必须落在 agenthub_memory_ 命名空间，否则记忆向量 isReady=false（只日志，不阻塞启动）
+    milvus-collection: ${AGENTHUB_MEMORY_MILVUS_COLLECTION:agenthub_memory_long}
+    # 记忆向量维度：仅作排障对照，**不参与 ensure / 写入**。真正维度取平台级 Embedding
+    # 最近一次连通测试成功快照 model_instance.embedding_dim；快照缺失则记忆向量 isReady=false。
+    embedding-dimension: ${AGENTHUB_MEMORY_EMBEDDING_DIMENSION:768}
+    # 平台级 Embedding / Rerank 解析结果短缓存毫秒数。设置/换绑/连通测试快照更新时主动失效；
+    # 本 TTL 只兜「绕过模型中心直接改库」的场景，避免每次召回都查 model_instance。
+    platform-model-cache-ms: ${AGENTHUB_MEMORY_PLATFORM_CACHE_MS:30000}
+    # 向量双写（Embedding + Milvus upsert）失败重试：次数含首次，退避毫秒；耗尽只日志，不回滚 MySQL
+    vector-write-max-attempts: ${AGENTHUB_MEMORY_VECTOR_MAX_ATTEMPTS:3}
+    vector-write-retry-backoff-ms: ${AGENTHUB_MEMORY_VECTOR_RETRY_BACKOFF_MS:200}
+    # 召回（LONG）：Milvus 候选条数、Embedding / Rerank 单次等待上限、单轮尝试次数。
+    # 超时或失败一律降级 MySQL Top N；默认 attempts=1 即每轮每类出站最多一次（配置最多 2 = 一次短重试）
+    recall-vector-top-k: ${AGENTHUB_MEMORY_RECALL_TOP_K:20}
+    recall-vector-timeout-ms: ${AGENTHUB_MEMORY_RECALL_TIMEOUT_MS:2500}
+    recall-rerank-timeout-ms: ${AGENTHUB_MEMORY_RECALL_RERANK_TIMEOUT_MS:2500}
+    recall-vector-max-attempts: ${AGENTHUB_MEMORY_RECALL_MAX_ATTEMPTS:1}
+    # 存量补同步（刀5）：单轮最多推进条数、允许的最大失败次数。
+    # 手动入口：POST /api/memory/vector/reconcile；失败达到上限后停在 FAILED 只打日志。
+    vector-reconcile-batch-limit: ${AGENTHUB_MEMORY_RECONCILE_BATCH:200}
+    vector-reconcile-max-fail-count: ${AGENTHUB_MEMORY_RECONCILE_MAX_FAIL:3}
+    # 存量补同步的应用内定时（刀6）。默认 false：补同步会真出站，不默认自动跑。
+    # 打开后按 vector-reconcile-delay-ms（fixedDelay，默认 30 分钟）推进一轮；与手动接口共用同一 runOnce()，
+    # 已就绪判定 / 并发 CAS / 单轮 ≤200 / fail_count<3 全部复用，不做启动全量。
+    vector-reconcile-schedule-enabled: ${AGENTHUB_MEMORY_RECONCILE_SCHEDULE_ENABLED:false}
+    vector-reconcile-delay-ms: ${AGENTHUB_MEMORY_RECONCILE_DELAY_MS:1800000}
+    # 受控重建未完成期间的自动续补（默认开）：重建是操作者显式确认过的一次性动作，
+    # 剩余存量由服务端按短间隔继续推进，页面刷新 / 切菜单都不打断，不需要人反复点「继续补同步」。
+    # 与上面的全局补同步定时分开：全局仍默认关，避免装好就开始烧配额。
+    vector-rebuild-drain-enabled: ${AGENTHUB_MEMORY_REBUILD_DRAIN_ENABLED:true}
+    # 自动续补轮询间隔（毫秒）。只在该进程持有「重建未完成」标记时生效，空闲期一次库都不查
+    vector-rebuild-drain-delay-ms: ${AGENTHUB_MEMORY_REBUILD_DRAIN_DELAY_MS:3000}
+    # 单轮零进展时的退避上限（毫秒）：Embedding 故障/未就绪时指数退避到该值，有进展立刻回到基础间隔
+    vector-rebuild-drain-max-backoff-ms: ${AGENTHUB_MEMORY_REBUILD_DRAIN_MAX_BACKOFF_MS:30000}
     # 策略、绑定、平台 SUMMARY 都空时才用。空字符串表示不兜底
     summary-fallback-instance-id: ${AGENTHUB_SUMMARY_MODEL_ID:}
     # MEMORY 抽取环境兜底；与 SUMMARY 分离，不共用
     memory-fallback-instance-id: ${AGENTHUB_MEMORY_MODEL_ID:}
     cleanup-delay-ms: 3600000
-    # 空闲批抽定时扫描间隔；首次推迟见 session-close-initial-delay-ms（默认 1h，本地/测试可改短）
+    # 过期清理（刀8）：单轮最多处理行数。过期满批后下一轮继续（按 id 升序，进度单调）；
+    # 过期行本就被读路径过滤，短暂积压只影响表大小。一次删几十万行会长时间持锁并把海量主键塞给向量删除。
+    expired-purge-batch-limit: ${AGENTHUB_MEMORY_EXPIRED_PURGE_BATCH:2000}
+    # 单次向量删除请求的主键上限。超过则拆批串行发送，避免一次过期清理打爆 Milvus/网关。
+    vector-delete-batch-limit: ${AGENTHUB_MEMORY_VECTOR_DELETE_BATCH:500}
+    # 空闲批抽定时扫描间隔（fixedDelay）；首轮延迟默认 1 小时（3600000），避免生产重启后立刻打库/出站。
+    # 本地想快速观测首轮扫描，用 application-local.yml 或环境变量
+    #   AGENTHUB_MEMORY_SESSION_CLOSE_INITIAL_DELAY_MS=30000
+    # 覆盖即可，不要把默认值改回 30 秒：默认配置会随发布走，重启即批抽不可接受。
+    # 到期判定不读这里：读每个 Agent 策略的 ctx_idle_ttl_sec（默认 7200、最小 60）
     session-close-delay-ms: 60000
     session-close-initial-delay-ms: 3600000
-    # 批抽出站总闸（session_end / summary）。false=一键关死出站批抽；explicit「记住」不受影响
-    long-extract-batch-enabled: false
+    # 批抽出站总闸（session_end / summary）。随仓默认 true = 允许出站批抽；
+    # 生产止血时用环境变量 AGENTHUB_MEMORY_LONG_EXTRACT_BATCH_ENABLED=false 关死（代码兜底默认仍是 false）。
+    # 关着时策略开关打开也会 skip，幂等表记 reason=batch_kill_switch，之后不会补抽；
+    # explicit「记住」走独立通道，不受本开关影响。
+    long-extract-batch-enabled: true
     # 单次 CloseJob 最多收口+批抽的空闲会话数（串行）
     session-close-batch-limit: 5
     # 会话级批抽最短正文；更短则 skip 不调模型
     long-extract-min-chars: 32
     # 两次批抽间隔毫秒；0=不额外 sleep
     long-extract-interval-ms: 200
-    # LONG fact_key 同义扩展（别名 → 规范键）；内置已含居住/城市等，此处可覆盖追加
+    # LONG fact_key 同义扩展（别名 → 规范键）。内置已含居住/城市类与饮食/饮品偏好族
+    # （food_preference / favorite_food / 饮食偏好 → food_preference；favorite_drink / 喜爱饮品 → beverage_preference），
+    # 同族写入库会合并成一条。此处只追加业务私有别名；同名覆盖内置。
     fact-key-aliases: {}
+    # L0 显式「记住」正则（find 匹配）。留空=用代码内置默认：
+    #   记住 / 请记住 / 帮我记住 / 以后默认 / 以后都按 / 记一下 / 帮我记着 / 别忘了 / 存一下
+    # 配置后整体替换默认；仅作用于用户当轮原文的显式通道，不影响会话结束/摘要批抽。
+    remember-patterns: []
   rag:
     # 一期①只做知识库建库与 Collection 初始化；②入库 ③检索 ④Agent 绑定后排
     milvus:
@@ -331,6 +405,14 @@ agenthub:
       timeout-ms: ${AGENTHUB_EVAL_EVALSCOPE_TIMEOUT_MS:60000}
       export-dir: ${AGENTHUB_EVAL_EVALSCOPE_EXPORT_DIR:./workspace-test}
       note: ""
+  # Token 日汇总定时：只扫「今天」，同维覆盖 / 无流水清零，与控制台重算共用 rebuildRange
+  billing:
+    # 总闸；关则整轮立即返回，不查库
+    daily-rollup-enabled: ${AGENTHUB_BILLING_DAILY_ROLLUP_ENABLED:true}
+    # Spring cron（含秒）：默认每小时的 10 / 30 / 50 分；时区固定 Asia/Shanghai（见 Job 注解）
+    daily-rollup-cron: ${AGENTHUB_BILLING_DAILY_ROLLUP_CRON:0 10,30,50 * * * ?}
+    # 定时写入 created_by / updated_by 的系统占位用户 id（非真实登录用户）
+    daily-rollup-operator-id: ${AGENTHUB_BILLING_DAILY_ROLLUP_OPERATOR_ID:0}
   security:
     # local | oauth2 | passthrough；后两者本期只保留枚举，不接企业身份
     mode: local

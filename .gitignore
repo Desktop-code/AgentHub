@@ -98,6 +98,9 @@ bin/
 sql/*
 !sql/agenthub.sql
 !sql/data-init.sql
+# 根目录「当期增量」脚本随仓交付（README 约定：结构变更以 sql/ 根目录增量为准）。
+# 只放行根目录 schema-delta-*.sql；sql/temp/ 历史归档仍全部忽略，禁止 force add。
+!sql/schema-delta-*.sql
 
 # AI工具本地配置
 .cursor/

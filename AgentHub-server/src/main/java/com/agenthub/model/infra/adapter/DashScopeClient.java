@@ -64,7 +64,7 @@ public class DashScopeClient implements ModelClient {
 
     private ProbeResult compatibleEmbed(ProbeCommand command) {
         String body = http.json(Map.of("model", command.modelId(), "input", "ping"));
-        return http.postJson(http.join(command.baseUrl(), "/embeddings"), command.apiKey(), body, "ok");
+        return http.postEmbedding(http.join(command.baseUrl(), "/embeddings"), command.apiKey(), body, "ok");
     }
 
     private ProbeResult nativeChat(ProbeCommand command) {
@@ -82,7 +82,7 @@ public class DashScopeClient implements ModelClient {
                 "model", command.modelId(),
                 "input", Map.of("texts", List.of("ping"))));
         String url = DashScopeNativePaths.join(command.baseUrl(), DashScopeNativePaths.TEXT_EMBEDDING);
-        return http.postJson(url, command.apiKey(), body, "ok");
+        return http.postEmbedding(url, command.apiKey(), body, "ok");
     }
 
     /**

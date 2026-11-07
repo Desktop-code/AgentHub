@@ -309,8 +309,9 @@ public class ChildRunner {
                 turn = planned.turn();
                 notices = planned.notices();
             } else {
+                // 记忆段在装配时进链（工具目录之前）；召回用本子查询文本，失败自动回落 MySQL
                 TrialMemoryCoordinator.Augmented recalled = memory.recallDurable(
-                        memorySession(parent.getId(), userId, sessionId));
+                        memorySession(parent.getId(), userId, sessionId), childInput.displaySubQuery());
                 TrialPlan plan = loader.loadReact(hit.agent(), childInput.displaySubQuery(), recalled.memoryBlock());
                 plan.setToolArgsFacts(recalled.injectedFacts());
                 memory.publishInjection(plan);

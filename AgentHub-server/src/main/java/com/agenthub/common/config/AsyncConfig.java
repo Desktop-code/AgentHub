@@ -16,12 +16,12 @@ import java.util.concurrent.ThreadPoolExecutor;
  * 全局线程池装配。所属域：common 的 config。
  * <p>
  * 为什么集中在一处：此前 Router 并行子 Agent 每次请求 {@code new} 临时池、MCP SSE 读流裸
- * {@code new Thread}，线程数量随并发请求线性放大且不受任何全局上限约束。这里把三类异步场景
+ * {@code new Thread}，线程数量随并发请求线性放大且不受任何全局上限约束。这里把各类异步场景
  * 各收口成一个命名 Bean，参数（核心/最大/队列/拒绝策略）只在此文件维护，业务侧按名注入即可。
  * <p>
  * 硬约束：
  * <ol>
- *   <li>三个池<b>队列均为有界队列</b>，且队列容量只在此文件维护；调用方不得另建无界队列池覆盖；</li>
+ *   <li>各个池<b>队列均为有界队列</b>，且队列容量只在此文件维护；调用方不得另建无界队列池覆盖；</li>
  *   <li>{@code @EnableAsync} 在此开启，同时通过 {@link AsyncConfigurer#getAsyncExecutor()} 把
  *       <b>默认执行器</b>钉到 {@link #lightTaskExecutor()}：不显式写 {@code @Async("xxx")} 的任务
  *       也不会退回到 Spring 默认的无界 {@code SimpleAsyncTaskExecutor}（那会「每次调用新建线程」）；</li>
@@ -45,6 +45,12 @@ public class AsyncConfig implements AsyncConfigurer {
 
     /** 后台轻量任务池线程名前缀 */
     private static final String LIGHT_THREAD_PREFIX = "light-task-";
+
+    /** 显式「记住」抽取池线程名前缀 */
+    private static final String MEMORY_THREAD_PREFIX = "memory-task-";
+
+    /** 记忆召回（Embedding / Rerank / 向量检索）池线程名前缀 */
+    private static final String MEMORY_RECALL_THREAD_PREFIX = "memory-recall-";
 
     /**
      * Router 并行子 Agent 执行池。
@@ -121,6 +127,71 @@ public class AsyncConfig implements AsyncConfigurer {
         executor.setThreadNamePrefix(LIGHT_THREAD_PREFIX);
         // 轻量任务不丢：队列满时退回提交线程执行，避免出现「有轮次没标题」的残缺数据
         executor.setRejectedExecutionHandler(new ThreadPoolExecutor.CallerRunsPolicy());
+        executor.initialize();
+        return executor;
+    }
+
+    /**
+     * 显式「记住」的长期偏好抽取池。
+     * <p>
+     * 用途：用户说「请记住…」时，抽取要走一次最长 60s 的 MEMORY 出站。这一步必须离开请求线程，
+     * 否则首字延迟被整段抽取吃掉（N6 红线）。本池只承接 {@code ExplicitMemoryExtractor} 投递的任务。
+     * <p>
+     * 为什么不复用 {@link #lightTaskExecutor()}：light 池是 CallerRuns，池满时任务会退回<b>提交线程</b>执行；
+     * 对本场景等于「高并发下偶发地又把 60s 阻塞塞回 Tomcat 线程」，红线会复发。且 light 池的既有注释
+     * 明确只放纯 DB / 短出站任务，抽取属于长出站，不该挤占标题生成。
+     * <p>
+     * 为什么拒绝策略选 Abort：这里<b>必须</b>保证「提交方立刻返回」。池与队列都满时宁可丢掉这一次
+     * 记忆写入（用户重申一次、人工录入、会话结束批抽都能补），也绝不能退回请求线程等模型。
+     * 丢弃由投递方（{@code ExplicitMemoryExtractor}）捕获 {@code TaskRejectedException} 并打 warn，
+     * 带 sessionId，便于事后确认「用户说过记住但没落库」是容量问题而不是规则问题。
+     * <p>
+     * 容量依据：单任务最长 60s，核心 4 / 最大 8 覆盖控制台试跑量；队列 200 有界，
+     * 饱和后立即拒绝而不是无界堆积吃内存。停机沿用默认（不等待、直接中断），
+     * 被中断的抽取等于少一次记忆写入，不影响已经发出的回答。
+     *
+     * @return 有界队列（200）+ Abort 的执行器，核心 4 / 最大 8
+     */
+    @Bean("memoryTaskExecutor")
+    public ThreadPoolTaskExecutor memoryTaskExecutor() {
+        ThreadPoolTaskExecutor executor = new ThreadPoolTaskExecutor();
+        executor.setCorePoolSize(4);
+        executor.setMaxPoolSize(8);
+        executor.setQueueCapacity(200);
+        executor.setThreadNamePrefix(MEMORY_THREAD_PREFIX);
+        // 拒绝即丢弃：本池任务绝不允许退回调用线程，否则 60s 抽取会重新阻塞用户首字
+        executor.setRejectedExecutionHandler(new ThreadPoolExecutor.AbortPolicy());
+        executor.initialize();
+        return executor;
+    }
+
+    /**
+     * 记忆召回出站池（Embedding / Rerank / 向量检索）。
+     * <p>
+     * 用途：LONG 语义召回要在主对话前完成，但每次出站都必须有等待上限。调用线程（Tomcat）
+     * 把出站提交到本池后只等 {@code agenthub.memory.recall-*-timeout-ms}，超时即降级 MySQL Top N。
+     * 这样「出站能不能快点返回」不再决定首字延迟的上界。
+     * <p>
+     * 为什么不复用 {@link #lightTaskExecutor()}：light 是 CallerRuns，池满时会把出站退回请求线程，
+     * 超时上限立刻失效；召回宁可降级也不能把出站塞回主线程。
+     * 为什么不复用 {@link #memoryTaskExecutor()}：那是 60s 抽取池且用 AbortPolicy 丢任务，
+     * 与「召回失败要回落 MySQL」的语义不同，也不该互相挤占。
+     * <p>
+     * 为什么 Abort：池与队列都满说明召回侧已经过载，立即降级比排队等待更能保住主对话。
+     * daemon=true：停机时召回任务不应拖住进程退出（出站本身也有读超时）。
+     *
+     * @return 有界队列（100）+ Abort 的执行器，核心 4 / 最大 8
+     */
+    @Bean("memoryRecallExecutor")
+    public ThreadPoolTaskExecutor memoryRecallExecutor() {
+        ThreadPoolTaskExecutor executor = new ThreadPoolTaskExecutor();
+        executor.setCorePoolSize(4);
+        executor.setMaxPoolSize(8);
+        executor.setQueueCapacity(100);
+        executor.setThreadNamePrefix(MEMORY_RECALL_THREAD_PREFIX);
+        // 池满即降级：绝不把召回出站退回请求线程（那会让超时上限失效）
+        executor.setRejectedExecutionHandler(new ThreadPoolExecutor.AbortPolicy());
+        executor.setDaemon(true);
         executor.initialize();
         return executor;
     }

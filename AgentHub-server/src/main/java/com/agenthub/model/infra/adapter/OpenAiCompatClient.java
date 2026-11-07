@@ -49,7 +49,8 @@ public class OpenAiCompatClient implements ModelClient {
         }
         if (route.kind() == PurposeIoKind.EMBEDDING) {
             String body = http.json(Map.of("model", command.modelId(), "input", "ping"));
-            return http.postJson(http.join(command.baseUrl(), "/embeddings"), command.apiKey(), body, "ok");
+            // 嵌入探活需要从响应里解析向量维度快照，供 memory 域建集/写入
+            return http.postEmbedding(http.join(command.baseUrl(), "/embeddings"), command.apiKey(), body, "ok");
         }
         if (route.kind() == PurposeIoKind.VISION) {
             return probeVision(command);

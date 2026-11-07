@@ -62,7 +62,8 @@
 <script setup lang="ts">
 /**
  * 新建 Agent 弹窗。所属域：agent。
- * 系统提示词按 runMode 预填默认模板；切模式时仅空/仍为旧默认才替换。
+ * 系统提示词不再预填任何默认模板：新建即空，由配置者在「配置提示词」里按需选择模板或填写业务正文，
+ * 避免一打开弹窗就带着一段需要「删除或迁移」的默认正文。
  * 默认 ReAct，启停固定为正常。编辑基本信息在详情区完成。
  */
 import { reactive, ref, watch } from 'vue'
@@ -70,7 +71,7 @@ import { QuestionFilled } from '@element-plus/icons-vue'
 import { ElMessage } from 'element-plus'
 import AgentPromptEditor from '@/components/agent/AgentPromptEditor.vue'
 import type { AgentSave, PromptBinding } from '@/types/agent'
-import { checkUserPrompt, promptAfterModeSwitch, recommendedPrompt } from '@/utils/promptSafety'
+import { checkUserPrompt } from '@/utils/promptSafety'
 
 /** 新建默认运行配置：Router 那组（多意图开 / 拼接 / N=3 / ROUTER_PARALLEL）与计划那组（自动执行 / 8 步 / 0 重试），与后端 defaults 对齐 */
 function defaultRuntimeConfig() {
@@ -137,8 +138,8 @@ watch(
     form.code = ''
     form.runMode = 'REACT'
     form.description = ''
-    // 打开即预填当前模式默认模板，避免业务正文一片空白
-    form.systemPrompt = recommendedPrompt('', 'REACT')
+    // 新建不预填默认提示词：留空交给配置者选择模板或自行填写，避免每次都先删默认正文
+    form.systemPrompt = ''
     // 新建默认不挂 L2 模板：保留自由业务段的过渡路径，需要治理时再选模板
     form.prompt = {
       supported: true,
@@ -152,16 +153,12 @@ watch(
   }
 )
 
-/** 切 ReAct / Router：仅空或仍为旧模式默认时换新模板，自定义正文不覆盖。 */
+/** 切 ReAct / Router：不再自动填默认模板，正文始终保持用户自己写的内容。 */
 watch(
   () => form.runMode,
   (next, prev) => {
     if (!props.modelValue || !prev || next === prev) {
       return
-    }
-    const replaced = promptAfterModeSwitch(form.systemPrompt, form.name, prev, next)
-    if (replaced !== null) {
-      form.systemPrompt = replaced
     }
     // 新建时切到 Router：agent_def 只承载 CHAT，这里已选的模板会永远不生效，直接清掉
     if (next === 'ROUTER') {

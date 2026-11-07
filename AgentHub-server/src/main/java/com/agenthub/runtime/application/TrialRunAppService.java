@@ -572,8 +572,9 @@ public class TrialRunAppService {
         if (AgentRunMode.PLAN_AND_EXECUTE.name().equals(agent.getRunMode())) {
             return runPlan(agent, query, modelUser, session, written, seq, progress);
         }
-        // 记忆段在装配时进链（位于工具目录之前），不再往装配结果尾部追加
-        TrialMemoryCoordinator.Augmented recalled = memory.recallDurable(session);
+        // 记忆段在装配时进链（位于工具目录之前），不再往装配结果尾部追加。
+        // 传本轮 query（含 OCR 文本）：LONG 走语义召回，取不到就自动回落 MySQL Top N
+        TrialMemoryCoordinator.Augmented recalled = memory.recallDurable(session, query);
         TrialPlan plan = loader.loadReact(agent, query, recalled.memoryBlock());
         plan.setToolArgsFacts(recalled.injectedFacts());
         memory.publishInjection(plan);

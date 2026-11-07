@@ -19,6 +19,7 @@ import com.agenthub.prompt.domain.model.PromptTemplate;
 import com.agenthub.prompt.domain.repository.PromptSegmentRepository;
 import com.agenthub.prompt.domain.repository.PromptTemplateRepository;
 import com.agenthub.prompt.domain.service.PromptOverrideReader;
+import com.agenthub.prompt.domain.service.PromptPlatformLocks;
 import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import org.slf4j.Logger;
@@ -182,7 +183,7 @@ public class AgentPromptBindingService implements AgentPromptTemplatePort {
             throw new BizException(ErrorCode.BAD_REQUEST,
                     "模板版本不一致：提交 v" + templateVersion + "，该模板实际为 v" + row.getVersion());
         }
-        String overrideJson = toOverrideJson(row.getId(), override);
+        String overrideJson = toOverrideJson(row.getId(), row.getPurpose(), override);
         return new AgentPromptBinding(row.getId(), row.getVersion(), overrideJson, extra);
     }
 
@@ -331,11 +332,12 @@ public class AgentPromptBindingService implements AgentPromptTemplatePort {
      * 否则会出现「保存了空串，预览却回退库文」的困惑。
      *
      * @param templateId 钉死版主键
+     * @param purpose    模板用途码
      * @param override   seg_key → 文案
      * @return JSON；无有效覆盖时为 null
      * @throws BizException 键为该版 core 段或不存在
      */
-    private String toOverrideJson(Long templateId, Map<String, String> override) {
+    private String toOverrideJson(Long templateId, String purpose, Map<String, String> override) {
         if (!hasAnyOverride(override)) {
             return null;
         }
@@ -349,6 +351,7 @@ public class AgentPromptBindingService implements AgentPromptTemplatePort {
             }
         }
         Map<String, String> normalized = new LinkedHashMap<>();
+        int droppedLocked = 0;
         for (Map.Entry<String, String> entry : override.entrySet()) {
             String key = entry.getKey() == null ? "" : entry.getKey().trim();
             String value = entry.getValue();
@@ -361,6 +364,13 @@ public class AgentPromptBindingService implements AgentPromptTemplatePort {
             }
             // core 段禁止覆盖：这是 L3 的硬边界，不允许用「提交了但被忽略」糊过去
             if (!softKeys.contains(key)) {
+                // 平台锁定段（记忆抽取的契约/格式）是升级后的边界：旧 Agent 可能还留着
+                // memory_style 之类历史覆盖键，直接丢弃而不是阻断整页保存；
+                // 运行时也只拼锁定段，这些残值永远不会再生效。
+                if (PromptPlatformLocks.contentLocked(purpose, key)) {
+                    droppedLocked++;
+                    continue;
+                }
                 throw new BizException(ErrorCode.BAD_REQUEST,
                         "覆盖段为锁定段：" + key + "（core 段不允许被 Agent 覆盖）");
             }
@@ -369,6 +379,10 @@ public class AgentPromptBindingService implements AgentPromptTemplatePort {
                         "覆盖段文案超过长度：" + key + "，最长 " + OVERRIDE_VALUE_MAX);
             }
             normalized.put(key, value);
+        }
+        if (droppedLocked > 0) {
+            // 只记用途与数量：覆盖正文可能含业务描述，不进日志
+            log.info("L3 覆盖已丢弃平台锁定段 purpose={} dropped={}", purpose, droppedLocked);
         }
         if (normalized.isEmpty()) {
             return null;

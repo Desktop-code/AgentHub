@@ -15,6 +15,8 @@ import com.agenthub.memory.domain.service.MemoryTexts;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
+import java.util.List;
+
 /**
  * 记忆条目用例。所属域：memory。
  * SHORT 走双写；LONG / AGENT 只写 MySQL。操作日志只记 id 和动作，不记正文。
@@ -29,6 +31,7 @@ public class MemoryItemAppService {
     private final AgentDefRepository agents;
     private final OperatorContext operatorContext;
     private final OperLogWriter operLogWriter;
+    private final MemoryVectorHook vectors;
 
     /**
      * @param items           条目仓储
@@ -38,10 +41,11 @@ public class MemoryItemAppService {
      * @param agents          填写了 agentId 时必须存在
      * @param operatorContext 操作人
      * @param operLogWriter   审计
+     * @param vectors         LONG 向量双写统一挂载点（只处理 LONG，提交后异步）
      */
     public MemoryItemAppService(MemoryItemRepository items, MemoryPolicyAppService policies, ShortMemoryWriter shorts,
                                 LongMemoryMerger longMerger, AgentDefRepository agents, OperatorContext operatorContext,
-                                OperLogWriter operLogWriter) {
+                                OperLogWriter operLogWriter, MemoryVectorHook vectors) {
         this.items = items;
         this.policies = policies;
         this.shorts = shorts;
@@ -49,6 +53,7 @@ public class MemoryItemAppService {
         this.agents = agents;
         this.operatorContext = operatorContext;
         this.operLogWriter = operLogWriter;
+        this.vectors = vectors;
     }
 
     /**
@@ -117,7 +122,10 @@ public class MemoryItemAppService {
             evictDurable(draft);
         }
         operLogWriter.write("memory", "edit", "memory_item", String.valueOf(id), "编辑记忆 " + id);
-        return items.findById(id).orElseThrow();
+        // 以库中整行为准挂向量双写：停用/过期会转成删向量，LONG 之外由 hook 自行忽略
+        MemoryItem saved = items.findById(id).orElseThrow();
+        vectors.afterSaved(saved);
+        return saved;
     }
 
     /**
@@ -131,6 +139,8 @@ public class MemoryItemAppService {
             shorts.remove(existing, operatorId);
         } else {
             items.logicalDelete(id, operatorId);
+            // 逻辑删除是物理上下线：向量必须同步删除，否则召回仍会命中已删条目
+            vectors.afterRemoved(List.of(id));
         }
         operLogWriter.write("memory", "remove", "memory_item", String.valueOf(id), "删除记忆 " + id);
     }
@@ -152,6 +162,8 @@ public class MemoryItemAppService {
             shorts.update(existing, operatorId);
         } else {
             items.update(existing, operatorId);
+            // 停用=不该再被召回：hook 会按 status 决定删向量；启用则重新写入
+            vectors.afterSaved(existing);
         }
         operLogWriter.write("memory", "enable", "memory_item", String.valueOf(id), "启停记忆 " + id);
         return items.findById(id).orElseThrow();
@@ -174,12 +186,17 @@ public class MemoryItemAppService {
             existing.setExpiredTime(draft.getExpiredTime());
             items.update(existing, operatorId);
             evictDurable(existing);
-            return items.findById(existing.getId()).orElse(existing);
+            // 以库中整行为准挂双写（AGENT 由 hook 自行忽略）
+            MemoryItem saved = items.findById(existing.getId()).orElse(existing);
+            vectors.afterSaved(saved);
+            return saved;
         }
         Long id = items.insert(draft, operatorId);
         draft.setId(id);
         evictDurable(draft);
-        return items.findById(id).orElse(draft);
+        MemoryItem saved = items.findById(id).orElse(draft);
+        vectors.afterSaved(saved);
+        return saved;
     }
 
     private void evictDurable(MemoryItem item) {
@@ -191,7 +208,12 @@ public class MemoryItemAppService {
         if (MemoryScope.AGENT.name().equals(item.getScope())) {
             keep = policy.getMaxLongItems();
         }
-        items.evictOverflow(item.getAgentId(), item.getUserId(), item.getScope(), keep, operatorContext.requireUserId());
+        List<Long> evicted = items.evictOverflow(item.getAgentId(), item.getUserId(), item.getScope(), keep,
+                operatorContext.requireUserId());
+        // 只有 LONG 有向量；AGENT/SHORT 淘汰不涉及向量库
+        if (MemoryScope.LONG.name().equals(item.getScope())) {
+            vectors.afterRemoved(evicted);
+        }
     }
 
     private void prepare(MemoryItem draft, boolean creating) {

@@ -1,10 +1,11 @@
 <template>
+  <!-- 点遮罩空白即关闭：试跑是轻量动作，不强迫用户去右上角找关闭按钮 -->
   <el-drawer
     class="wf-exec-drawer"
     :model-value="modelValue"
     title="执行工作流"
     size="560px"
-    :close-on-click-modal="false"
+    :close-on-click-modal="true"
     @update:model-value="(value: boolean) => emit('update:modelValue', value)"
   >
     <div class="wf-exec">
@@ -714,53 +715,54 @@ function timeoutLabel(value?: string | null): string {
 
 /* ============================ 数据加载 ============================ */
 
-/** 打开抽屉时按默认发布指针选版本；已经加载过就不重复打接口 */
-watch(
-  () => props.modelValue,
-  (open) => {
-    if (!open) {
-      stopPolling()
-      return
-    }
-    if (!releases.value.length) {
-      void loadReleases()
-    } else {
-      pickDefaultRelease()
-    }
-    void loadHistory()
-  }
-)
-
 /** 读版本列表，默认选中定义的默认发布指针 */
 async function loadReleases() {
-  if (!props.workflowId) {
+  const id = props.workflowId
+  if (!id) {
     return
   }
   loading.value = true
   try {
-    const { data } = await listWorkflowReleases(props.workflowId)
+    const { data } = await listWorkflowReleases(id)
+    // 请求期间切换了工作流：丢弃过期响应，避免把上一条的版本盖回来
+    if (props.workflowId !== id) {
+      return
+    }
     releases.value = data.data || []
     pickDefaultRelease()
   } catch {
-    releases.value = []
+    if (props.workflowId === id) {
+      releases.value = []
+    }
   } finally {
-    loading.value = false
+    if (props.workflowId === id) {
+      loading.value = false
+    }
   }
 }
 
 /** 最近执行列表：点一行即可回看该次 run 的节点状态 */
 async function loadHistory() {
-  if (!props.workflowId) {
+  const id = props.workflowId
+  if (!id) {
     return
   }
   historyLoading.value = true
   try {
-    const { data } = await listWorkflowRuns(props.workflowId)
+    const { data } = await listWorkflowRuns(id)
+    // 与版本列表同理：跨工作流切换时丢弃迟到响应
+    if (props.workflowId !== id) {
+      return
+    }
     history.value = data.data || []
   } catch {
-    history.value = []
+    if (props.workflowId === id) {
+      history.value = []
+    }
   } finally {
-    historyLoading.value = false
+    if (props.workflowId === id) {
+      historyLoading.value = false
+    }
   }
 }
 
@@ -1082,6 +1084,65 @@ async function scrollTimelineTo(position: 'top' | number) {
 function scrollToNode(id: number) {
   void scrollTimelineTo(id)
 }
+
+/* ============================ 打开 / 换工作流 ============================ */
+
+/**
+ * 换工作流时彻底清空上一份状态。
+ * <p>列表页的抽屉在第一次打开后会常驻（父级 v-if 只挡首渲染），
+ * 若只改 workflowId 不重置，版本、最近执行、时间轴都会停在上一条工作流上，
+ * 用户看到的就是「点了试跑还是上一个的信息」。
+ */
+function resetForWorkflow() {
+  stopPolling()
+  stopElapsedTimer()
+  releases.value = []
+  releaseId.value = undefined
+  runDetail.value = null
+  history.value = []
+  note.value = ''
+  jsonError.value = ''
+  starting.value = false
+  refreshing.value = false
+  cancelling.value = false
+  acting.value = false
+  configCollapsed.value = false
+  elapsed.value = 0
+  resetTimelineMemory()
+  // 通知父页清空画布高亮，避免上一条工作流的节点状态残留
+  emit('run-change', null)
+}
+
+/**
+ * 打开态 / 工作流 id 变化的统一入口。
+ * <p>打开就重取版本与执行列表：发布后立刻试跑必须看到新版本，缓存会拿到旧快照。
+ * <p>换了工作流先清空再加载，保证一次请求、且不会把上一条的数据混进来。
+ * <p>关闭时只停轮询、保留当前 run 便于再次打开回看；若关时仍在运行，重开继续轮询。
+ * <p>必须放在轮询 / 时间轴状态声明之后：immediate 会同步执行，提前注册会踩到 let 的 TDZ。
+ */
+watch(
+  () => [props.modelValue, props.workflowId] as const,
+  ([open, id], prev) => {
+    if (!open) {
+      stopPolling()
+      // 关闭期间换了工作流：静默清空，避免下次打开先闪一下上一条的数据
+      if (prev && id !== prev[1]) {
+        resetForWorkflow()
+      }
+      return
+    }
+    if (prev && id !== prev[1]) {
+      resetForWorkflow()
+    }
+    void loadReleases()
+    void loadHistory()
+    if (runDetail.value?.status === 'RUNNING') {
+      startPolling()
+    }
+  },
+  // 列表页的抽屉随「试跑」按钮首次挂载时 modelValue 已经是 true，不 immediate 会漏掉这次加载
+  { immediate: true }
+)
 
 onBeforeUnmount(() => {
   stopPolling()

@@ -17,6 +17,8 @@ public final class ModelPermissions {
     public static final String INSTANCE_EDIT = "model:instance:edit";
     public static final String INSTANCE_REMOVE = "model:instance:remove";
     public static final String INSTANCE_TEST = "model:instance:test";
+    /** 设置 / 取消 / 换绑平台级实例；影响记忆与检索全局，权限单独收口 */
+    public static final String INSTANCE_PLATFORM = "model:instance:platform";
 
     private ModelPermissions() {
     }

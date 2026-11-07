@@ -38,4 +38,83 @@
         ORDER BY id DESC
         LIMIT #{offset}, #{size}
     </select>
+
+    <!-- 状态位只对 LONG 生效：scope 硬锁，防止将来有人拿别的 scope 的 id 误改。
+         逻辑删除后的行也要能落终态，故不带 deleted 条件；禁写任何时间列 -->
+    <update id="updateVectorSync">
+        UPDATE memory_item
+        SET vector_sync_status = #{status},
+            vector_sync_fail_count = #{failCount},
+            vector_sync_error = #{error}
+        WHERE scope = 'LONG'
+          AND id IN
+        <foreach collection="ids" item="id" open="(" separator="," close=")">
+            #{id}
+        </foreach>
+    </update>
+
+    <!-- 补同步按 Agent 推进：曾有 LONG 行就要扫（与当前记忆策略开关无关） -->
+    <select id="listLongAgentIds" resultType="java.lang.Long">
+        SELECT DISTINCT agent_id FROM memory_item
+        WHERE deleted = 0 AND scope = 'LONG' AND agent_id IS NOT NULL
+        ORDER BY agent_id
+    </select>
+
+    <!-- 只改状态位：不动失败次数/原因。用于「未就绪 → 拉回 PENDING」，不应消耗三振 -->
+    <update id="updateVectorSyncStatus">
+        UPDATE memory_item
+        SET vector_sync_status = #{status}
+        WHERE scope = 'LONG'
+          AND id IN
+        <foreach collection="ids" item="id" open="(" separator="," close=")">
+            #{id}
+        </foreach>
+    </update>
+
+    <!-- 联删失败：状态置位并把失败次数自增 1。
+         自增而不是覆盖——联删入口拿不到行上的历史次数，覆盖会让三振永远到不了上限 -->
+    <update id="bumpVectorSyncFail">
+        UPDATE memory_item
+        SET vector_sync_status = #{status},
+            vector_sync_fail_count = vector_sync_fail_count + 1,
+            vector_sync_error = #{error}
+        WHERE scope = 'LONG'
+          AND id IN
+        <foreach collection="ids" item="id" open="(" separator="," close=")">
+            #{id}
+        </foreach>
+    </update>
+
+    <!-- 受控重建后重排队：集合已被删建，向量库为空，MySQL 里的 SYNCED 必须打回 PENDING 才会被补同步捞到。
+         只动有效 LONG；已删/停用/已过期的行交给删点阶段。幂等：已是干净 PENDING 的行不重复计入 -->
+    <update id="requeueValidLong">
+        UPDATE memory_item
+        SET vector_sync_status = 'PENDING',
+            vector_sync_fail_count = 0,
+            vector_sync_error = NULL
+        WHERE scope = 'LONG'
+          AND deleted = 0
+          AND status = 1
+          AND (expired_time IS NULL OR expired_time &gt; #{now})
+          AND (vector_sync_status &lt;&gt; 'PENDING'
+               OR vector_sync_fail_count &lt;&gt; 0
+               OR vector_sync_error IS NOT NULL)
+    </update>
+
+    <!-- 该删向量的 LONG 候选：显式写 deleted = 1 的分支，绕过 TableLogic。
+         状态只取 PENDING/FAILED，SUCCESS 行不再重复出站；fail_count 到上限的不捞（只打日志）。
+         已过期判定用 <=（恰好到点即过期），与 MemoryVectorPolicy 一致 -->
+    <select id="listVectorDeleteCandidates" resultType="java.lang.Long">
+        SELECT id FROM memory_item
+        WHERE scope = 'LONG'
+          AND vector_sync_status IN ('PENDING', 'FAILED')
+          AND vector_sync_fail_count &lt; #{maxFail}
+          AND (
+            deleted = 1
+            OR status &lt;&gt; 1
+            OR (expired_time IS NOT NULL AND expired_time &lt;= #{now})
+          )
+        ORDER BY id
+        LIMIT #{limit}
+    </select>
 </mapper>

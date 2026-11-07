@@ -113,7 +113,10 @@ public class MemoryPolicyAppService {
         policy.setMaxLongItems(bounded(policy.getMaxLongItems(), 1, 500, "长期条数"));
         policy.setCtxMaxTurns(bounded(policy.getCtxMaxTurns(), 1, properties.getCtxMaxTurnsCap(), "窗口轮数"));
         policy.setCtxMaxChars(bounded(policy.getCtxMaxChars(), 256, properties.getCtxMaxCharsCap(), "窗口字符"));
-        policy.setCtxIdleTtlSec(bounded(policy.getCtxIdleTtlSec(), 60, properties.getCtxIdleTtlMaxSec(), "窗口 TTL"));
+        // ctx_idle_ttl_sec 同时是窗口 Redis TTL 与「空闲多久后收口批抽」，下限 60 秒；
+        // 调度侧不写死 7200，一律读这一列，所以这里挡住的非法值就是批抽到期判定的非法值
+        policy.setCtxIdleTtlSec(bounded(policy.getCtxIdleTtlSec(), 60, properties.getCtxIdleTtlMaxSec(),
+                "空闲时间(秒)"));
         policy.setShortDefaultTtlSec(bounded(policy.getShortDefaultTtlSec(), 60,
                 properties.getShortDefaultTtlMaxSec(), "短期 TTL"));
         assertChat(policy.getSummaryModelInstanceId(), "摘要模型");
