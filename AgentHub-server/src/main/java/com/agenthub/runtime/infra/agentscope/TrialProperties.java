@@ -14,8 +14,12 @@ public class TrialProperties {
     /** content_text 单条字符上限。超出截断并注明已截断 */
     private int contentLimitChars = 32768;
 
-    /** 历史会话条数上限。只查当前用户和指定 Agent，按 started_at 倒序 */
-    private int historyLimit = 20;
+    /**
+     * 历史会话的<b>默认页大小</b>（只查当前用户和指定 Agent，按 start_time 倒序）。
+     * <p>语义已改：不再是「任何请求都裁到这个条数」的硬顶。调用方传了 size 就按 size
+     * （仍受全站 100 上限约束），没传才用它；真分页靠前端 current++ 翻页，不靠缩减总量。
+     */
+    private int historyLimit = 50;
 
     /**
      * 首轮结束后是否异步生成会话标题。默认开；

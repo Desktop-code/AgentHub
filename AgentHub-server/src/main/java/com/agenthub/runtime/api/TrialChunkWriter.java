@@ -2,6 +2,7 @@ package com.agenthub.runtime.api;
 
 import com.agenthub.runtime.api.dto.MessageResp;
 import com.agenthub.runtime.api.sse.ServletSseFrameSink;
+import com.agenthub.runtime.api.sse.SseBatchOptions;
 import com.agenthub.runtime.api.sse.UnifiedSseWriter;
 import com.agenthub.runtime.application.TrialStreamEnd;
 import com.agenthub.runtime.domain.model.ChildPlanPendingView;
@@ -31,6 +32,9 @@ import java.util.Map;
  * 在当前请求线程里边跑边刷出，避免异步线程丢掉登录态。出站前脱敏。
  * 结束帧（done）的兜底统一交给 {@link UnifiedSseWriter}：本类只负责把「业务上已经结束」
  * 这件事通知过去，其余四条异常路径（截断 / 超时 / 上游错误 / 客户端取消）由写入器用 CAS 收口。
+ *
+ * <p>正文合批在写入器里做（见 {@code UnifiedSseWriter#messageDelta}）：
+ * 本类仍是「一个增量一次回调」，合批只改变出站帧数，不改事件名、字段与顺序。
  */
 public final class TrialChunkWriter implements TrialProgress, TrialStreamEnd {
 
@@ -41,7 +45,16 @@ public final class TrialChunkWriter implements TrialProgress, TrialStreamEnd {
      * @param json     把 data 收成一行，避免换行截断 SSE
      */
     public TrialChunkWriter(HttpServletResponse response, ObjectMapper json) {
-        this.writer = new UnifiedSseWriter(new ServletSseFrameSink(response, true), json);
+        this(response, json, SseBatchOptions.defaults());
+    }
+
+    /**
+     * @param response 已设为 text/event-stream 的响应
+     * @param json     把 data 收成一行，避免换行截断 SSE
+     * @param batch    正文增量合批参数（时间窗 + 单帧字节上限）
+     */
+    public TrialChunkWriter(HttpServletResponse response, ObjectMapper json, SseBatchOptions batch) {
+        this.writer = new UnifiedSseWriter(new ServletSseFrameSink(response, true), json, batch);
     }
 
     /**
