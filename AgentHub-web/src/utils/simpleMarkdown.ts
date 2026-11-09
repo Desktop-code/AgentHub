@@ -7,6 +7,9 @@
  *
  * 调用方：ChatPanel（Agent 对话）、MaRunFlow（多智能体运行）、ProcessTimeline、WorkflowTrialDrawer。
  * 改这里等于同时改这几个页面的正文口径，保持同一套语法与样式约定。
+ *
+ * 流式热点（对话区逐帧重渲）请走 {@link renderMarkdownMemo}：按渲染位置缓存结果，
+ * 只有正在增长的那一块会重算，算法与上面两个入口完全一致。
  */
 
 type ColumnAlign = 'left' | 'center' | 'right'
@@ -196,6 +199,81 @@ export function renderStreamingMarkdown(source: string): string {
     parts.push(cut.progressiveHtml)
   }
   return parts.join('')
+}
+
+/**
+ * 渲染槽缓存上限。超出后按插入顺序淘汰最早的一条，被淘汰的位置下次重算即可。
+ */
+const SLOT_CACHE_LIMIT = 512
+
+/**
+ * 渲染槽缓存：一个「渲染位置」（轮次 + 块 + 模式）只保留最新一份 HTML。
+ *
+ * <p>为什么需要：流式期每个 delta 都会让整棵消息树重渲，历史块内容一字未变，
+ * 却会跟着重跑一遍转义 / 切块 / 正则，轮次越多越贵。命中缓存后历史块直接复用上次结果，
+ * 只有真正在增长的那一块会重算。
+ *
+ * <p>键分两层：
+ * - 槽键（slot）：由调用方用「轮次 key + 块序号 + 模式」拼出，保证不会跨位置串用；
+ * - 内容签名（signature）：`流式/终态 + 长度 + FNV-1a`，内容一变即不命中；
+ *   流式与终态也永不互相命中（两者 HTML 不同，混用会把半截表刷回源码或反过来）。
+ */
+const slotCache = new Map<string, { signature: string; html: string }>()
+
+/**
+ * 内容签名：模式 + 长度 + 32 位 FNV-1a。
+ *
+ * <p>不直接把全文当 Map 键，是为了避免每次命中都拿整段正文去比较；
+ * 长度能挡住绝大多数变化，哈希兜住「长度相同但内容不同」的重放 / 快照恢复场景。
+ *
+ * @param source    Markdown 原文
+ * @param streaming 是否流式渲染
+ * @return 可比较的签名串
+ */
+function markdownSignatureOf(source: string, streaming: boolean): string {
+  let hash = 0x811c9dc5
+  for (let index = 0; index < source.length; index += 1) {
+    hash ^= source.charCodeAt(index)
+    hash = Math.imul(hash, 0x01000193)
+  }
+  return `${streaming ? 'S' : 'F'}${source.length}#${(hash >>> 0).toString(36)}`
+}
+
+/**
+ * 带缓存的 Markdown 渲染。输出与 {@link renderStreamingMarkdown} / {@link renderSimpleMarkdown}
+ * 完全一致，只是同位置同内容不再重复解析（算法本身未改）。
+ *
+ * @param slot      渲染位置键；同一位置必须复用同一个 key，否则缓存形同虚设
+ * @param source    Markdown 原文
+ * @param streaming 是否流式渲染（流式与终态结果不同，必须分开缓存）
+ * @return 可直接 v-html 的 HTML
+ */
+export function renderMarkdownMemo(slot: string, source: string, streaming = false): string {
+  const text = source || ''
+  const signature = markdownSignatureOf(text, streaming)
+  const hit = slotCache.get(slot)
+  if (hit && hit.signature === signature) {
+    return hit.html
+  }
+  const html = streaming ? renderStreamingMarkdown(text) : renderSimpleMarkdown(text)
+  // 一个槽只留最新一份：流式中每帧签名都会变，旧值留着只会白占内存
+  slotCache.delete(slot)
+  slotCache.set(slot, { signature, html })
+  if (slotCache.size > SLOT_CACHE_LIMIT) {
+    const oldest = slotCache.keys().next()
+    if (!oldest.done) {
+      slotCache.delete(oldest.value)
+    }
+  }
+  return html
+}
+
+/**
+ * 清空渲染槽缓存。整段会话被替换（切会话 / 重置时间线）或单测隔离时调用，
+ * 避免旧轮次的 HTML 长期占位；不调用也不会渲染错误，只是多占一点内存。
+ */
+export function clearMarkdownMemo(): void {
+  slotCache.clear()
 }
 
 /**

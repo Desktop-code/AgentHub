@@ -55,8 +55,8 @@
  * 约束：只产出图标名称字符串（与 sys_menu.icon 一致），不参与表单校验；空值表示不显示图标。
  */
 import { computed, ref } from 'vue'
-import { ArrowDown, Search } from '@element-plus/icons-vue'
-import { MENU_ICON_GROUPS, resolveMenuIcon } from './menuIcons'
+import { ArrowDown, Search, Setting } from '@element-plus/icons-vue'
+import { MENU_ICON_GROUPS, MENU_ICON_MAP } from './menuIconCatalog'
 
 const props = defineProps<{
   /** 当前图标名，空串表示未选 */
@@ -86,10 +86,13 @@ const filteredGroups = computed(() => {
 /**
  * 取图标组件，未登记的存量名称回退 Setting。
  *
+ * <p>这里直接读全量候选集（本页所在路由已静态引入该模块），不走侧栏那套懒加载：
+ * 选择器一次要画几十个图标，异步组件会让格子先空一拍。
+ *
  * @param name 图标名
  */
 function iconOf(name: string) {
-  return resolveMenuIcon(name)
+  return MENU_ICON_MAP[name] || Setting
 }
 
 /**

@@ -99,7 +99,7 @@
  * <p>约束：只读展示；数据由父组件按轮次传入，本组件不发请求、不解析正文；
  * 不输出结论文本、思维链与工具长结果；汇总步骤算路由 Agent 的收尾一步。
  */
-import { computed, ref } from 'vue'
+import { computed, onBeforeUnmount, ref, watch } from 'vue'
 import { Check, Close, Loading, Minus } from '@element-plus/icons-vue'
 import type { MaLineState, MaRunGroup } from '@/components/runtime/ma/maRunView'
 import { buildChainLines, buildDetailLines } from '@/components/runtime/ma/maRunView'
@@ -107,8 +107,6 @@ import { buildChainLines, buildDetailLines } from '@/components/runtime/ma/maRun
 const props = defineProps<{
   /** 当前选中的运行轮次；undefined 表示还没选 */
   group?: MaRunGroup
-  /** 每秒刷新的当前时间戳，用于运行中耗时 */
-  now: number
   /** 追踪数据整体加载失败说明 */
   error?: string
   /** 追踪数据是否仍在首次加载 */
@@ -119,6 +117,49 @@ const props = defineProps<{
 
 /** 右栏视图：默认明细；切换后跨轮次保持 */
 const mode = ref<'detail' | 'chain'>('detail')
+
+/**
+ * 右栏自持的 1Hz 时间锚点。
+ *
+ * <p>只在本列内部更新：父级不再传每秒变化的 now，也就不会带着中栏对话一起重渲。
+ * 仅在本轮运行中开表；收尾后耗时用收尾时刻封顶，不需要再刷新。
+ */
+const now = ref(Date.now())
+let tickTimer: number | undefined
+
+/** 启动右栏秒表；重复调用不叠加定时器 */
+function startTick() {
+  if (tickTimer !== undefined) {
+    return
+  }
+  now.value = Date.now()
+  tickTimer = window.setInterval(() => {
+    now.value = Date.now()
+  }, 1000)
+}
+
+/** 停止右栏秒表并释放句柄 */
+function stopTick() {
+  if (tickTimer !== undefined) {
+    window.clearInterval(tickTimer)
+    tickTimer = undefined
+  }
+}
+
+// 跟随选中轮次的运行态开关秒表：空闲轮次不空转，也不每秒重渲右栏
+watch(
+  () => props.group?.status,
+  (status) => {
+    if (status === 'running') {
+      startTick()
+    } else {
+      stopTick()
+    }
+  },
+  { immediate: true }
+)
+
+onBeforeUnmount(stopTick)
 
 /** 分段按钮定义；顺序即展示顺序 */
 const tabs: { value: 'detail' | 'chain'; label: string }[] = [
@@ -145,10 +186,10 @@ function safeLines<T>(build: () => T[], tag: string): T[] {
 }
 
 /** 明细行：按执行顺序一步一行，含 LLM 与工具调用 */
-const detailLines = computed(() => safeLines(() => buildDetailLines(props.group, props.now), 'detail'))
+const detailLines = computed(() => safeLines(() => buildDetailLines(props.group, now.value), 'detail'))
 
 /** 链路行：同一批步骤的树形结构；只排除检索工具内部记录，汇总归到路由节点下 */
-const chainLines = computed(() => safeLines(() => buildChainLines(props.group, props.now), 'chain'))
+const chainLines = computed(() => safeLines(() => buildChainLines(props.group, now.value), 'chain'))
 
 /**
  * 角色图例：路由与业务 Agent 一卡一条，不合并。

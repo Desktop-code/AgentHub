@@ -504,6 +504,7 @@
       :workflow-id="workflowId"
       :default-release-id="def?.defaultReleaseId ?? null"
       :can-act="canHumanAct"
+      :page-active="pageActive"
       @run-change="onRunChange"
     />
   </div>
@@ -743,6 +744,12 @@ const canRunTrial = computed(() => user.hasPerm('workflow:run:trial'))
 const canHumanAct = computed(() => user.hasPerm('workflow:human:act'))
 
 const trialVisible = ref(false)
+
+/**
+ * 本页是否在前台。KeepAlive 缓存根切走 / 切回时翻转，
+ * 透传给试跑抽屉，让它停 / 起轮询与秒表（抽屉是子组件，收不到 deactivated）。
+ */
+const pageActive = ref(true)
 
 /* ===== 模块一 / 二：布局折叠与悬浮工具栏（纯 UI 状态，不参与 graph_json） ===== */
 /** 左「节点库」是否折叠（用户意图，不含 hover 临时展开） */
@@ -1989,6 +1996,8 @@ onBeforeUnmount(() => {
 
 /** KeepAlive 切走时退出专注：壳层布局是全局的，不能跟着缓存页一起走 */
 onDeactivated(() => {
+  // 试跑抽屉是子组件、收不到 deactivated：由本页把失活状态传下去，抽屉据此停轮询与秒表
+  pageActive.value = false
   if (focusMode.value) {
     exitFocusMode()
   }
@@ -2001,6 +2010,7 @@ onDeactivated(() => {
  */
 let activatedOnce = false
 onActivated(() => {
+  pageActive.value = true
   if (!activatedOnce) {
     activatedOnce = true
     return

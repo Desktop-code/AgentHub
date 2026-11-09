@@ -1,12 +1,13 @@
 <template>
   <div class="chat">
-    <div ref="scroller" class="messages">
+    <div ref="scroller" class="messages" @scroll.passive="onScroll">
       <!-- 进行态粘在滚动容器顶，内容变长时仍可见；结束后整条不渲染 -->
       <div v-if="liveTurn" class="phase phase-sticky" :class="'phase-' + liveTurn.phase">
         <span class="phase-bar" />
         <span>{{ detached ? '连接已断开，等待本轮结束' : phaseLabel(liveTurn.phase) }}</span>
         <!-- 断线时不再显示「已等待」，避免让人以为还在收增量 -->
-        <span v-if="!detached" class="wait">已等待 {{ waitSeconds(liveTurn.startTime) }}s</span>
+        <!-- 秒表下沉为叶子组件：只有这行文字每秒更新，对话树不跟着整棵重渲 -->
+        <ElapsedSeconds v-if="!detached" class="wait" :start-time="liveTurn.startTime" />
         <span v-else class="wait">结束后自动补齐</span>
       </div>
 
@@ -149,7 +150,10 @@
                 </el-tooltip>
               </div>
             </div>
-            <div class="md answer" v-html="markdown(row.flow.answer, row.turn.status === 'streaming')" />
+            <div
+              class="md answer"
+              v-html="markdown(planAnswerSlot(row.turn), row.flow.answer, row.turn.status === 'streaming')"
+            />
             <span v-if="row.turn.status === 'streaming'" class="caret">|</span>
           </div>
 
@@ -224,7 +228,7 @@
                       <div
                         v-if="step.type === 'reasoning'"
                         class="md think-body"
-                        v-html="markdown(step.text, row.turn.status === 'streaming')"
+                        v-html="markdown(stepSlot(row.turn, laneIndex, stepIndex), step.text, row.turn.status === 'streaming')"
                       />
                       <pre v-else-if="step.type === 'tool_call'" class="step-call">{{ step.text }}</pre>
                       <div v-else class="step-result">
@@ -248,7 +252,8 @@
             </div>
           </div>
 
-          <template v-for="(block, index) in row.turn.blocks" :key="'out-' + index">
+          <!-- 块列表：key 必须用数据层分配的稳定 id，禁止用数组下标（视觉块是 unshift 到队首的） -->
+          <template v-for="(block, index) in row.turn.blocks" :key="blockKey(block, index)">
             <!-- 图片文字提取结果：本轮素材，排在思考与终答之前，可折叠 -->
             <div v-if="block.kind === 'vision'" class="vision-block">
               <button
@@ -268,23 +273,23 @@
                 <div class="section-label answer-label">最终回答</div>
                 <!-- 同上：完成态才给图标控件，流式中隐藏，避免念到半句 -->
                 <div v-if="row.turn.status !== 'streaming'" class="speak-actions">
-                  <el-tooltip :content="speakHintOf(blockAnswerKey(row.turn, index))" placement="top">
+                  <el-tooltip :content="speakHintOf(blockAnswerKey(row.turn, block))" placement="top">
                     <button
                       type="button"
                       class="speak-icon"
-                      :class="{ active: isSpeaking(blockAnswerKey(row.turn, index)) }"
-                      :aria-label="speakHintOf(blockAnswerKey(row.turn, index))"
-                      @click="toggleSpeak(blockAnswerKey(row.turn, index), block.text)"
+                      :class="{ active: isSpeaking(blockAnswerKey(row.turn, block)) }"
+                      :aria-label="speakHintOf(blockAnswerKey(row.turn, block))"
+                      @click="toggleSpeak(blockAnswerKey(row.turn, block), block.text)"
                     >
-                      <el-icon :class="{ 'is-loading': isPreparing(blockAnswerKey(row.turn, index)) }">
-                        <Loading v-if="isPreparing(blockAnswerKey(row.turn, index))" />
-                        <VideoPause v-else-if="isPlaying(blockAnswerKey(row.turn, index))" />
+                      <el-icon :class="{ 'is-loading': isPreparing(blockAnswerKey(row.turn, block)) }">
+                        <Loading v-if="isPreparing(blockAnswerKey(row.turn, block))" />
+                        <VideoPause v-else-if="isPlaying(blockAnswerKey(row.turn, block))" />
                         <VideoPlay v-else />
                       </el-icon>
                     </button>
                   </el-tooltip>
                   <el-tooltip
-                    v-if="isSpeaking(blockAnswerKey(row.turn, index))"
+                    v-if="isSpeaking(blockAnswerKey(row.turn, block))"
                     content="停止朗读"
                     placement="top"
                   >
@@ -294,7 +299,10 @@
                   </el-tooltip>
                 </div>
               </div>
-              <div class="md answer" v-html="markdown(block.text, row.turn.status === 'streaming')" />
+              <div
+                class="md answer"
+                v-html="markdown(blockSlot(block, index), block.text, row.turn.status === 'streaming')"
+              />
               <span
                 v-if="row.turn.status === 'streaming' && index === lastAssistantIndex(row.turn)"
                 class="caret"
@@ -428,9 +436,9 @@
  *
  * 折叠默认展开，仅当用户点过标题才收起；终答出现也不自动收起。
  */
-import { computed, nextTick, reactive, ref, watch } from 'vue'
+import { computed, onBeforeUnmount, onMounted, onUpdated, reactive, ref, watch } from 'vue'
 import { Microphone, Picture, Headset, VideoPlay, VideoPause, Loading, Close } from '@element-plus/icons-vue'
-import type { ChatTurn, RouterTraceView } from '@/types/runtime'
+import type { AssistantBlock, ChatTurn, RouterTraceView } from '@/types/runtime'
 import { ElMessage } from 'element-plus'
 import { transcribeAudio } from '@/api/voice'
 import { useVoiceRecorder } from '@/composables/voiceRecorder'
@@ -447,7 +455,9 @@ import type { TurnSections } from '@/components/runtime/trialMessages'
 import ProcessTimeline from '@/components/runtime/ProcessTimeline.vue'
 import RouterTimeline from '@/components/runtime/RouterTimeline.vue'
 import FileCard from '@/components/runtime/FileCard.vue'
-import { renderSimpleMarkdown, renderStreamingMarkdown } from '@/utils/simpleMarkdown'
+import ElapsedSeconds from '@/components/runtime/ElapsedSeconds.vue'
+import { resolveFollowAfterScroll } from '@/components/runtime/chatFollow'
+import { renderMarkdownMemo } from '@/utils/simpleMarkdown'
 
 const props = defineProps<{
   turns: ChatTurn[]
@@ -456,8 +466,6 @@ const props = defineProps<{
   sessionReady: boolean
   /** 不能发送时的说明。结案和未选会话用不同文案 */
   blockedHint?: string
-  /** 进行中时每秒刷新「已等待」 */
-  now: number
   /**
    * 是否已与后端断开、只能等落库。
    * 整页刷新后前端不再持有 SSE，增量拿不到；此时状态条如实标注，不假装还在思考。
@@ -832,10 +840,9 @@ function answerOf(turn: ChatTurn): SpeakTarget | null {
   }
   // 非计划流：一段回答可能被拆成多块，只读最后一段正文，避免一段话被念两遍
   let last: SpeakTarget | null = null
-  for (let index = 0; index < turn.blocks.length; index += 1) {
-    const block = turn.blocks[index]
+  for (const block of turn.blocks) {
     if (block.kind === 'assistant' && block.text) {
-      last = { key: blockAnswerKey(turn, index), text: block.text }
+      last = { key: blockAnswerKey(turn, block), text: block.text }
     }
   }
   return last
@@ -878,10 +885,24 @@ function flushAutoSpeak(): void {
 }
 
 /**
- * 自动朗读的触发点：轮次有任何变化就扫一遍。
+ * 自动朗读的最小依赖签名。
+ *
+ * <p>只收集「哪些助手轮存在、是否仍在进行 / 待批准」这几个浅字段：
+ * 流式增量只改 blocks 里的正文，不会让签名变化，因此不再像 deep 监听那样
+ * 每来一个 delta 就深遍历整棵 turns（历史轮越多越贵）。
+ */
+const speakSignature = computed(() =>
+  props.turns
+    .filter((turn) => turn.role === 'assistant')
+    .map((turn) => `${turn.key}|${turn.status}|${turn.planPending === true ? 1 : 0}`)
+    .join(';')
+)
+
+/**
+ * 自动朗读的触发点：助手轮进入流式 / 结束 / 待批准解除时扫一遍。
  * 只在「回答已结束」时才会命中，因此流式增量不会误读半句。
  */
-watch(() => props.turns, flushAutoSpeak, { deep: true })
+watch(speakSignature, flushAutoSpeak)
 
 /**
  * 兜底触发：本轮发送结束（sending 由 true 变 false）后再扫一次。
@@ -905,11 +926,12 @@ function planAnswerKey(item: ChatTurn): string {
  * 非计划流程里 assistant 块的朗读键。
  *
  * @param item  助手轮
- * @param index 块序号
+ * @param block 块本身
  * @return 唯一键
  */
-function blockAnswerKey(item: ChatTurn, index: number): string {
-  return `block:${item.key}:${index}`
+function blockAnswerKey(item: ChatTurn, block: AssistantBlock): string {
+  // 用块稳定 id 而不是下标：插入视觉块时下标会整体位移，播放状态会串到别的块上
+  return `block:${item.key}:${block.id ?? block.kind}`
 }
 
 /**
@@ -1004,16 +1026,120 @@ function routerCardStatus(item: ChatTurn): 'running' | 'done' | 'error' {
   return item.status === 'error' ? 'error' : 'done'
 }
 
-watch(
-  () => props.turns,
-  async () => {
-    await nextTick()
-    if (scroller.value) {
-      scroller.value.scrollTop = scroller.value.scrollHeight
+/**
+ * 用户是否仍停在对话底部附近。
+ * 只有它为 true 时才跟滚：上翻阅读历史时，不能被流式增量硬拽回底部。
+ */
+const nearBottom = ref(true)
+
+/** 距底部多少像素内算「仍在底部」；略大于一行高度，避免轻微抖动就被判成上翻 */
+const NEAR_BOTTOM_PX = 80
+
+/** 已排队但还没执行的跟滚帧；同一帧内的多次更新只滚一次 */
+let followFrame = 0
+
+/**
+ * 上一次由程序写入 `scrollTop` 后读回的实际值（-1 表示本轮还没写过）。
+ *
+ * <p>用途：区分「用户滚动」与「我们自己滚到底」。后者同样会派发 scroll 事件，
+ * 且派发时正文可能又长了，若当成用户上翻就会把跟滚关掉（见 {@link resolveFollowAfterScroll}）。
+ */
+let selfScrollTop = -1
+
+/**
+ * 记录滚动位置：只在滚动事件里读一次布局，判断是否仍在底部附近。
+ * 把布局读取从「每个增量」挪到「用户真的滚动」，避免流式期每帧强制同步布局。
+ */
+function onScroll() {
+  const element = scroller.value
+  if (!element) {
+    return
+  }
+  nearBottom.value = resolveFollowAfterScroll({
+    scrollTop: element.scrollTop,
+    scrollHeight: element.scrollHeight,
+    clientHeight: element.clientHeight,
+    selfScrollTop,
+    previous: nearBottom.value,
+    threshold: NEAR_BOTTOM_PX
+  })
+}
+
+/**
+ * 强制恢复「跟到底部」。
+ *
+ * <p>用于语义上必然是「要看最新内容」的时刻：用户刚发问、刚切到另一个会话。
+ * 这两处若沿用上一次的滚动状态，从旧会话带着「已上翻」进来就会一直不滚。
+ */
+function followToBottom() {
+  nearBottom.value = true
+  scheduleFollowBottom()
+}
+
+/**
+ * 把跟滚合批到下一帧：一帧最多读一次 scrollHeight、写一次 scrollTop。
+ *
+ * <p>由 {@link onUpdated} 在内容（含 Markdown 增量）真正写进 DOM 之后触发；
+ * 用户已上翻则直接跳过，不抢回滚动位置。
+ */
+function scheduleFollowBottom() {
+  if (followFrame) {
+    return
+  }
+  followFrame = requestAnimationFrame(() => {
+    followFrame = 0
+    if (!nearBottom.value) {
+      return
     }
-  },
-  { deep: true }
+    const element = scroller.value
+    if (!element) {
+      return
+    }
+    // 读布局与写滚动在同一帧完成，只触发一次布局失效，替代原先每个 delta 一次
+    element.scrollTop = element.scrollHeight
+    // 读回钳制后的真实值：内容不足一屏时会被夹到 0，下次判定要认这个值
+    selfScrollTop = element.scrollTop
+  })
+}
+
+// 用户发问（sending 由 false 变 true）即视为「要看最新内容」：无论之前是否上翻，都重新跟到底
+watch(
+  () => props.sending,
+  (now) => {
+    if (now) {
+      followToBottom()
+    }
+  }
 )
+
+/**
+ * 会话身份（首轮 key）变化：新建会话或切到另一个会话，都要从底部开始看。
+ * 不能只依赖上一次的滚动状态，否则从「上翻着的旧会话」切过来会停在顶部。
+ */
+watch(
+  () => props.turns[0]?.key ?? '',
+  () => {
+    followToBottom()
+  }
+)
+
+// 每次组件更新（流式增量 / 新轮次 / 排版变化）后安排一次跟滚；不再深监听整棵 turns
+onUpdated(scheduleFollowBottom)
+
+/**
+ * 挂载时先定位到最新一条。
+ * <p>抽屉关掉再打开、页签切回来都会重建组件，而挂载那一刻没有数据变化、不会触发 onUpdated，
+ * 不补这一步就会停在最顶部，看起来像「没有自动定位」。
+ */
+onMounted(followToBottom)
+
+// 卸载时取消未执行的帧，避免回调在已销毁组件上读 DOM
+onBeforeUnmount(() => {
+  if (followFrame) {
+    cancelAnimationFrame(followFrame)
+    followFrame = 0
+  }
+})
 
 /** 状态码换成商城同款短句。未知阶段不显示空标签。 */
 function phaseLabel(phase?: string) {
@@ -1155,19 +1281,55 @@ function lastAssistantIndex(item: ChatTurn) {
   return -1
 }
 
-function waitSeconds(startTime: number) {
-  if (!startTime) {
-    return 0
-  }
-  return Math.max(0, Math.floor((props.now - startTime) / 1000))
-}
-
 /**
  * 思考与终答共用轻量 Markdown。流式走安全前缀+表渐进，结束后完整终渲。
  * 原文标签不会执行。
+ *
+ * <p>按「渲染位置」缓存结果：流式期每帧只有正在增长的那一块签名会变，
+ * 历史块的 HTML 直接命中缓存，不再每帧把全部历史重新跑一遍正则。
+ *
+ * @param slot      渲染位置键（轮次 + 块 + 区段），同一位置必须稳定不变
+ * @param value     Markdown 原文
+ * @param streaming 是否流式渲染（与终态分开缓存，避免脏 HTML）
+ * @return 可直接 v-html 的 HTML
  */
-function markdown(value: string, streaming = false) {
-  return streaming ? renderStreamingMarkdown(value) : renderSimpleMarkdown(value)
+function markdown(slot: string, value: string, streaming = false) {
+  return renderMarkdownMemo(slot, value, streaming)
+}
+
+/** 计划流终答的缓存槽键。与朗读键区分：这里只标识渲染位置 */
+function planAnswerSlot(item: ChatTurn): string {
+  return `plan:${item.key}:answer`
+}
+
+/**
+ * 块级 v-for 的 key。
+ * <p>取数据层分配的稳定 id；块一旦建立就永远不变，视觉块/调度卡插到队首时其它块不会重挂。
+ * 只有异常数据（外部构造、缺 id）才退化成「种类 + 轮内下标」——此时只保证同轮内不撞键。
+ *
+ * @param block 块
+ * @param index 块在本轮内的下标；仅在缺 id 的兜底分支使用
+ * @return 稳定 key
+ */
+function blockKey(block: AssistantBlock, index: number): string {
+  return block.id || `out-${block.kind}-${index}`
+}
+
+/**
+ * 非计划流程里 assistant 块的 Markdown 缓存槽键。
+ * <p>与 v-for key 同源（稳定 id）：块顺序变化不会让历史块命中不到上一帧的 HTML。
+ *
+ * @param block 块
+ * @param index 块在本轮内的下标；仅在缺 id 的兜底分支使用
+ * @return 缓存槽键
+ */
+function blockSlot(block: AssistantBlock, index: number): string {
+  return `out:${block.id || `${block.kind}-${index}`}`
+}
+
+/** 思考过程里单个步骤的缓存槽键；泳道与步骤序号共同定位 */
+function stepSlot(item: ChatTurn, laneIndex: number, stepIndex: number): string {
+  return `think:${item.key}:${laneIndex}:${stepIndex}`
 }
 
 function submit() {

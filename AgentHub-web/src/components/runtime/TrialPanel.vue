@@ -34,6 +34,8 @@
         :sending="sending"
         :resuming="resuming"
         :history-loading="historyLoading"
+        :has-more="historyHasMore"
+        :loading-more="historyLoadingMore"
         :is-temp="isTempSession"
         :is-running="isRowRunning"
         :title-of="sessionTitle"
@@ -43,6 +45,7 @@
         @clear="clearCurrent"
         @open="openHistory"
         @command="onSessionCommand"
+        @load-more="loadMoreHistory"
       />
 
       <!--
@@ -69,7 +72,6 @@
           :session-ready="sessionReady"
           :blocked-hint="blockedHint"
           :detached="detached"
-          :now="now"
           @select="selectedMaTurn = $event"
           @send="send"
         />
@@ -94,7 +96,6 @@
           :can-send="canRun"
           :session-ready="sessionReady"
           :blocked-hint="blockedHint"
-          :now="now"
           :can-approve="canRun"
           :approving="approving"
           :vision-enabled="visionEnabled"
@@ -114,7 +115,6 @@
       <aside v-if="variant === 'ma'" class="ma-chain-col">
         <MaRunChain
           :group="selectedMaGroup"
-          :now="now"
           :error="maTraceError"
           :loading="maTraceLoading"
           :can-view="maCanView"
@@ -138,7 +138,6 @@
         :loading="routerTrace?.loading === true"
         :trace-id="routerTrace?.traceId ?? ''"
         :session-id="routerTrace?.sessionId != null ? String(routerTrace.sessionId) : null"
-        :now="now"
         :default-expanded="true"
         :auto-collapse="false"
         @refresh="reloadRouterTrace"
@@ -151,7 +150,7 @@
 <script setup lang="ts">
 /**
  * 试跑工作台。所属域：runtime。
- * 抽屉里左栏是当前用户、当前 Agent 的历史会话（按今日/昨日/本周/更早分组），右栏是对话。
+ * 抽屉里左栏是当前用户、当前 Agent 的历史会话（按今日 / 7天内 / 30天内 / 更早分组），右栏是对话。
  * 点「新会话」= 仅前端顶插「新对话」临时条并清空右栏；不调创建接口、不落库。
  * 首条用户消息发送时再 create + 流式；临时条用返回的 session 转正。切历史/关页丢掉临时。
  * 「清空当前」只对已落库会话：删事件并重置轮次，会话和标题保留。
@@ -223,6 +222,7 @@ import { useUserStore } from '@/stores/user'
 import TrialChildPlanBar from '@/components/runtime/trial/TrialChildPlanBar.vue'
 import TrialSessionList from '@/components/runtime/trial/TrialSessionList.vue'
 import type { SessionGroup } from '@/components/runtime/trial/sessionGroup'
+import { groupSessionsByDay, parseSessionTime } from '@/components/runtime/trial/sessionGroup'
 import type { ChatTurn, TrialAgent, TrialEvent, TrialPlanView, TrialSession } from '@/types/runtime'
 
 const props = withDefaults(
@@ -259,11 +259,30 @@ const knownSessions = ref<Map<number, TrialSession>>(new Map())
 const pageError = ref('')
 const sending = ref(false)
 const historyLoading = ref(false)
+/**
+ * 历史会话分页状态。所属域：runtime（前端列表）。
+ * 服务端已是真分页：total 是全量 COUNT，records 只给当前页。左栏触底 current++ 追加，
+ * 不再出现「请求 size=100 却被裁成 20」的截断。
+ */
+const HISTORY_PAGE_SIZE = 50
+/** 已加载到的页码；首屏重置为 1，追加成功才前进 */
+const historyCurrent = ref(1)
+/** 服务端全量条数（COUNT，不含 LIMIT），用于判断还有没有下一页 */
+const historyTotal = ref(0)
+/** 正在追加下一页。只驱动列表底部的 loading，不盖整栏 */
+const historyLoadingMore = ref(false)
+/**
+ * 已从服务端取回的<b>原始</b>行数（含被前端判定为空壳而没展示的行）。
+ * 用它（而不是 history.length）与 total 比较：否则空壳被滤掉后会被误判成「还没取完」而反复触底。
+ */
+const historyLoadedRows = ref(0)
+/** 是否还有下一页：原始已取行数 < 服务端全量 */
+const historyHasMore = computed(() => historyLoadedRows.value < historyTotal.value)
+/** 列表请求令牌：切 Agent / 切方案 / 重新首屏都要作废在途请求，避免串列表 */
+let historyToken = 0
 /** 前端临时「新对话」：未发首问前可输入；不占库。 */
 const draftReady = ref(false)
-const now = ref(Date.now())
 let restoring = false
-let clock: number | undefined
 /** 重进续订时的轮询定时器；关窗、切会话、发送前都要停。 */
 let pollTimer: number | undefined
 /** 会话标题补拉的定时器（后端异步生成，落库晚于 SSE 结束）。 */
@@ -383,8 +402,12 @@ const {
   loading: maTraceLoading,
   error: maTraceError
 } = useMaTurnTraces(routerSessionId, routerTraceActive, maEnabled)
-/** 中栏运行轮次：一条用户提问 + 本轮协作卡 */
-const maGroups = computed(() => buildMaRunGroups(turns.value, maTraces.value, now.value))
+/**
+ * 中栏运行轮次：一条用户提问 + 本轮协作卡。
+ * 不再依赖每秒变化的 now：只在时间线与 trace 真的变化时重建，
+ * 运行中耗时由卡片 / 右栏各自的秒表叶子继续走，避免整页秒闪。
+ */
+const maGroups = computed(() => buildMaRunGroups(turns.value, maTraces.value))
 /** 右栏绑定的轮次 key；进入页 / 新增一轮时跟到最后 */
 const selectedMaTurn = ref('')
 let maKnownGroupCount = 0
@@ -460,7 +483,15 @@ const blockedHint = computed(() =>
  */
 const historyGroups = computed(() => {
   const current = session.value
-  const rows = history.value.filter((row) => !isTempSession(row))
+  // 分页追加与「第 1 页合并」都可能让同一 id 出现两次：按 id 去重，保留先出现（更新 / 更靠前）的一条
+  const seen = new Set<number>()
+  const rows = history.value.filter((row) => {
+    if (isTempSession(row) || seen.has(row.id)) {
+      return false
+    }
+    seen.add(row.id)
+    return true
+  })
   const have = new Set(rows.map((row) => row.id))
   const extra: TrialSession[] = []
   if (current) {
@@ -564,10 +595,11 @@ onBeforeUnmount(() => {
   // 关面板不再 abort SSE：本轮的响应式时间线登记在模块级 trialStream，
   // 读流与增量累积继续，重开直接接上同一份数据 —— 这是「渐进显示」的前提。
   // 中间过程只走 SSE、不落库，断了就只能等整轮跑完才看到内容。
-  // 组件内只收拾自己的定时器与轮询；SSE 由 trialStream 的登记项持有，直到收尾并落库接管。
-  stopClock()
+  // 组件内只收拾自己的轮询；SSE 由 trialStream 的登记项持有，直到收尾并落库接管。
   stopResume()
   stopTitleRefresh()
+  // 关面板即作废在途的列表请求：令牌一变，迟到的响应不再回写已卸载的列表
+  historyToken += 1
 })
 
 /** 下拉只含启用 Agent。抽屉不请求这份列表。 */
@@ -627,13 +659,37 @@ async function loadCapabilities(agentId?: number) {
 }
 
 /**
- * 只拉当前 Agent、当前用户的近期会话；未提问的空壳不展示并后台清掉。
+ * 当前归属下的会话分页参数。
+ *
+ * <p>agentId / maId 互斥：虚拟根按方案，绑根按 Agent；后端也会拒绝同时携带。
+ *
+ * @param owner   会话归属键（Agent id 或方案 id）
+ * @param current 页码，从 1 开始
+ * @return 直接传给列表接口的参数
+ */
+function historyPageParams(owner: number, current: number) {
+  return maMode.value
+    ? { current, size: HISTORY_PAGE_SIZE, maId: owner }
+    : { current, size: HISTORY_PAGE_SIZE, agentId: owner }
+}
+
+/**
+ * 首屏 / 切归属时拉第 1 页，重置列表与分页状态；未提问的空壳不展示并在后台清掉。
+ *
+ * <p>只在这一条路径做「整表替换 + 空壳清理」：追加页绝不替换、绝不清理，
+ * 否则用户已加载的第 2..N 页会被冲掉。
+ *
  * @param selectLatest 首次挂载时选中上次会话或最近一条，方便续聊
  */
 async function loadHistory(selectLatest = false) {
   const owner = ownerId.value
+  // 每次首屏都换令牌：在途的下一页请求与旧归属的响应都会因令牌不符被丢弃
+  const token = ++historyToken
   if (!canList.value || !owner) {
     history.value = []
+    historyTotal.value = 0
+    historyLoadedRows.value = 0
+    historyCurrent.value = 1
     return
   }
   // 上次看的会话（重进 / 刷新后用来回到本轮，而不是落到空白草稿）
@@ -643,13 +699,18 @@ async function loadHistory(selectLatest = false) {
   const eager = selectLatest && !!resumedId && !session.value && !draftReady.value
   const eagerTask = eager ? openHistory(resumedId as number) : undefined
   historyLoading.value = true
+  historyLoadingMore.value = false
   try {
-    // 两条入口参数互斥：虚拟根按 maId，绑根按 agentId；后端也拒绝同时携带
-    const pageParams = maMode.value
-      ? { current: 1, size: 100, maId: owner }
-      : { current: 1, size: 100, agentId: owner }
-    const { data } = await pageTrialSessions(pageParams)
-    const records = data.data?.records || []
+    const { data } = await pageTrialSessions(historyPageParams(owner, 1))
+    // 请求期间已切 Agent / 已重新首屏：这次结果属于旧归属，直接丢，避免串列表
+    if (token !== historyToken) {
+      return
+    }
+    const page = data.data
+    const records = page?.records || []
+    historyCurrent.value = 1
+    historyTotal.value = page?.total ?? records.length
+    historyLoadedRows.value = records.length
     const kept: TrialSession[] = []
     const empties: TrialSession[] = []
     const currentId = session.value?.id
@@ -677,11 +738,15 @@ async function loadHistory(selectLatest = false) {
         session.value = mergeSessionMeta(fresh, session.value)
       }
     }
-    // 其它历史空壳静默删掉，避免反复点「新会话」堆未提问记录。已有预览或轮次的不进 empties
+    // 其它历史空壳静默删掉，避免反复点「新会话」堆未提问记录。已有预览或轮次的不进 empties。
+    // 只在第 1 页做：追加页只负责展示，不做删除，避免翻页变成批量清理。
     void purgeUnaskedSessions(empties)
     if (eagerTask) {
       // 等即时打开完成（失败也不挡后续兜底）
       await eagerTask
+    }
+    if (token !== historyToken) {
+      return
     }
     if (selectLatest && !session.value && !draftReady.value) {
       // 上次看的会话仍在列表里就回它；本轮刚发出时它还是空壳，也在 records 中，照样能重进
@@ -700,9 +765,116 @@ async function loadHistory(selectLatest = false) {
       }
     }
   } catch {
-    history.value = []
+    // 只有本次首屏仍然有效时才清空；旧请求失败不能把新归属的列表清掉
+    if (token === historyToken) {
+      history.value = []
+      historyTotal.value = 0
+      historyLoadedRows.value = 0
+      historyCurrent.value = 1
+    }
   } finally {
-    historyLoading.value = false
+    if (token === historyToken) {
+      historyLoading.value = false
+    }
+  }
+}
+
+/**
+ * 追加下一页（触底 / 点「加载更多」）。
+ *
+ * <p>只追加、不替换：不清空现有行、不做空壳清理、不重置选中会话；
+ * 切 Agent 后在途响应靠 {@link historyToken} 丢弃。失败静默（保留已加载内容，
+ * 用户可再次触底重试），不打断正在进行的对话。
+ */
+async function loadMoreHistory() {
+  const owner = ownerId.value
+  // 四道闸门：没归属 / 首屏未完成 / 已在追加 / 已到底，一律不发请求
+  if (!canList.value || !owner || historyLoading.value || historyLoadingMore.value || !historyHasMore.value) {
+    return
+  }
+  const token = historyToken
+  const next = historyCurrent.value + 1
+  historyLoadingMore.value = true
+  try {
+    const { data } = await pageTrialSessions(historyPageParams(owner, next))
+    if (token !== historyToken) {
+      return
+    }
+    const page = data.data
+    const records = page?.records || []
+    historyTotal.value = page?.total ?? historyTotal.value
+    historyCurrent.value = next
+    historyLoadedRows.value += records.length
+    // 空页但仍声称有下一页：把已加载量对齐 total，避免触底无限重试
+    if (!records.length) {
+      historyLoadedRows.value = historyTotal.value
+    }
+    const have = new Set(history.value.map((row) => row.id))
+    const appended: TrialSession[] = []
+    for (const item of records) {
+      if (have.has(item.id) || isTempSession(item)) {
+        continue
+      }
+      have.add(item.id)
+      // 追加页只跳过「确定是空壳且不在执行」的行；正在跑的空壳照样展示（要能看到转圈）
+      if (isUnaskedSession(item) && !isTurnRunning(item.id) && !isPossiblyInFlight(item)) {
+        continue
+      }
+      appended.push(item)
+    }
+    if (appended.length) {
+      // 追加而不是替换；historyGroups 会按 id 去重后再分组，不会出现重复行
+      history.value = [...history.value, ...appended]
+      for (const item of appended) {
+        rememberKnown(item)
+      }
+    }
+  } catch {
+    // 追加失败不清空已加载内容；保留页码，用户可再次触底重试
+  } finally {
+    if (token === historyToken) {
+      historyLoadingMore.value = false
+    }
+  }
+}
+
+/**
+ * 只刷新第 1 页并按 id 合并，不重置已加载的后续页。
+ *
+ * <p>用途：首轮标题落库晚于 SSE 结束，需要再按列表补拉一次兜底。
+ * 不能走 {@link loadHistory} 的整表替换，否则用户已加载的第 2..N 页会被冲掉。
+ */
+async function refreshHistoryHead() {
+  const owner = ownerId.value
+  if (!canList.value || !owner) {
+    return
+  }
+  const token = historyToken
+  try {
+    const { data } = await pageTrialSessions(historyPageParams(owner, 1))
+    if (token !== historyToken) {
+      return
+    }
+    const page = data.data
+    const records = page?.records || []
+    historyTotal.value = page?.total ?? historyTotal.value
+    const fresh = new Map(records.map((item) => [item.id, item]))
+    // 已在列表里的行按 id 合并元数据；本地多出来的行（已加载的后续页）原样保留
+    const merged = history.value.map((row) => {
+      const hit = fresh.get(row.id)
+      return hit ? mergeSessionMeta(hit, row) : row
+    })
+    // 第 1 页里本地还没有的行（例如别处新建）补到最前；空壳不补，交给首屏清理
+    const have = new Set(merged.map((row) => row.id))
+    const extra = records.filter(
+      (item) => !have.has(item.id) && !isTempSession(item) && !isUnaskedSession(item)
+    )
+    history.value = [...extra, ...merged]
+    for (const item of extra) {
+      rememberKnown(item)
+    }
+  } catch {
+    // 标题补拉是锦上添花，失败静默，不打断当前列表
   }
 }
 
@@ -759,7 +931,8 @@ function scheduleTitleRefresh(id: number) {
   const delays = [...TITLE_REFRESH_DELAYS]
   const tick = () => {
     titleTimer = window.setTimeout(async () => {
-      await loadHistory(false)
+      // 只合并刷新第 1 页：整表替换会把已加载的第 2..N 页冲掉
+      await refreshHistoryHead()
       const fresh = history.value.find((item) => item.id === id)
       // 标题已有值、或会话已不在列表（被删/切 Agent）时收手
       if (!fresh || (fresh.sessionTitle || '').trim()) {
@@ -989,55 +1162,6 @@ function sessionTooltip(item: TrialSession) {
 }
 
 /**
- * 按今日 / 昨日 / 本周 / 更早拆分左栏。
- * 「本周」= 昨天之前、距今不足 7 个自然日；更早单独成组。
- */
-function groupSessionsByDay(items: TrialSession[]): SessionGroup[] {
-  const buckets: Record<string, TrialSession[]> = {
-    今日: [],
-    昨日: [],
-    本周: [],
-    更早: []
-  }
-  const now = new Date()
-  const todayStart = startOfLocalDay(now)
-  const yesterdayStart = new Date(todayStart)
-  yesterdayStart.setDate(yesterdayStart.getDate() - 1)
-  const weekStart = new Date(todayStart)
-  weekStart.setDate(weekStart.getDate() - 6)
-
-  for (const item of items) {
-    const stamp = parseSessionTime(item.updateTime || item.startTime)
-    if (stamp >= todayStart.getTime()) {
-      buckets['今日'].push(item)
-    } else if (stamp >= yesterdayStart.getTime()) {
-      buckets['昨日'].push(item)
-    } else if (stamp >= weekStart.getTime()) {
-      buckets['本周'].push(item)
-    } else {
-      buckets['更早'].push(item)
-    }
-  }
-  return (['今日', '昨日', '本周', '更早'] as const)
-    .filter((label) => buckets[label].length > 0)
-    .map((label) => ({ label, items: buckets[label] }))
-}
-
-/** 本地日零点，避免时区偏移把「今日」判错。 */
-function startOfLocalDay(date: Date) {
-  return new Date(date.getFullYear(), date.getMonth(), date.getDate())
-}
-
-/** 服务端时间可能是「yyyy-MM-dd HH:mm:ss」，统一成毫秒。 */
-function parseSessionTime(value?: string) {
-  if (!value) {
-    return 0
-  }
-  const time = new Date(value.replace(' ', 'T')).getTime()
-  return Number.isNaN(time) ? 0 : time
-}
-
-/**
  * 三点菜单：重命名 / 删除。
  *
  * @param command 菜单项
@@ -1070,7 +1194,7 @@ async function clearCurrent() {
     pageError.value = ''
     // 清空后端同时拒绝了待批子计划，本地卡片一并收起
     childPending.value = null
-    await loadHistory(false)
+    await refreshHistoryHead()
     ElMessage.success('已清空当前会话')
   } catch {
     pageError.value = '清空失败'
@@ -1128,10 +1252,14 @@ async function remove(item: TrialSession) {
   try {
     await deleteTrialSession(item.id)
     forgetTrialSession(item.id)
+    // 本地先摘行：已加载的后续页不会因为只刷新第 1 页而把这一行留在列表里
+    history.value = history.value.filter((row) => row.id !== item.id)
+    historyLoadedRows.value = Math.max(0, historyLoadedRows.value - 1)
+    historyTotal.value = Math.max(0, historyTotal.value - 1)
     if (session.value?.id === item.id) {
       resetConversation()
     }
-    await loadHistory(false)
+    await refreshHistoryHead()
   } catch {
     pageError.value = '删除失败'
   }
@@ -1196,8 +1324,7 @@ async function openHistory(id: number, force = false) {
     turns.value = live.turns
     // 左栏标题与轮次从已收到的时间线反推，避免刚发出时这一行还显示「新对话」
     syncSessionFromTurns(id, live.turns)
-    startClock()
-    // 仍在跑：转圈由 trialStream 的 running 集合驱动，这里只需保持计时
+    // 仍在跑：转圈由 trialStream 的 running 集合驱动；「已等待」由对话区自己的秒表叶子计时
     return
   }
 
@@ -1205,7 +1332,6 @@ async function openHistory(id: number, force = false) {
   const snapshot = loadSnapshot(id)
   if (snapshot) {
     turns.value = snapshot
-    startClock()
   }
 
   try {
@@ -1425,7 +1551,6 @@ function beginResume(id: number, first: TrialEvent[], keepCurrent = false, liveM
   if (!keepCurrent) {
     applyResumeEvents(id, first, liveMode)
   }
-  startClock()
   scheduleResume(id, token, startTime)
 }
 
@@ -1524,7 +1649,7 @@ function scheduleResume(id: number, token: number, startTime: number) {
         dropLive(id)
         finishResume()
         // 刷新左栏取最新预览/轮次
-        await loadHistory(false)
+        await refreshHistoryHead()
         return
       }
       scheduleResume(id, token, startTime)
@@ -1693,7 +1818,6 @@ function stopPolling() {
   pollToken += 1
   resumingId = undefined
   resumeSignature = ''
-  stopClock()
 }
 
 /**
@@ -1736,7 +1860,6 @@ async function send(content: string, images?: string[]) {
   // 取数组里的响应式代理再改，裸对象上的增量不会驱动思考/终答边收边渲
   turns.value = [...turns.value, assistantTurn(`local-a-${Date.now()}`, 'streaming')]
   const live = turns.value[turns.value.length - 1]
-  startClock()
   // 不再 abort：关面板后读流与增量累积继续，重开直接接上这份响应式数据。
   // 这是「渐进显示」的前提——中间过程只走 SSE、不落库，断了就只能等整轮落库。
   // controller 仍要传：页面卸载时浏览器会自行中断连接，这里只提供句柄便于将来显式中断。
@@ -1905,7 +2028,7 @@ async function send(content: string, images?: string[]) {
         pageError.value = '连接已结束'
       }
     }
-    await loadHistory(false)
+    await refreshHistoryHead()
   } catch (error) {
     live.status = 'error'
     live.phase = 'error'
@@ -1917,19 +2040,7 @@ async function send(content: string, images?: string[]) {
       finishLive(sessionId)
     }
     sending.value = false
-    // 用户可能已在发送中切到别的会话并在那儿续订：那不是本轮的计时，别一起停掉
-    if (!resumingId) {
-      stopClock()
-    }
   }
-}
-
-function startClock() {
-  stopClock()
-  now.value = Date.now()
-  clock = window.setInterval(() => {
-    now.value = Date.now()
-  }, 1000)
 }
 
 /**
@@ -1953,7 +2064,6 @@ async function approvePlan(planId?: string) {
   approving.value = true
   pageError.value = ''
   markTurnRunning(id, true)
-  startClock()
   beginApprovedRun(planId)
   // 批准执行时的进展只能从内存快照拿到：先开一路轮询，让步骤边跑边出现
   const watcher = watchApproveProgress(id, planId)
@@ -1970,7 +2080,7 @@ async function approvePlan(planId?: string) {
     dropLive(id)
     finishLive(id)
     await openHistory(id, true)
-    await loadHistory(false)
+    await refreshHistoryHead()
   } catch (error) {
     pageError.value = error instanceof Error ? error.message : '批准失败'
     // 失败时先收回本地进行态，再让服务端事件重新决定卡态：
@@ -1982,7 +2092,6 @@ async function approvePlan(planId?: string) {
     watcher.stop()
     approving.value = false
     finishLive(id)
-    stopClock()
   }
 }
 
@@ -2237,7 +2346,7 @@ async function rejectPlan(planId?: string) {
     dropLive(id)
     finishLive(id)
     await openHistory(id, true)
-    await loadHistory(false)
+    await refreshHistoryHead()
   } catch (error) {
     pageError.value = error instanceof Error ? error.message : '取消失败'
   } finally {
@@ -2259,12 +2368,6 @@ function clearPendingPlanFlag(planId?: string) {
   }
 }
 
-function stopClock() {
-  if (clock) {
-    window.clearInterval(clock)
-    clock = undefined
-  }
-}
 </script>
 
 <style scoped>

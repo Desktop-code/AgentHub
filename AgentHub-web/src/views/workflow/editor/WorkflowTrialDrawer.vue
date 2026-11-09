@@ -335,6 +335,15 @@ const props = defineProps<{
   workflowId: number
   defaultReleaseId?: number | null
   canAct: boolean
+  /**
+   * 宿主页面是否仍在前台（KeepAlive 缓存页切走后为 false）。
+   *
+   * <p>为什么必须由父级传：Vue 的 onDeactivated 只会派发给 `<keep-alive>` 的
+   * <b>直接缓存根</b>（这里是工作流编辑 / 列表页），本抽屉是它的子组件，收不到该钩子。
+   * 父级把自己的失活状态传下来，抽屉才能在这里停掉轮询与秒表。
+   * 缺省 true：非缓存场景（或父级未传）保持原有行为。
+   */
+  pageActive?: boolean
 }>()
 
 const emit = defineEmits<{
@@ -960,10 +969,16 @@ watch(
   }
 )
 
-/** 等接口期间也要有「已用时」，否则用户看不出是慢还是卡死 */
-function startElapsedTimer() {
+/**
+ * 等接口期间也要有「已用时」，否则用户看不出是慢还是卡死。
+ *
+ * @param reset true=从 0 开始（新跑批）；false=接着上次的秒数走（关抽屉后重开、切页签回来）
+ */
+function startElapsedTimer(reset = true) {
   stopElapsedTimer()
-  elapsed.value = 0
+  if (reset) {
+    elapsed.value = 0
+  }
   elapsedTimer = window.setInterval(() => {
     elapsed.value += 1
   }, 1000)
@@ -978,6 +993,10 @@ function stopElapsedTimer() {
 
 /** 轮询 run 详情：只在 RUNNING 时开，终态 / 关闭抽屉立刻停 */
 function startPolling() {
+  // 宿主页已失活（切走菜单）：不挂表，等 pageActive 回到 true 再按需恢复
+  if (props.pageActive === false) {
+    return
+  }
   if (pollTimer !== undefined) {
     return
   }
@@ -1125,6 +1144,9 @@ watch(
   ([open, id], prev) => {
     if (!open) {
       stopPolling()
+      // 关闭时同样要停秒表：此时 isRunning 仍为 true，不会自己收尾，
+      // 不停就是「抽屉关掉了、1Hz 定时器还在刷 elapsed」的无限空转
+      stopElapsedTimer()
       // 关闭期间换了工作流：静默清空，避免下次打开先闪一下上一条的数据
       if (prev && id !== prev[1]) {
         resetForWorkflow()
@@ -1137,6 +1159,8 @@ watch(
     void loadReleases()
     void loadHistory()
     if (runDetail.value?.status === 'RUNNING') {
+      // 关时停过秒表，重开若仍在跑要接着走秒，否则「已用时」会定在关闭那一刻
+      startElapsedTimer(false)
       startPolling()
     }
   },
@@ -1148,6 +1172,30 @@ onBeforeUnmount(() => {
   stopPolling()
   stopElapsedTimer()
 })
+
+/**
+ * 宿主页 KeepAlive 失活 / 恢复（由父级 pageActive 传导）。
+ *
+ * <p>失活时停轮询与秒表：组件不会卸载，`onBeforeUnmount` 收不到，不停就是切走菜单后
+ * 仍在每 2s 打 `GET workflow/run`、并每秒刷一次 `elapsed`。
+ * 恢复时只在「抽屉仍打开 + 该运行仍未跑完」才重新起表，其它情况保持静止。
+ */
+watch(
+  () => props.pageActive !== false,
+  (active) => {
+    if (!active) {
+      stopPolling()
+      stopElapsedTimer()
+      return
+    }
+    if (!props.modelValue || runDetail.value?.status !== 'RUNNING') {
+      return
+    }
+    // 秒表接着失活前的秒数继续走，不归零：避免「已用时」看起来像重新开始
+    startElapsedTimer(false)
+    startPolling()
+  }
+)
 
 /* ============================ 文案映射 ============================ */
 
