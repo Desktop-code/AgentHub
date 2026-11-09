@@ -190,6 +190,16 @@ agenthub:
     prompt-max-chars: 12000
     # 覆盖系统规则、外连诱导默认只告警仍可保存；改为 true 则一并拒绝
     prompt-warn-as-error: false
+    # 运行期装配字典缓存（扫描报告 C3 落地）：只缓 tool_item / tool_source 无密投影 / skill_def。
+    # 只缓字典、不缓绑定：绑定仍每轮直读，写入口的失效面因此收紧到工具与 Skill 的写接口。
+    # 键：agenthub:agent:dict:{tool-item|tool-source|skill-def}:{id}；失效一律在事务提交后执行。
+    dict-cache:
+      # 总开关。false 即整条链路退回直读库（排障用），功能不变，只是每轮多几次查询
+      enabled: ${AGENTHUB_AGENT_DICT_CACHE_ENABLED:true}
+      # Redis TTL（秒）。写入口会显式失效，这里只是漏失效时的兜底
+      redis-ttl-sec: 120
+      # 「确认不存在」的负缓存（秒）。绑定指向已删项时避免每轮打库
+      miss-ttl-sec: 10
   prompt:
     # 绑定个数硬顶。保存时超出直接拒绝
     max-tools-per-agent: 16

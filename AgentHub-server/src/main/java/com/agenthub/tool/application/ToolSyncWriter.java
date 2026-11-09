@@ -2,6 +2,7 @@ package com.agenthub.tool.application;
 
 import com.agenthub.audit.domain.OperLogWriter;
 import com.agenthub.common.web.OperatorContext;
+import com.agenthub.spi.cache.AgentDictCacheInvalidator;
 import com.agenthub.tool.api.dto.SyncResp;
 import com.agenthub.tool.domain.model.RemoteTool;
 import com.agenthub.tool.domain.model.ToolItem;
@@ -15,7 +16,9 @@ import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
 import java.time.LocalDateTime;
+import java.util.LinkedHashSet;
 import java.util.List;
+import java.util.Set;
 
 /**
  * MCP 同步的「写库阶段」。所属域：tool。
@@ -37,19 +40,23 @@ public class ToolSyncWriter {
     private final ToolItemRepository items;
     private final OperatorContext operatorContext;
     private final OperLogWriter operLogWriter;
+    private final AgentDictCacheInvalidator dictCache;
 
     /**
      * @param sources         回写 last_sync_* 同步列
      * @param items           upsert 工具项
      * @param operatorContext 操作人
      * @param operLogWriter   操作日志（不含鉴权头与密文）
+     * @param dictCache       运行期装配字典缓存失效（提交后执行）
      */
     public ToolSyncWriter(ToolSourceRepository sources, ToolItemRepository items,
-                          OperatorContext operatorContext, OperLogWriter operLogWriter) {
+                          OperatorContext operatorContext, OperLogWriter operLogWriter,
+                          AgentDictCacheInvalidator dictCache) {
         this.sources = sources;
         this.items = items;
         this.operatorContext = operatorContext;
         this.operLogWriter = operLogWriter;
+        this.dictCache = dictCache;
     }
 
     /**
@@ -87,6 +94,9 @@ public class ToolSyncWriter {
                 + " updated=" + merged.getUpdated().size()
                 + " retired=" + merged.getRetired().size();
         sources.recordSync(source.getId(), LocalDateTime.now(), 1, SyncText.clip(message, 255), operatorId);
+        // 同步会改 schema / 新增 / 下架工具项：把「新增 + 更新 + 下架」涉及的 id 一并失效。
+        // 下架项已逻辑删除，查不到，必须用合并结果里的 id 补上
+        evictSyncedItems(source.getId(), merged);
         operLogWriter.write("tool", "sync", "tool_source", String.valueOf(source.getId()),
                 "同步工具源 " + source.getName() + " " + message);
         return SyncResp.ok(elapsed(started), merged.getCreated().size(), merged.getUpdated().size(),
@@ -110,6 +120,26 @@ public class ToolSyncWriter {
         operLogWriter.write("tool", "sync", "tool_source", String.valueOf(source.getId()),
                 "同步工具源失败 " + source.getName());
         return SyncResp.fail(elapsed(started), message);
+    }
+
+    /**
+     * 同步后失效本源的字典键。
+     * <p>
+     * 「当前未删除」的项覆盖新增与更新；下架项已逻辑删除查不到，用合并结果里的 id 补齐。
+     * 新增项本来就没有缓存条目，一并删掉也无副作用（幂等）。
+     *
+     * @param sourceId 本方工具源
+     * @param merged   本次对账结果（含下架行）
+     */
+    private void evictSyncedItems(Long sourceId, ToolSyncMerger.Result merged) {
+        Set<Long> ids = new LinkedHashSet<>();
+        for (ToolItem live : items.listBySourceId(sourceId)) {
+            ids.add(live.getId());
+        }
+        for (ToolItem retired : merged.getRetired()) {
+            ids.add(retired.getId());
+        }
+        dictCache.evictToolItems(ids);
     }
 
     /** 毫秒耗时：与原实现同一算法，保证返回给前端的 elapsed 口径不变。 */

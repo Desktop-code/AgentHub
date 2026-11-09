@@ -1,6 +1,7 @@
 package com.agenthub.runtime.application;
 
 import com.agenthub.runtime.domain.service.BuiltinSchemaSource;
+import com.agenthub.spi.cache.AgentDictCacheInvalidator;
 import com.agenthub.tool.domain.model.ToolItem;
 import com.agenthub.tool.domain.model.ToolSourceType;
 import com.agenthub.tool.domain.repository.ToolItemRepository;
@@ -10,6 +11,9 @@ import org.slf4j.LoggerFactory;
 import org.springframework.boot.ApplicationArguments;
 import org.springframework.boot.ApplicationRunner;
 import org.springframework.stereotype.Component;
+
+import java.util.ArrayList;
+import java.util.List;
 
 /**
  * 启动时把 BUILTIN 空白的 input_schema_json 写成 Java schema。所属域：runtime。
@@ -24,17 +28,20 @@ public class BuiltinSchemaBackfill implements ApplicationRunner {
     private final ToolSourceRepository sources;
     private final ToolItemRepository items;
     private final BuiltinSchemaSource schemas;
+    private final AgentDictCacheInvalidator dictCache;
 
     /**
-     * @param sources 只取 BUILTIN 源
-     * @param items   按源列工具项并条件更新
-     * @param schemas Java 注解生成的 schema
+     * @param sources   只取 BUILTIN 源
+     * @param items     按源列工具项并条件更新
+     * @param schemas   Java 注解生成的 schema
+     * @param dictCache 回填后失效运行期字典（启动期无事务，立即执行）
      */
     public BuiltinSchemaBackfill(ToolSourceRepository sources, ToolItemRepository items,
-                                 BuiltinSchemaSource schemas) {
+                                 BuiltinSchemaSource schemas, AgentDictCacheInvalidator dictCache) {
         this.sources = sources;
         this.items = items;
         this.schemas = schemas;
+        this.dictCache = dictCache;
     }
 
     /**
@@ -57,6 +64,7 @@ public class BuiltinSchemaBackfill implements ApplicationRunner {
      */
     private int fillBlank() {
         int filled = 0;
+        List<Long> written = new ArrayList<>();
         for (Long sourceId : sources.listIdsByType(ToolSourceType.BUILTIN.name())) {
             for (ToolItem item : items.listBySourceId(sourceId)) {
                 if (item.getInputSchemaJson() != null && !item.getInputSchemaJson().isBlank()) {
@@ -68,9 +76,12 @@ public class BuiltinSchemaBackfill implements ApplicationRunner {
                 }
                 if (items.fillInputSchemaIfBlank(item.getId(), schema)) {
                     filled++;
+                    written.add(item.getId());
                 }
             }
         }
+        // 回填改的是 schema 正文：Redis 里可能有上一次进程留下的旧值，启动完成后一并失效
+        dictCache.evictToolItems(written);
         return filled;
     }
 }

@@ -6,6 +6,7 @@ import com.agenthub.common.api.PageResult;
 import com.agenthub.common.error.BizException;
 import com.agenthub.common.error.ErrorCode;
 import com.agenthub.common.web.OperatorContext;
+import com.agenthub.spi.cache.AgentDictCacheInvalidator;
 import com.agenthub.tool.api.dto.ItemBatchStatusResp;
 import com.agenthub.tool.api.dto.ItemCreateReq;
 import com.agenthub.tool.api.dto.ItemPageReq;
@@ -40,6 +41,7 @@ public class ToolItemAppService {
     private final ToolReferencePolicy references;
     private final OperatorContext operatorContext;
     private final OperLogWriter operLogWriter;
+    private final AgentDictCacheInvalidator dictCache;
 
     /**
      * @param items           工具项
@@ -48,15 +50,18 @@ public class ToolItemAppService {
      * @param references      同名检查
      * @param operatorContext 操作人
      * @param operLogWriter   操作日志
+     * @param dictCache       运行期装配字典缓存失效（提交后执行）
      */
     public ToolItemAppService(ToolItemRepository items, ToolSourceRepository sources, ToolLookup lookup,
-                              ToolReferencePolicy references, OperatorContext operatorContext, OperLogWriter operLogWriter) {
+                              ToolReferencePolicy references, OperatorContext operatorContext,
+                              OperLogWriter operLogWriter, AgentDictCacheInvalidator dictCache) {
         this.items = items;
         this.sources = sources;
         this.lookup = lookup;
         this.references = references;
         this.operatorContext = operatorContext;
         this.operLogWriter = operLogWriter;
+        this.dictCache = dictCache;
     }
 
     /**
@@ -125,6 +130,8 @@ public class ToolItemAppService {
         existing.setDescription(ToolChecks.optionalText(req.getDescription(), 1000, "说明"));
         existing.setInputSchemaJson(ToolChecks.schemaJson(req.getInputSchemaJson()));
         items.updateMetadata(existing, operatorContext.requireUserId());
+        // 装配链按 id 缓存了工具项：提交后失效，下一轮运行立即读到新 schema / 说明
+        dictCache.evictToolItem(id);
         operLogWriter.write("tool", "update", "tool_item", String.valueOf(id), "更新工具项 " + existing.getName());
         return get(id);
     }
@@ -139,6 +146,8 @@ public class ToolItemAppService {
         ToolItem existing = lookup.requireItem(id);
         int status = ToolChecks.exactStatus(req.getStatus());
         items.updateStatus(id, status, operatorContext.requireUserId());
+        // 启停直接决定该工具能否进 schema，必须让缓存失效
+        dictCache.evictToolItem(id);
         String action = status == 1 ? "enable" : "disable";
         operLogWriter.write("tool", action, "tool_item", String.valueOf(id), "更新工具项状态 " + existing.getName());
         return get(id);
@@ -163,6 +172,8 @@ public class ToolItemAppService {
         int status = ToolChecks.exactStatus(req.getStatus());
         Long operatorId = operatorContext.requireUserId();
         int updated = items.updateStatusBySourceId(sourceId, status, operatorId);
+        // 批量启停改的是整源工具项：先取当前 id，再整批失效（提交后执行）
+        dictCache.evictToolItems(items.listBySourceId(sourceId).stream().map(ToolItem::getId).toList());
         String action = status == 1 ? "enableAll" : "disableAll";
         operLogWriter.write("tool", action, "tool_source", String.valueOf(sourceId),
                 "批量更新工具源 " + source.getName() + " 下工具项状态为 " + status + "，共 " + updated + " 条");
@@ -176,6 +187,8 @@ public class ToolItemAppService {
     public void remove(Long id) {
         ToolItem existing = lookup.requireItem(id);
         items.logicalDelete(id, operatorContext.requireUserId());
+        // 删除后该 id 不会再被绑定读到；失效是为了避免「刚删还在缓存里」的负缓存期假象
+        dictCache.evictToolItem(id);
         operLogWriter.write("tool", "remove", "tool_item", String.valueOf(id), "删除工具项 " + existing.getName());
     }
 
