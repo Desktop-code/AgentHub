@@ -294,6 +294,27 @@ public class ReActTrialExecutor {
     }
 
     /**
+     * 多子终答汇总（流式版）：同一轮父模型调用，但正文按增量推给页面。
+     *
+     * <p>为什么单独开一条：汇总往往要两三秒且是整轮最后一步，用户等的是「看着字出来」；
+     * 一次性推全文在 MA 三栏里表现为「最后整块闪现」。这里只改投递方式，
+     * 提示词、模型、限制、计量与 LLM 步骤落库与 {@link #summarize} 完全同源。
+     *
+     * @param scope    父 Agent、ROUTER/CHAT 模型与会话
+     * @param prompt   汇总系统提示（已含平台前缀）
+     * @param userText 用户原问 + 各子终答拼接
+     * @param limits   父限制
+     * @param progress 增量出口；非空时正文边收边推，调用方不得再整段补推
+     * @return 汇总正文 + 是否已投递（true 表示正文已经推给 progress）
+     * @throws TrialFailure 超时或调用失败
+     */
+    public StreamedAnswer summarizeStreamed(MeterScope scope, String prompt, String userText,
+                                            EffectiveLimits limits, TrialProgress progress) {
+        return oneShotStreamed(scope, "trial-router-summarize", prompt, userText, limits,
+                "父模型汇总超时", "终答汇总失败", progress);
+    }
+
+    /**
      * 计划执行模式的规划调用：不挂工具，单轮产出有序步骤 JSON。
      * 与 {@link #judge} 同一条无工具路径，只是名字与失败文案不同，便于链路上一眼区分。
      *
@@ -314,9 +335,11 @@ public class ReActTrialExecutor {
     }
 
     /**
-     * 无工具、单轮 ReAct 调用；判路由、规划与 SUMMARIZE 共用。
+     * 无工具、单轮 ReAct 调用；判路由、规划与没有增量出口时的汇总共用。
      * 思考块只在引擎真的给出时经 progress 推出（规划阶段也要有可折叠思考），
      * 拿不到就不推，不编造。
+     *
+     * <p>要连正文一起流式推给页面时用 {@link #oneShotStreamed}，装配口径与本方法一致。
      *
      * @param progress 可空的增量出口；用于把该次单轮调用的思考交给时间线
      */
@@ -356,6 +379,92 @@ public class ReActTrialExecutor {
                 throw new TrialFailure("撞限：timeout（" + timeoutLabel + "）", LimitHitReasons.TIMEOUT, ex);
             }
             throw new TrialFailure(ModelCallErrors.describe(ex), LimitHitReasons.ERROR, ex);
+        }
+    }
+
+    /**
+     * 单轮流式调用：与 {@link #oneShot} 同一套装配，只把投递换成「边收边推」。
+     *
+     * <p>复用 {@link TrialEventCollector}：正文增量、思考增量都走它已有的口径
+     * （ThinkingBlock 才算思考、正文只进助手回答），这里不再写第二套解析。
+     * collector 在收尾时若发现流里没推过正文，会自己补推一次整段，
+     * 因此返回的 {@code delivered} 按「progress 非空且拿到了正文」判定：
+     * 调用方据此决定是否还需要自己补推。
+     *
+     * @param scope      Agent、模型与会话
+     * @param agentName  引擎侧 Agent 名，便于日志排查
+     * @param prompt     系统提示（已含平台前缀）
+     * @param userText   用户侧输入
+     * @param limits     生效限制；空则用平台默认
+     * @param timeoutLabel 超时文案前缀
+     * @param failLabel  失败日志标签
+     * @param progress   增量出口；可空，空则退化成整段返回
+     * @return 正文 + 是否已投递给 progress
+     * @throws TrialFailure 超时或调用失败
+     */
+    private StreamedAnswer oneShotStreamed(MeterScope scope, String agentName, String prompt, String userText,
+                                          EffectiveLimits limits, String timeoutLabel, String failLabel,
+                                          TrialProgress progress) {
+        EffectiveLimits effective = limits != null ? limits : limitResolver.resolve(null);
+        RunBudget budget = new RunBudget(effective);
+        Model model = new LimitingModel(models.open(scope), budget);
+        Duration timeout = Duration.ofMillis(Math.min(
+                Math.max(effective.llmTimeoutMs(), 1000L),
+                Math.max(effective.timeoutMs(), 1000L)));
+        ExecutionConfig execution = ExecutionConfig.builder().timeout(timeout).maxAttempts(1).build();
+        try (ReActAgent agent = ReActAgent.builder()
+                .name(agentName)
+                .sysPrompt(prompts.require(prompt))
+                .model(model)
+                .toolkit(new Toolkit())
+                .maxIters(1)
+                .modelExecutionConfig(execution)
+                .build()) {
+            TrialEventCollector collector = new TrialEventCollector(progress, budget);
+            List<AgentEvent> events = agent
+                    .streamEvents(List.of(new UserMessage(userText)),
+                            RuntimeContext.builder().sessionId("trial-route").build())
+                    .doOnNext(collector::accept)
+                    .collectList()
+                    .block(timeout);
+            // 超时由预算统一判定：与 execute 一致，避免只看 block 结果而放过内部已超时
+            budget.assertNotTimedOut();
+            if (events == null || events.isEmpty()) {
+                return StreamedAnswer.empty();
+            }
+            // 收尾会把「流里没推过的正文 / 思考 / 工具」补齐，因此这里拿到的就是最终正文
+            TrialTurn turn = collector.finish();
+            String text = turn.getAssistantText() == null ? "" : turn.getAssistantText();
+            return new StreamedAnswer(text, progress != null && !text.isBlank());
+        } catch (TrialFailure ex) {
+            logIfCaused(failLabel + "（已映射）", ex);
+            throw ex;
+        } catch (RuntimeException ex) {
+            // 与 oneShot 同口径：带栈记录真实的出站失败点
+            log.warn("{} type={} root={} cause={}", failLabel, ex.getClass().getSimpleName(),
+                    rootType(ex), CauseDigest.of(ex), ex);
+            if (isTimeout(ex) || System.nanoTime() >= budget.deadlineNanos()) {
+                throw new TrialFailure("撞限：timeout（" + timeoutLabel + "）", LimitHitReasons.TIMEOUT, ex);
+            }
+            throw new TrialFailure(ModelCallErrors.describe(ex), LimitHitReasons.ERROR, ex);
+        }
+    }
+
+    /**
+     * 单轮流式调用的结果。
+     *
+     * @param text      正文；空串表示模型没给出可用内容
+     * @param delivered 正文是否已经推给 progress（true 时调用方禁止再整段补推，否则页面重影）
+     */
+    public record StreamedAnswer(String text, boolean delivered) {
+
+        /**
+         * 流里一条事件都没有：既没有正文也没有可投递内容。
+         *
+         * @return 空结果
+         */
+        public static StreamedAnswer empty() {
+            return new StreamedAnswer("", false);
         }
     }
 

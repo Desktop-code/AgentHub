@@ -58,6 +58,10 @@
 依据 `docs/架构定稿-模型防腐层与统一SSE.md` §4。
 
 - 出站写出类：`api/sse/UnifiedSseWriter`（done 兜底与新旧映射）、`api/sse/ServletSseFrameSink`（Servlet 写出与断连判定）；现网入口仍是 `api/TrialChunkWriter`，由它转调写入器。
+- **正文合批**：`api/sse/SseTextBatcher` + `api/sse/SseBatchOptions`。`assistant` / `reasoning` 连续同类型增量按
+  「时间窗（默认 50ms）+ 单帧字节上限（默认 2048）」合并成一帧，帧数降下来但**事件名、字段、文本顺序不变**；
+  类型切换、任何控制帧（phase / route / tool / plan / step / file / vision / error / done）写出前先 flush，
+  收尾 / 超时 / 取消路径也强制 flush，不丢尾字。参数见 `agenthub.runtime.sse.batch-window-ms` / `batch-max-bytes`。
 - 映射表：`api/sse/UnifiedSseMapping`。`assistant`↔`message.delta`、`reasoning`↔`thinking.delta` 各发一帧兼容；
   `done` 与 `error` 新旧同名，**合并为单帧**（`done` 载荷是字段并集：`status`/`sessionId`/`errorSummary` + `finishReason`/`usage`）。
 - done 兜底只在出站层用 `AtomicBoolean` CAS 一次，覆盖五条路径：上游已 done、流截断、超时、上游错误、客户端取消。

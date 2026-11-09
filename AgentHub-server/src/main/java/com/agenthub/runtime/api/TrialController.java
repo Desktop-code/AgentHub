@@ -18,12 +18,14 @@ import com.agenthub.runtime.api.dto.SessionTitleReq;
 import com.agenthub.runtime.application.TrialRunAppService;
 import com.agenthub.runtime.application.TrialSessionAppService;
 import com.agenthub.runtime.api.sse.ServletSseFrameSink;
+import com.agenthub.runtime.api.sse.SseBatchOptions;
 import com.agenthub.runtime.domain.model.ChildPlanPendingView;
 import com.agenthub.runtime.domain.model.PlanStep;
 import com.agenthub.runtime.domain.model.PlanView;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import jakarta.servlet.http.HttpServletResponse;
 import jakarta.validation.Valid;
+import org.springframework.beans.factory.annotation.Value;
 import org.springframework.http.MediaType;
 import org.springframework.web.bind.annotation.DeleteMapping;
 import org.springframework.web.bind.annotation.GetMapping;
@@ -49,16 +51,23 @@ public class TrialController {
     private final TrialSessionAppService sessions;
     private final TrialRunAppService runs;
     private final ObjectMapper json;
+    /** SSE 正文合批参数。从 agenthub.runtime.sse.* 读，缺省 50ms / 2KB */
+    private final SseBatchOptions sseBatch;
 
     /**
-     * @param sessions 会话查询、改名、清空和删除
-     * @param runs     发送一轮，含 SSE
-     * @param json     SSE data 收成一行
+     * @param sessions        会话查询、改名、清空和删除
+     * @param runs            发送一轮，含 SSE
+     * @param json            SSE data 收成一行
+     * @param sseBatchWindowMs 正文合批时间窗（毫秒）；配置缺失或非法时由 {@link SseBatchOptions} 兜默认
+     * @param sseBatchMaxBytes 单帧正文上限（UTF-8 字节）；同上
      */
-    public TrialController(TrialSessionAppService sessions, TrialRunAppService runs, ObjectMapper json) {
+    public TrialController(TrialSessionAppService sessions, TrialRunAppService runs, ObjectMapper json,
+                           @Value("${agenthub.runtime.sse.batch-window-ms:50}") long sseBatchWindowMs,
+                           @Value("${agenthub.runtime.sse.batch-max-bytes:2048}") int sseBatchMaxBytes) {
         this.sessions = sessions;
         this.runs = runs;
         this.json = json;
+        this.sseBatch = new SseBatchOptions(sseBatchWindowMs, sseBatchMaxBytes);
     }
 
     /**
@@ -181,7 +190,7 @@ public class TrialController {
             throws IOException {
         // 统一设头：漏掉 no-transform 会让中间层缓冲，前端收不到增量
         ServletSseFrameSink.prepare(response);
-        TrialChunkWriter writer = new TrialChunkWriter(response, json);
+        TrialChunkWriter writer = new TrialChunkWriter(response, json, sseBatch);
         writer.bindSession(id);
         try {
             runs.stream(id, req.getContent().trim(), req.getImages(), writer, writer);

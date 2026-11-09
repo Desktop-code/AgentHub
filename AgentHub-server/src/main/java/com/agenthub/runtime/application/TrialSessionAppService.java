@@ -25,6 +25,7 @@ import com.agenthub.runtime.domain.model.SessionQuery;
 import com.agenthub.runtime.domain.model.TitleSource;
 import com.agenthub.runtime.domain.repository.RunEventRepository;
 import com.agenthub.runtime.domain.repository.RunSessionRepository;
+import com.agenthub.runtime.domain.service.HistoryPageSize;
 import com.agenthub.runtime.domain.service.TrialTexts;
 import com.agenthub.runtime.infra.agentscope.ReActTrialExecutor;
 import com.agenthub.runtime.infra.agentscope.TrialProperties;
@@ -32,7 +33,11 @@ import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
 import java.time.LocalDateTime;
+import java.util.HashMap;
+import java.util.LinkedHashSet;
 import java.util.List;
+import java.util.Map;
+import java.util.Set;
 
 /**
  * 试跑会话的创建、查询、取消和删除。所属域：runtime。
@@ -157,7 +162,11 @@ public class TrialSessionAppService {
     /**
      * 只返回当前用户在指定 Agent 或方案下的会话。管理员也不放行别人的试跑。
      *
-     * @param req 必须带 agentId 或 maId（二选一）
+     * <p>真分页：页大小只受全站上限（100）约束，调用方要多少给多少；
+     * {@code history-limit} 仅为「未传 size」时的默认页大小。返回体的 total 是全量 COUNT，
+     * 用于前端判断还有没有下一页。
+     *
+     * @param req 必须带 agentId 或 maId（二选一），以及 current / size
      * @return 按开始时间倒序的会话页
      * @throws BizException 两者都没给，或同时给了
      */
@@ -181,9 +190,11 @@ public class TrialSessionAppService {
         query.setUserId(userId);
         PageResult<RunSession> page = sessions.page(query);
         // 整页只按需读方案名：虚拟根行需要，绑根行不需要
-        java.util.Map<Long, MaDef> maCache = new java.util.HashMap<>();
+        Map<Long, MaDef> maCache = new HashMap<>();
+        // Agent 名一次性批量预取：逐行 findById 在 100 条页上就是 100 次主键查询
+        Map<Long, String> agentNames = prefetchAgentNames(page.getRecords());
         return PageResult.of(page.getTotal(), page.getCurrent(), page.getSize(),
-                page.getRecords().stream().map(item -> toResp(item, maCache)).toList());
+                page.getRecords().stream().map(item -> toResp(item, maCache, agentNames)).toList());
     }
 
     /**
@@ -374,24 +385,59 @@ public class TrialSessionAppService {
     }
 
     private SessionResp toResp(RunSession session) {
-        return toResp(session, new java.util.HashMap<>());
+        return toResp(session, new HashMap<>(), new HashMap<>());
+    }
+
+    /**
+     * 一次批量取回本页用到的 Agent 名。
+     *
+     * <p>为什么必须批量：页大小已从 20 放开到最多 100，逐行 {@code findById} 就是最多 100 次
+     * 主键查询；这里按去重后的 id 集合取一次，缺失（已删 / 不存在）的 id 显式补空串，
+     * 让 {@link #toResp} 不再回落到逐行查询。
+     *
+     * @param rows 当前页会话
+     * @return agentId → 名称（值不为 null）
+     */
+    private Map<Long, String> prefetchAgentNames(List<RunSession> rows) {
+        Set<Long> ids = new LinkedHashSet<>();
+        for (RunSession row : rows) {
+            if (row.getAgentId() != null) {
+                ids.add(row.getAgentId());
+            }
+        }
+        Map<Long, String> names = new HashMap<>();
+        if (ids.isEmpty()) {
+            return names;
+        }
+        for (AgentDef def : agents.findByIds(ids)) {
+            names.put(def.getId(), def.getName() == null ? "" : def.getName());
+        }
+        // 软删 / 不存在的 Agent 也要占位，否则 toResp 会为这些行再查一次
+        for (Long id : ids) {
+            names.putIfAbsent(id, "");
+        }
+        return names;
     }
 
     /**
      * 会话 → 接口对象。虚拟根没有 Agent：展示名退回方案名，避免左栏出现空白标题。
      *
-     * @param session 领域会话
-     * @param maCache 本次请求内的方案缓存；避免整页 N 次主键查询
+     * @param session    领域会话
+     * @param maCache    本次请求内的方案缓存；避免整页 N 次主键查询
+     * @param agentNames 本次请求内批量预取的 Agent 名；命中即用，未命中才回落单查
      * @return 接口对象
      */
-    private SessionResp toResp(RunSession session, java.util.Map<Long, MaDef> maCache) {
+    private SessionResp toResp(RunSession session, Map<Long, MaDef> maCache, Map<Long, String> agentNames) {
         SessionResp resp = new SessionResp();
         resp.setId(session.getId());
         resp.setAgentId(session.getAgentId());
         resp.setMaId(session.getMaDefId());
         String agentName = "";
         if (session.getAgentId() != null) {
-            agentName = agents.findById(session.getAgentId()).map(AgentDef::getName).orElse("");
+            String cached = agentNames.get(session.getAgentId());
+            // 页内预取命中；只有单条详情（get）没走预取时才回落到主键查询
+            agentName = cached != null ? cached
+                    : agents.findById(session.getAgentId()).map(AgentDef::getName).orElse("");
         }
         MaDef ma = session.getMaDefId() == null ? null
                 : maCache.computeIfAbsent(session.getMaDefId(), key -> mas.findById(key).orElse(null));
@@ -434,14 +480,16 @@ public class TrialSessionAppService {
     }
 
     /**
-     * 条数不超过 history-limit。调用方传更大的 size 也裁回配置值，默认 20。
+     * 解析页大小：语义是「页大小」，不是「总量上限」。
+     *
+     * <p>旧实现把任意请求都裁到 {@code history-limit}（默认 20），导致左栏永远只有 20 条；
+     * 现在交给 {@link HistoryPageSize}：传了 size 就按 size（仍受全站 100 约束），
+     * 没传才用配置的默认值。想改「一次看多少」应改前端页大小，而不是在这里缩总量。
      *
      * @param requested 请求的每页条数
-     * @return 实际查询条数
+     * @return 实际查询条数，落在 [1, 100]
      */
     private long historySize(long requested) {
-        int cap = properties.getHistoryLimit() > 0 ? properties.getHistoryLimit() : 20;
-        long size = requested > 0 ? requested : cap;
-        return Math.min(size, cap);
+        return HistoryPageSize.resolve(requested, properties.getHistoryLimit());
     }
 }

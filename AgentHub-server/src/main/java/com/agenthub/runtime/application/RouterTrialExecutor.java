@@ -320,7 +320,8 @@ public class RouterTrialExecutor {
                             : "多意图路由×" + intents.size(),
                     routeFields);
 
-            // 多子或 SUMMARIZE / VOTE：子侧仍推 tool/reasoning；屏蔽 assistant，等齐后一次出终答
+            // 多子或 SUMMARIZE / VOTE：子侧仍推 tool/reasoning；屏蔽子 assistant，
+            // 等齐后由汇总那一步统一出正文（SUMMARIZE 已是流式推送，见 AnswerAggregator）
             boolean muteChildAssistant = intents.size() > 1
                     || runtime.answerModeEnum() == RouterAnswerMode.SUMMARIZE
                     // VOTE 也要等投票结论出来才能推终答，不能让子正文先流出去

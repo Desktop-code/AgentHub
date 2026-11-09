@@ -116,6 +116,14 @@ agenthub:
     # 单次 run 允许预建的 node_run 条数。
     max-node-runs-per-run: 500
   runtime:
+    # 试跑 SSE 出站。正文增量（assistant / reasoning）按「时间窗 + 单帧字节」双上限合批，
+    # 只改帧数，不改事件名 / 字段 / 顺序；控制帧（phase / route / tool / plan / step / done…）
+    # 写出前会先 flush，收尾与取消路径也强制 flush，不丢尾字。
+    sse:
+      # 时间窗（毫秒）。默认 50，有效范围 1~1000；写 0 或负数回落默认
+      batch-window-ms: ${AGENTHUB_SSE_BATCH_WINDOW_MS:50}
+      # 单帧正文上限（UTF-8 字节）。默认 2048（中文约 680 字），有效范围 1~65536
+      batch-max-bytes: ${AGENTHUB_SSE_BATCH_MAX_BYTES:2048}
     voice:
       # 单段录音体积上限（字节）。默认 10MB，约等于 60 秒 webm/opus；
       # 与 spring.servlet.multipart.max-file-size（12MB）配合：先由业务闸门给人话文案，再由容器兜底。
@@ -154,8 +162,9 @@ agenthub:
     trial:
       # content_text 单条上限（字符）。超出截断并注明已截断
       content-limit-chars: 32768
-      # 历史会话条数。接口再按当前用户 + agentId 裁剪，按 started_at 倒序
-      history-limit: 20
+      # 历史会话的「默认页大小」：仅当请求没传 size 时生效，不再是任意请求的硬顶。
+      # 真分页由前端 current++ 触底加载；单页上限仍是全站 100（PageQuery.MAX_SIZE）。
+      history-limit: 50
       # 首轮对话结束后是否异步生成会话标题（≤10 汉字）。关掉则左栏只显示首问预览；
       # 生成任务跑在 common 的 lightTaskExecutor 上，失败只记日志，不影响试跑。
       auto-title-enabled: ${AGENTHUB_AUTO_TITLE_ENABLED:true}

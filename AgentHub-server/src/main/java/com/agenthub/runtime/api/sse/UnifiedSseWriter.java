@@ -13,6 +13,7 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import java.util.LinkedHashMap;
 import java.util.Map;
 import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.function.LongSupplier;
 
 /**
  * SSE 出站统一事件写入器。所属域：runtime（出站层）。
@@ -27,6 +28,11 @@ import java.util.concurrent.atomic.AtomicBoolean;
  *       这是 Adapter 层做不到的部分，Adapter 取消后已无接收方，只有出站层才知道连接是否还活着。</li>
  * </ol>
  * 并发：Router 多子 Agent 并行时多线程会同时推增量，故所有写出与状态判定都在本对象的锁内完成。
+ *
+ * <p>正文合批（性能刀6）：assistant / reasoning 这类纯文本增量先进 {@link SseTextBatcher}，
+ * 按「时间窗 + 单帧字节上限」合并成一帧再写，降低帧频率但<b>不改事件名、字段与文本顺序</b>。
+ * 控制帧（phase / route / tool / plan / step / file / vision / done / error）写出前一律先 flush，
+ * 收尾与取消路径也强制 flush，因此尾字不会丢、卡片不会插进半句话。
  */
 public final class UnifiedSseWriter {
 
@@ -51,12 +57,41 @@ public final class UnifiedSseWriter {
     private boolean errorEmitted;
 
     /**
+     * 正文增量合批器。只收 assistant / reasoning 这类纯文本增量；
+     * 所有控制帧在写出前都会先 flush 它，因此帧的相对顺序与改造前一致。
+     */
+    private final SseTextBatcher textBatcher;
+
+    /**
      * @param sink 帧写出目标
      * @param json 序列化器，复用容器配置
      */
     public UnifiedSseWriter(SseFrameSink sink, ObjectMapper json) {
+        this(sink, json, SseBatchOptions.defaults());
+    }
+
+    /**
+     * @param sink  帧写出目标
+     * @param json  序列化器，复用容器配置
+     * @param batch 正文合批参数（时间窗 + 单帧字节上限）
+     */
+    public UnifiedSseWriter(SseFrameSink sink, ObjectMapper json, SseBatchOptions batch) {
+        this(sink, json, batch, System::nanoTime);
+    }
+
+    /**
+     * 全参构造，供单测注入可控时钟。生产一律走上面两个构造。
+     *
+     * @param sink      帧写出目标
+     * @param json      序列化器
+     * @param batch     合批参数
+     * @param nanoClock 纳秒时钟
+     */
+    UnifiedSseWriter(SseFrameSink sink, ObjectMapper json, SseBatchOptions batch, LongSupplier nanoClock) {
         this.sink = sink;
         this.json = json;
+        // 合批写出走本对象的 write，队列里的文本先拼成一帧；两个帧（新名 + 旧名）在此一次性发出
+        this.textBatcher = new SseTextBatcher(batch, nanoClock, this::writeBatchedText);
     }
 
     /**
@@ -91,6 +126,12 @@ public final class UnifiedSseWriter {
      * 输出一条统一事件。旧前端可读的事件会额外发一条旧名帧，保证兼容期内前端行为不变。
      * 收到 DONE 时按「路径 1」处理：占位结束帧并发出，后续所有兜底都会被 CAS 挡掉。
      *
+     * <p>非正文事件写出前一定先 flush 合批器：控制帧不允许越过还没发出去的正文，
+     * 否则前端会把工具卡/计划卡插到半句话中间。
+     *
+     * <p>正文合批只作用于 {@link #messageDelta} / {@link #thinkingDelta}（现网试跑的真实热路径）；
+     * 经本方法直接传进来的正文事件仍立即写出，不额外缓冲，语义与改造前一致。
+     *
      * @param event 统一事件
      * @return true 表示至少有一条帧写出成功；false 表示连接已不可用或无需写出
      */
@@ -106,6 +147,8 @@ public final class UnifiedSseWriter {
         if (doneSent.get()) {
             return false;
         }
+        // 先把攒着的正文落地，再写这一帧（正文 / 控制帧的相对顺序与逐 chunk 时一致）
+        textBatcher.flush();
         if (event.getUsage() != null) {
             usage = event.getUsage();
         }
@@ -116,6 +159,16 @@ public final class UnifiedSseWriter {
             // 这样旧前端不退化，新前端也能从 done 拿到完整语义。
             return writeLegacyError(event.getContent());
         }
+        return writeEventFrames(event);
+    }
+
+    /**
+     * 写一条业务事件对应的新旧两帧。
+     *
+     * @param event 统一事件（非 ERROR / 非 DONE）
+     * @return 是否至少有一帧写出成功
+     */
+    private boolean writeEventFrames(UnifiedStreamEvent event) {
         boolean ok = writeUnified(event);
         // 旧名兼容帧：只对旧前端认识的类型补发；新旧同名时上面已合并，不能再写第二遍
         UnifiedSseMapping.Mapping mapping = UnifiedSseMapping.of(event.getType());
@@ -124,6 +177,25 @@ public final class UnifiedSseWriter {
             ok |= writeLegacy(mapping, event);
         }
         return ok;
+    }
+
+    /**
+     * 合批器回调：把攒好的一段正文写成「新名 + 旧名」两帧。
+     *
+     * <p>由 {@link SseTextBatcher#flush()} 在写入器的锁内调用，因此不会被控制帧穿插。
+     * 合并只发生在帧的粒度上，文本内容与顺序与逐 chunk 写出完全一致。
+     *
+     * @param kind 正文类型（助手终答 / 思考）
+     * @param text 本帧合并后的完整文本
+     */
+    private void writeBatchedText(SseTextBatcher.Kind kind, String text) {
+        if (text == null || text.isEmpty() || doneSent.get()) {
+            return;
+        }
+        UnifiedStreamEvent event = kind == SseTextBatcher.Kind.REASONING
+                ? UnifiedStreamEvent.thinkingDelta(text)
+                : UnifiedStreamEvent.messageDelta(text);
+        writeEventFrames(event);
     }
 
     /**
@@ -185,6 +257,8 @@ public final class UnifiedSseWriter {
      */
     public synchronized boolean finishError(String summary) {
         String text = summary == null || summary.isBlank() ? "试跑失败" : summary;
+        // 错误提示前先把攒着的正文发出去：否则 error 会插在半句话前面，用户以为回答被截断
+        textBatcher.flush();
         // 错误提示只发一次：避免 error 事件与兜底路径各发一遍，前端弹两次
         if (!errorEmitted && !doneSent.get()) {
             emitErrorFrame(text);
@@ -227,6 +301,13 @@ public final class UnifiedSseWriter {
      */
     private boolean emitDone(UnifiedFinishReason reason, UnifiedUsage usageOverride, String summary,
                              boolean planPending) {
+        // 已收尾：不再 flush、不再写帧（尾字在第一次收尾时已经落地过）
+        if (doneSent.get()) {
+            return false;
+        }
+        // 收尾前必须把缓冲里的正文全部落地，否则尾字会随连接一起丢。
+        // 注意顺序：必须在 CAS 之前——CAS 置位后 doneSent=true，合批写出会把自己否决掉。
+        textBatcher.flush();
         // CAS 是唯一闸门：五条路径无论谁先到，只有第一个能继续写帧
         if (!doneSent.compareAndSet(false, true)) {
             return false;
@@ -355,24 +436,42 @@ public final class UnifiedSseWriter {
     }
 
     /**
-     * 便捷构造：把一条助手正文增量包装成统一事件后写出。
+     * 便捷构造：把一条助手正文增量交给合批器。
      * 供仍按旧回调工作的调用方（TrialProgress 实现）直接复用，避免各处重复 builder。
      *
-     * @param text 正文片段
-     * @return true 表示写出成功
+     * <p>不再「一个 chunk 一帧」：同一类型连续增量会在时间窗 / 字节上限内合成一帧，
+     * 控制帧与收尾路径都会先 flush，因此调用方不需要关心合批细节。
+     *
+     * @param text 正文片段；空串直接忽略
+     * @return true 表示已收下（可能仍在缓冲里）；false 表示本轮已收尾，帧会被丢弃
      */
-    public boolean messageDelta(String text) {
-        return emit(UnifiedStreamEvent.messageDelta(text == null ? "" : text));
+    public synchronized boolean messageDelta(String text) {
+        return queueText(SseTextBatcher.Kind.ASSISTANT, text);
     }
 
     /**
-     * 便捷构造：思考增量。
+     * 便捷构造：思考增量。语义同 {@link #messageDelta}，只是类型为 reasoning。
      *
-     * @param text 思考片段
-     * @return true 表示写出成功
+     * @param text 思考片段；空串直接忽略
+     * @return true 表示已收下（可能仍在缓冲里）
      */
-    public boolean thinkingDelta(String text) {
-        return emit(UnifiedStreamEvent.thinkingDelta(text == null ? "" : text));
+    public synchronized boolean thinkingDelta(String text) {
+        return queueText(SseTextBatcher.Kind.REASONING, text);
+    }
+
+    /**
+     * 把一段正文交进合批缓冲。
+     *
+     * @param kind 正文类型
+     * @param text 片段文本，空串忽略
+     * @return true 表示已收下；false 表示已收尾或片段为空
+     */
+    private boolean queueText(SseTextBatcher.Kind kind, String text) {
+        if (text == null || text.isEmpty() || doneSent.get()) {
+            return false;
+        }
+        textBatcher.accept(kind, text);
+        return true;
     }
 
     /**
@@ -386,6 +485,8 @@ public final class UnifiedSseWriter {
         if (doneSent.get()) {
             return false;
         }
+        // 阶段切换是控制帧：先让正文落地，状态条与正文的先后关系不会错
+        textBatcher.flush();
         return write("phase", phase);
     }
 
@@ -399,6 +500,8 @@ public final class UnifiedSseWriter {
         if (doneSent.get()) {
             return false;
         }
+        // 路由摘要同样是控制帧：先 flush 正文，时间线里「正文 → 路由」的顺序不乱
+        textBatcher.flush();
         return write("route", summary);
     }
 
@@ -414,6 +517,8 @@ public final class UnifiedSseWriter {
         if (doneSent.get()) {
             return false;
         }
+        // 工具卡 / 计划卡 / 步骤 / 产物 / 图片文字都在这里出站：先 flush 正文，卡片不会插进半句话
+        textBatcher.flush();
         return write(event, data);
     }
 }

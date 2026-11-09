@@ -41,7 +41,8 @@ import static com.agenthub.runtime.application.router.ChildOutcome.keyOf;
  * <ul>
  *   <li>SUMMARIZE / VOTE 失败一律降级 CONCAT，但墙钟超时（finishReason=TIMEOUT）必须原样抛出，不降级；</li>
  *   <li>VOTE 票池 0 路 / 1 路不调模型，直接走既有口径；</li>
- *   <li>降级中文说明的文案与「是否推 assistant」的时机保持不变。</li>
+ *   <li>降级中文说明的文案不变；SUMMARIZE 的正文改为流式投递（边收边推），
+ *       只有未投递时才在末尾补推整段，避免同一段正文被推两次。</li>
  * </ul>
  *
  * <p>构造方式：由 {@code RouterTrialExecutor} 在自身构造器内 new（非 Spring Bean），
@@ -100,6 +101,12 @@ public class AnswerAggregator {
         RouterAnswerMode mode = runtime.answerModeEnum();
         List<String> notices = new ArrayList<>();
         String aggregateLine = null;
+        /**
+         * 汇总正文是否已经在汇总那一步边收边推给页面。
+         * <p>true 时本方法末尾不得再整段推一次，否则页面会出现「流式正文 + 整段重影」；
+         * 只有汇总没投递（无父模型 / 推正文前就失败降级）时才补推拼接正文。
+         */
+        boolean answerDelivered = false;
         if (mode == RouterAnswerMode.VOTE) {
             // 票池只收「有正文的成功子」；失败 / 跳过子仍占位但不参与投票
             List<ChildOutcome> pool = outcomes.stream().filter(item -> item.hasAnswer()).toList();
@@ -128,6 +135,8 @@ public class AnswerAggregator {
             // 汇总模型与判路由同源：方案里配了就用方案的，否则回落 Agent 的 ROUTER/CHAT 槽
             Optional<Long> parentModel = resolveRouterModel(parent, spec);
             if (parentModel.isPresent()) {
+                // 有出口就走流式投递：汇总常是整轮最后一步，一次性出全文会让人以为卡住
+                AssistantRelay relay = progress == null ? null : new AssistantRelay(progress);
                 try {
                     RouterClock.assertBefore(deadlineNanos);
                     if (progress != null) {
@@ -140,15 +149,26 @@ public class AnswerAggregator {
                     long remainingMs = Math.max(1000L, (deadlineNanos - System.nanoTime()) / 1_000_000L);
                     EffectiveLimits summarizeLimits = parentLimits.withTimeoutMs(
                             Math.min(parentLimits.timeoutMs(), remainingMs));
-                    String summary = react.summarize(
-                            MeterScope.console(parent.getId(), parentModel.get(), sessionId, userId),
-                            summarizePrompt(parent, userText),
-                            summarizeUser(userText, outcomes),
-                            summarizeLimits);
+                    MeterScope scope = MeterScope.console(parent.getId(), parentModel.get(), sessionId, userId);
+                    String prompt = summarizePrompt(parent, userText);
+                    String input = summarizeUser(userText, outcomes);
+                    String summary;
+                    if (relay == null) {
+                        // 没有增量出口（如计划执行模式的收尾汇总）：保持整段返回
+                        summary = react.summarize(scope, prompt, input, summarizeLimits);
+                    } else {
+                        ReActTrialExecutor.StreamedAnswer streamed =
+                                react.summarizeStreamed(scope, prompt, input, summarizeLimits, relay);
+                        summary = streamed.text();
+                        // 已被 relay 推给页面：标记住，避免下面再整段补推
+                        answerDelivered = streamed.delivered();
+                    }
                     if (summary != null && !summary.isBlank()) {
                         TrialTurn turn = mergeTurns(outcomes, summary.trim());
-                        if (progress != null) {
+                        // 正文已经边收边推过，这里再推就是重影；没推过（relay 为空 / 流里没正文）才补
+                        if (progress != null && !answerDelivered) {
                             progress.assistant(turn.getAssistantText());
+                            answerDelivered = true;
                         }
                         return new AggregateOutcome(turn, notices, aggregateLine, -1);
                     }
@@ -172,6 +192,10 @@ public class AnswerAggregator {
                         progress.route("汇总失败，已降级为拼接");
                     }
                 } finally {
+                    // 中途失败也可能已经推过一部分正文：失败路径同样记下，避免末尾再叠一整段
+                    if (relay != null && relay.delivered()) {
+                        answerDelivered = true;
+                    }
                     if (trace != null) {
                         trace.bindParent(null);
                     }
@@ -187,7 +211,9 @@ public class AnswerAggregator {
                 || mode == RouterAnswerMode.SUMMARIZE
                 // VOTE 也屏蔽过子正文：降级拼接时必须整段补推一次
                 || mode == RouterAnswerMode.VOTE;
-        if (progress != null && needPush) {
+        // 汇总已经推过正文时不再补推：前半段是流式原文、后半段是拼接全文，拼起来会是一段错乱答复。
+        // 这种情况下前端在本轮结束时会按落库事件重放，页面最终仍对齐到真实的拼接终答。
+        if (progress != null && needPush && !answerDelivered) {
             progress.assistant(turn.getAssistantText());
         }
         return new AggregateOutcome(turn, notices, aggregateLine, -1);
@@ -496,5 +522,71 @@ public class AnswerAggregator {
             }
         }
         return -1;
+    }
+
+    /**
+     * 汇总正文中转站。所属域：runtime（应用层）。
+     *
+     * <p>职责：把汇总模型的增量原样转发给页面，同时记下「正文是否已经推过」。
+     * 为什么要记：汇总成功时调用方不能再整段补推（会重影）；
+     * 但汇总在推正文之前就失败降级时，末尾仍要补推拼接正文，否则页面空白。
+     *
+     * <p>只转发判路由 / 汇总用得上的五类回调。汇总调用不挂工具、不产计划 / 产物 / 子计划，
+     * 其余默认空实现直接继承 {@link TrialProgress}，不必逐个补齐。
+     */
+    private static final class AssistantRelay implements TrialProgress {
+
+        /** 真正的页面出口 */
+        private final TrialProgress delegate;
+
+        /** 是否已经推过非空正文；用 volatile 是因为增量来自模型响应线程 */
+        private volatile boolean delivered;
+
+        /**
+         * @param delegate 页面出口；非空
+         */
+        private AssistantRelay(TrialProgress delegate) {
+            this.delegate = delegate;
+        }
+
+        /**
+         * @return true 表示正文已经推给页面，调用方不得再整段补推
+         */
+        boolean delivered() {
+            return delivered;
+        }
+
+        /** {@inheritDoc} */
+        @Override
+        public void phase(String phase) {
+            delegate.phase(phase);
+        }
+
+        /** {@inheritDoc} */
+        @Override
+        public void route(String summary) {
+            delegate.route(summary);
+        }
+
+        /** {@inheritDoc} */
+        @Override
+        public void reasoning(String delta) {
+            delegate.reasoning(delta);
+        }
+
+        /** {@inheritDoc} */
+        @Override
+        public void tool(String name, String arguments, String result, boolean success) {
+            delegate.tool(name, arguments, result, success);
+        }
+
+        /** {@inheritDoc} */
+        @Override
+        public void assistant(String delta) {
+            if (delta != null && !delta.isEmpty()) {
+                delivered = true;
+            }
+            delegate.assistant(delta);
+        }
     }
 }
