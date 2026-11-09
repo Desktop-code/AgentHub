@@ -10,6 +10,7 @@ import com.agenthub.audit.domain.OperLogWriter;
 import com.agenthub.common.error.BizException;
 import com.agenthub.common.error.ErrorCode;
 import com.agenthub.common.web.OperatorContext;
+import com.agenthub.spi.cache.AclCacheInvalidator;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
@@ -25,16 +26,20 @@ public class MenuAppService {
     private final MenuRepository menus;
     private final OperatorContext operatorContext;
     private final OperLogWriter operLogWriter;
+    private final AclCacheInvalidator aclCache;
 
     /**
      * @param menus           菜单仓储
      * @param operatorContext 操作者
      * @param operLogWriter   操作日志
+     * @param aclCache        访问快照失效（提交后推进版本）
      */
-    public MenuAppService(MenuRepository menus, OperatorContext operatorContext, OperLogWriter operLogWriter) {
+    public MenuAppService(MenuRepository menus, OperatorContext operatorContext, OperLogWriter operLogWriter,
+                          AclCacheInvalidator aclCache) {
         this.menus = menus;
         this.operatorContext = operatorContext;
         this.operLogWriter = operLogWriter;
+        this.aclCache = aclCache;
     }
 
     /**
@@ -53,6 +58,8 @@ public class MenuAppService {
         assertParent(null, req.getParentId());
         assertButtonPermission(req);
         Long id = menus.insert(toModel(null, req));
+        // 新菜单/按钮会进入超管的权限码与所有被授权角色的侧栏：提交后整体失效
+        aclCache.evictAll();
         operLogWriter.write("menu", "create", "menu", String.valueOf(id), "创建菜单 " + req.getName());
         return toResp(menus.findById(id).orElseThrow());
     }
@@ -69,6 +76,8 @@ public class MenuAppService {
         assertParent(id, req.getParentId());
         assertButtonPermission(req);
         menus.update(toModel(id, req));
+        // 名称/路径/权限码/排序/启停任一项变化都会改变快照内容：提交后整体失效
+        aclCache.evictAll();
         operLogWriter.write("menu", "update", "menu", String.valueOf(id), "更新菜单 " + existing.getName());
         return toResp(menus.findById(id).orElseThrow());
     }
@@ -84,6 +93,8 @@ public class MenuAppService {
             throw new BizException(ErrorCode.BAD_REQUEST, "请先删除子菜单");
         }
         menus.logicDelete(id, operatorContext.requireUserId());
+        // 删菜单会同时带走一条权限码与侧栏节点：提交后整体失效
+        aclCache.evictAll();
         operLogWriter.write("menu", "delete", "menu", String.valueOf(id), "删除菜单 " + existing.getName());
     }
 

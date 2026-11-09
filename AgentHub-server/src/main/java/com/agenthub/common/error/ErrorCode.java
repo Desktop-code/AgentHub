@@ -28,6 +28,11 @@ public enum ErrorCode {
     /** 已登录但权限码不匹配 */
     FORBIDDEN(40301, "无权限", HttpStatus.FORBIDDEN),
     /**
+     * 幂等键冲突：同键不同内容、或同键仍在执行中。
+     * 属请求语义冲突而非系统故障，必须 4xx 明确拒绝，禁止静默覆盖或再跑一遍。
+     */
+    IDEMPOTENCY_CONFLICT(40901, "幂等键冲突", HttpStatus.CONFLICT),
+    /**
      * 提示词组装失败：无生效 L1、用途未配置模板、缺必选段、变量未赋值等。
      * 属「故障」而非业务空结果，必须阻断出站，禁止拼半截 Prompt 送模型。
      */

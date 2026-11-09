@@ -25,6 +25,7 @@ import com.agenthub.runtime.domain.model.PlanView;
 import com.agenthub.runtime.domain.model.RunEvent;
 import com.agenthub.runtime.domain.model.RunSession;
 import com.agenthub.runtime.domain.model.RunStatus;
+import com.agenthub.runtime.domain.model.TrialIdemGuard;
 import com.agenthub.runtime.domain.model.TitleSource;
 import com.agenthub.runtime.domain.model.TrialPlan;
 import com.agenthub.runtime.domain.model.TrialTurn;
@@ -34,6 +35,7 @@ import com.agenthub.runtime.domain.service.CauseDigest;
 import com.agenthub.runtime.domain.service.PlanJson;
 import com.agenthub.runtime.domain.service.PromptInjectionHolder;
 import com.agenthub.runtime.domain.service.SessionTitleTexts;
+import com.agenthub.runtime.domain.service.MeterTurnHolder;
 import com.agenthub.runtime.domain.service.TrialFailure;
 import com.agenthub.runtime.domain.service.TrialSendGate;
 import com.agenthub.runtime.domain.service.TrialTurnOutcome;
@@ -83,6 +85,8 @@ public class TrialRunAppService {
     private final SessionTitleGeneratorAppService titleGenerator;
     /** 方案读源：虚拟根与绑根都按 ma_def 执行；为空时才回落 Agent 旧配置 */
     private final MaTrialSpecLoader maSpecs;
+    /** 发消息幂等：同会话 + 同 Idempotency-Key 只真正执行一次 */
+    private final TrialMessageIdempotency idempotency;
 
     /**
      * @param sessions        会话
@@ -105,6 +109,7 @@ public class TrialRunAppService {
      * @param vision          图片文字提取；无图时完全不参与
      * @param titleGenerator  首轮结束后异步生成会话标题；失败不影响本轮
      * @param maSpecs         方案读源；虚拟根没有 Agent 时由它提供模板、候选与判路由模型
+     * @param idempotency     发消息幂等闸门；无键请求不改变原行为
      */
     public TrialRunAppService(RunSessionRepository sessions, RunEventRepository events, AgentDefRepository agents,
                               TrialAccess access, TrialBindingLoader loader, ReActTrialExecutor react,
@@ -113,7 +118,8 @@ public class TrialRunAppService {
                               TrialEventWriter writer, TrialFlight flight,
                               OperatorContext operatorContext, OperLogWriter operLogWriter, TrialObsHooks obs,
                               TrialMemoryCoordinator memory, TrialLiveBuffer live, VisionOcrExecutor vision,
-                              SessionTitleGeneratorAppService titleGenerator, MaTrialSpecLoader maSpecs) {
+                              SessionTitleGeneratorAppService titleGenerator, MaTrialSpecLoader maSpecs,
+                              TrialMessageIdempotency idempotency) {
         this.sessions = sessions;
         this.events = events;
         this.agents = agents;
@@ -135,6 +141,7 @@ public class TrialRunAppService {
         this.vision = vision;
         this.titleGenerator = titleGenerator;
         this.maSpecs = maSpecs;
+        this.idempotency = idempotency;
     }
 
     /**
@@ -166,7 +173,7 @@ public class TrialRunAppService {
      * @throws BizException 会话已取消，或上一轮还没结束。历史 SUCCESS 不挡。
      */
     public MessageResp send(Long sessionId, String content) {
-        return executeTurn(sessionId, content, null, null);
+        return executeTurn(sessionId, content, null, null, null);
     }
 
     /**
@@ -179,7 +186,24 @@ public class TrialRunAppService {
      * @throws BizException 会话已取消、上一轮未结束，或图片缺少视觉模型
      */
     public MessageResp send(Long sessionId, String content, List<String> images) {
-        return executeTurn(sessionId, content, images, null);
+        return executeTurn(sessionId, content, images, null, null);
+    }
+
+    /**
+     * 同步跑完一轮（带幂等键）。
+     *
+     * <p>幂等语义见 {@link TrialMessageIdempotency}：同会话 + 同键只真正执行一次，
+     * 重复请求返回首次结果的等价响应（{@code replayed=true}，不带事件）。
+     *
+     * @param sessionId 会话
+     * @param content   用户输入
+     * @param images    图片，可空
+     * @param idemKey   客户端幂等键，可空；空＝保持现网直发行为
+     * @return 本轮新事件和助手预览，或重放结果
+     * @throws BizException 会话已取消、上一轮未结束、键冲突，或首轮仍在执行
+     */
+    public MessageResp send(Long sessionId, String content, List<String> images, String idemKey) {
+        return executeTurn(sessionId, content, images, null, idemKey);
     }
 
     /**
@@ -205,9 +229,27 @@ public class TrialRunAppService {
      */
     public void stream(Long sessionId, String content, List<String> images,
                        TrialProgress progress, TrialStreamEnd end) {
+        stream(sessionId, content, images, progress, end, null);
+    }
+
+    /**
+     * 边跑边推增量（可带图片 + 幂等键）。
+     *
+     * <p>SSE 重连 / 客户端重试带同一个键时不会重跑：命中终态直接补一帧 done
+     * （重放响应不带正文增量），前端收尾后按 sessionId 回拉事件即可看到完整一轮。
+     *
+     * @param sessionId 会话
+     * @param content   用户输入
+     * @param images    图片，可空
+     * @param progress  增量出口，不可空
+     * @param end       结束出口，不可空
+     * @param idemKey   客户端幂等键，可空
+     */
+    public void stream(Long sessionId, String content, List<String> images,
+                       TrialProgress progress, TrialStreamEnd end, String idemKey) {
         try {
             progress.phase("planning");
-            end.done(executeTurn(sessionId, content, images, progress));
+            end.done(executeTurn(sessionId, content, images, progress, idemKey));
         } catch (BizException ex) {
             end.fail(ex.getMessage());
         } catch (TrialFailure ex) {
@@ -409,10 +451,59 @@ public class TrialRunAppService {
         return resp;
     }
 
-    private MessageResp executeTurn(Long sessionId, String content, List<String> images, TrialProgress progress) {
+    /**
+     * 一轮发消息的外层闸门：归属校验 → 幂等占位 → 执行 → 回写终态。
+     *
+     * <p>幂等放在这里而不是 Controller：SSE 路径与同步路径共用同一处判定，
+     * 且「占位 → 执行 → 留终态」必须紧贴真正跑模型的那一段，中间不能插入别的写库动作。
+     *
+     * @param sessionId 会话
+     * @param content   用户输入
+     * @param images    图片，可空
+     * @param progress  增量出口，可空（同步 send）
+     * @param idemKey   客户端幂等键，可空
+     * @return 本轮结果，或命中重放时的等价结果
+     * @throws BizException 会话不可发、幂等键冲突，或首轮仍在执行
+     */
+    private MessageResp executeTurn(Long sessionId, String content, List<String> images, TrialProgress progress,
+                                    String idemKey) {
         RunSession session = access.require(sessionId);
         // 仅取消（及已删除由 access 挡）不可再发。历史 SUCCESS 不挡；空闲不再写成 SUCCESS。
         TrialSendGate.assertSendable(session);
+        // 幂等闸门放在归属校验之后：别人的会话不该在幂等表里留下占位行
+        TrialIdemGuard guard = idempotency.begin(sessionId, idemKey, content, images);
+        if (guard.hasReplay()) {
+            // 同键同内容已跑完：不插消息、不调模型、不写流水，直接返回等价结果
+            return guard.replay();
+        }
+        // 本轮幂等键进计量上下文：同一轮若被重复执行，账本会拿到同一批 dedupe_key
+        MeterTurnHolder.begin(guard.managed() ? guard.idemKey() : null);
+        try {
+            MessageResp resp = runTurn(session, content, images, progress);
+            // 成功与业务失败都是结论，必须落终态；否则同键重试会被判成「进行中」
+            idempotency.complete(guard, resp);
+            return resp;
+        } catch (RuntimeException ex) {
+            // 未形成结论就抛出（会话正忙、图片非法等）：释放占位，允许同键重试
+            idempotency.release(guard);
+            throw ex;
+        } finally {
+            // 线程池复用：必须清掉本轮 turnKey，避免污染下一轮账本去重键
+            MeterTurnHolder.clear();
+        }
+    }
+
+    /**
+     * 真正跑一轮：单飞 → 落用户事件 → 按运行模式分派 → 落助手与收尾。
+     *
+     * @param session  已校验归属的会话（幂等闸门已通过）
+     * @param content  用户输入
+     * @param images   图片，可空
+     * @param progress 增量出口，可空
+     * @return 本轮结果
+     */
+    private MessageResp runTurn(RunSession session, String content, List<String> images, TrialProgress progress) {
+        Long sessionId = session.getId();
         if (!flight.tryStart(sessionId)) {
             throw new BizException(ErrorCode.BAD_REQUEST, "该会话正在执行");
         }

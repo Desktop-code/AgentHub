@@ -13,6 +13,7 @@ import com.agenthub.skill.domain.model.SkillDef;
 import com.agenthub.skill.domain.model.SkillVersion;
 import com.agenthub.skill.domain.repository.SkillDefRepository;
 import com.agenthub.skill.domain.repository.SkillVersionRepository;
+import com.agenthub.spi.cache.AgentDictCacheInvalidator;
 import org.springframework.dao.DuplicateKeyException;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
@@ -40,6 +41,7 @@ public class SkillVersionAppService {
     private final SkillAssembler assembler;
     private final OperatorContext operatorContext;
     private final OperLogWriter operLogWriter;
+    private final AgentDictCacheInvalidator dictCache;
 
     /**
      * @param skills          Skill 定义仓储
@@ -47,15 +49,17 @@ public class SkillVersionAppService {
      * @param assembler       版本响应装配
      * @param operatorContext 操作人
      * @param operLogWriter   操作日志
+     * @param dictCache       运行期装配字典缓存失效（提交后执行）
      */
     public SkillVersionAppService(SkillDefRepository skills, SkillVersionRepository versions,
                                   SkillAssembler assembler, OperatorContext operatorContext,
-                                  OperLogWriter operLogWriter) {
+                                  OperLogWriter operLogWriter, AgentDictCacheInvalidator dictCache) {
         this.skills = skills;
         this.versions = versions;
         this.assembler = assembler;
         this.operatorContext = operatorContext;
         this.operLogWriter = operLogWriter;
+        this.dictCache = dictCache;
     }
 
     /**
@@ -167,6 +171,8 @@ public class SkillVersionAppService {
         versions.activate(versionId);
         skills.updateActiveMirror(skillId, String.valueOf(version.getVersionNo()),
                 version.getDescription(), operatorId);
+        // 生效版正文与简介变了：提交后失效 Skill 快照，下一轮运行立即注入新正文
+        dictCache.evictSkill(skillId);
         operLogWriter.write("skill", "publish", "skill_version", String.valueOf(versionId),
                 "发布 Skill " + skill.getName() + " v" + version.getVersionNo());
         return get(skillId, versionId);
@@ -192,6 +198,8 @@ public class SkillVersionAppService {
         versions.activate(versionId);
         skills.updateActiveMirror(skillId, String.valueOf(version.getVersionNo()),
                 version.getDescription(), operatorId);
+        // 回滚生效版同样改变「当前注入正文」：提交后失效
+        dictCache.evictSkill(skillId);
         operLogWriter.write("skill", "activate", "skill_version", String.valueOf(versionId),
                 "切换 Skill 生效版 " + skill.getName() + " v" + version.getVersionNo());
         return get(skillId, versionId);

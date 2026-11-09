@@ -10,17 +10,15 @@ import com.agenthub.prompt.domain.model.PromptLayout;
 import com.agenthub.runtime.domain.model.BuiltinToolSpec;
 import com.agenthub.runtime.domain.model.McpToolSpec;
 import com.agenthub.runtime.domain.model.PromptInjectionStats;
+import com.agenthub.runtime.domain.model.ToolSourceView;
+import com.agenthub.runtime.domain.service.AgentDictionaryReader;
 import com.agenthub.runtime.domain.service.BuiltinSchemaSource;
 import com.agenthub.runtime.domain.service.PromptInjectionComposer;
 import com.agenthub.runtime.domain.service.ToolEnablement;
 import com.agenthub.skill.domain.model.SkillDef;
-import com.agenthub.skill.domain.repository.SkillDefRepository;
 import com.agenthub.skill.domain.service.SkillTriggerMatcher;
 import com.agenthub.tool.domain.model.ToolItem;
-import com.agenthub.tool.domain.model.ToolSource;
 import com.agenthub.tool.domain.model.ToolSourceType;
-import com.agenthub.tool.domain.repository.ToolItemRepository;
-import com.agenthub.tool.domain.repository.ToolSourceRepository;
 import org.springframework.stereotype.Component;
 
 import java.util.ArrayList;
@@ -54,9 +52,7 @@ public class TrialPromptFactory {
 
     private final AgentToolBindRepository toolBinds;
     private final AgentSkillBindRepository skillBinds;
-    private final ToolItemRepository items;
-    private final ToolSourceRepository sources;
-    private final SkillDefRepository skills;
+    private final AgentDictionaryReader dictionary;
     private final SystemPromptAssembler prompts;
     private final PromptBudgetProperties budgets;
     private final BuiltinSchemaSource builtinSchemas;
@@ -64,22 +60,17 @@ public class TrialPromptFactory {
     /**
      * @param toolBinds      工具绑定
      * @param skillBinds     Skill 绑定
-     * @param items          工具项
-     * @param sources        区分 BUILTIN 和 MCP
-     * @param skills         Skill 正文
+     * @param dictionary     工具项 / 工具源 / Skill 的只读口（生产走缓存装饰器，见 {@code CachedAgentDictionary}）
      * @param prompts        平台前缀、锁定段在业务段之前
      * @param budgets        三类字符预算
      * @param builtinSchemas BUILTIN 的 Java schema；MCP 用库表 schema
      */
     public TrialPromptFactory(AgentToolBindRepository toolBinds, AgentSkillBindRepository skillBinds,
-                              ToolItemRepository items, ToolSourceRepository sources, SkillDefRepository skills,
-                              SystemPromptAssembler prompts, PromptBudgetProperties budgets,
-                              BuiltinSchemaSource builtinSchemas) {
+                              AgentDictionaryReader dictionary, SystemPromptAssembler prompts,
+                              PromptBudgetProperties budgets, BuiltinSchemaSource builtinSchemas) {
         this.toolBinds = toolBinds;
         this.skillBinds = skillBinds;
-        this.items = items;
-        this.sources = sources;
-        this.skills = skills;
+        this.dictionary = dictionary;
         this.prompts = prompts;
         this.budgets = budgets;
         this.builtinSchemas = builtinSchemas;
@@ -198,7 +189,7 @@ public class TrialPromptFactory {
                 continue;
             }
             // Skill 停用同样不得注入全文，也不参与强制触发
-            Optional<SkillDef> skill = skills.findById(bind.getSkillId())
+            Optional<SkillDef> skill = dictionary.skill(bind.getSkillId())
                     .filter(item -> ToolEnablement.itemOn(item.getStatus()));
             if (skill.isEmpty()) {
                 continue;
@@ -231,14 +222,14 @@ public class TrialPromptFactory {
                 continue;
             }
             // 工具项不在白名单（MCP 新同步默认 0）：不得进 schema
-            Optional<ToolItem> item = items.findById(bind.getToolItemId())
+            Optional<ToolItem> item = dictionary.toolItem(bind.getToolItemId())
                     .filter(one -> ToolEnablement.itemOn(one.getStatus()));
             if (item.isEmpty()) {
                 notices.add("跳过未启用的工具绑定");
                 continue;
             }
             // 源停用等价整源下线：不得进 schema，即使绑定与工具项都开着
-            Optional<ToolSource> source = sources.findById(item.get().getSourceId())
+            Optional<ToolSourceView> source = dictionary.toolSource(item.get().getSourceId())
                     .filter(one -> ToolEnablement.sourceOn(one.getStatus()));
             if (source.isEmpty()) {
                 notices.add("跳过工具 " + item.get().getName() + "：工具源不可用");

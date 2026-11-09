@@ -29,6 +29,8 @@ public class TokenLedger {
     private String currency;
     private Integer status;
     private String remark;
+    /** 业务唯一键；NULL 表示该条不参与去重（MySQL 唯一索引允许多个 NULL） */
+    private String dedupeKey;
     private Long createdBy;
     private LocalDateTime createTime;
 }

@@ -37,6 +37,8 @@ public class TokenLedgerEntity extends BillingAuditEntity {
     /** 1 正常。本期写入恒为 1，不作废 */
     private Integer status;
     private String remark;
+    /** 业务唯一键；uk_ledger_dedupe。同一次计费事件重复写入会撞唯一键 */
+    private String dedupeKey;
 
     @TableLogic
     private Integer deleted;

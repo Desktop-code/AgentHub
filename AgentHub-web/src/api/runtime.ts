@@ -71,10 +71,31 @@ export function createMaTrialSession(maId: number) {
 }
 
 /** 同步跑一轮。超时略大于平台墙钟硬顶（300s）。页面发送走 SSE，这条留给需要整包结果的调用。 */
-export function sendTrialMessage(id: number, content: string, images?: string[]) {
+export function sendTrialMessage(
+  id: number,
+  content: string,
+  images?: string[],
+  idempotencyKey?: string
+) {
   return request.post<Result<TrialMessageResult>>(`/api/runtime/trial/sessions/${id}/messages`, { content, images }, {
-    timeout: 310000
+    timeout: 310000,
+    headers: idempotencyKey ? { 'Idempotency-Key': idempotencyKey } : undefined
   })
+}
+
+/**
+ * 生成一次发消息的业务幂等键。
+ *
+ * <p>为什么在发送前生成、并在失败重试时复用：服务端按「会话 + 键 + 内容指纹」去重，
+ * 同一轮重复提交（连点、网关重试、SSE 重连）只会真正跑一次模型、只写一条用户消息与一条计费流水。
+ * 优先用 `crypto.randomUUID()`；老浏览器没有时退化为时间戳 + 随机串（仍满足服务端 8~64 位字母数字键格式）。
+ */
+export function newTrialIdempotencyKey(): string {
+  const cryptoApi = globalThis.crypto as Crypto | undefined
+  if (cryptoApi && typeof cryptoApi.randomUUID === 'function') {
+    return cryptoApi.randomUUID()
+  }
+  return `t${Date.now().toString(36)}${Math.random().toString(36).slice(2, 12)}`
 }
 
 /** 改左栏标题。服务端写入 session_title 并把来源标为 MANUAL（此后自动生成不再覆盖）。 */
@@ -186,13 +207,15 @@ export interface TrialStreamHandlers {
  * @param handlers 增量
  * @param signal 关闭抽屉时可中止读取
  * @param images 图片 data URI 数组，可空。与 content 一起提交；后端先做 OCR 再喂主模型
+ * @param idempotencyKey 业务幂等键，可空。带上后同会话同键重复提交只真正跑一次
  */
 export async function streamTrialMessage(
   id: number,
   content: string,
   handlers: TrialStreamHandlers,
   signal?: AbortSignal,
-  images?: string[]
+  images?: string[],
+  idempotencyKey?: string
 ) {
   const token = localStorage.getItem(TOKEN_KEY)
   const base = import.meta.env.VITE_API_BASE || ''
@@ -201,6 +224,7 @@ export async function streamTrialMessage(
     headers: {
       'Content-Type': 'application/json',
       Accept: 'text/event-stream',
+      ...(idempotencyKey ? { 'Idempotency-Key': idempotencyKey } : {}),
       ...(token ? { Authorization: `Bearer ${token}` } : {})
     },
     // images 不传时不带这个键：后端据此完全不走 OCR 分支

@@ -4,7 +4,7 @@ import cn.dev33.satoken.stp.StpInterface;
 import cn.dev33.satoken.stp.StpUtil;
 import com.agenthub.admin.domain.model.User;
 import com.agenthub.admin.domain.repository.UserRepository;
-import com.agenthub.auth.application.AccessQueryService;
+import com.agenthub.auth.domain.service.AccessSnapshotProvider;
 import com.agenthub.common.error.BizException;
 import com.agenthub.common.error.ErrorCode;
 import com.agenthub.common.web.OperatorContext;
@@ -17,7 +17,9 @@ import java.util.List;
 
 /**
  * Sa-Token 权限加载，以及当前操作者。所属域：auth。
- * 权限不放进会话缓存：每次校验都查库，角色变更马上生效。
+ * 权限本身按用户维度缓存在 Redis（见 {@code CachedAccessSnapshotProvider}）：
+ * 角色/菜单变更由写入口在事务提交后推进版本，因此「改完即生效」的语义保持不变；
+ * 用户行仍每次按主键读库，停用用户的权限能当场归零，不依赖缓存过期。
  */
 public final class AuthInfrastructure {
 
@@ -31,15 +33,15 @@ public final class AuthInfrastructure {
     public static class StpInterfaceImpl implements StpInterface {
 
         private final UserRepository users;
-        private final AccessQueryService accessQuery;
+        private final AccessSnapshotProvider accessSnapshots;
 
         /**
-         * @param users       按登录 id 找用户
-         * @param accessQuery 权限计算
+         * @param users           按登录 id 找用户（每次按主键读库，停用能当场归零）
+         * @param accessSnapshots 权限与角色（生产走缓存装饰器）
          */
-        public StpInterfaceImpl(UserRepository users, AccessQueryService accessQuery) {
+        public StpInterfaceImpl(UserRepository users, AccessSnapshotProvider accessSnapshots) {
             this.users = users;
-            this.accessQuery = accessQuery;
+            this.accessSnapshots = accessSnapshots;
         }
 
         /**
@@ -50,7 +52,7 @@ public final class AuthInfrastructure {
         @Override
         public List<String> getPermissionList(Object loginId, String loginType) {
             User user = load(loginId);
-            return user == null ? List.of() : accessQuery.permissions(user);
+            return user == null ? List.of() : accessSnapshots.snapshot(user).getPermissions();
         }
 
         /**
@@ -61,7 +63,7 @@ public final class AuthInfrastructure {
         @Override
         public List<String> getRoleList(Object loginId, String loginType) {
             User user = load(loginId);
-            return user == null ? List.of() : accessQuery.roleCodes(user);
+            return user == null ? List.of() : accessSnapshots.snapshot(user).getRoles();
         }
 
         private User load(Object loginId) {

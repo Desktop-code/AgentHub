@@ -15,6 +15,7 @@ import com.agenthub.skill.domain.model.SkillDef;
 import com.agenthub.skill.domain.model.SkillQuery;
 import com.agenthub.skill.domain.repository.SkillDefRepository;
 import com.agenthub.skill.domain.service.SkillNamePolicy;
+import com.agenthub.spi.cache.AgentDictCacheInvalidator;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
@@ -37,6 +38,7 @@ public class SkillAppService {
     private final SkillVersionAppService skillVersions;
     private final OperatorContext operatorContext;
     private final OperLogWriter operLogWriter;
+    private final AgentDictCacheInvalidator dictCache;
 
     /**
      * @param skills         Skill 仓储
@@ -45,16 +47,18 @@ public class SkillAppService {
      * @param skillVersions  版本用例：新建时落 v1 草稿
      * @param operatorContext 操作人
      * @param operLogWriter  操作日志
+     * @param dictCache      运行期装配字典缓存失效（提交后执行）
      */
     public SkillAppService(SkillDefRepository skills, SkillNamePolicy names, SkillAssembler assembler,
                            SkillVersionAppService skillVersions, OperatorContext operatorContext,
-                           OperLogWriter operLogWriter) {
+                           OperLogWriter operLogWriter, AgentDictCacheInvalidator dictCache) {
         this.skills = skills;
         this.names = names;
         this.assembler = assembler;
         this.skillVersions = skillVersions;
         this.operatorContext = operatorContext;
         this.operLogWriter = operLogWriter;
+        this.dictCache = dictCache;
     }
 
     /**
@@ -113,6 +117,8 @@ public class SkillAppService {
         names.assertUnique(name, id);
         assembler.applyUpdate(existing, req);
         skills.updateProfile(existing, operatorContext.requireUserId());
+        // 名称/标题/触发词都会影响装配（目录文案与硬触发），提交后失效
+        dictCache.evictSkill(id);
         operLogWriter.write("skill", "update", "skill_def", String.valueOf(id), "更新 Skill " + name);
         return get(id);
     }
@@ -127,6 +133,8 @@ public class SkillAppService {
         SkillDef existing = require(id);
         int status = SkillChecks.exactStatus(req.getStatus());
         skills.updateStatus(id, status, operatorContext.requireUserId());
+        // 停用即不得进目录、不得硬触发，必须让缓存失效
+        dictCache.evictSkill(id);
         String action = status == SkillChecks.ENABLED ? "enable" : "disable";
         operLogWriter.write("skill", action, "skill_def", String.valueOf(id), "更新 Skill 状态 " + existing.getName());
         return get(id);
@@ -141,6 +149,8 @@ public class SkillAppService {
     public void remove(Long id) {
         SkillDef existing = require(id);
         skills.logicalDelete(id, operatorContext.requireUserId());
+        // 删除后绑定仍可能指向该 id：失效后由下一次读取写入短 TTL 负缓存
+        dictCache.evictSkill(id);
         operLogWriter.write("skill", "remove", "skill_def", String.valueOf(id), "删除 Skill " + existing.getName());
     }
 

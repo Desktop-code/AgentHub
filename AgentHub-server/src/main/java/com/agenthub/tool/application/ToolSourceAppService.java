@@ -4,6 +4,7 @@ import com.agenthub.audit.domain.OperLogWriter;
 import com.agenthub.common.error.BizException;
 import com.agenthub.common.error.ErrorCode;
 import com.agenthub.common.web.OperatorContext;
+import com.agenthub.spi.cache.AgentDictCacheInvalidator;
 import com.agenthub.spi.crypto.SecretContexts;
 import com.agenthub.spi.crypto.SecretStore;
 import com.agenthub.tool.api.dto.ResetAuthReq;
@@ -11,6 +12,7 @@ import com.agenthub.tool.api.dto.SourceCreateReq;
 import com.agenthub.tool.api.dto.SourceResp;
 import com.agenthub.tool.api.dto.SourceStatusReq;
 import com.agenthub.tool.api.dto.SourceUpdateReq;
+import com.agenthub.tool.domain.model.ToolItem;
 import com.agenthub.tool.domain.model.ToolSource;
 import com.agenthub.tool.domain.repository.ToolItemRepository;
 import com.agenthub.tool.domain.repository.ToolSourceRepository;
@@ -37,6 +39,7 @@ public class ToolSourceAppService {
     private final SecretStore secretStore;
     private final OperatorContext operatorContext;
     private final OperLogWriter operLogWriter;
+    private final AgentDictCacheInvalidator dictCache;
 
     /**
      * @param sources         工具源
@@ -46,10 +49,12 @@ public class ToolSourceAppService {
      * @param secretStore     与模型共用的 AES-GCM
      * @param operatorContext 操作人
      * @param operLogWriter   操作日志，摘要不含鉴权头
+     * @param dictCache       运行期装配字典缓存失效（提交后执行）
      */
     public ToolSourceAppService(ToolSourceRepository sources, ToolItemRepository items, ToolLookup lookup,
                                 ToolReferencePolicy references, SecretStore secretStore,
-                                OperatorContext operatorContext, OperLogWriter operLogWriter) {
+                                OperatorContext operatorContext, OperLogWriter operLogWriter,
+                                AgentDictCacheInvalidator dictCache) {
         this.sources = sources;
         this.items = items;
         this.lookup = lookup;
@@ -57,6 +62,7 @@ public class ToolSourceAppService {
         this.secretStore = secretStore;
         this.operatorContext = operatorContext;
         this.operLogWriter = operLogWriter;
+        this.dictCache = dictCache;
     }
 
     /**
@@ -121,6 +127,8 @@ public class ToolSourceAppService {
         existing.setBaseUrl(ToolChecks.baseUrl(req.getBaseUrl()));
         existing.setRemark(ToolChecks.optionalText(req.getRemark(), 500, "备注"));
         sources.updateProfile(existing, operatorContext.requireUserId());
+        // 源名称会进装配说明，类型/启停决定整源可用性：提交后失效源快照与其下工具项
+        dictCache.evictToolSource(id);
         operLogWriter.write("tool", "update", "tool_source", String.valueOf(id), "更新工具源 " + existing.getName());
         return get(id);
     }
@@ -149,6 +157,8 @@ public class ToolSourceAppService {
         int status = ToolChecks.exactStatus(req.getStatus());
         existing.setStatus(status);
         sources.updateProfile(existing, operatorContext.requireUserId());
+        // 源停用等价整源下线：必须让缓存失效，否则停用后本轮仍能装配出工具
+        dictCache.evictToolSource(id);
         String action = status == 1 ? "enable" : "disable";
         operLogWriter.write("tool", action, "tool_source", String.valueOf(id), "更新工具源状态 " + existing.getName());
         return get(id);
@@ -164,8 +174,12 @@ public class ToolSourceAppService {
         ToolSource existing = lookup.requireSource(id);
         references.assertDeletable(existing);
         Long operatorId = operatorContext.requireUserId();
+        // 删除前先记下源下工具项 id：逻辑删除后已查不到，否则这些键只能等 TTL 过期
+        List<Long> itemIds = items.listBySourceId(id).stream().map(ToolItem::getId).toList();
         items.logicalDeleteBySourceId(id, operatorId);
         sources.logicalDelete(id, operatorId);
+        dictCache.evictToolItems(itemIds);
+        dictCache.evictToolSource(id);
         operLogWriter.write("tool", "remove", "tool_source", String.valueOf(id), "删除工具源 " + existing.getName());
     }
 

@@ -96,6 +96,15 @@ agenthub:
       read-timeout-ms: 15000
       # 语音识别 / 合成出站的读超时。合成整段回答比探活慢，沿用 15 秒会误判成失败
       speech-timeout-ms: ${AGENTHUB_MODEL_SPEECH_TIMEOUT_MS:60000}
+  auth:
+    # 访问快照缓存（扫描报告 C1）：按用户维度缓存「角色编码 + 权限码集合 + 导航菜单树」，
+    # 键 = agenthub:acl:snapshot:{userId}:v{全局版本}；角色/菜单变更推进 agenthub:acl:ver，用户级变更精确删该用户键。
+    # 只有 Redis 层、没有进程内 L1：权限要求写完立刻生效，本地层在多实例下只能清本机。
+    acl-cache:
+      # 总开关。false 即整链退回直读库（排障用），权限语义不变，只是每个请求多打 1~5 次查询
+      enabled: ${AGENTHUB_ACL_CACHE_ENABLED:true}
+      # 快照 TTL（秒）。写入口会推进版本或精确删键，这里只是漏失效时的兜底
+      redis-ttl-sec: 120
   tool:
     mcp:
       # tools/list 的连接与读取上限，避免同步占住控制台请求
@@ -116,6 +125,17 @@ agenthub:
     # 单次 run 允许预建的 node_run 条数。
     max-node-runs-per-run: 500
   runtime:
+    # 发消息幂等（幂等刀1 · I1）。客户端用 Header Idempotency-Key 传业务幂等键；
+    # 同会话 + 同键 + 同内容只真正跑一次，重复请求返回首次结果的等价响应。
+    # Redis 只是快路径，最终兜底是 agent_run_idempotency 的 (session_id, idem_key) 唯一键。
+    idempotency:
+      # 总开关。关掉后带键请求也按「无键」直发（排障用，可能重复执行）
+      enabled: ${AGENTHUB_RUN_IDEMPOTENCY_ENABLED:true}
+      # 幂等记录在 Redis 的存活秒数；过期后回落 DB 判定
+      ttl-sec: ${AGENTHUB_RUN_IDEMPOTENCY_TTL_SEC:1800}
+      # RUNNING 陈旧窗口（秒）：进程崩溃后同键可接管，避免键被永久占死。
+      # 必须大于平台单轮墙钟硬顶（limits.timeout-ms.max，默认 300 秒）
+      stale-sec: ${AGENTHUB_RUN_IDEMPOTENCY_STALE_SEC:600}
     # 试跑 SSE 出站。正文增量（assistant / reasoning）按「时间窗 + 单帧字节」双上限合批，
     # 只改帧数，不改事件名 / 字段 / 顺序；控制帧（phase / route / tool / plan / step / done…）
     # 写出前会先 flush，收尾与取消路径也强制 flush，不丢尾字。
@@ -190,6 +210,16 @@ agenthub:
     prompt-max-chars: 12000
     # 覆盖系统规则、外连诱导默认只告警仍可保存；改为 true 则一并拒绝
     prompt-warn-as-error: false
+    # 运行期装配字典缓存（扫描报告 C3 落地）：只缓 tool_item / tool_source 无密投影 / skill_def。
+    # 只缓字典、不缓绑定：绑定仍每轮直读，写入口的失效面因此收紧到工具与 Skill 的写接口。
+    # 键：agenthub:agent:dict:{tool-item|tool-source|skill-def}:{id}；失效一律在事务提交后执行。
+    dict-cache:
+      # 总开关。false 即整条链路退回直读库（排障用），功能不变，只是每轮多几次查询
+      enabled: ${AGENTHUB_AGENT_DICT_CACHE_ENABLED:true}
+      # Redis TTL（秒）。写入口会显式失效，这里只是漏失效时的兜底
+      redis-ttl-sec: 120
+      # 「确认不存在」的负缓存（秒）。绑定指向已删项时避免每轮打库
+      miss-ttl-sec: 10
   prompt:
     # 绑定个数硬顶。保存时超出直接拒绝
     max-tools-per-agent: 16
