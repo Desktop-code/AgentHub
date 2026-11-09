@@ -31,4 +31,10 @@ public class MessageResp {
 
     /** 本次处理的子路由键（回显，便于前端清掉对应待批卡片） */
     private String childRouteKey;
+
+    /**
+     * 本次响应是幂等重放（同会话 + 同幂等键 + 同内容已经跑过一轮）。
+     * 为 true 时 events 为空、没有新的模型调用，客户端应按 sessionId 回拉时间线。
+     */
+    private boolean replayed;
 }

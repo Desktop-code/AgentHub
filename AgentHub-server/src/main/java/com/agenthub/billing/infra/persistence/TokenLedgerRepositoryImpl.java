@@ -14,6 +14,7 @@ import org.springframework.stereotype.Repository;
 
 import java.time.LocalDate;
 import java.util.List;
+import java.util.Optional;
 
 /**
  * 流水仓储实现。所属域：billing。Entity 不出本包。
@@ -60,9 +61,23 @@ public class TokenLedgerRepositoryImpl implements TokenLedgerRepository {
         entity.setCurrency(ledger.getCurrency());
         entity.setStatus(ledger.getStatus());
         entity.setRemark(ledger.getRemark());
+        entity.setDedupeKey(ledger.getDedupeKey());
         entity.setCreatedBy(operatorId);
         mapper.insert(entity);
         return entity.getId();
+    }
+
+    /** {@inheritDoc} */
+    @Override
+    public Optional<TokenLedger> findByDedupeKey(String dedupeKey) {
+        if (dedupeKey == null || dedupeKey.isBlank()) {
+            return Optional.empty();
+        }
+        // 唯一键最多一行；用 selectOne 让「脏数据多行」直接暴露成异常而不是悄悄取一条
+        TokenLedgerEntity entity = mapper.selectOne(new LambdaQueryWrapper<TokenLedgerEntity>()
+                .eq(TokenLedgerEntity::getDedupeKey, dedupeKey)
+                .last("LIMIT 1"));
+        return Optional.ofNullable(entity).map(this::toDomain);
     }
 
     /**
@@ -118,6 +133,7 @@ public class TokenLedgerRepositoryImpl implements TokenLedgerRepository {
         ledger.setCurrency(entity.getCurrency());
         ledger.setStatus(entity.getStatus());
         ledger.setRemark(entity.getRemark());
+        ledger.setDedupeKey(entity.getDedupeKey());
         ledger.setCreatedBy(entity.getCreatedBy());
         // 域/API 仍用 createTime；库列已是 create_time
         ledger.setCreateTime(entity.getCreateTime());

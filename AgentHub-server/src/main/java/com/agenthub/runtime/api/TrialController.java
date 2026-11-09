@@ -15,6 +15,7 @@ import com.agenthub.runtime.api.dto.SessionCreateReq;
 import com.agenthub.runtime.api.dto.SessionPageReq;
 import com.agenthub.runtime.api.dto.SessionResp;
 import com.agenthub.runtime.api.dto.SessionTitleReq;
+import com.agenthub.runtime.application.TrialMessageIdempotency;
 import com.agenthub.runtime.application.TrialRunAppService;
 import com.agenthub.runtime.application.TrialSessionAppService;
 import com.agenthub.runtime.api.sse.ServletSseFrameSink;
@@ -32,6 +33,7 @@ import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.PathVariable;
 import org.springframework.web.bind.annotation.PostMapping;
 import org.springframework.web.bind.annotation.RequestBody;
+import org.springframework.web.bind.annotation.RequestHeader;
 import org.springframework.web.bind.annotation.RequestMapping;
 import org.springframework.web.bind.annotation.RequestParam;
 import org.springframework.web.bind.annotation.RestController;
@@ -167,33 +169,46 @@ public class TrialController {
     /**
      * 同步执行。失败时 HTTP 仍是成功包，data.status=FAILED。
      *
-     * @param id  会话主键
-     * @param req 用户输入
+     * <p>可选请求头 {@code Idempotency-Key}：同会话 + 同键 + 同内容只真正执行一次，
+     * 重复请求返回首次结果的等价响应（data.replayed=true，events 为空）。
+     *
+     * @param id             会话主键
+     * @param req            用户输入
+     * @param idempotencyKey 客户端幂等键，可空；空＝保持原直发行为
      * @return 助手预览和本轮事件
      */
     @SaCheckPermission(RuntimePermissions.RUN)
     @PostMapping("/sessions/{id}/messages")
-    public Result<MessageResp> send(@PathVariable Long id, @Valid @RequestBody MessageReq req) {
-        return Result.ok(runs.send(id, req.getContent().trim(), req.getImages()));
+    public Result<MessageResp> send(@PathVariable Long id, @Valid @RequestBody MessageReq req,
+                                    @RequestHeader(value = TrialMessageIdempotency.HEADER, required = false)
+                                    String idempotencyKey) {
+        return Result.ok(runs.send(id, req.getContent().trim(), req.getImages(), idempotencyKey));
     }
 
     /**
      * 边跑边推 phase / reasoning / tool / assistant / done。仍在当前请求线程执行，登录态不用另传。
      *
-     * @param id       会话主键
-     * @param req      用户输入
-     * @param response 直接写 SSE，避免等整轮结束才返回
+     * <p>可选请求头 {@code Idempotency-Key}：SSE 重连 / 客户端重试带同一个键时不会重跑，
+     * 命中终态时只补一帧 done，前端收尾后按 sessionId 回拉事件即可。
+     *
+     * @param id             会话主键
+     * @param req            用户输入
+     * @param idempotencyKey 客户端幂等键，可空
+     * @param response       直接写 SSE，避免等整轮结束才返回
      */
     @SaCheckPermission(RuntimePermissions.RUN)
     @PostMapping(value = "/sessions/{id}/messages/stream", produces = MediaType.TEXT_EVENT_STREAM_VALUE)
-    public void stream(@PathVariable Long id, @Valid @RequestBody MessageReq req, HttpServletResponse response)
+    public void stream(@PathVariable Long id, @Valid @RequestBody MessageReq req,
+                       @RequestHeader(value = TrialMessageIdempotency.HEADER, required = false)
+                       String idempotencyKey,
+                       HttpServletResponse response)
             throws IOException {
         // 统一设头：漏掉 no-transform 会让中间层缓冲，前端收不到增量
         ServletSseFrameSink.prepare(response);
         TrialChunkWriter writer = new TrialChunkWriter(response, json, sseBatch);
         writer.bindSession(id);
         try {
-            runs.stream(id, req.getContent().trim(), req.getImages(), writer, writer);
+            runs.stream(id, req.getContent().trim(), req.getImages(), writer, writer, idempotencyKey);
         } finally {
             // 兜底：业务侧任何路径没写结束帧（异常、线程中断、上游直接断），这里补一帧再关连接。
             // 内部有 CAS，重复调用不会产生第二帧。

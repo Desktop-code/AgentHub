@@ -170,6 +170,7 @@ import {
   listTrialAgents,
   listTrialEvents,
   listTrialLiveEvents,
+  newTrialIdempotencyKey,
   pageTrialSessions,
   rejectTrialPlan,
   renameTrialSession,
@@ -1848,6 +1849,9 @@ async function send(content: string, images?: string[]) {
   }
   sending.value = true
   pageError.value = ''
+  // 本轮业务幂等键：一次点击生成一次。网络重试 / 浏览器重放同一个请求时复用该键，
+  // 服务端据此保证「只插一条用户消息、只跑一轮模型、只记一条流水」。
+  const idempotencyKey = newTrialIdempotencyKey()
   // 新一轮开始：上一轮遗留的子计划待批卡片必须清掉，避免误导
   childPending.value = null
   // 手动发问接管展示：只停轮询，保留本会话的转圈（这一轮改由 SSE 驱动）。
@@ -1995,7 +1999,7 @@ async function send(content: string, images?: string[]) {
         // 连接断了就再也收不到批准结果，留着按钮只会点出「已失效」
         childPending.value = null
       }
-    }, controller.signal, images)
+    }, controller.signal, images, idempotencyKey)
     // 落库成功后再用事件覆盖，避免把未入库的失败卡片刷掉。
     // done 到达时服务端已经写了轮次；先改掉创建接口带回的 0，防止紧接着的「新会话」把本条当空壳删掉
     if (persisted && session.value && session.value.id === sessionId) {

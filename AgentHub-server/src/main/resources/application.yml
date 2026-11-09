@@ -125,6 +125,17 @@ agenthub:
     # 单次 run 允许预建的 node_run 条数。
     max-node-runs-per-run: 500
   runtime:
+    # 发消息幂等（幂等刀1 · I1）。客户端用 Header Idempotency-Key 传业务幂等键；
+    # 同会话 + 同键 + 同内容只真正跑一次，重复请求返回首次结果的等价响应。
+    # Redis 只是快路径，最终兜底是 agent_run_idempotency 的 (session_id, idem_key) 唯一键。
+    idempotency:
+      # 总开关。关掉后带键请求也按「无键」直发（排障用，可能重复执行）
+      enabled: ${AGENTHUB_RUN_IDEMPOTENCY_ENABLED:true}
+      # 幂等记录在 Redis 的存活秒数；过期后回落 DB 判定
+      ttl-sec: ${AGENTHUB_RUN_IDEMPOTENCY_TTL_SEC:1800}
+      # RUNNING 陈旧窗口（秒）：进程崩溃后同键可接管，避免键被永久占死。
+      # 必须大于平台单轮墙钟硬顶（limits.timeout-ms.max，默认 300 秒）
+      stale-sec: ${AGENTHUB_RUN_IDEMPOTENCY_STALE_SEC:600}
     # 试跑 SSE 出站。正文增量（assistant / reasoning）按「时间窗 + 单帧字节」双上限合批，
     # 只改帧数，不改事件名 / 字段 / 顺序；控制帧（phase / route / tool / plan / step / done…）
     # 写出前会先 flush，收尾与取消路径也强制 flush，不丢尾字。

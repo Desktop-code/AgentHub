@@ -4,6 +4,7 @@ import com.agenthub.runtime.infra.agentscope.RequiredArgProperties;
 import com.agenthub.common.config.RuntimeLimitsProperties;
 import com.agenthub.runtime.infra.agentscope.TrialProperties;
 import com.agenthub.runtime.infra.cache.AgentDictCacheProperties;
+import com.agenthub.runtime.infra.idempotency.TrialIdempotencyProperties;
 import com.agenthub.runtime.model.acl.impl.ModelAdapterFactory;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import io.agentscope.core.state.InMemoryAgentStateStore;
@@ -21,7 +22,8 @@ import java.time.Duration;
  */
 @Configuration
 @EnableConfigurationProperties({TrialProperties.class, RuntimeLimitsProperties.class,
-        RequiredArgProperties.class, VoiceProperties.class, AgentDictCacheProperties.class})
+        RequiredArgProperties.class, VoiceProperties.class, AgentDictCacheProperties.class,
+        TrialIdempotencyProperties.class})
 public class RuntimeInfrastructure {
 
     /**

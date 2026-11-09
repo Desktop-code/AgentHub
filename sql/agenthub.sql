@@ -125,6 +125,27 @@ CREATE TABLE `agent_route`  (
 ) ENGINE = InnoDB AUTO_INCREMENT = 1 CHARACTER SET = utf8mb4 COLLATE = utf8mb4_general_ci COMMENT = 'Router 子 Agent 路由配置' ROW_FORMAT = Dynamic;
 
 -- ----------------------------
+-- Table structure for agent_run_idempotency
+-- ----------------------------
+DROP TABLE IF EXISTS `agent_run_idempotency`;
+CREATE TABLE `agent_run_idempotency`  (
+  `id` bigint(20) NOT NULL AUTO_INCREMENT COMMENT '主键',
+  `session_id` bigint(20) NOT NULL COMMENT 'agent_run_session.id',
+  `idem_key` varchar(64) CHARACTER SET utf8mb4 COLLATE utf8mb4_general_ci NOT NULL COMMENT '客户端幂等键（Header Idempotency-Key）',
+  `fingerprint` varchar(64) CHARACTER SET utf8mb4 COLLATE utf8mb4_general_ci NOT NULL COMMENT '请求内容指纹 SHA-256（正文 + 图片）',
+  `state` varchar(16) CHARACTER SET utf8mb4 COLLATE utf8mb4_general_ci NOT NULL DEFAULT 'RUNNING' COMMENT 'RUNNING执行中 / SUCCESS成功 / FAILED失败',
+  `run_status` varchar(16) CHARACTER SET utf8mb4 COLLATE utf8mb4_general_ci NULL DEFAULT NULL COMMENT '本轮 MessageResp.status，仅终态有值',
+  `assistant_preview` varchar(255) CHARACTER SET utf8mb4 COLLATE utf8mb4_general_ci NULL DEFAULT NULL COMMENT '本轮助手预览（已脱敏截断），重放用',
+  `error_summary` varchar(500) CHARACTER SET utf8mb4 COLLATE utf8mb4_general_ci NULL DEFAULT NULL COMMENT '本轮错误摘要（已脱敏截断）',
+  `plan_pending` tinyint(4) NOT NULL DEFAULT 0 COMMENT '1=本轮停在计划待批准',
+  `create_time` datetime NOT NULL DEFAULT CURRENT_TIMESTAMP COMMENT '创建时间',
+  `update_time` datetime NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP COMMENT '状态刷新时间（陈旧判定依据）',
+  PRIMARY KEY (`id`) USING BTREE,
+  UNIQUE INDEX `uk_session_idem`(`session_id`, `idem_key`) USING BTREE,
+  INDEX `idx_state_update`(`state`, `update_time`) USING BTREE
+) ENGINE = InnoDB AUTO_INCREMENT = 1 CHARACTER SET = utf8mb4 COLLATE = utf8mb4_general_ci COMMENT = '发消息幂等占位与终态' ROW_FORMAT = Dynamic;
+
+-- ----------------------------
 -- Table structure for agent_run_event
 -- ----------------------------
 DROP TABLE IF EXISTS `agent_run_event`;
@@ -313,12 +334,14 @@ CREATE TABLE `billing_token_ledger`  (
   `currency` varchar(8) CHARACTER SET utf8mb4 COLLATE utf8mb4_general_ci NULL DEFAULT NULL COMMENT '如 CNY/USD',
   `status` tinyint(4) NOT NULL DEFAULT 1 COMMENT '1正常 0作废',
   `remark` varchar(500) CHARACTER SET utf8mb4 COLLATE utf8mb4_general_ci NULL DEFAULT NULL COMMENT '备注',
+  `dedupe_key` varchar(128) CHARACTER SET utf8mb4 COLLATE utf8mb4_general_ci NULL DEFAULT NULL COMMENT '业务唯一键；同一次计费事件只允许一条流水；NULL=不参与去重',
   `deleted` tinyint(4) NOT NULL DEFAULT 0 COMMENT '0未删 1已删',
   `created_by` bigint(20) NULL DEFAULT NULL,
   `create_time` datetime NOT NULL DEFAULT CURRENT_TIMESTAMP COMMENT '创建时间',
   `updated_by` bigint(20) NULL DEFAULT NULL,
   `update_time` datetime NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP COMMENT '更新时间',
   PRIMARY KEY (`id`) USING BTREE,
+  UNIQUE INDEX `uk_ledger_dedupe`(`dedupe_key`) USING BTREE,
   INDEX `idx_biz_date`(`biz_date`) USING BTREE,
   INDEX `idx_agent_id`(`agent_id`) USING BTREE,
   INDEX `idx_model_instance_id`(`model_instance_id`) USING BTREE,
