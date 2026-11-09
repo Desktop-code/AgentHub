@@ -96,6 +96,15 @@ agenthub:
       read-timeout-ms: 15000
       # 语音识别 / 合成出站的读超时。合成整段回答比探活慢，沿用 15 秒会误判成失败
       speech-timeout-ms: ${AGENTHUB_MODEL_SPEECH_TIMEOUT_MS:60000}
+  auth:
+    # 访问快照缓存（扫描报告 C1）：按用户维度缓存「角色编码 + 权限码集合 + 导航菜单树」，
+    # 键 = agenthub:acl:snapshot:{userId}:v{全局版本}；角色/菜单变更推进 agenthub:acl:ver，用户级变更精确删该用户键。
+    # 只有 Redis 层、没有进程内 L1：权限要求写完立刻生效，本地层在多实例下只能清本机。
+    acl-cache:
+      # 总开关。false 即整链退回直读库（排障用），权限语义不变，只是每个请求多打 1~5 次查询
+      enabled: ${AGENTHUB_ACL_CACHE_ENABLED:true}
+      # 快照 TTL（秒）。写入口会推进版本或精确删键，这里只是漏失效时的兜底
+      redis-ttl-sec: 120
   tool:
     mcp:
       # tools/list 的连接与读取上限，避免同步占住控制台请求

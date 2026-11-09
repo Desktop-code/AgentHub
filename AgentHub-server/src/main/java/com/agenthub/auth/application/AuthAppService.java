@@ -6,12 +6,13 @@ import com.agenthub.admin.domain.model.Menu;
 import com.agenthub.admin.domain.model.User;
 import com.agenthub.admin.domain.repository.DeptRepository;
 import com.agenthub.admin.domain.repository.UserRepository;
-import com.agenthub.admin.domain.service.MenuTreeBuilder;
 import com.agenthub.audit.domain.LoginLogWriter;
 import com.agenthub.auth.api.dto.LoginReq;
 import com.agenthub.auth.api.dto.LoginResp;
 import com.agenthub.auth.api.dto.MeResp;
 import com.agenthub.auth.api.dto.MenuNodeResp;
+import com.agenthub.auth.domain.model.AccessSnapshot;
+import com.agenthub.auth.domain.service.AccessSnapshotProvider;
 import com.agenthub.common.config.AgentHubProperties;
 import com.agenthub.common.error.BizException;
 import com.agenthub.common.error.ErrorCode;
@@ -34,7 +35,7 @@ public class AuthAppService {
     private final DeptRepository depts;
     private final PasswordHasher passwordHasher;
     private final LoginLogWriter loginLogWriter;
-    private final AccessQueryService accessQuery;
+    private final AccessSnapshotProvider accessSnapshots;
     private final OperatorContext operatorContext;
     private final AgentHubProperties properties;
 
@@ -43,17 +44,17 @@ public class AuthAppService {
      * @param depts           补部门名称
      * @param passwordHasher  BCrypt 比对
      * @param loginLogWriter  成败都记
-     * @param accessQuery     角色、权限、菜单
+     * @param accessSnapshots 角色、权限、菜单（生产走缓存装饰器，一次取齐）
      * @param operatorContext 客户端 IP
      * @param properties      安全模式
      */
     public AuthAppService(UserRepository users, DeptRepository depts, PasswordHasher passwordHasher, LoginLogWriter loginLogWriter,
-                          AccessQueryService accessQuery, OperatorContext operatorContext, AgentHubProperties properties) {
+                          AccessSnapshotProvider accessSnapshots, OperatorContext operatorContext, AgentHubProperties properties) {
         this.users = users;
         this.depts = depts;
         this.passwordHasher = passwordHasher;
         this.loginLogWriter = loginLogWriter;
-        this.accessQuery = accessQuery;
+        this.accessSnapshots = accessSnapshots;
         this.operatorContext = operatorContext;
         this.properties = properties;
     }
@@ -118,13 +119,21 @@ public class AuthAppService {
         if (user.getDeptId() != null) {
             depts.findById(user.getDeptId()).ifPresent(dept -> resp.setDeptName(dept.getName()));
         }
+        // 角色、权限、菜单一次取齐：三者同源同版本，避免 /me 内部出现「新权限配旧菜单」
+        AccessSnapshot access = accessSnapshots.snapshot(user);
         resp.setPlatformAdmin(user.isPlatformAdmin());
-        resp.setRoles(accessQuery.roleCodes(user));
-        resp.setPermissions(accessQuery.permissions(user));
-        resp.setMenus(toNodes(MenuTreeBuilder.buildNavigable(accessQuery.visibleMenus(user))));
+        resp.setRoles(access.getRoles());
+        resp.setPermissions(access.getPermissions());
+        resp.setMenus(toNodes(access.getMenus()));
         return resp;
     }
 
+    /**
+     * 菜单树 → 响应节点。树已在快照里组好（按钮已剔除、已排序），这里只做逐层拷贝。
+     *
+     * @param menus 导航树
+     * @return 响应节点
+     */
     private List<MenuNodeResp> toNodes(List<Menu> menus) {
         List<MenuNodeResp> nodes = new ArrayList<>();
         for (Menu menu : menus) {

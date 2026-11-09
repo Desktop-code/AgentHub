@@ -21,6 +21,7 @@ import com.agenthub.common.error.BizException;
 import com.agenthub.common.error.ErrorCode;
 import com.agenthub.common.security.PasswordHasher;
 import com.agenthub.common.web.OperatorContext;
+import com.agenthub.spi.cache.AclCacheInvalidator;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
@@ -41,6 +42,7 @@ public class UserAppService {
     private final AgentHubProperties properties;
     private final OperatorContext operatorContext;
     private final OperLogWriter operLogWriter;
+    private final AclCacheInvalidator aclCache;
 
     /**
      * @param users           用户仓储
@@ -51,10 +53,11 @@ public class UserAppService {
      * @param properties      重置口令配置
      * @param operatorContext 当前操作者
      * @param operLogWriter   操作日志
+     * @param aclCache        访问快照失效（提交后按用户精确删）
      */
     public UserAppService(UserRepository users, RoleRepository roles, DeptRepository depts, ScopeQueryService scopes,
                           PasswordHasher passwordHasher, AgentHubProperties properties, OperatorContext operatorContext,
-                          OperLogWriter operLogWriter) {
+                          OperLogWriter operLogWriter, AclCacheInvalidator aclCache) {
         this.users = users;
         this.roles = roles;
         this.depts = depts;
@@ -63,6 +66,7 @@ public class UserAppService {
         this.properties = properties;
         this.operatorContext = operatorContext;
         this.operLogWriter = operLogWriter;
+        this.aclCache = aclCache;
     }
 
     /**
@@ -144,6 +148,8 @@ public class UserAppService {
         existing.setPhone(req.getPhone());
         existing.setStatus(status);
         users.updateProfile(existing);
+        // 启停/部门变化会影响该用户的权限与 /me 展示：提交后按该用户精确失效
+        aclCache.evictUser(id);
         operLogWriter.write("user", "update", "user", String.valueOf(id), "更新用户 " + existing.getUsername());
         return get(id);
     }
@@ -161,6 +167,8 @@ public class UserAppService {
         }
         assertKeepsAdmin(id, false);
         users.logicDelete(id, operatorContext.requireUserId());
+        // 删除用户后其快照不应再被命中：提交后精确失效
+        aclCache.evictUser(id);
         operLogWriter.write("user", "delete", "user", String.valueOf(id), "删除用户 " + existing.getUsername());
     }
 
@@ -192,6 +200,8 @@ public class UserAppService {
         boolean remain = RecordStatus.isEnabled(existing.getStatus()) && keepAdmin;
         assertKeepsAdmin(id, remain);
         users.replaceRoles(id, req.getRoleIds());
+        // 只影响这一个用户的角色集合：精确删该用户快照，不误伤其它用户
+        aclCache.evictUser(id);
         operLogWriter.write("user", "grant", "user", String.valueOf(id), "分配角色");
     }
 

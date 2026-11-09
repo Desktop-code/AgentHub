@@ -20,6 +20,7 @@ import com.agenthub.common.api.PageResult;
 import com.agenthub.common.error.BizException;
 import com.agenthub.common.error.ErrorCode;
 import com.agenthub.common.web.OperatorContext;
+import com.agenthub.spi.cache.AclCacheInvalidator;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
@@ -37,6 +38,7 @@ public class RoleAppService {
     private final DeptRepository depts;
     private final OperatorContext operatorContext;
     private final OperLogWriter operLogWriter;
+    private final AclCacheInvalidator aclCache;
 
     /**
      * @param roles           角色仓储
@@ -44,14 +46,17 @@ public class RoleAppService {
      * @param depts           校验自定义部门
      * @param operatorContext 操作者
      * @param operLogWriter   操作日志
+     * @param aclCache        访问快照失效（提交后推进版本）
      */
     public RoleAppService(RoleRepository roles, MenuRepository menus, DeptRepository depts,
-                          OperatorContext operatorContext, OperLogWriter operLogWriter) {
+                          OperatorContext operatorContext, OperLogWriter operLogWriter,
+                          AclCacheInvalidator aclCache) {
         this.roles = roles;
         this.menus = menus;
         this.depts = depts;
         this.operatorContext = operatorContext;
         this.operLogWriter = operLogWriter;
+        this.aclCache = aclCache;
     }
 
     /**
@@ -123,6 +128,8 @@ public class RoleAppService {
         }
         fill(role, req);
         roles.update(role);
+        // 角色启停会改变「启用角色」集合，进而改变权限码与菜单：提交后整体失效
+        aclCache.evictAll();
         operLogWriter.write("role", "update", "role", String.valueOf(id), "更新角色 " + role.getCode());
         return get(id);
     }
@@ -138,6 +145,8 @@ public class RoleAppService {
             throw new BizException(ErrorCode.BAD_REQUEST, "不能删除管理员角色");
         }
         roles.logicDelete(id, operatorContext.requireUserId());
+        // 撤销角色等于拿走其用户的一批权限与菜单：提交后整体失效
+        aclCache.evictAll();
         operLogWriter.write("role", "delete", "role", String.valueOf(id), "删除角色 " + role.getCode());
     }
 
@@ -157,6 +166,8 @@ public class RoleAppService {
             }
         }
         roles.replaceMenus(id, MenuTreeBuilder.withAncestors(new HashSet<>(req.getMenuIds()), all));
+        // 角色授权决定该角色下所有用户的权限码与侧栏菜单：提交后整体失效
+        aclCache.evictAll();
         operLogWriter.write("role", "grant", "role", String.valueOf(id), "分配菜单 " + role.getCode());
     }
 
