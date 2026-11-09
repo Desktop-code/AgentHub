@@ -15,9 +15,10 @@ import org.springframework.stereotype.Component;
  * 跨域只读引用模型实例。所属域：rag。
  * 只调 model 的领域仓储，不依赖其 Entity / AppService；Key 与 Base URL 一概不读，RAG 只存 id。
  * <p>
- * 维度来源：模型实例的 {@code extra_json.dimension}（或 {@code embeddingDimension}）。
- * 模型中心当前没有独立的维度列，因此约定用 extra_json 承载；缺失时允许管理员在创建请求里显式给出，
- * 两者都没有则拒绝创建——不允许猜一个维度建出无法写入的集合。
+ * 维度来源（按可信度）：① 模型连通测试返回的 {@code model_instance.embedding_dim}；
+ * ② 模型实例的 {@code extra_json.dimension}（或 {@code embeddingDimension}）。
+ * 缺失时允许管理员在创建请求里显式给出兜底值，三者都没有则拒绝创建——
+ * 不允许猜一个维度建出无法写入的集合。
  */
 @Component
 public class RagModelLookup {
@@ -69,14 +70,23 @@ public class RagModelLookup {
     }
 
     /**
-     * 解析向量维度：先读模型实例 extra_json，读不到用调用方给的兜底值。
+     * 解析向量维度。取值顺序（与前端展示、记忆域口径一致）：
+     * ① 模型连通测试返回的 {@code embedding_dim} 快照——模型自己回答的维度，最可信；
+     * ② 模型实例 {@code extra_json.dimension}；
+     * ③ 调用方给的兜底值；
+     * 三者都没有则拒绝创建，绝不猜一个维度建出写不进向量的集合。
      *
      * @param instance   Embedding 实例
      * @param fallback   请求里显式给的维度，可空
      * @return 维度，必然 > 0
-     * @throws BizException 两处都没有合法维度
+     * @throws BizException 三处都没有合法维度
      */
     public int resolveDimension(ModelInstance instance, Integer fallback) {
+        // 连通测试快照优先：它是模型真实返回的维度，人工填的 extra_json 可能与模型不符
+        Integer probed = instance.getEmbeddingDim();
+        if (probed != null && probed > 0) {
+            return probed;
+        }
         Integer fromMeta = dimensionOf(instance.getExtraJson());
         if (fromMeta != null && fromMeta > 0) {
             return fromMeta;
@@ -86,8 +96,8 @@ public class RagModelLookup {
         }
         throw new BizException(ErrorCode.BAD_REQUEST,
                 "无法确定向量维度：" + instance.getDisplayName()
-                        + " 未在模型中心填写 extraJson.dimension，且请求未提供 vectorDimension。"
-                        + "请在模型实例的扩展 JSON 中补 {\"dimension\":768} 后重试");
+                        + " 还没有连通测试返回的维度，也未在模型中心填写 extraJson.dimension。"
+                        + "请先在模型管理对该 Embedding 实例做一次连通测试后重试");
     }
 
     /**

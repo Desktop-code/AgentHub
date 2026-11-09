@@ -38,7 +38,6 @@
               <el-tag :type="l1CardRow.status === 1 ? 'success' : 'info'" size="small" effect="plain">
                 {{ l1CardRow.status === 1 ? '已发布' : '草稿' }}
               </el-tag>
-              <span v-if="l1CardRow.isActive === 1" class="obj-sub">生效中</span>
             </template>
             <span v-else class="obj-ver muted">暂无版本</span>
           </span>
@@ -99,10 +98,11 @@
             <div class="versions-head">
               <div class="versions-title">
                 <span class="versions-name">{{ objectTitle }}</span>
-                <el-tag v-if="objectPurpose" :type="purposeType(objectPurpose)" size="small" effect="plain">
-                  {{ objectPurpose }}
-                </el-tag>
-                <el-tag v-if="selectedKind === 'L1'" type="danger" size="small" effect="dark">系统级</el-tag>
+                <!--
+                  头部标签恒为同一个 el-tag 节点，只切文案 / 配色，不做挂载卸载：
+                  这样就不存在「CHAT 与系统级同时出现、随后 CHAT 消失导致位移」的任何可能。
+                -->
+                <el-tag :type="headTag.type" size="small" :effect="headTag.effect">{{ headTag.text }}</el-tag>
                 <span class="versions-sub">{{ versions.length }} 个版本 · {{ locale }}</span>
               </div>
               <el-button
@@ -130,23 +130,28 @@
             <el-table-column label="版本" width="90" align="center">
               <template #default="{ row }">v{{ row.version }}</template>
             </el-table-column>
-            <el-table-column label="状态" width="100" align="center">
+            <el-table-column label="状态" width="110" align="center">
               <template #default="{ row }">
                 <el-tag :type="row.status === 1 ? 'success' : 'info'" size="small" effect="plain">
                   {{ row.status === 1 ? '已发布' : '草稿' }}
                 </el-tag>
               </template>
             </el-table-column>
-            <el-table-column label="生效" width="100" align="center">
+            <el-table-column label="生效" width="110" align="center">
               <template #default="{ row }">
                 <el-tag v-if="isRowActive(row)" type="success" size="small" effect="dark">生效中</el-tag>
                 <span v-else class="muted">—</span>
               </template>
             </el-table-column>
-            <el-table-column prop="updateTime" label="更新时间" min-width="170" align="center">
-              <template #default="{ row }">{{ row.updateTime || '—' }}</template>
+            <!--
+              时间只到秒：带毫秒会把列撑开并折行。
+              这里用 min-width 而不是固定 width——固定宽度加起来不足容器宽时，
+              Element Plus 会在最右侧留一条空白；让它吃掉剩余空间即可填满。
+            -->
+            <el-table-column label="更新时间" min-width="180" align="center" class-name="col-nowrap">
+              <template #default="{ row }">{{ formatDateTime(row.updateTime) }}</template>
             </el-table-column>
-            <el-table-column label="操作" width="230" align="center" fixed="right">
+            <el-table-column label="操作" width="240" align="center" fixed="right">
               <template #default="{ row }">
                 <el-button link type="primary" @click.stop="openEditor(row)">
                   {{ row.status === 1 ? '查看' : '编辑' }}
@@ -175,19 +180,19 @@
       </section>
     </div>
 
-    <!-- ============ 右抽屉：编辑 ============ -->
+    <!-- ============ 右抽屉：编辑（半屏宽，内容较长时按段落滚动） ============ -->
     <el-drawer
       v-model="drawer.open"
       :title="drawerTitle"
-      size="760px"
+      size="50%"
       destroy-on-close
       :before-close="beforeDrawerClose"
     >
       <!-- L1：只有语言与正文，按 locale 版本发布 -->
       <el-form v-if="selectedKind === 'L1'" label-width="90px" class="drawer-form">
         <el-form-item label="语言">
-          <!-- 当前阶段仅开放 zh-CN；一旦落库，版本行的 locale 固定，不可再改 -->
-          <el-select v-model="l1Form.locale" :disabled="!!l1Form.id || drawer.readonly" style="width: 100%">
+          <!-- 当前阶段只有 zh-CN 一个默认值，选择项固定为不可选；落库后版本行 locale 也随之固定 -->
+          <el-select v-model="l1Form.locale" disabled style="width: 100%">
             <el-option label="zh-CN" value="zh-CN" />
           </el-select>
         </el-form-item>
@@ -404,6 +409,7 @@ import PageHeader from '@/components/PageHeader.vue'
 import { useRowIndexColumn } from '@/composables/listIndex'
 import { useFormDirty } from '@/composables/useFormDirty'
 import { confirmDiscardUnsaved } from '@/utils/unsavedConfirm'
+import { formatDateTime } from '@/utils/datetime'
 import { useUserStore } from '@/stores/user'
 import type {
   PromptCatalog,
@@ -432,6 +438,13 @@ const PURPOSE_LABELS: Record<string, string> = {
  */
 function purposeLabel(purpose: string) {
   return PURPOSE_LABELS[purpose] || purpose
+}
+
+/** 中栏标题右侧标签的渲染配置；type 与 el-tag 的 type 取同一套枚举 */
+interface HeadTag {
+  text: string
+  type: 'primary' | 'success' | 'warning' | 'info' | 'danger'
+  effect: 'dark' | 'light' | 'plain'
 }
 
 /** 中栏统一行结构：L1/L2 都归一成这一份，表格与选中态复用一套逻辑 */
@@ -632,16 +645,30 @@ const selectedSlot = computed(() =>
 /** 当前槽位绑定的业务键：生效/最新版所属 key；空槽时后端给约定键（用途名） */
 const selectedKey = computed(() => selectedSlot.value?.templateKey ?? selectedPurpose.value)
 
+/**
+ * 中栏标题右侧的标签。恒返回一份：L1 是「系统级」，L2 是用途码。
+ * 只用同一个 el-tag 渲染，切换对象时只换文案与配色，不会出现两个标签并存的瞬间。
+ */
+const headTag = computed<HeadTag>(() => {
+  if (selectedKind.value === 'L1') {
+    return { text: '系统级', type: 'danger', effect: 'dark' }
+  }
+  if (!selectedPurpose.value) {
+    return { text: 'L2', type: 'info', effect: 'plain' }
+  }
+  return { text: selectedPurpose.value, type: purposeType(selectedPurpose.value), effect: 'plain' }
+})
+
+/**
+ * 中栏标题：L2 只用「用途中文名 + 模板」，不再在标题里重复括号用途码——
+ * 右侧已经有一个同用途的 Tag，重复一次既啰嗦又把标题撑长。
+ */
 const objectTitle = computed(() => {
   if (selectedKind.value === 'L1') {
     return '平台全局约束 (L1)'
   }
-  return selectedPurpose.value ? `${purposeLabel(selectedPurpose.value)}模板（${selectedPurpose.value}）` : 'L2 用途模板'
+  return selectedPurpose.value ? `${purposeLabel(selectedPurpose.value)}模板` : 'L2 用途模板'
 })
-
-const objectPurpose = computed(() =>
-  selectedKind.value === 'L2' ? selectedPurpose.value : ''
-)
 
 const drawerTitle = computed(() => {
   if (selectedKind.value === 'L1') {
@@ -712,7 +739,7 @@ const canPublishFromDrawer = computed(
  * @param purpose 用途码
  * @return el-tag 的 type
  */
-function purposeType(purpose?: string) {
+function purposeType(purpose?: string): HeadTag['type'] {
   switch (purpose) {
     case 'CHAT':
       return 'primary'
@@ -820,8 +847,12 @@ function selectL1() {
   if (selectedKind.value !== 'L1') {
     drawer.open = false
   }
-  selectedKind.value = 'L1'
+  /*
+   * 先清用途再切类型：反过来会让中栏在切换瞬间同时持有「L1 + 旧用途码」，
+   * 标题行的用途 Tag 会先冒出来再消失（用户看到的抖动）。
+   */
   selectedPurpose.value = ''
+  selectedKind.value = 'L1'
   applyL1Versions()
 }
 
@@ -1480,6 +1511,15 @@ onMounted(() => {
   min-width: 0;
 }
 
+/* 时间列不折行：列宽已按「YYYY-MM-DD HH:mm:ss」给足，这里只做兜底 */
+.versions :deep(.col-nowrap .cell) {
+  white-space: nowrap;
+}
+
+.versions :deep(.el-table .cell) {
+  line-height: 1.5;
+}
+
 .versions-head {
   display: flex;
   align-items: center;
@@ -1500,6 +1540,16 @@ onMounted(() => {
   font-weight: 600;
   white-space: nowrap;
   text-overflow: ellipsis;
+}
+
+/*
+ * 头部标签固定最小宽度并居中：CHAT / 系统级 文案宽度不同，
+ * 不锁宽度时切换会让后面的版本数与标题左右横跳，看起来像「位置前移」。
+ */
+.versions-title :deep(.el-tag) {
+  flex: none;
+  justify-content: center;
+  min-width: 64px;
 }
 
 .versions-sub {

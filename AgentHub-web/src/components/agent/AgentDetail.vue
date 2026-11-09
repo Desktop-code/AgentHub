@@ -478,7 +478,7 @@ import type {
   ToolBind
 } from '@/types/agent'
 import { MEMORY_SLOT_PURPOSES, normalizeCapability, PURPOSE_SLOT_GROUPS } from '@/types/model'
-import { checkUserPrompt, promptAfterModeSwitch } from '@/utils/promptSafety'
+import { checkUserPrompt, settleLegacyPrompt, PROMPT_MAX_CHARS } from '@/utils/promptSafety'
 import {
   normalizeChildRunModes,
   normalizeContextPolicy,
@@ -871,16 +871,30 @@ async function onPromptChange(value: PromptBinding) {
   }
   promptSaving.value = true
   try {
+    // 弹窗里刚选上模板时，旧正文同样并入追加要求后再落库，避免「双轨」闸门拒绝
+    const settled = settleLegacyPrompt(
+      form.value.systemPrompt || '',
+      value.promptExtra || '',
+      value.templateId ?? null
+    )
+    // 合并后超长就当场拦下：后端追加区上限与 system_prompt 一致，超了必 400
+    if (settled.promptExtra.length > PROMPT_MAX_CHARS) {
+      ElMessage.error(`并入旧正文后「追加要求」超过长度，最长 ${PROMPT_MAX_CHARS}，请先精简`)
+      if (form.value) {
+        form.value.prompt = previous
+      }
+      return
+    }
     const { data } = await updateAgent(props.agentId, {
       ...payloadFromSaved(snapshot),
       // 弹窗可能同时迁移了业务提示词正文（CHAT 未挂模板时），随同一次请求落库
-      systemPrompt: form.value.systemPrompt || '',
+      systemPrompt: settled.systemPrompt,
       // 落库的是「快照 + 本次提示词」，与其它草稿隔离
       prompt: {
         templateId: value.templateId ?? null,
         templateVersion: value.templateVersion ?? null,
         override: value.override || {},
-        promptExtra: value.promptExtra || ''
+        promptExtra: settled.promptExtra
       }
     })
     if (!active || !form.value) {
@@ -888,13 +902,16 @@ async function onPromptChange(value: PromptBinding) {
     }
     const landed = normalizePromptBinding(data.data?.prompt ?? value)
     form.value.prompt = landed
+    // 服务端已把「旧正文」并入追加要求并清空 system_prompt，回填保持一致，避免底栏一直显示脏
+    const landedPrompt = data.data?.systemPrompt ?? settled.systemPrompt
+    form.value.systemPrompt = landedPrompt
     // 只洗白提示词两列：同一页其它未提交的文本 / 选择草稿必须继续算脏
     saved.value = {
       ...saved.value!,
       prompt: landed,
-      systemPrompt: data.data?.systemPrompt ?? saved.value!.systemPrompt
+      systemPrompt: landedPrompt
     }
-    patchBaseline({ prompt: landed, systemPrompt: data.data?.systemPrompt ?? saved.value!.systemPrompt })
+    patchBaseline({ prompt: landed, systemPrompt: landedPrompt })
     ElMessage.success('提示词已保存')
   } catch {
     // 失败回滚到保存前的四列，摘要行不能显示一个没落库的模板
@@ -1071,7 +1088,7 @@ function restoreDraft(snap: DraftSnap) {
     maxPlanSteps: snap.maxPlanSteps,
     maxStepRetries: snap.maxStepRetries
   }
-  // 提示词模板跟着回滚，避免下次切模式时拿旧锚点做整段替换
+  // 锚点跟着回滚，下次判 Router ↔ 非 Router 边界时仍以已落库模式为准
   promptModeAnchor.value = snap.runMode
 }
 
@@ -1153,12 +1170,18 @@ watch(
 )
 
 /**
- * 与表单 runMode 对齐的锚点：仅用户点 radio 时做模板替换，避免 load/切 Agent 误覆盖。
+ * 与表单 runMode 对齐的锚点：记录「上一次模式」，用于判断 Router ↔ 非 Router 的边界。
+ * 不参与提示词正文生成，也不做模板替换，避免 load / 切 Agent 时误改用户内容。
  */
 const promptModeAnchor = ref('REACT')
 
 /**
- * 基本信息里改 runMode：空或仍为旧模式默认模板才换成新默认；自定义不覆盖。
+ * 基本信息里改 runMode：只处理模式边界，**不再自动往「系统提示词」里灌默认正文**。
+ * <p>
+ * 旧行为会在正文为空（或仍等于旧模式默认模板）时替换成新模式的推荐模板。一旦该 Agent 已挂
+ * L3 模板，这份「顺手填进来的」正文就会撞上「模板 + 旧正文双轨」的保存闸门，
+ * 表现为「只切了个运行模式，一保存就报旧提示词未迁移」。现在正文只表达配置者自己写的内容，
+ * 与新建弹窗的口径一致。
  * <p>
  * Router 边界：agent_def 只承载 CHAT 模板，切到 ROUTER 后已选的模板永远不会生效，
  * 后端也会拒绝保存。因此这里就地清空并提示，并同步 supported 让编辑区退化为自由段。
@@ -1170,10 +1193,6 @@ function onRunModeChange(value: string | number | boolean) {
   const next = String(value)
   const prev = promptModeAnchor.value
   promptModeAnchor.value = next
-  const replaced = promptAfterModeSwitch(form.value.systemPrompt || '', form.value.name, prev, next)
-  if (replaced !== null) {
-    form.value.systemPrompt = replaced
-  }
   if (next === 'ROUTER') {
     // 编排根不可作子：切到 ROUTER 就地把开关关掉（保存时服务端同样强制写 0）
     form.value.allowOrchestrated = false
@@ -1349,6 +1368,12 @@ function payload(): AgentSave | null {
     return null
   }
   const runtime = normalizeRuntimeConfig(form.value.runtimeConfig)
+  // 挂模板时旧正文并入追加要求，避免被后端「双轨」闸门拦下
+  const settled = settleLegacyPrompt(
+    form.value.systemPrompt || '',
+    form.value.prompt?.promptExtra || '',
+    form.value.prompt?.templateId ?? null
+  )
   return {
     name: form.value.name.trim(),
     code: form.value.code.trim(),
@@ -1356,13 +1381,13 @@ function payload(): AgentSave | null {
     // ROUTER 一律上报 false（服务端也会强制）；其它模式按当前开关，undefined 视为开
     allowOrchestrated: form.value.runMode === 'ROUTER' ? false : form.value.allowOrchestrated !== false,
     description: form.value.description?.trim() || '',
-    systemPrompt: form.value.systemPrompt || '',
+    systemPrompt: settled.systemPrompt,
     // L3 四列整体回传：后端据 templateId 是否为空决定「挂模板 / 清空」
     prompt: {
       templateId: form.value.prompt?.templateId ?? null,
       templateVersion: form.value.prompt?.templateVersion ?? null,
       override: form.value.prompt?.override || {},
-      promptExtra: form.value.prompt?.promptExtra || ''
+      promptExtra: settled.promptExtra
     },
     remark: form.value.remark?.trim() || '',
     timeoutMs: form.value.timeoutMs ?? null,
@@ -1509,6 +1534,11 @@ async function save() {
     ElMessage.warning('请填写名称和编码')
     return
   }
+  // 旧正文并入追加要求后可能超过上限：这里先拦，避免提交后被后端 400
+  if ((body.prompt?.promptExtra || '').length > PROMPT_MAX_CHARS) {
+    ElMessage.error(`并入旧正文后「追加要求」超过长度，最长 ${PROMPT_MAX_CHARS}，请先精简`)
+    return
+  }
   const report = promptEditor.value?.reveal() ?? checkUserPrompt(body.systemPrompt || '')
   if (report.errors.length) {
     ElMessage.error(report.errors.join('；'))
@@ -1519,6 +1549,8 @@ async function save() {
     ElMessage.error(limitError)
     return
   }
+  // 挂模板后旧正文被并入追加要求时，成功提示里说清楚去向，避免配置者以为正文丢了
+  const migratedLegacy = (form.value.systemPrompt || '').trim().length > 0 && body.systemPrompt === ''
   saving.value = true
   try {
     const { data } = await updateAgent(props.agentId, body)
@@ -1526,7 +1558,7 @@ async function save() {
     if (warnings.length) {
       ElMessage.warning(warnings.join('；'))
     } else {
-      ElMessage.success('已保存')
+      ElMessage.success(migratedLegacy ? '已保存，原「系统提示词」正文已并入「追加要求」' : '已保存')
     }
     emit('changed', changedPatch())
     // 保存成功：表单内容即刚落库的内容，以服务端回填为准（不保留草稿）
@@ -1612,6 +1644,12 @@ async function saveRuntimeSwitch(key: 'requirePlanConfirm', value: boolean) {
  * @return 提交体
  */
 function payloadFromSaved(snapshot: SavedSnap): AgentSave {
+  // 挂模板时旧正文并入追加要求，避免被后端「双轨」闸门拦下
+  const settled = settleLegacyPrompt(
+    snapshot.systemPrompt,
+    snapshot.prompt.promptExtra || '',
+    snapshot.prompt.templateId ?? null
+  )
   return {
     name: snapshot.name,
     code: snapshot.code,
@@ -1619,12 +1657,12 @@ function payloadFromSaved(snapshot: SavedSnap): AgentSave {
     // 必须带上：这两条即时接口也走整份保存，漏传会被服务端按默认值重新打开开关
     allowOrchestrated: snapshot.runMode === 'ROUTER' ? false : snapshot.allowOrchestrated,
     description: snapshot.description,
-    systemPrompt: snapshot.systemPrompt,
+    systemPrompt: settled.systemPrompt,
     prompt: {
       templateId: snapshot.prompt.templateId ?? null,
       templateVersion: snapshot.prompt.templateVersion ?? null,
       override: snapshot.prompt.override || {},
-      promptExtra: snapshot.prompt.promptExtra || ''
+      promptExtra: settled.promptExtra
     },
     remark: snapshot.remark,
     timeoutMs: snapshot.timeoutMs,

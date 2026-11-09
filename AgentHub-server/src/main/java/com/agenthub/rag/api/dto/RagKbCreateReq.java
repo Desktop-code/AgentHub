@@ -5,7 +5,8 @@ import lombok.Data;
 
 /**
  * 新建知识库请求。所属域：rag。
- * 向量维度优先取模型实例 extraJson.dimension，缺失时才用本请求的 vectorDimension 兜底。
+ * 向量维度优先取模型实例连通测试返回的 embedding_dim，其次 extra_json.dimension，
+ * 最后才用本请求的 vectorDimension 兜底。
  * Key / Base URL 一律不传：Embedding 只引用模型实例 id。
  */
 @Data
@@ -26,7 +27,7 @@ public class RagKbCreateReq {
     /** Embedding 模型实例 id，用途必须 EMBEDDING */
     private Long embeddingModelId;
 
-    /** 维度兜底值；模型 extraJson.dimension 优先 */
+    /** 维度兜底值；模型连通测试快照 / extraJson.dimension 优先 */
     private Integer vectorDimension;
 
     /** 可选 Rerank 模型实例 id，用途必须 RERANK */

@@ -1,7 +1,11 @@
 /**
- * 用户业务段的前端检查和推荐模板。所属域：agent。
+ * 用户业务段的前端检查。所属域：agent。
  * 规则与后端 PromptSafetyChecker 对齐，只做保存前提示；以后端结果为准。
  * 这里只有形态特征，不写真实密钥、地址或租户。
+ *
+ * <p>只保留校验：历史上那套「按运行模式生成推荐提示词 / 切模式自动替换正文」的模板文本
+ * 已经整体下线——它会凭空往「系统提示词」里灌一段正文，与已绑定模板形成双轨，
+ * 让「只切了个模式就保存不了」成为常见现象。正文现在只表达配置者自己写的内容。
  */
 
 /** 与 agenthub.agent.prompt-max-chars 默认值、AgentChecks.PROMPT_MAX 一致，按 JS 字符计 */
@@ -21,91 +25,35 @@ export interface PromptCheck {
 }
 
 /**
- * ReAct 用户业务段默认模板（助手 + 优先工具）。
+ * 提交前收敛「旧系统提示词」。
  *
- * @param name 当前表单名称；空则用「助手」
- */
-export function recommendedReactPrompt(name: string): string {
-  const label = name.trim() || '助手'
-  return [
-    `你是「${label}」智能助手。请用简洁、准确的中文回答用户问题。`,
-    '- 需要外部信息或操作时，优先调用已绑定的工具，并根据工具结果作答。',
-    '- 不确定时如实说明，不要编造数据。',
-    '- 输出条理清晰；涉及步骤时分点说明。'
-  ].join('\n')
-}
-
-/**
- * Router 用户业务段默认模板（只做意图分发，不代跑工具链）。
+ * <p>挂上 L3 模板后，{@code system_prompt} 不再作为独立的整段业务提示词存在，
+ * 后端会以「模板 + 旧正文双轨」直接拒绝保存。历史上这类正文可能已经留在库里，
+ * 因此统一收敛：还残留正文就并入「追加要求」（等价于原弹窗的「迁移到追加要求」），
+ * 并把 systemPrompt 置空后一起提交。这样切模式 / 直接保存都不会再被这条闸门挡住，
+ * 也不会静默丢字。
  *
- * @param name 当前表单名称；空则用「路由助手」
- */
-export function recommendedRouterPrompt(name: string): string {
-  const label = name.trim() || '路由助手'
-  return [
-    `你是「${label}」路由助手。根据用户意图选择合适的子 Agent；一句可含多个意图。`,
-    '- 输出有序 JSON 数组：[{"route_key":"...","sub_query":"切给该子的子问题"}, ...]；单意图长度为 1。',
-    '- 不要代替子 Agent 执行专业工具链。',
-    '- 仅在无法匹配子节点时，才可简短直答或说明无法路由。'
-  ].join('\n')
-}
-
-/**
- * 计划执行用户业务段默认模板（先拆计划再逐步执行）。
+ * <p>未挂模板时原样返回：业务正文仍是该 Agent 唯一的提示词来源。
  *
- * @param name 当前表单名称；空则用「执行助手」
+ * @param systemPrompt 当前业务提示词正文
+ * @param promptExtra  当前追加要求
+ * @param templateId   已选模板 id；为空表示未挂模板
+ * @return 可直接提交的正文与追加要求
  */
-export function recommendedPlanPrompt(name: string): string {
-  const label = name.trim() || '执行助手'
-  return [
-    `你是「${label}」计划执行助手。收到任务后先拆成有序步骤，再逐步执行并给出结论。`,
-    '- 步骤要具体可执行；能一步完成就不要拆多步。',
-    '- 每一小步只使用已绑定的工具取真实结果，不要编造数据。',
-    '- 全部步骤完成后，用一段连贯的中文给出最终答复，不要罗列内部步骤编号。'
-  ].join('\n')
-}
-
-/**
- * 「填入模板」/ 新建默认用。按 runMode 区分 ReAct / Router / 计划执行。
- *
- * @param name 当前表单名称
- * @param runMode REACT | ROUTER | PLAN_AND_EXECUTE；其它值按 REACT
- * @return 用户业务段模板，不含平台前缀
- */
-export function recommendedPrompt(name: string, runMode: string = 'REACT'): string {
-  if (runMode === 'ROUTER') {
-    return recommendedRouterPrompt(name)
+export function settleLegacyPrompt(
+  systemPrompt: string,
+  promptExtra: string,
+  templateId: number | null | undefined
+): { systemPrompt: string; promptExtra: string } {
+  const legacy = (systemPrompt || '').trim()
+  if (!templateId || !legacy) {
+    return { systemPrompt: systemPrompt || '', promptExtra: promptExtra || '' }
   }
-  if (runMode === 'PLAN_AND_EXECUTE') {
-    return recommendedPlanPrompt(name)
+  const extra = (promptExtra || '').trim()
+  return {
+    systemPrompt: '',
+    promptExtra: extra ? `${extra}\n\n${legacy}` : legacy
   }
-  return recommendedReactPrompt(name)
-}
-
-/**
- * 切换运行模式时决定是否替换用户段。
- * 仅当正文为空，或仍等于「切换前模式」的默认模板时，才返回新模式默认模板；否则返回 null（不覆盖自定义）。
- *
- * @param current 当前用户段
- * @param name 当前 Agent 名称（用于拼默认模板）
- * @param fromMode 切换前模式
- * @param toMode 切换后模式
- */
-export function promptAfterModeSwitch(
-  current: string,
-  name: string,
-  fromMode: string,
-  toMode: string
-): string | null {
-  if (!toMode || fromMode === toMode) {
-    return null
-  }
-  const trimmed = (current || '').trim()
-  const oldDefault = recommendedPrompt(name, fromMode).trim()
-  if (!trimmed || trimmed === oldDefault) {
-    return recommendedPrompt(name, toMode)
-  }
-  return null
 }
 
 /**

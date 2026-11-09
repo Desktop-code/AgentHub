@@ -38,6 +38,7 @@
       <!--
         未挂模板的 CHAT：业务提示词仍需可写（历史配置不能只读锁死）。
         这里只给单栏文本框，不恢复「右侧平台约束」双栏——L1 只在预览/出站组装结果里出现。
+        已挂模板时整块不出现：模板与整段业务正文不再并行维护。
       -->
       <div v-if="isChat && !draft.templateId" class="legacy-block">
         <p class="block-title">业务提示词（未挂模板时生效）</p>
@@ -50,28 +51,9 @@
           placeholder="只写业务要求。平台约束会在运行时自动加在前面"
         />
         <p class="block-hint">
-          选定模板后本区不再参与出站，请把需要保留的内容迁移到「追加要求」，避免与模板双轨。
+          选定模板后本区不再参与出站；这里已有的正文会在保存时自动并入「追加要求」，不需要手工迁移。
         </p>
       </div>
-
-      <!-- 已挂模板但库里还有旧正文：显式迁移或丢弃，禁止静默合并 / 静默清空 -->
-      <el-alert
-        v-if="isChat && draft.templateId && legacyDraft.trim().length > 0"
-        type="info"
-        :closable="false"
-        show-icon
-        class="legacy-alert"
-      >
-        <template #title>
-          检测到旧的「系统提示词」正文（{{ legacyDraft.trim().length }} 字）。已绑定模板后它不再作为整段提示词编辑，
-          需迁移到「追加要求」或丢弃后才能保存。
-        </template>
-        <pre class="legacy-text">{{ legacyDraft }}</pre>
-        <div class="legacy-actions">
-          <el-button type="primary" link :disabled="disabled" @click="migrateLegacy">迁移到追加要求</el-button>
-          <el-button type="danger" link :disabled="disabled" @click="legacyDraft = ''">丢弃旧正文</el-button>
-        </div>
-      </el-alert>
     </div>
 
     <!--
@@ -214,31 +196,14 @@ async function onPreview() {
 }
 
 /**
- * 把旧业务提示词并入追加区：内容原样追加在已有追加区之后，再清空旧正文。
- * 显式操作、可预期，不做静默合并。
- */
-function migrateLegacy() {
-  const legacy = legacyDraft.value.trim()
-  if (!legacy) {
-    return
-  }
-  const current = (draft.promptExtra || '').trim()
-  draft.promptExtra = current ? `${current}\n\n${legacy}` : legacy
-  legacyDraft.value = ''
-}
-
-/**
- * 保存：先跑前端能判的硬闸（钉版本、失效段落、旧正文未迁移），再交调用方落库。
+ * 保存：先跑前端能判的硬闸（钉版本、失效段落），再交调用方落库。
  * 段落键合法性（core / 未知段）以后端为准，前端不重复实现一套规则。
+ * <p>「已挂模板还残留业务正文」不再是闸门：调用方保存时会把旧正文并入「追加要求」并清空 system_prompt。
  */
 function submit() {
   const error = formRef.value?.validate?.() ?? null
   if (error) {
     ElMessage.error(error)
-    return
-  }
-  if (isChat.value && draft.templateId && legacyDraft.value.trim().length > 0) {
-    ElMessage.error('请先把旧「系统提示词」正文迁移到追加要求，或丢弃旧正文后再保存')
     return
   }
   if (isChat.value && !draft.templateId && legacyDraft.value.length > PROMPT_MAX_CHARS) {
@@ -306,32 +271,6 @@ function submit() {
   color: var(--ah-text-muted, #9ca3af);
   font-size: 12px;
   line-height: 1.5;
-}
-
-.legacy-alert {
-  margin-top: 4px;
-}
-
-.legacy-text {
-  max-height: 120px;
-  margin: 8px 0 0;
-  overflow: auto;
-  padding: 8px 10px;
-  background: #fff;
-  border: 1px solid var(--ah-border, #e6e8ef);
-  border-radius: 4px;
-  white-space: pre-wrap;
-  word-break: break-word;
-  font-family: inherit;
-  font-size: 12px;
-  line-height: 1.55;
-  color: #4b5563;
-}
-
-.legacy-actions {
-  display: flex;
-  gap: 8px;
-  margin-top: 8px;
 }
 </style>
 
