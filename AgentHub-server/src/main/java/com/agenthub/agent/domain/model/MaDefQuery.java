@@ -5,8 +5,8 @@ import lombok.Data;
 /**
  * 多智能体方案列表条件。所属域：agent。
  *
- * <p>tenantId 由应用层强制写入；keyword 同时匹配 name / code；
- * hasRoot 为 true 只看绑根方案，false 只看虚拟根，null 不筛。
+ * <p>tenantId 由应用层强制写入；keyword 同时匹配 name / code。
+ * 方案已与 Agent 根断开：不再提供「绑根 / 虚拟根」筛选，历史列不参与查询条件。
  */
 @Data
 public class MaDefQuery {
@@ -17,8 +17,6 @@ public class MaDefQuery {
     private String keyword;
     /** 1 启用 / 0 停用；null 不筛 */
     private Integer enabled;
-    /** 模板码；null 不筛 */
+    /** 模板码；null 不筛。入口 {@code ENTRY_ROUTER} 可显式筛选查看 */
     private String template;
-    /** true 只看有绑根；false 只看虚拟根；null 不筛 */
-    private Boolean hasRoot;
 }

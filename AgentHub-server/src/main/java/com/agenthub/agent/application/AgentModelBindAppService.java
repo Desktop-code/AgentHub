@@ -7,6 +7,7 @@ import com.agenthub.agent.api.dto.PromptBindingReq;
 import com.agenthub.agent.domain.model.AgentDef;
 import com.agenthub.agent.domain.model.AgentModelBind;
 import com.agenthub.agent.domain.model.AgentPromptBinding;
+import com.agenthub.agent.domain.model.AgentPromptTemplateOption;
 import com.agenthub.agent.domain.model.AgentStatus;
 import com.agenthub.agent.domain.repository.AgentModelBindRepository;
 import com.agenthub.agent.domain.service.AgentPromptTemplatePort;
@@ -31,6 +32,9 @@ import java.util.Optional;
  */
 @Service
 public class AgentModelBindAppService {
+
+    /** 默认绑定的语言；与 AgentAppService 保持一致（L2 按 purpose+locale 唯一生效）。 */
+    private static final String DEFAULT_PROMPT_LOCALE = "zh-CN";
 
     private final AgentLookup lookup;
     private final AgentModelBindRepository binds;
@@ -122,8 +126,8 @@ public class AgentModelBindAppService {
         bind.setPurpose(purpose);
         bind.setPriority(AgentChecks.priority(req.getPriority()));
         bind.setStatus(AgentChecks.initialStatus(req.getStatus()));
-        // 非 CHAT 的 L3：四列跟着绑定行走 agent_model_bind，不写 agent_def
-        applyPromptBinding(bind, slot, req.getPrompt());
+        // 非 CHAT 的 L3：四列跟着绑定行走 agent_model_bind；未显式选模板时钉该用途当前生效版本
+        applyPromptBinding(bind, slot, req.getPrompt(), true);
         Long id = binds.insert(bind, operatorContext.requireUserId());
         operLogWriter.write("agent", "bind", "agent_model_bind", String.valueOf(id),
                 "绑定模型 " + instance.getDisplayName() + " → " + slot.name());
@@ -169,7 +173,7 @@ public class AgentModelBindAppService {
         // L3：显式传了 prompt 就按新槽重新校验；改用途但没传 prompt 时，也按新槽复核旧值，
         // 否则会出现「用途换成 REWRITE、模板还钉着 SUMMARY」的错配，运行时组装直接失败
         if (req.getPrompt() != null) {
-            applyPromptBinding(existing, newSlot, req.getPrompt());
+            applyPromptBinding(existing, newSlot, req.getPrompt(), true);
         } else if (oldSlot != newSlot) {
             revalidatePromptForNewSlot(existing, newSlot);
         }
@@ -303,19 +307,44 @@ public class AgentModelBindAppService {
      * @param bind  正在保存的绑定行
      * @param slot  有效用途槽
      * @param req   前端提交的四列；null 表示不挂模板
+     * @param autoBind true=未选模板时钉该用途当前生效版本（新建 / 显式清空）
      * @throws com.agenthub.common.error.BizException 段落键非法、core 段、版本不一致或用途不符
      */
-    private void applyPromptBinding(AgentModelBind bind, ModelCapability slot, PromptBindingReq req) {
-        if (req == null) {
+    private void applyPromptBinding(AgentModelBind bind, ModelCapability slot, PromptBindingReq req,
+                                    boolean autoBind) {
+        String purpose = slot == null ? null : slot.name();
+        // 显式选了模板：沿用既有硬闸
+        if (req != null && req.getTemplateId() != null) {
+            apply(bind, promptTemplates.normalize(purpose, req.getTemplateId(),
+                    req.getTemplateVersion(), req.getOverride(), req.getPromptExtra()));
+            return;
+        }
+        // 未选模板：该用途有已发布生效 L2 就自动钉住，禁止回到「未挂模板」
+        if (autoBind && promptTemplates.supportsPurpose(purpose)) {
+            AgentPromptTemplateOption def = promptTemplates.defaultOption(purpose, DEFAULT_PROMPT_LOCALE);
+            if (def != null) {
+                // 追加要求优先用本次请求的；没传则保留绑定行已有值，避免改用途时丢追加
+                String extra = req == null ? bind.getPromptExtra() : req.getPromptExtra();
+                apply(bind, promptTemplates.normalize(purpose, def.getId(), def.getVersion(), null, extra));
+                return;
+            }
+        }
+        // 该用途没有生效模板：保持未挂，交给运行时「用途未配置模板」失败语义（禁止用 CHAT 顶替）
+        if (req != null) {
             bind.setPromptTemplateId(null);
             bind.setTemplateVersion(null);
             bind.setPromptOverrideJson(null);
             bind.setPromptExtra(null);
-            return;
         }
-        String purpose = slot == null ? null : slot.name();
-        AgentPromptBinding binding = promptTemplates.normalize(purpose, req.getTemplateId(),
-                req.getTemplateVersion(), req.getOverride(), req.getPromptExtra());
+    }
+
+    /**
+     * 四列落库。显式选择与默认绑定两条路径共用，避免两处各写一份 setter。
+     *
+     * @param bind    绑定行
+     * @param binding 已通过保存闸的绑定值
+     */
+    private static void apply(AgentModelBind bind, AgentPromptBinding binding) {
         bind.setPromptTemplateId(binding.getTemplateId());
         bind.setTemplateVersion(binding.getTemplateVersion());
         bind.setPromptOverrideJson(binding.getOverrideJson());
@@ -332,10 +361,18 @@ public class AgentModelBindAppService {
      * @param slot 新的有效用途槽
      */
     private void revalidatePromptForNewSlot(AgentModelBind bind, ModelCapability slot) {
+        String purpose = slot == null ? null : slot.name();
         if (bind.getPromptTemplateId() == null) {
+            // 改到新用途且原本未挂模板：该用途有生效模板就补钉，避免「换了用途却没有提示词」
+            if (promptTemplates.supportsPurpose(purpose)) {
+                AgentPromptTemplateOption def = promptTemplates.defaultOption(purpose, DEFAULT_PROMPT_LOCALE);
+                if (def != null) {
+                    apply(bind, promptTemplates.normalize(purpose, def.getId(), def.getVersion(), null,
+                            bind.getPromptExtra()));
+                }
+            }
             return;
         }
-        String purpose = slot == null ? null : slot.name();
         if (!promptTemplates.supportsPurpose(purpose)) {
             throw new BizException(ErrorCode.BAD_REQUEST,
                     "该用途不支持提示词模板，请先清空提示词配置再改用途");

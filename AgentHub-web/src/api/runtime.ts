@@ -217,9 +217,35 @@ export async function streamTrialMessage(
   images?: string[],
   idempotencyKey?: string
 ) {
+  return streamSessionMessage('/api/runtime/trial', id, content, handlers, signal, images, idempotencyKey)
+}
+
+/**
+ * 按会话边跑边收 SSE 的通用实现。所属域：runtime（前端）。
+ *
+ * <p>试跑与工作台只是路径前缀不同，帧协议、正文合批、鉴权与 401 处理完全一致；
+ * 抽出来避免第二份解析器（两套解析器一旦分叉，计划卡 / 子计划待批就会出现行为差异）。
+ *
+ * @param prefix         接口前缀，如 `/api/runtime/trial` 或 `/api/runtime/workbench`
+ * @param id             会话主键
+ * @param content        用户输入
+ * @param handlers       增量回调
+ * @param signal         中止信号，可空
+ * @param images         图片 data URI 数组，可空
+ * @param idempotencyKey 业务幂等键，可空
+ */
+export async function streamSessionMessage(
+  prefix: string,
+  id: number,
+  content: string,
+  handlers: TrialStreamHandlers,
+  signal?: AbortSignal,
+  images?: string[],
+  idempotencyKey?: string
+) {
   const token = localStorage.getItem(TOKEN_KEY)
   const base = import.meta.env.VITE_API_BASE || ''
-  const response = await fetch(`${base}/api/runtime/trial/sessions/${id}/messages/stream`, {
+  const response = await fetch(`${base}${prefix}/sessions/${id}/messages/stream`, {
     method: 'POST',
     headers: {
       'Content-Type': 'application/json',

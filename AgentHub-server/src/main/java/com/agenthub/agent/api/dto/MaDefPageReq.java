@@ -7,7 +7,7 @@ import lombok.EqualsAndHashCode;
 /**
  * 多智能体方案分页请求。所属域：agent。
  *
- * <p>keyword 同时匹配 name / code；hasRoot=true 只看绑根方案，false 只看虚拟根。
+ * <p>keyword 同时匹配 name / code。方案已与 Agent 根断开，不再接收「绑根」筛选参数。
  * 分页沿用全站 current / size。
  */
 @Data
@@ -19,6 +19,4 @@ public class MaDefPageReq extends PageQuery {
     private Integer enabled;
     /** 五值模板之一；null 不筛 */
     private String template;
-    /** true=有绑根；false=虚拟根；null 不筛 */
-    private Boolean hasRoot;
 }

@@ -2,6 +2,10 @@
 /data/
 # RAG 原文落盘目录 ./data/rag，相对进程工作目录）
 **/data/rag/
+# 用户头像落盘 ./data/avatars（不进仓）
+**/data/avatars/
+# Agent 自定义形象落盘 ./data/agent-avatars（不进仓，与用户头像分目录）
+**/data/agent-avatars/
 /AgentHub-server/data/
 
 # ========== IDE 与编辑器 ==========

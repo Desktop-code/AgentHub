@@ -86,6 +86,29 @@ public class ChildRunner {
     /** 并行子执行池；容器所有，禁止 shutdown */
     private final ThreadPoolTaskExecutor routerTaskExecutor;
 
+    /** 目标方案执行委托（刀5）；普通子 Agent 不走这里 */
+    private final MaTargetRunner maTargets;
+
+    /** 目标工作流执行委托（刀5B）；普通子 Agent / 方案目标都不走这里 */
+    private final WorkflowTargetRunner workflowTargets;
+
+    /**
+     * 兼容构造：未装配工作流委托（大量窄测只验证 Agent / 方案链路）。
+     *
+     * @param loader             装配 REACT 子计划、收紧超时
+     * @param react              REACT 子执行
+     * @param memory             记忆召回与注入统计
+     * @param planRunner         P&E 子规划与执行
+     * @param childApprovals     单批准槽 + 待批登记
+     * @param routerTaskExecutor 并行子执行池
+     * @param maTargets          目标方案执行委托（刀5）
+     */
+    public ChildRunner(TrialBindingLoader loader, ReActTrialExecutor react, TrialMemoryCoordinator memory,
+                       PlanTrialExecutor planRunner, ChildPlanApprovalRegistry childApprovals,
+                       ThreadPoolTaskExecutor routerTaskExecutor, MaTargetRunner maTargets) {
+        this(loader, react, memory, planRunner, childApprovals, routerTaskExecutor, maTargets, null);
+    }
+
     /**
      * @param loader             装配 REACT 子计划、收紧超时
      * @param react              REACT 子执行
@@ -93,16 +116,21 @@ public class ChildRunner {
      * @param planRunner         P&E 子规划与执行
      * @param childApprovals     单批准槽 + 待批登记
      * @param routerTaskExecutor 并行子执行池
+     * @param maTargets          目标方案执行委托（刀5）
+     * @param workflowTargets    目标工作流执行委托（刀5B）；可空，为空时该候选按「已跳过」处理
      */
     public ChildRunner(TrialBindingLoader loader, ReActTrialExecutor react, TrialMemoryCoordinator memory,
                        PlanTrialExecutor planRunner, ChildPlanApprovalRegistry childApprovals,
-                       ThreadPoolTaskExecutor routerTaskExecutor) {
+                       ThreadPoolTaskExecutor routerTaskExecutor, MaTargetRunner maTargets,
+                       WorkflowTargetRunner workflowTargets) {
         this.loader = loader;
         this.react = react;
         this.memory = memory;
         this.planRunner = planRunner;
         this.childApprovals = childApprovals;
         this.routerTaskExecutor = routerTaskExecutor;
+        this.maTargets = maTargets;
+        this.workflowTargets = workflowTargets;
     }
 
     /**
@@ -131,6 +159,12 @@ public class ChildRunner {
             return List.of(runOneChild(parent, intents.get(0), modelUser, userText, userId, sessionId,
                     deadlineNanos, progress, trace, childParent, false, isolateChild, Thread.currentThread(), null));
         }
+        // 嵌套编排（命中 MA 候选后的那一层）不抢同一个池：按序内联推进，
+        // 避免「池线程等子任务、子任务排队等线程」的自等待；结果与顺序与并行一致
+        if (MaNestedContext.inside()) {
+            return runChildrenInline(parent, intents, modelUser, userText, userId, sessionId, deadlineNanos,
+                    progress, trace, childParent, isolateChild);
+        }
         List<Future<ChildOutcome>> futures = new ArrayList<>(intents.size());
         // 并行子跑池线程：ThreadLocal 不跨线程继承，必须由提交线程把同一块草稿板带进 worker
         ScratchBoard scratch = ScratchContext.board();
@@ -150,7 +184,7 @@ public class ChildRunner {
                     long remainMs = Math.max(1L, (deadlineNanos - System.nanoTime()) / 1_000_000L);
                     outcomes.add(futures.get(i).get(remainMs, TimeUnit.MILLISECONDS));
                 } catch (TrialFailure ex) {
-                    // 墙钟超时：尽量打断未完成子
+                    // 父墙钟已到：尽量打断未完成子
                     cancelPending(futures);
                     throw ex;
                 } catch (InterruptedException ex) {
@@ -159,7 +193,11 @@ public class ChildRunner {
                     cancelPending(futures);
                     outcomes.add(ChildOutcome.failed(intents.get(i), "子 Agent 执行被中断"));
                 } catch (Exception ex) {
-                    cancelPending(futures);
+                    /*
+                     * 单个子失败（含它自己撞上 consecutive_fail_abort）只记这一路失败，
+                     * <b>不</b>取消其它仍在跑的子：熔断按专家分开，前一个专家把自己打断，
+                     * 后一个专家仍要能读文件、写稿。取消统一交给 finally（只清未完成的）。
+                     */
                     // ExecutionException 需剥掉包装层才能拿到业务异常；中断/超时按原样处理
                     Throwable cause = ex instanceof ExecutionException && ex.getCause() != null ? ex.getCause() : ex;
                     // 包装层会吞掉原始栈，这里带 Throwable 打一次，保证并行子失败也有全栈
@@ -178,6 +216,44 @@ public class ChildRunner {
     }
 
     /**
+     * 嵌套编排下的多子执行：当前线程按 intents 顺序逐个跑，失败压成失败段。
+     *
+     * <p>与 {@link #runChildren} 的唯一差别是<b>不提交线程池</b>：
+     * 目标方案已经运行在外层子线程上，再向同一池提交会在高并发时形成自等待。
+     * 每个子开跑前仍检查外层墙钟，超时按统一口径抛出。
+     *
+     * @param parent       编排根
+     * @param intents      已排序的参与者
+     * @param modelUser    已注入记忆的用户侧文本
+     * @param userText     用户原文
+     * @param deadlineNanos 父墙钟截止
+     * @param progress     可空
+     * @param trace        可空
+     * @param childParent  子 AGENT 的 parent_id
+     * @param isolateChild 多意图时 true：子仅吃 sub_query
+     * @return 与 intents 同序的子结果
+     */
+    private List<ChildOutcome> runChildrenInline(AgentDef parent, List<RoutedIntent> intents, String modelUser,
+                                                 String userText, long userId, long sessionId, long deadlineNanos,
+                                                 TrialProgress progress, ObsTraceScope trace, Long childParent,
+                                                 boolean isolateChild) {
+        List<ChildOutcome> outcomes = new ArrayList<>(intents.size());
+        for (RoutedIntent intent : intents) {
+            RouterClock.assertBefore(deadlineNanos);
+            try {
+                outcomes.add(runOneChild(parent, intent, modelUser, userText, userId, sessionId, deadlineNanos,
+                        progress, trace, childParent, false, isolateChild, Thread.currentThread(), null));
+            } catch (RuntimeException ex) {
+                // 与并行链同口径：单子失败不打断其它子，正文走边界清洗
+                log.warn("嵌套编排子执行失败 agentId={} type={} cause={}",
+                        rootId(parent), ex.getClass().getSimpleName(), CauseDigest.of(ex), ex);
+                outcomes.add(ChildOutcome.failed(intent, UserFacingText.safeMessage(ex, "子 Agent 执行失败")));
+            }
+        }
+        return outcomes;
+    }
+
+    /**
      * 串行：按 intents 顺序依次执行，前一步的终答摘要进下一步输入；单步失败默认继续后续步。
      * <p>固定串行与路由后串行共用本方法：两者的差别只是 intents 的来源
      * （候选 sort_order vs 判路由数组序）与 sub_query（整段原问 vs 判路由切分）。
@@ -192,7 +268,6 @@ public class ChildRunner {
                                                AgentRuntimeConfig runtime) {
         List<ChildOutcome> outcomes = new ArrayList<>(intents.size());
         List<FixedSequenceContext.PriorStep> prior = new ArrayList<>();
-        boolean priorSummary = runtime.priorSummaryOn();
         // 单子串行没有「前置」，与现网单意图对齐：允许继承父历史，否则硬隔离
         boolean single = intents.size() == 1;
         for (RoutedIntent intent : intents) {
@@ -201,7 +276,8 @@ public class ChildRunner {
             if (progress != null && intent.routeLine() != null) {
                 progress.route(intent.routeLine());
             }
-            // 多步串行默认只给「本步子问 + 前置终答摘要」，绝不灌父历史/工具原文；单步交回既有解析
+            // 多步串行的输入固定为「本步子问 + 前面专家的成文结论」，不看上下文策略开关，
+            // 也不把工具 JSON / 父历史灌进去；并行不走本方法。单步交回既有解析。
             String stepModelText = null;
             boolean isolate;
             if (!single) {
@@ -213,7 +289,7 @@ public class ChildRunner {
                 String stepQuestion = intent.subQuery() == null || intent.subQuery().isBlank()
                         ? userText
                         : intent.subQuery();
-                stepModelText = priorSummary ? FixedSequenceContext.render(stepQuestion, prior) : stepQuestion;
+                stepModelText = FixedSequenceContext.render(stepQuestion, prior);
                 isolate = true;
             } else {
                 isolate = !runtime.allowParentHistoryWhenSingleOn();
@@ -225,12 +301,13 @@ public class ChildRunner {
             } catch (RuntimeException ex) {
                 // 默认「失败继续」：压成占位段，后续步仍能看到「该步未完成」而不是整条序列中断
                 log.warn("固定串行第 {} 步失败 agentId={} type={} cause={}", outcomes.size() + 1,
-                        parent.getId(), ex.getClass().getSimpleName(), CauseDigest.of(ex), ex);
+                        rootId(parent), ex.getClass().getSimpleName(), CauseDigest.of(ex), ex);
                 outcome = ChildOutcome.failed(intent, UserFacingText.safeMessage(ex, "子 Agent 执行失败"));
             }
             outcomes.add(outcome);
-            // 只把终答正文进摘要区：工具原文/思考过程不外泄给下一步
-            prior.add(new FixedSequenceContext.PriorStep(intent.routeLine(),
+            // 只交接成文结论：展示名不含 route_key；失败步只有一句短说明，不带异常原文和工具 JSON
+            prior.add(new FixedSequenceContext.PriorStep(
+                    RouterTexts.childLabel(intent.candidate().agent()),
                     outcome.turn() == null ? null : outcome.turn().getAssistantText(),
                     outcome.turn() == null));
         }
@@ -284,11 +361,18 @@ public class ChildRunner {
             ChildSubQueryInput.Result childInput = modelTextOverride != null
                     ? new ChildSubQueryInput.Result(modelTextOverride, intent.subQuery(), false)
                     : ChildSubQueryInput.resolve(modelUser, userText, intent.subQuery(), isolateChild);
+            // 串行交接已经把「子问 + 前置结论」拼进 modelTextOverride。
+            // 方案 / 工作流目标不走 ReAct 的 modelText，必须把这份文本当成它们的用户问题，否则下一位方案仍只看见原问。
+            String handedUser = modelTextOverride != null && !modelTextOverride.isBlank()
+                    ? modelTextOverride : userText;
+            String handedModel = modelTextOverride != null && !modelTextOverride.isBlank()
+                    ? modelTextOverride : modelUser;
             // 多意图：子开跑推「路由到」，并以 lane 包装后续增量，并行交错时仍能切回本子块
             String childRouteLine = intent.routeLine() != null ? intent.routeLine()
                     : RouterTexts.routeSummary(hit, intent.reason());
             TrialProgress childProgress = progress;
-            if (progress != null && parallelWorker) {
+            if (progress != null && (parallelWorker || MaNestedContext.inside())) {
+                // 并行交错 / 目标方案内顺序推进：开跑前先推「路由到」，时间线才能按块切回本子
                 progress.route(childRouteLine);
                 childProgress = laneBound(progress, childRouteLine);
             }
@@ -303,7 +387,30 @@ public class ChildRunner {
             // P&E 子不在这里装配 ReAct：规划与各步装配由 PlanTrialExecutor 完成（子自身 auto/模型，A7 不继承父）。
             TrialTurn turn;
             List<String> notices;
-            if (AgentRunMode.PLAN_AND_EXECUTE.name().equals(hit.agent().getRunMode())) {
+            // 目标方案内部的下一层跳：只有 MA 目标会填，其它分支保持空表
+            List<NestedRoute> nested = List.of();
+            if (hit.isMaTarget()) {
+                // 刀5：目标是另一套编排方案 → 委托回模板执行器，在<b>同一条会话</b>里再跑一层编排。
+                // 不写提示词侧的记忆段：目标方案自己的子 Agent 各自按既有纪律召回。
+                // 用 conclusionChannel：外层静音只挡住本层 token，内层方案的子结论和「方案结论」必须能写出去
+                TrialProgress schemeProgress = progress == null ? null : progress.conclusionChannel();
+                MaTargetRunner.MaTargetResult result = maTargets.run(intent, hit.maTarget(), handedUser, handedModel,
+                        userId, sessionId, deadlineNanos, schemeProgress);
+                turn = result.turn();
+                notices = result.notices() == null ? List.of() : new ArrayList<>(result.notices());
+                nested = result.children();
+            } else if (hit.isWorkflowTarget()) {
+                // 刀5B：目标是已发布工作流 → 交给工作流域的现网运行入口，引擎不并进对话栈。
+                // 记忆段同样不写：工作流各节点的 Agent 节点自己按既有纪律召回。
+                if (workflowTargets == null) {
+                    // 只有在窄测里才会出现「未装配工作流委托」：明确失败，不伪装成空回答
+                    throw new TrialFailure("当前实例未装配工作流运行入口，无法运行该工作流线路");
+                }
+                WorkflowTargetRunner.WorkflowTargetResult result = workflowTargets.run(intent,
+                        hit.workflowTarget(), handedUser, userId, sessionId, deadlineNanos, childProgress);
+                turn = result.turn();
+                notices = result.notices() == null ? List.of() : new ArrayList<>(result.notices());
+            } else if (AgentRunMode.PLAN_AND_EXECUTE.name().equals(hit.agent().getRunMode())) {
                 PlanChildResult planned = runPlanChild(parent, hit, intent, childInput, userId, sessionId,
                         deadlineNanos, childProgress);
                 turn = planned.turn();
@@ -311,7 +418,7 @@ public class ChildRunner {
             } else {
                 // 记忆段在装配时进链（工具目录之前）；召回用本子查询文本，失败自动回落 MySQL
                 TrialMemoryCoordinator.Augmented recalled = memory.recallDurable(
-                        memorySession(parent.getId(), userId, sessionId), childInput.displaySubQuery());
+                        memorySession(rootId(parent), userId, sessionId), childInput.displaySubQuery());
                 TrialPlan plan = loader.loadReact(hit.agent(), childInput.displaySubQuery(), recalled.memoryBlock());
                 plan.setToolArgsFacts(recalled.injectedFacts());
                 memory.publishInjection(plan);
@@ -330,11 +437,16 @@ public class ChildRunner {
                         extraSpanAttrs));
                 trace.close(agentSpan, agentOk);
             }
-            return ChildOutcome.ok(intent, notices, turn);
+            // 静音包装器会在这里把整段结论钉回该参与者；已流式推过的路径默认空操作，不会重影。
+            // 方案目标的内部子结论和汇总结论由内层执行自己推，这里再推会把子正文复制进方案块。
+            if (!(hit.isMaTarget() && !nested.isEmpty())) {
+                deliverConclusion(progress, childRouteLine, turn);
+            }
+            return ChildOutcome.ok(intent, notices, turn, nested);
         } catch (RuntimeException ex) {
             // 子 Agent 失败：并行时被压成失败段（用户可见文案走清洗），但栈必须留在日志里
             log.warn("子 Agent 执行失败 agentId={} parallel={} type={} cause={}",
-                    parent.getId(), parallelWorker, ex.getClass().getSimpleName(), CauseDigest.of(ex), ex);
+                    rootId(parent), parallelWorker, ex.getClass().getSimpleName(), CauseDigest.of(ex), ex);
             if (trace != null && agentSpan != null) {
                 SpanClose agentErr = new SpanClose();
                 agentErr.setStatus(ObsStatus.ERROR);
@@ -423,7 +535,7 @@ public class ChildRunner {
             }
             PlanTrialExecutor.ExecutedTurn executed = planRunner.execute(child, pending, progress, false);
             log.info("子计划执行完成 parentId={} childId={} routeKey={} sessionId={}",
-                    parent.getId(), child.getId(), routeKey, sessionId);
+                    rootId(parent), child.getId(), routeKey, sessionId);
             return new PlanChildResult(executed.turn(), noticesOf(planned));
         } finally {
             // 无论成功/失败/超时都清登记与槽：否则后续需确认的 P&E 子会一直排在队里
@@ -546,6 +658,37 @@ public class ChildRunner {
         session.setAgentId(agentId);
         session.setUserId(userId);
         return session;
+    }
+
+    /**
+     * 编排根主键：方案试跑没有 Agent 根，返回 null；旧 Agent 试跑返回 Agent 主键。
+     *
+     * @param parent 旧 Agent 试跑的 ROUTER；可为 null
+     * @return Agent 主键或 null
+     */
+    private static Long rootId(AgentDef parent) {
+        return parent == null ? null : parent.getId();
+    }
+
+    /**
+     * 参与者结束后交出成文结论。
+     *
+     * <p>流式路径的默认实现是空操作（正文已经按 token 出去了）。
+     * 静音包装器覆写后会先钉路由行再推整段，消息流才能把结论挂到这个参与者名下。
+     *
+     * @param progress  本子拿到的进度出口（可能是静音包装）
+     * @param routeLine 本子路由行
+     * @param turn      本子终答；空正文不推
+     */
+    private static void deliverConclusion(TrialProgress progress, String routeLine, TrialTurn turn) {
+        if (progress == null || turn == null) {
+            return;
+        }
+        String text = turn.getAssistantText();
+        if (text == null || text.isBlank()) {
+            return;
+        }
+        progress.deliverParticipantConclusion(routeLine, text.trim());
     }
 
     /**

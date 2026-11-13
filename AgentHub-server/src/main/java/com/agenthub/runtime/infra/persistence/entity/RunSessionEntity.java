@@ -22,6 +22,14 @@ public class RunSessionEntity {
     private Long agentId;
     /** ma_def.id；虚拟根试跑归属，绑根会话为空 */
     private Long maDefId;
+    /** 入口渠道：WORKBENCH 工作台对话 / DEBUG 控制台调试 */
+    private String entryChannel;
+    /** 建会话时的默认接待方案快照 */
+    private Long receptionMaId;
+    /** 刀3 路由沿用键；本刀只建列 */
+    private String stickyRouteKey;
+    /** 刀3 路由沿用子 Agent；本刀只建列 */
+    private Long stickyAgentId;
     private String runMode;
     private Long userId;
     private String status;

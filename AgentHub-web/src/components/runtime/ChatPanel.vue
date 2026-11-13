@@ -1,5 +1,5 @@
 <template>
-  <div class="chat">
+  <div class="chat" :class="{ 'is-workbench': isWorkbench }">
     <div ref="scroller" class="messages" @scroll.passive="onScroll">
       <!-- 进行态粘在滚动容器顶，内容变长时仍可见；结束后整条不渲染 -->
       <div v-if="liveTurn" class="phase phase-sticky" :class="'phase-' + liveTurn.phase">
@@ -12,15 +12,67 @@
       </div>
 
       <div v-if="!rows.length" class="empty">
-        <h3>开始对话</h3>
-        <p>新建会话后在下方输入。Enter 发送，Shift+Enter 换行。</p>
+        <template v-if="isWorkbench">
+          <h3>需要我帮您做什么？</h3>
+          <p>我是 AgentHub 智能网关，我会为您自动分配合适的专家。</p>
+          <div class="quick-cards">
+            <button
+              v-for="item in quickPromptList"
+              :key="item"
+              type="button"
+              class="quick-card"
+              :disabled="!canSend || sending || !sessionReady"
+              @click="sendQuick(item)"
+            >
+              {{ item }}
+            </button>
+          </div>
+        </template>
+        <template v-else>
+          <h3>开始对话</h3>
+          <p>新建会话后在下方输入。Enter 发送，Shift+Enter 换行。</p>
+        </template>
       </div>
 
       <div v-for="row in rows" :key="row.turn.key" class="row" :class="row.turn.role">
-        <div v-if="row.turn.role === 'user'" class="bubble">{{ row.turn.text }}</div>
+        <!-- 用户气泡：登录用户头像（或首字兜底）；与 Agent 形象分开 -->
+        <template v-if="row.turn.role === 'user'">
+          <div class="speak-row is-user">
+            <div class="bubble">{{ row.turn.text }}</div>
+            <div
+              class="msg-avatar is-user"
+              :class="{ 'has-photo': !!userAvatarSrc }"
+              :style="userAvatarStyle"
+              :title="userDisplayName"
+            >
+              <img v-if="userAvatarSrc" :src="userAvatarSrc" alt="" />
+              <span v-else>{{ userInitial }}</span>
+            </div>
+          </div>
+        </template>
 
         <!-- 计划执行模式：顺序钉死（计划思考 → 计划卡 → 按步执行 → 终答） -->
-        <article v-else-if="row.flow" class="card">
+        <div v-else-if="row.flow" class="speak-row is-assistant">
+          <div
+            class="msg-avatar is-assistant"
+            :style="assistantAvatarStyle(row.turn)"
+            :title="assistantDisplayName(row.turn)"
+          >
+            <img
+              v-if="assistantLook(row.turn).iconSrc"
+              :src="assistantLook(row.turn).iconSrc"
+              :class="{ 'is-custom': assistantLook(row.turn).custom }"
+              alt=""
+            />
+            <AgentLookArt
+              v-else-if="assistantLook(row.turn).art"
+              :art="assistantLook(row.turn).art!"
+              :color="assistantLook(row.turn).initialColor"
+            />
+            <span v-else>{{ assistantLook(row.turn).initial }}</span>
+          </div>
+        <article class="card">
+          <!-- 计划流同样不在卡片头挂展示名：名称只出现在终答气泡上方，避免和计划卡抢身份 -->
           <!-- Router 试跑的编排调度卡：在用户气泡之后、思考与终答之前，数据只读不落库 -->
           <RouterTimeline
             v-if="showRouterCard(row.turn)"
@@ -119,14 +171,12 @@
           </section>
 
           <!-- 4. 终答。永远排在计划卡与步骤之后，不允许插队 -->
+          <!-- 工作台：名称随终答气泡出现一次，且置于气泡外上方，不当作卡片头 -->
+          <div v-if="isWorkbench && row.flow.answer" class="msg-name">{{ assistantDisplayName(row.turn) }}</div>
           <div v-if="row.flow.answer" class="answer-block">
-            <div class="answer-head">
+            <!-- 工作台：不展示「最终回答」标题与朗读调试图标，终端用户只看正文气泡 -->
+            <div v-if="!isWorkbench" class="answer-head">
               <div class="section-label answer-label">最终回答</div>
-              <!--
-                只读最终回答：思考过程、工具原文不提供朗读入口。
-                这里只放图标控件（播放 / 暂停 / 停止），不写「朗读」等旁注文字；
-                自动朗读由输入区的喇叭开关负责，这条只是手动播放的最后一条回答。
-              -->
               <div v-if="row.turn.status !== 'streaming'" class="speak-actions">
                 <el-tooltip :content="speakHintOf(planAnswerKey(row.turn))" placement="top">
                   <button
@@ -152,13 +202,19 @@
             </div>
             <div
               class="md answer"
-              v-html="markdown(planAnswerSlot(row.turn), row.flow.answer, row.turn.status === 'streaming')"
+              v-html="markdown(planAnswerSlot(row.turn), displayAnswer(row.flow.answer), row.turn.status === 'streaming')"
             />
             <span v-if="row.turn.status === 'streaming'" class="caret">|</span>
           </div>
 
           <p v-for="(note, index) in row.flow.notes" :key="'n-' + index" class="note">{{ note }}</p>
-          <p v-for="(err, index) in row.flow.errors" :key="'e-' + index" class="error">{{ err }}</p>
+          <p
+            v-for="(err, index) in row.flow.errors"
+            :key="'e-' + index"
+            :class="isWorkbench ? 'wb-soft-error' : 'error'"
+          >
+            {{ displayErrorText(err) }}
+          </p>
 
           <!-- 5. 产物：Agent 写进工作区的文件。排在终答之后，是「结果」而不是「过程」 -->
           <FileCard v-for="file in row.flow.files" :key="'f-' + file.fileName" :file="file" />
@@ -167,9 +223,34 @@
             {{ row.turn.planPending ? '计划待批准' : '思考中…' }}
           </p>
         </article>
+        </div>
 
         <!-- 非计划流程（REACT / ROUTER）：保持原有「思考过程 + 块顺序」渲染 -->
-        <article v-else class="card">
+        <div v-else class="speak-row is-assistant">
+          <!-- 工作台有思考面板时，行首大 avatar 让位：身份改挂在正文气泡上方，
+               否则 36px 头像会贴在思考面板左侧，看起来像思考面板的「外包作答 Agent」 -->
+          <div
+            v-if="!(isWorkbench && (hasProcess(row.turn) || participantFeedHasActor(row.turn)))"
+            class="msg-avatar is-assistant"
+            :style="assistantAvatarStyle(row.turn)"
+            :title="assistantDisplayName(row.turn)"
+          >
+            <img
+              v-if="assistantLook(row.turn).iconSrc"
+              :src="assistantLook(row.turn).iconSrc"
+              :class="{ 'is-custom': assistantLook(row.turn).custom }"
+              alt=""
+            />
+            <AgentLookArt
+              v-else-if="assistantLook(row.turn).art"
+              :art="assistantLook(row.turn).art!"
+              :color="assistantLook(row.turn).initialColor"
+            />
+            <span v-else>{{ assistantLook(row.turn).initial }}</span>
+          </div>
+        <article class="card">
+          <!-- 展示名不再挂在卡片头：思考面板有自己的「智能网关 / 专家」两步身份，
+               作答 Agent 的名称只在正文气泡上方出现，避免和思考面板抢身份 -->
           <!-- Router 试跑的编排调度卡：在用户气泡之后、思考与终答之前，数据只读不落库 -->
           <RouterTimeline
             v-if="showRouterCard(row.turn)"
@@ -181,20 +262,112 @@
             @refresh="emit('refresh-router')"
             @open-gantt="emit('open-gantt')"
           />
-          <!-- 思考过程：多路由按子 Agent 分块，收束后仍保持分块不拍扁 -->
-          <div v-if="hasProcess(row.turn)" class="think-block">
+          <!--
+            工作台消息流：居中网关判定条，每位专家一条（思考默认收起），方案只在有汇总结论时出现。
+            全场「查看思考与路由轨迹」不放在消息流里；执行明细仍在右上角。
+          -->
+          <div v-if="isWorkbench && participantFeedOf(row.turn).length" class="wb-actors">
+            <template v-for="card in participantFeedOf(row.turn)" :key="card.key">
+              <!-- 入口判定条：判定句本身就是网关这一步的结果，不再额外挂一块空壳 -->
+              <div v-if="card.kind === 'gateway'" class="wb-gate">
+                <span v-if="card.lines?.length" class="wb-gate-badge">智能网关判定：{{ (card.lines || []).join(' ') }}</span>
+              </div>
+              <!-- 方案分发条：紧凑判定条，不是参与者消息。写清这一层把任务分给了哪几位 -->
+              <div v-else-if="card.kind === 'route'" class="wb-gate is-route">
+                <span v-if="card.lines?.length" class="wb-gate-badge">
+                  {{ card.title }} {{ (card.lines || []).join(' ') }}
+                </span>
+              </div>
+              <section v-else class="wb-actor" :class="'is-' + card.kind">
+                <span
+                  class="wb-actor-avatar"
+                  :style="participantAvatarStyle(card)"
+                  :title="card.title"
+                >
+                  <img
+                    v-if="card.look?.iconSrc"
+                    :src="card.look.iconSrc"
+                    :class="{ 'is-custom': card.look.custom }"
+                    alt=""
+                  />
+                  <AgentLookArt
+                    v-else-if="card.look?.art"
+                    :art="card.look.art"
+                    :color="card.look.initialColor"
+                  />
+                  <span v-else>{{ card.look?.initial || (card.title || '专').slice(0, 1) }}</span>
+                </span>
+                <div class="wb-actor-main">
+                  <div class="wb-actor-head">
+                    <span class="wb-actor-name">{{ card.title }}</span>
+                    <span v-if="card.roleLabel" class="wb-actor-role">{{ card.roleLabel }}</span>
+                  </div>
+                  <!-- 方案这一步的结果就是分流：写在气泡可见处，不藏在折叠里 -->
+                  <p v-if="card.roleLabel === '方案' && card.lines?.length" class="wb-actor-result">
+                    {{ (card.lines || []).join(' ') }}
+                  </p>
+                  <div v-if="actorHasThink(card)" class="wb-actor-fold">
+                    <button
+                      type="button"
+                      class="think-toggle"
+                      :aria-expanded="isOpen(row.turn, actorThinkPart(card), false)"
+                      :aria-label="isOpen(row.turn, actorThinkPart(card), false) ? '收起思考过程与工具调用' : '查看思考过程与工具调用'"
+                      @click.stop.prevent="toggle(row.turn, actorThinkPart(card), false)"
+                    >
+                      <span class="section-label">查看思考过程与工具调用</span>
+                      <span class="chevron" :class="{ open: isOpen(row.turn, actorThinkPart(card), false) }" aria-hidden="true" />
+                    </button>
+                    <div v-show="isOpen(row.turn, actorThinkPart(card), false)" class="wb-actor-fold-body">
+                      <p
+                        v-for="(line, lineIndex) in (card.roleLabel === '方案' ? [] : card.lines)"
+                        :key="'l-' + lineIndex"
+                        class="wb-actor-line"
+                      >{{ line }}</p>
+                      <ol v-if="card.steps?.length" class="wb-actor-steps">
+                        <li
+                          v-for="(item, itemIndex) in card.steps"
+                          :key="itemIndex"
+                          class="wb-actor-step"
+                          :class="'is-' + item.type"
+                        >
+                          <span v-if="item.title && item.type !== 'reasoning'" class="wb-actor-step-title">{{ item.title }}</span>
+                          <pre v-if="item.type === 'tool_call' || item.type === 'tool_result'" class="wb-actor-pre">{{ item.text }}</pre>
+                          <p v-else class="wb-actor-reasoning">{{ item.text }}</p>
+                        </li>
+                      </ol>
+                    </div>
+                  </div>
+                  <div v-if="actorHasBubble(card)" class="answer-block">
+                    <p v-for="(err, errIndex) in card.errors" :key="'err-' + errIndex" class="wb-soft-error">{{ err }}</p>
+                    <div
+                      v-if="card.answer"
+                      class="md answer"
+                      v-html="markdown(row.turn.key + ':' + card.key, card.answer, row.turn.status === 'streaming' && card.pending)"
+                    />
+                    <p v-else-if="card.pending" class="thinking">正在作答…</p>
+                    <FileCard v-for="file in card.files" :key="file.fileName" :file="file" />
+                  </div>
+                </div>
+              </section>
+            </template>
+          </div>
+
+          <!-- 调试皮肤：多路由按子 Agent 分块的原始时间线。工作台消息流不再放全场轨迹 -->
+          <div v-if="!isWorkbench && hasProcess(row.turn)" class="think-block">
             <button
               type="button"
               class="think-toggle"
-              :aria-expanded="isOpen(row.turn, THINK_KEY, true)"
-              :aria-label="isOpen(row.turn, THINK_KEY, true) ? '收起思考过程' : '展开思考过程'"
-              @click.stop.prevent="toggle(row.turn, THINK_KEY, true)"
+              :aria-expanded="isOpen(row.turn, THINK_KEY, thinkDefaultOpen)"
+              :aria-label="isOpen(row.turn, THINK_KEY, thinkDefaultOpen) ? '收起思考过程' : '展开思考过程'"
+              @click.stop.prevent="toggle(row.turn, THINK_KEY, thinkDefaultOpen)"
             >
-              <span class="section-label">思考过程</span>
-              <span class="chevron" :class="{ open: isOpen(row.turn, THINK_KEY, true) }" aria-hidden="true" />
+              <span class="section-label">
+                {{ thinkToggleLabel(row.turn) }}
+              </span>
+              <span class="chevron" :class="{ open: isOpen(row.turn, THINK_KEY, thinkDefaultOpen) }" aria-hidden="true" />
             </button>
             <div
-              v-show="isOpen(row.turn, THINK_KEY, true)"
+              v-show="isOpen(row.turn, THINK_KEY, thinkDefaultOpen)"
               class="think-panel"
               :class="{ 'lanes-multi': lanesOf(row.turn).length > 1 }"
             >
@@ -208,10 +381,10 @@
                   <template v-if="lane.kind === 'agent' && routeAgentName(lane.title)">
                     路由到 <span class="route-agent">{{ routeAgentName(lane.title) }}</span>
                   </template>
-                  <template v-else>{{ lane.title }}</template>
-                  <span v-if="lane.routeKey" class="route-key">route_key · {{ lane.routeKey }}</span>
+                  <template v-else>{{ thinkText(lane.title) }}</template>
+                  <!-- 内部 route_key 不对终端用户展示：工作台在展示层再脱敏一次 -->
                 </div>
-                <pre v-if="lane.body" class="lane-body">{{ lane.body }}</pre>
+                <pre v-if="lane.body" class="lane-body">{{ thinkText(lane.body) }}</pre>
                 <ol v-if="lane.steps.length" class="timeline">
                   <li
                     v-for="(step, stepIndex) in lane.steps"
@@ -228,14 +401,14 @@
                       <div
                         v-if="step.type === 'reasoning'"
                         class="md think-body"
-                        v-html="markdown(stepSlot(row.turn, laneIndex, stepIndex), step.text, row.turn.status === 'streaming')"
+                        v-html="markdown(stepSlot(row.turn, laneIndex, stepIndex), thinkText(step.text), row.turn.status === 'streaming')"
                       />
-                      <pre v-else-if="step.type === 'tool_call'" class="step-call">{{ step.text }}</pre>
+                      <pre v-else-if="step.type === 'tool_call'" class="step-call">{{ thinkText(step.text) }}</pre>
                       <div v-else class="step-result">
                         <pre
                           class="step-result-body"
                           :class="{ clamped: !isResultExpanded(row.turn, laneIndex, stepIndex) }"
-                        >{{ step.text }}</pre>
+                        >{{ thinkText(step.text) }}</pre>
                         <button
                           v-if="needsResultToggle(step.text)"
                           type="button"
@@ -268,10 +441,36 @@
               </button>
               <pre v-show="isOpen(row.turn, VISION_KEY, false)" class="vision-body">{{ block.text }}</pre>
             </div>
-            <div v-else-if="block.kind === 'assistant'" class="answer-block">
-              <div class="answer-head">
+            <template v-else-if="block.kind === 'assistant' && !participantFeedHasActor(row.turn)">
+              <!-- 工作台：作答 Agent 的身份只跟着正文气泡走（气泡上方、面板之外），思考面板不套这层标题 -->
+              <div
+                v-if="isWorkbench && index === firstAssistantIndex(row.turn)"
+                class="wb-answer-head"
+              >
+                <span
+                  class="wb-answer-avatar"
+                  :style="assistantAvatarStyle(row.turn)"
+                  :title="assistantDisplayName(row.turn)"
+                >
+                  <img
+                    v-if="assistantLook(row.turn).iconSrc"
+                    :src="assistantLook(row.turn).iconSrc"
+                    :class="{ 'is-custom': assistantLook(row.turn).custom }"
+                    alt=""
+                  />
+                  <AgentLookArt
+                    v-else-if="assistantLook(row.turn).art"
+                    :art="assistantLook(row.turn).art!"
+                    :color="assistantLook(row.turn).initialColor"
+                  />
+                  <span v-else>{{ assistantLook(row.turn).initial }}</span>
+                </span>
+                <span class="msg-name">{{ assistantDisplayName(row.turn) }}</span>
+              </div>
+              <div class="answer-block">
+              <!-- 工作台：隐藏朗读 ▷ 与「最终回答」黑话标题 -->
+              <div v-if="!isWorkbench" class="answer-head">
                 <div class="section-label answer-label">最终回答</div>
-                <!-- 同上：完成态才给图标控件，流式中隐藏，避免念到半句 -->
                 <div v-if="row.turn.status !== 'streaming'" class="speak-actions">
                   <el-tooltip :content="speakHintOf(blockAnswerKey(row.turn, block))" placement="top">
                     <button
@@ -301,25 +500,33 @@
               </div>
               <div
                 class="md answer"
-                v-html="markdown(blockSlot(block, index), block.text, row.turn.status === 'streaming')"
+                v-html="markdown(blockSlot(block, index), displayAnswer(block.text), row.turn.status === 'streaming')"
               />
               <span
                 v-if="row.turn.status === 'streaming' && index === lastAssistantIndex(row.turn)"
                 class="caret"
               >|</span>
-            </div>
+              </div>
+            </template>
             <p v-else-if="block.kind === 'system'" class="note">{{ block.text }}</p>
-            <p v-else-if="block.kind === 'error'" class="error">{{ block.text }}</p>
-            <!-- 产物卡片：块顺序里出现在工具步之后，读起来就是「这一步生成了这个文件」 -->
-            <FileCard v-else-if="block.kind === 'file' && block.file" :file="block.file" />
+            <p
+              v-else-if="block.kind === 'error' && !participantFeedHasActor(row.turn)"
+              :class="isWorkbench ? 'wb-soft-error' : 'error'"
+            >
+              {{ displayErrorText(block.text) }}
+            </p>
+            <!-- 产物卡片：工作台分块时跟在对应专家气泡里，这里只留给非工作台 -->
+            <FileCard v-else-if="block.kind === 'file' && block.file && !participantFeedHasActor(row.turn)" :file="block.file" />
           </template>
           <p v-if="showThinking(row.turn)" class="thinking">
             {{ row.turn.planPending ? '计划待批准' : '思考中…' }}
           </p>
         </article>
+        </div>
       </div>
     </div>
-    <div class="composer">
+
+    <div class="composer" :class="{ 'has-at-panel': atPanelOpen }">
       <!-- 已选图片缩略图：带删除角标，发送前可逐个移除 -->
       <div v-if="attachments.length" class="thumbs">
         <div v-for="(item, index) in attachments" :key="item.id" class="thumb">
@@ -335,14 +542,51 @@
           </button>
         </div>
       </div>
+      <!-- @ 提及片：与正文分离，不进 {query} -->
+      <div v-if="isWorkbench && selectedRoute?.agentName" class="mention-chip-row">
+        <span class="mention-chip">
+          @{{ selectedRoute.agentName }}
+          <button
+            type="button"
+            class="mention-chip-x"
+            :disabled="sending"
+            aria-label="取消指定线路"
+            @click="emit('clear-route')"
+          >
+            ×
+          </button>
+        </span>
+      </div>
+      <!-- @ 候选面板：展示名检索，不暴露 route_key -->
+      <ul v-if="atPanelOpen" class="at-panel" role="listbox" aria-label="指定线路">
+        <li v-if="!filteredAtCandidates.length" class="at-empty">无匹配线路</li>
+        <li
+          v-for="(item, index) in filteredAtCandidates"
+          :key="item.routeKey"
+          class="at-item"
+          :class="{ active: index === atActiveIndex }"
+          role="option"
+          :aria-selected="index === atActiveIndex"
+          @mousedown.prevent="confirmAtPick(item)"
+        >
+          <span class="at-name">{{ item.agentName || '未命名线路' }}</span>
+          <span v-if="item.intentDesc" class="at-desc">{{ item.intentDesc }}</span>
+          <span v-if="item.targetType && item.targetType !== 'AGENT'" class="at-type">
+            {{ item.targetType === 'MA' ? '方案' : item.targetType === 'WORKFLOW' ? '工作流' : '' }}
+          </span>
+        </li>
+      </ul>
       <el-input
         v-model="text"
         type="textarea"
-        :rows="3"
+        :rows="isWorkbench ? 2 : 3"
+        :autosize="isWorkbench ? { minRows: 2, maxRows: 10 } : undefined"
+        :resize="isWorkbench ? 'none' : 'vertical'"
         maxlength="8000"
-        placeholder="输入问题，Enter 发送，Shift+Enter 换行"
+        :placeholder="composerPlaceholder"
         :disabled="!canSend || sending"
-        @keydown.enter.exact.prevent="submit"
+        @keydown="onComposerKeydown"
+        @input="onComposerInput"
       />
       <div class="composer-bar">
         <div class="composer-left">
@@ -351,7 +595,7 @@
             绝不补读历史记录；关闭不再自动读，且立刻停掉正在朗读的那一条。
             开/关不用文字标注：开启时实心高亮，关闭时描边，靠形态与颜色一起区分。
           -->
-          <el-tooltip :content="speakerHint" placement="top">
+          <el-tooltip v-if="!isWorkbench" :content="speakerHint" placement="top">
             <button
               type="button"
               class="voice-icon-btn speaker-btn"
@@ -364,11 +608,10 @@
             </button>
           </el-tooltip>
           <!--
-            语音听写：只留图标（时长与状态走 tooltip，不再排一行字）。
-            未绑定 ASR 时按钮保留图标颜色、降透明度并拦住点击，hover 仍说明原因；
-            禁止回退浏览器 Web Speech 识别。
+            语音听写：未落地能力在工作台不摆可点按钮（避免伪装可用）；
+            调试形态仍保留置灰入口并说明原因。
           -->
-          <el-tooltip :content="recordHint" placement="top">
+          <el-tooltip v-if="showMicBtn" :content="recordHint" placement="top">
             <button
               type="button"
               class="voice-icon-btn mic-btn"
@@ -383,17 +626,12 @@
               </el-icon>
             </button>
           </el-tooltip>
-          <!-- 录音中才出现：同样是图标按钮，避免和「说话」并排成一行文字 -->
           <el-tooltip v-if="voiceRecording" content="取消本次录音" placement="top">
             <button type="button" class="voice-icon-btn cancel-btn" aria-label="取消本次录音" @click="cancelVoiceRecording">
               <el-icon><Close /></el-icon>
             </button>
           </el-tooltip>
-          <!--
-            上传图片：同样只放图标（不入文字），与语音按钮同一套视觉；
-            未绑 VISION 时保留图标颜色、降透明度并拦住点击，hover 仍说明原因。
-          -->
-          <el-tooltip :content="uploadHint" placement="top">
+          <el-tooltip v-if="showImageBtn" :content="uploadHint" placement="top">
             <button
               type="button"
               class="voice-icon-btn image-btn"
@@ -405,7 +643,6 @@
               <el-icon><Picture /></el-icon>
             </button>
           </el-tooltip>
-          <!-- 原生 file input：支持多选，读取后转 data URI 提交给后端做 OCR -->
           <input
             ref="filePicker"
             type="file"
@@ -414,9 +651,17 @@
             class="file-input"
             @change="onFilesPicked"
           />
+          <!-- 工作台徽标：未指定=自动匹配；已指定/失效时如实反映，不替代 @ -->
+          <span
+            v-if="isWorkbench && gatewayBadge"
+            class="gateway-badge"
+            :title="gatewayBadgeTitle"
+          >
+            ⚡ {{ gatewayBadge }}
+          </span>
           <span class="hint">{{ sessionReady ? '' : blockedHint || '请先新建会话或从左侧选择' }}</span>
         </div>
-        <el-button v-if="canSend" type="primary" :loading="sending" :disabled="!sessionReady" @click="submit">
+        <el-button v-if="canSend" type="primary" :loading="sending" :disabled="!sessionReady || sending" @click="submit">
           发送
         </el-button>
       </div>
@@ -426,7 +671,7 @@
 
 <script setup lang="ts">
 /**
- * 试跑对话区。所属域：runtime。只展示传入的时间线，不自己请求接口。
+ * 试跑 / 工作台对话区。所属域：runtime。只展示传入的时间线，不自己请求接口。
  *
  * 两种渲染分支：
  * - 计划执行模式（含 plan / step 块）：顺序钉死为
@@ -434,11 +679,16 @@
  *   终答与草稿一律排在计划卡之后，绝不抢到前面。
  * - REACT / ROUTER：沿用「思考过程（按子 Agent 分块）+ 块顺序」渲染。
  *
+ * 工作台皮肤额外：输入框 @ 指定线路（提及片与 query 分离）、输入区徽标显示线路状态；
+ * 调试皮肤（TrialPanel）不启用 @。
+ *
  * 折叠默认展开，仅当用户点过标题才收起；终答出现也不自动收起。
  */
-import { computed, onBeforeUnmount, onMounted, onUpdated, reactive, ref, watch } from 'vue'
+import { computed, onBeforeUnmount, onErrorCaptured, onMounted, onUpdated, reactive, ref, watch } from 'vue'
 import { Microphone, Picture, Headset, VideoPlay, VideoPause, Loading, Close } from '@element-plus/icons-vue'
 import type { AssistantBlock, ChatTurn, RouterTraceView } from '@/types/runtime'
+import type { WorkbenchRouteOption } from '@/types/workbench'
+import type { AgentRobotShape } from '@/constants/agentRobotShapes'
 import { ElMessage } from 'element-plus'
 import { transcribeAudio } from '@/api/voice'
 import { useVoiceRecorder } from '@/composables/voiceRecorder'
@@ -453,11 +703,36 @@ import {
 } from '@/components/runtime/trialMessages'
 import type { TurnSections } from '@/components/runtime/trialMessages'
 import ProcessTimeline from '@/components/runtime/ProcessTimeline.vue'
+import { buildParticipantFeed } from '@/components/runtime/workbench/workbenchParticipantFeed'
+import type { ParticipantCard } from '@/components/runtime/workbench/workbenchParticipantFeed'
 import RouterTimeline from '@/components/runtime/RouterTimeline.vue'
 import FileCard from '@/components/runtime/FileCard.vue'
 import ElapsedSeconds from '@/components/runtime/ElapsedSeconds.vue'
+import AgentLookArt from '@/components/agent/AgentLookArt.vue'
 import { resolveFollowAfterScroll } from '@/components/runtime/chatFollow'
 import { renderMarkdownMemo } from '@/utils/simpleMarkdown'
+import {
+  friendlyWorkbenchError,
+  stripWorkbenchLeadHeadings
+} from '@/utils/workbenchFriendlyError'
+import {
+  detectWorkbenchAtTrigger,
+  filterWorkbenchAtCandidates,
+  stripWorkbenchAtFragment
+} from '@/utils/workbenchAtRoute'
+import {
+  resolveWorkbenchAgentName,
+  stripRouteDecisionJson,
+  stripWorkbenchInternalKeys
+} from '@/components/runtime/workbench/workbenchMessageMeta'
+import {
+  USER_AVATAR_FALLBACK_COLOR,
+  initialOf,
+  resolveAgentAvatar,
+  resolveAvatarUrl,
+  resolveFallbackRobotAvatar
+} from '@/constants/agentLooks'
+import { useUserStore } from '@/stores/user'
 
 const props = defineProps<{
   turns: ChatTurn[]
@@ -497,6 +772,23 @@ const props = defineProps<{
    * null 表示不展示：非 Router、无追踪权限或还没拿到数据时都由外层传 null。
    */
   routerTrace?: RouterTraceView | null
+  /**
+   * 展示皮肤：workbench=工作台沉浸（空状态 / 思考折叠 / 气泡 / 输入区）；
+   * 缺省=调试试跑，行为与样式保持原样。
+   */
+  skin?: 'default' | 'workbench'
+  /** 工作台思考摘要用的线路展示名；勿写死「接待助手」 */
+  routeHint?: string
+  /** 工作台空状态快捷提问；点卡片即填入并发送 */
+  quickPrompts?: string[]
+  /** 工作台输入区网关徽标文案，如「自动匹配专家」 */
+  gatewayBadge?: string
+  /** @ 面板候选（本会话快照方案启用项）；只展示名，不暴露 route_key */
+  routeCandidates?: WorkbenchRouteOption[]
+  /** 已选定的下一轮强制线路（提及片） */
+  selectedRoute?: WorkbenchRouteOption | null
+  /** 是否允许打开 @ 面板 */
+  canPickRoute?: boolean
 }>()
 
 const emit = defineEmits<{
@@ -509,7 +801,290 @@ const emit = defineEmits<{
   'refresh-router': []
   /** 紧凑时间线点了「查看详细甘特图」；抽屉由外层页面持有 */
   'open-gantt': []
+  /** 工作台 @ 选定线路（routeKey） */
+  'pick-route': [routeKey: string]
+  /** 清除 @ 提及片 */
+  'clear-route': []
 }>()
+
+/** 是否工作台沉浸皮肤 */
+const isWorkbench = computed(() => props.skin === 'workbench')
+/** 工作台思考过程默认收起；调试仍默认展开 */
+const thinkDefaultOpen = computed(() => !isWorkbench.value)
+
+const userStore = useUserStore()
+/** 当前登录用户展示名 */
+const userDisplayName = computed(
+  () => userStore.profile?.nickname || userStore.profile?.username || '用户'
+)
+const userInitial = computed(() => initialOf(userDisplayName.value))
+const userAvatarSrc = computed(() => resolveAvatarUrl(userStore.profile?.avatarUrl))
+const userAvatarStyle = computed(() =>
+  userAvatarSrc.value
+    ? undefined
+    : { background: USER_AVATAR_FALLBACK_COLOR, color: '#fff' }
+)
+
+/** 气泡用的 Agent 形象解析结果 */
+interface AssistantLookView {
+  name: string
+  initial: string
+  iconSrc?: string
+  /** 线稿图元（未命中机器人时为 undefined） */
+  art?: AgentRobotShape[] | null
+  /** 底座色：恒为白底方座 */
+  color: string
+  /** 线稿色 / 首字兜底色 */
+  initialColor: string
+  /** 自定义上传图：铺满裁切 */
+  custom: boolean
+}
+
+/**
+ * 解析本轮 AI 气泡形象：候选按 agentId / 名称匹配；多专家同会话时优先用思考车道里的 Agent 名。
+ * 未配置形象时与时间线一致，走固定机器人兜底（不再是首字方座）。
+ *
+ * @param turn 本轮对话
+ */
+function assistantLook(turn: ChatTurn): AssistantLookView {
+  const candidates = props.routeCandidates || []
+  let matched: WorkbenchRouteOption | undefined
+  // 1) 思考车道里的 Agent 名（多专家时更能对上本轮实际线路）
+  for (const lane of lanesOf(turn)) {
+    if (lane.kind !== 'agent') {
+      continue
+    }
+    const name = routeAgentName(lane.title) || lane.title
+    if (!name) {
+      continue
+    }
+    matched = candidates.find((item) => (item.agentName || '').trim() === name.trim())
+    if (matched) {
+      break
+    }
+  }
+  // 2) @ 选定 / 当前强制线路
+  if (!matched && props.selectedRoute) {
+    matched = props.selectedRoute
+  }
+  // 3) 调试皮肤：按当前 agentId
+  if (!matched && props.agentId != null) {
+    matched = candidates.find((item) => item.agentId === props.agentId)
+  }
+  const name =
+    (matched?.agentName || '').trim() ||
+    (props.routeHint || '').trim() ||
+    '助手'
+  // 与时间线共用同一套兜底：没配形象 / 配置认不出图形时给固定机器人，
+  // 气泡里也不再只露「企」这种首字方座
+  const view = lookOf(name)
+  return {
+    name,
+    initial: view.initial,
+    iconSrc: view.iconSrc,
+    art: view.art,
+    color: view.color,
+    initialColor: view.initialColor,
+    custom: view.custom
+  }
+}
+
+/**
+ * AI 头像样式：白底方座不变色；首字兜底时文字用该套霓虹色。
+ *
+ * @param turn 本轮
+ */
+function assistantAvatarStyle(turn: ChatTurn) {
+  const look = assistantLook(turn)
+  return {
+    background: look.color,
+    color: look.initialColor
+  }
+}
+
+/**
+ * 工作台 AI 名称行文案：优先取本轮思考车道里真实出现的「路由到 XXX」，
+ * 多专家同会话时各条用自己的名称；候选里有规范展示名则用规范名。
+ * 没有车道（单专家直答）时退回当前线路展示名；仍为空或占位则「智能助手」。
+ *
+ * @param turn 本轮助手消息
+ * @return 可展示的 Agent 名称
+ */
+function assistantDisplayName(turn: ChatTurn): string {
+  const candidates = props.routeCandidates || []
+  for (const lane of lanesOf(turn)) {
+    if (lane.kind !== 'agent') {
+      continue
+    }
+    const laneName = routeAgentName(lane.title)
+    if (!laneName) {
+      continue
+    }
+    // 车道名可能只是 Agent 简称，候选里能对上时用统一展示名
+    const matched = candidates.find((item) => (item.agentName || '').trim() === laneName)
+    return resolveWorkbenchAgentName(matched?.agentName || laneName)
+  }
+  // 无车道：沿用头像解析出的线路名，但过滤掉「线路已失效」等状态占位
+  return resolveWorkbenchAgentName(assistantLook(turn).name)
+}
+
+/** @ 面板是否打开 */
+const atPanelOpen = ref(false)
+/** @ 后的检索片段（不含 @） */
+const atQuery = ref('')
+/** 键盘高亮下标 */
+const atActiveIndex = ref(0)
+/**
+ * 触发 @ 时，输入框里「@检索片段」的起始下标；关闭面板时用于剥离。
+ * -1 表示当前没有挂起的 @ 片段。
+ */
+const atTriggerStart = ref(-1)
+
+/** 按展示名过滤候选；永不展示 route_key */
+const filteredAtCandidates = computed(() =>
+  filterWorkbenchAtCandidates(props.routeCandidates, atQuery.value)
+)
+
+/** 工作台占位：提示可用 @ 指定 */
+const composerPlaceholder = computed(() =>
+  isWorkbench.value
+    ? '输入问题，@ 指定线路；Enter 发送，Shift+Enter 换行'
+    : '输入问题，Enter 发送，Shift+Enter 换行'
+)
+
+/** 徽标 hover：已指定时不要再写「自动匹配」 */
+const gatewayBadgeTitle = computed(() => {
+  const badge = (props.gatewayBadge || '').trim()
+  if (!badge || badge === '自动匹配专家') {
+    return '网关模式：由接待方案自动匹配专家'
+  }
+  if (badge.includes('失效')) {
+    return '当前线路已失效，请 @ 重选或直接发送由系统重配'
+  }
+  return `下一轮将按「${badge.replace(/^已指定/, '')}」执行；也可继续 @ 更换`
+})
+
+/**
+ * 根据 textarea 内容同步 @ 面板开闭与检索词。
+ * 只认最后一个未闭合的 @（其后无空格）；有提及片后仍可再 @ 换人。
+ */
+function syncAtPanelFromText() {
+  if (!isWorkbench.value || props.canPickRoute === false) {
+    closeAtPanel()
+    return
+  }
+  const hit = detectWorkbenchAtTrigger(text.value)
+  if (!hit) {
+    closeAtPanel()
+    return
+  }
+  atTriggerStart.value = hit.start
+  atQuery.value = hit.query
+  if (!atPanelOpen.value) {
+    atActiveIndex.value = 0
+  }
+  atPanelOpen.value = true
+  // 检索变化时把高亮钳在范围内
+  if (atActiveIndex.value >= filteredAtCandidates.value.length) {
+    atActiveIndex.value = Math.max(0, filteredAtCandidates.value.length - 1)
+  }
+}
+
+/** 关闭 @ 面板（不改正文） */
+function closeAtPanel() {
+  atPanelOpen.value = false
+  atQuery.value = ''
+  atTriggerStart.value = -1
+  atActiveIndex.value = 0
+}
+
+/**
+ * 选定候选：剥离输入框里的 @片段，发出 pick-route；提及片由外层 selectedRoute 驱动。
+ *
+ * @param item 候选
+ */
+function confirmAtPick(item: WorkbenchRouteOption) {
+  if (!item?.routeKey) {
+    return
+  }
+  text.value = stripWorkbenchAtFragment(text.value, atTriggerStart.value)
+  closeAtPanel()
+  emit('pick-route', item.routeKey)
+}
+
+/**
+ * 输入区键盘：面板打开时上下/Enter/Esc 优先；否则 Enter 发送。
+ *
+ * @param event 键盘事件（el-input 透传）
+ */
+function onComposerKeydown(event: Event | KeyboardEvent) {
+  const e = event as KeyboardEvent
+  if (!e || typeof e.key !== 'string') {
+    return
+  }
+  if (atPanelOpen.value) {
+    if (e.key === 'ArrowDown') {
+      e.preventDefault()
+      const max = filteredAtCandidates.value.length
+      if (max > 0) {
+        atActiveIndex.value = (atActiveIndex.value + 1) % max
+      }
+      return
+    }
+    if (e.key === 'ArrowUp') {
+      e.preventDefault()
+      const max = filteredAtCandidates.value.length
+      if (max > 0) {
+        atActiveIndex.value = (atActiveIndex.value - 1 + max) % max
+      }
+      return
+    }
+    if (e.key === 'Escape') {
+      e.preventDefault()
+      // Esc：关掉面板并剥离未完成的 @片段，正文保留其余
+      text.value = stripWorkbenchAtFragment(text.value, atTriggerStart.value)
+      closeAtPanel()
+      return
+    }
+    if (e.key === 'Enter' && !e.shiftKey) {
+      e.preventDefault()
+      const pick = filteredAtCandidates.value[atActiveIndex.value]
+      if (pick) {
+        confirmAtPick(pick)
+      }
+      return
+    }
+  }
+  // 面板关闭：Enter 发送，Shift+Enter 换行（不 prevent）
+  if (e.key === 'Enter' && !e.shiftKey) {
+    e.preventDefault()
+    submit()
+  }
+}
+
+/** el-input 内容变化时同步 @ 面板 */
+function onComposerInput() {
+  syncAtPanelFromText()
+}
+
+watch(
+  () => props.canPickRoute,
+  (ok) => {
+    if (ok === false) {
+      closeAtPanel()
+    }
+  }
+)
+/** 快捷提问：外层传入；空则三条中性示例（不编造未接入能力） */
+const quickPromptList = computed(() =>
+  props.quickPrompts?.length
+    ? props.quickPrompts
+    : [
+        '我想咨询一个业务问题，请帮我匹配合适的专家',
+        '请介绍一下你能协助处理哪些类型的请求',
+        '帮我看看当前有什么需要优先处理的事项'
+      ]
+)
 
 /** 待发送的图片。id 只用于列表 key 与删除定位 */
 interface Attachment {
@@ -614,6 +1189,13 @@ const {
   onCancel: () => ElMessage.info('已取消录音'),
   onError: (message) => ElMessage.warning(message)
 })
+
+/** 工作台：未落地的语音入口不摆；录音中仍要显示以便结束/取消 */
+const showMicBtn = computed(
+  () => !isWorkbench.value || props.asrEnabled === true || voiceRecording.value
+)
+/** 工作台：未落地的图片入口不摆，避免伪装成可用 */
+const showImageBtn = computed(() => !isWorkbench.value || props.visionEnabled === true)
 
 /** 「说话」按钮的 Hover 说明。图标按钮没有可见文字，状态与原因全部靠它交代 */
 const recordHint = computed(() => {
@@ -905,6 +1487,341 @@ const speakSignature = computed(() =>
 watch(speakSignature, flushAutoSpeak)
 
 /**
+ * 工作台消息流：网关判定条、专家各一条、方案只在有汇总结论时出现。
+ *
+ * <p>形象仍走 lookOf。拼接终答不挂到最后一位，也不再在块下面重复贴一整段。
+ *
+ * @param turn 本轮助手消息
+ * @return 参与者卡片；不是工作台或时间线为空时为空
+ */
+/**
+ * 候选池浅签名：形象与目标类型都来自候选池，池子一变缓存必须失效。
+ */
+const candidateSignature = computed(() =>
+  (props.routeCandidates || [])
+    .map((item) => `${item.agentName || ''}|${item.targetType || ''}|${item.avatarConfig ? 1 : 0}`)
+    .join(',')
+)
+
+/**
+ * 每轮消息流投影的内容签名。
+ *
+ * <p>为什么要有：模板里每轮至少要问三次「有没有分块」（头像让位、分块区、逐块兜底），
+ * 每次调用都会重扫全部路由与块。长会话按「轮 × 块」放大，主线程会被拖住，
+ * 表现就是打开页面长时间空白。这里每帧只算一遍浅签名，投影按签名命中缓存。
+ */
+const feedSignatures = computed(() => {
+  const signatures = new Map<string, string>()
+  for (const turn of props.turns) {
+    const blocks = Array.isArray(turn.blocks) ? turn.blocks : []
+    let signature = `${turn.status}|${candidateSignature.value}`
+    for (const block of blocks) {
+      signature += `|${block.kind}:${(block.text || '').length}:${(block.detail || '').length}:${block.file?.fileName || ''}`
+    }
+    signatures.set(turn.key, signature)
+  }
+  return signatures
+})
+
+/** 投影缓存：同一轮同一签名只投影一次；切会话（turns 换数组）时整体清掉 */
+const feedMemo = new Map<string, { signature: string; cards: ParticipantCard[] }>()
+
+watch(
+  () => props.turns,
+  () => {
+    feedMemo.clear()
+  }
+)
+
+/**
+ * 工作台消息流：网关判定条、专家各一条、方案只在有汇总结论时出现。
+ *
+ * <p>形象仍走 lookOf。拼接终答不挂到最后一位，也不再在块下面重复贴一整段。
+ *
+ * @param turn 本轮助手消息
+ * @return 参与者卡片；不是工作台或时间线为空时为空
+ */
+function participantFeedOf(turn: ChatTurn): ParticipantCard[] {
+  if (!isWorkbench.value || !turn || !Array.isArray(turn.blocks)) {
+    return []
+  }
+  const signature = feedSignatures.value.get(turn.key) || ''
+  const cached = feedMemo.get(turn.key)
+  if (cached && cached.signature === signature) {
+    return cached.cards
+  }
+  // 投影再崩也只影响本轮：返回空数组让下面的逐块渲染接手，整页不会跟着变白
+  try {
+    const cards = buildParticipantFeed({
+      routeTexts: turn.blocks.filter((block) => block.kind === 'route').map((block) => block.text),
+      lanes: lanesOf(turn),
+      blocks: turn.blocks,
+      targetTypeOf,
+      streaming: turn.status === 'streaming',
+      fallbackName: assistantDisplayName(turn),
+      lookOf,
+      descriptionOf,
+      isTopLevelOf
+    })
+    feedMemo.set(turn.key, { signature, cards })
+    return cards
+  } catch (error) {
+    console.warn('[工作台消息流] 本轮分块投影失败，已回退到逐块渲染', error)
+    feedMemo.set(turn.key, { signature, cards: [] })
+    return []
+  }
+}
+
+/**
+ * 本轮消息流里是否已经有「人」的块（网关判定条不算）。
+ *
+ * <p>为什么单独判：只剩网关条时（方案还在跑、工作流只报一句、历史数据里只有判定），
+ * 逐块的正文 / 报错 / 文件必须照常显示；一按「有分块就全交给分块」把正文藏光，
+ * 用户看到的就是判定条下面一片空白。
+ *
+ * @param turn 本轮助手消息
+ * @return true 表示已有专家 / 方案 / 结论块，逐块渲染让位
+ */
+function participantFeedHasActor(turn: ChatTurn): boolean {
+  return participantFeedOf(turn).some((card) => card.kind === 'actor' || card.kind === 'conclusion')
+}
+
+/**
+ * 参与者头像样式：白底方座，线稿色用该套形象色。
+ *
+ * @param card 参与者卡片
+ * @return 内联样式；网关不用
+ */
+function participantAvatarStyle(card: ParticipantCard) {
+  return {
+    background: card.look?.color || '#fff',
+    color: card.look?.initialColor || '#635bff'
+  }
+}
+
+/**
+ * 该候选的简介 / 意图说明：判路由命中时后端 reason 只是内部标签，
+ * 这是网关句唯一能引用的「为什么是它」事实依据（现网字段 `intentDesc`）。
+ *
+ * @param name 展示名
+ * @return 简介；候选不在本会话或没有简介时为空串
+ */
+function descriptionOf(name: string): string {
+  return (candidateOf(name)?.intentDesc || '').trim()
+}
+
+/**
+ * 按展示名取候选项：用于目标类型与形象解析；对不上返回 undefined（按普通 Agent 处理）。
+ *
+ * @param name 展示名
+ * @return 候选；空表示不在本会话候选里
+ */
+function candidateOf(name: string) {
+  const wanted = (name || '').trim()
+  if (!wanted) {
+    return undefined
+  }
+  return (props.routeCandidates || []).find((item) => (item.agentName || '').trim() === wanted)
+}
+
+/**
+ * 是否是「入口直接分发」的参与者：能在本会话候选池里对上名。
+ *
+ * <p>方案内部的子专家不在候选池，因此对不上——时间线据此把它们归到方案块下面，
+ * 而不是把方案内部那一跳误写成入口判定。
+ *
+ * @param name 展示名
+ * @return true 表示入口候选
+ */
+function isTopLevelOf(name: string): boolean {
+  return !!candidateOf(name)
+}
+
+/**
+ * 目标类型：工作流 / 方案要按不同策略展示（只报状态，不展开内部思考）。
+ *
+ * @param name 展示名
+ * @return AGENT / MA / WORKFLOW；未知为 undefined
+ */
+function targetTypeOf(name: string): 'AGENT' | 'MA' | 'WORKFLOW' | undefined {
+  return candidateOf(name)?.targetType
+}
+
+/**
+ * 该名字的形象配置：先查入口候选，再查方案内部的子候选。
+ *
+ * <p>方案内部子专家不在入口候选池里，形象只能从入口方案那一行的 `children` 取；
+ * 两者都没有返回 undefined，交给调用方决定兜底（方案用固定机器人，专家用首字）。
+ *
+ * @param name 展示名
+ * @return 形象配置；未配置 / 不认识的参与者为 undefined
+ */
+function avatarConfigOf(name: string) {
+  const top = candidateOf(name)
+  if (top) {
+    return top.avatarConfig || undefined
+  }
+  const wanted = (name || '').trim()
+  if (!wanted) {
+    return undefined
+  }
+  for (const option of props.routeCandidates || []) {
+    const child = (option.children || []).find((item) => (item.agentName || '').trim() === wanted)
+    if (child) {
+      return child.avatarConfig || undefined
+    }
+  }
+  return undefined
+}
+
+/**
+ * 专家 / 方案形象：已配置的用配置，没配置（或配置认不出图形）的一律给固定机器人。
+ *
+ * <p>为什么不再退「首字方座」：时间线、方案块、子专家块都是「参与者」，只露一个汉字
+ * 既分不清谁是谁，也和单兵专家的机器人形象不在同一套里。兜底用
+ * {@link resolveFallbackRobotAvatar} 按名字稳定挑现成 8 套之一，刷新不会变脸；
+ * 不新增上传链路，也不另造 MA 形象协议。
+ *
+ * @param name 展示名
+ * @return 时间线内的小头像视图
+ */
+function lookOf(name: string) {
+  const config = avatarConfigOf(name)
+  let view = config ? resolveAgentAvatar(config, name) : null
+  if (!view || (!view.imgSrc && !view.art)) {
+    // 未配置 / 配置形态认不出：走固定机器人，避免「企」「制」这种首字方座
+    view = resolveFallbackRobotAvatar(name)
+  }
+  return {
+    initial: view.initial,
+    iconSrc: view.imgSrc || undefined,
+    art: view.art,
+    color: view.background,
+    initialColor: view.initialColor,
+    custom: view.isCustom
+  }
+}
+
+/**
+ * 这位参与者的思考折叠键。默认收起，点开才看思考和工具。
+ *
+ * @param card 参与者卡片
+ * @return 折叠区段名
+ */
+function actorThinkPart(card: ParticipantCard): string {
+  return `actor-think:${card.key}`
+}
+
+/**
+ * 是否有可折叠的思考或工具。空壳和状态句已在投影里去掉，这里不再补「没有额外的思考记录」。
+ *
+ * @param card 参与者卡片
+ * @return true 表示画出「查看思考过程与工具调用」
+ */
+function actorHasThink(card: ParticipantCard): boolean {
+  const lines = Array.isArray(card.lines) ? card.lines : []
+  const steps = Array.isArray(card.steps) ? card.steps : []
+  // 方案块的分流句已经是气泡里可见的结果，不再进折叠（否则同句出现两次）
+  if (card.roleLabel === '方案') {
+    return steps.length > 0
+  }
+  return lines.length > 0 || steps.length > 0
+}
+
+/**
+ * 结果气泡是否要画：正文、报错、文件，或仍在作答。
+ *
+ * @param card 参与者卡片
+ * @return true 表示画出气泡
+ */
+function actorHasBubble(card: ParticipantCard): boolean {
+  const errors = Array.isArray(card.errors) ? card.errors : []
+  const files = Array.isArray(card.files) ? card.files : []
+  return !!(card.answer || errors.length || files.length || card.pending)
+}
+
+/**
+ * 生成结束 → 延迟约 500ms 自动收起。
+ *
+ * <p>为什么留这 500ms：终答最后一个字刚落地就立刻收掉，用户来不及看到最后一条思考；
+ * 留半秒既能看到收尾，又不会一直占着版面。
+ *
+ * @param key 本轮 key
+ */
+function scheduleAutoCollapse(key: string) {
+  if (autoCollapseTimers.has(key)) {
+    return
+  }
+  const timer = window.setTimeout(() => {
+    autoCollapseTimers.delete(key)
+    // 用户已手动操作过就不自动收起，避免和用户抢方向盘
+    if (typeof userThinkOpen[key] !== 'boolean') {
+      autoCollapsedThink[key] = true
+    }
+  }, AUTO_COLLAPSE_DELAY_MS)
+  autoCollapseTimers.set(key, timer)
+}
+
+/**
+ * 自动收起的最小依赖签名：只收「哪些助手轮存在、是否仍在流式」两个浅字段。
+ * 流式增量只改块正文，不会让签名变化，因此不会每个 delta 都重扫。
+ */
+const thinkSignature = computed(() =>
+  props.turns
+    .filter((turn) => turn.role === 'assistant')
+    .map((turn) => `${turn.key}|${turn.status}`)
+    .join(';')
+)
+
+/** 本次挂载期间真正见过「流式中」的轮次；只有它们才配 500ms 延迟收起 */
+const seenStreamingTurns = new Set<string>()
+
+/**
+ * 生成结束 → 排一次自动收起；重新进入流式则撤销收起，让面板再次展开。
+ * 只作用于工作台皮肤，且只对真有过程内容的轮次生效。
+ * 历史回放（从未见过流式）直接收起，避免刷新后满屏展开的思考面板。
+ */
+watch(thinkSignature, () => {
+  if (!isWorkbench.value) {
+    return
+  }
+  for (const turn of props.turns) {
+    if (turn.role !== 'assistant') {
+      continue
+    }
+    if (turn.status === 'streaming') {
+      // 同一轮重新开跑（继续生成 / 批准后续跑）：撤销自动收起
+      seenStreamingTurns.add(turn.key)
+      delete autoCollapsedThink[turn.key]
+      continue
+    }
+    if (!hasProcess(turn)) {
+      continue
+    }
+    if (seenStreamingTurns.has(turn.key)) {
+      scheduleAutoCollapse(turn.key)
+    } else {
+      autoCollapsedThink[turn.key] = true
+    }
+  }
+})
+
+/**
+ * 首次挂载时把历史轮次标记为已收起：回放会话不该一进来就铺开所有思考面板。
+ * 只有真正在本次停留期间流式过的轮次才会在结束后延迟收起。
+ */
+onMounted(() => {
+  if (!isWorkbench.value) {
+    return
+  }
+  for (const turn of props.turns) {
+    if (turn.role === 'assistant' && turn.status !== 'streaming' && hasProcess(turn)) {
+      autoCollapsedThink[turn.key] = true
+    }
+  }
+})
+
+/**
  * 兜底触发：本轮发送结束（sending 由 true 变 false）后再扫一次。
  * 有些链路的终态是先改 sending 再回填正文，单靠 turns 深监听会漏掉这一拍。
  */
@@ -968,6 +1885,15 @@ const uploadHint = computed(() =>
 const foldOverride = reactive<Record<string, boolean>>({})
 /** 长工具结果是否展开。 */
 const resultOpen = reactive<Record<string, boolean>>({})
+
+/** 工作台思考面板：用户显式点过的展开态（键 = 轮 key）；一旦写入，自动收起不再覆盖 */
+const userThinkOpen = reactive<Record<string, boolean | undefined>>({})
+/** 已自动收起的轮次；仅在用户没点过时生效 */
+const autoCollapsedThink = reactive<Record<string, true>>({})
+/** 自动收起定时器；同一轮只挂一个，卸载时统一清掉 */
+const autoCollapseTimers = new Map<string, number>()
+/** 正文结束后延迟多少毫秒收起思考面板（留半秒让用户看到最后一条思考） */
+const AUTO_COLLAPSE_DELAY_MS = 500
 
 /**
  * 渲染行：每条对话配上它的计划分段视图（非计划流程为 undefined）。
@@ -1133,12 +2059,35 @@ onUpdated(scheduleFollowBottom)
  */
 onMounted(followToBottom)
 
+/**
+ * 子组件渲染兜底。所属域：runtime（前端对话区）。
+ *
+ * <p>为什么要有这一层：工作台整页是「左历史 + 右对话」一棵渲染树，结果气泡里的文件卡、
+ * 形象组件只要有一个在渲染期抛错（历史块的半截字段最容易踩），整棵树都会挂掉，
+ * 表现就是整页空白。这里只丢掉这一小块，其余消息照常显示。
+ *
+ * <p>只吃渲染 / 挂载阶段的异常：业务请求失败仍由各自的 try/catch 与错误条展示。
+ */
+onErrorCaptured((error, _instance, info) => {
+  if (info === 'render function' || info === 'component update' || info === 'mounted hook') {
+    console.warn('[对话消息] 子组件渲染失败，已跳过该小块', error)
+    // 返回 false 阻止继续冒泡，避免错误把上层整棵对话树卸载
+    return false
+  }
+  return undefined
+})
+
 // 卸载时取消未执行的帧，避免回调在已销毁组件上读 DOM
 onBeforeUnmount(() => {
   if (followFrame) {
     cancelAnimationFrame(followFrame)
     followFrame = 0
   }
+  // 自动收起定时器同理：组件销毁后不能再写响应式状态
+  for (const timer of autoCollapseTimers.values()) {
+    window.clearTimeout(timer)
+  }
+  autoCollapseTimers.clear()
 })
 
 /** 状态码换成商城同款短句。未知阶段不显示空标签。 */
@@ -1183,7 +2132,8 @@ function hasProcess(item: ChatTurn) {
 }
 
 function hasAnswer(item: ChatTurn) {
-  return item.blocks.some((block) => block.kind === 'assistant' && block.text.trim())
+  // 历史快照 / 流式半截块可能没有 text：当空处理，不能在这里抛（抛了整页都会白）
+  return item.blocks.some((block) => block.kind === 'assistant' && (block.text || '').trim())
 }
 
 /**
@@ -1198,6 +2148,11 @@ function hasOutput(item: ChatTurn) {
 
 /** 非计划流程：还没有任何过程/终答/产物时才显示占位。 */
 function showThinking(item: ChatTurn) {
+  if (isWorkbench.value) {
+    // 工作台只剩网关判定条时（方案还在跑、还没出专家块）也要有一句进行态，
+    // 否则判定条下面就是一片空白，看起来像页面没出来
+    return item.status === 'streaming' && !hasOutput(item) && !participantFeedHasActor(item)
+  }
   return item.status === 'streaming' && !hasProcess(item) && !hasOutput(item)
 }
 
@@ -1282,6 +2237,17 @@ function lastAssistantIndex(item: ChatTurn) {
 }
 
 /**
+ * 首个助手正文块的下标：工作台把作答 Agent 展示名挂在它上方，
+ * 只在第一条正文前出现一次，后续正文块不再重复。
+ *
+ * @param item 助手轮
+ * @return 下标；没有正文块时为 -1
+ */
+function firstAssistantIndex(item: ChatTurn) {
+  return item.blocks.findIndex((block) => block.kind === 'assistant')
+}
+
+/**
  * 思考与终答共用轻量 Markdown。流式走安全前缀+表渐进，结束后完整终渲。
  * 原文标签不会执行。
  *
@@ -1295,6 +2261,33 @@ function lastAssistantIndex(item: ChatTurn) {
  */
 function markdown(slot: string, value: string, streaming = false) {
   return renderMarkdownMemo(slot, value, streaming)
+}
+
+/**
+ * 工作台思考区文本：抹掉 route_key 等内部键；调试形态原样保留排障信息。
+ * 只影响渲染，不改思考过程的数据源。
+ *
+ * @param raw 思考正文 / 工具行 / 路由决策 JSON
+ * @return 可展示文本
+ */
+function thinkText(raw: string) {
+  return isWorkbench.value ? stripWorkbenchInternalKeys(raw) : raw
+}
+
+/**
+ * 工作台正文展示：剥文首人设/调试小节标题；调试形态原样。
+ * 只影响渲染，不改 turns 落库内容。
+ */
+function displayAnswer(raw: string) {
+  // 气泡正文是用户可见终稿：内部路由 JSON（含历史落库的旧数据）一律不展示
+  return isWorkbench.value ? stripRouteDecisionJson(stripWorkbenchLeadHeadings(raw)) : raw
+}
+
+/**
+ * 工作台错误展示：硬核不可用 → 友好灰字；其它原样。调试形态原样红字。
+ */
+function displayErrorText(raw: string) {
+  return isWorkbench.value ? friendlyWorkbenchError(raw) : raw
 }
 
 /** 计划流终答的缓存槽键。与朗读键区分：这里只标识渲染位置 */
@@ -1330,6 +2323,31 @@ function blockSlot(block: AssistantBlock, index: number): string {
 /** 思考过程里单个步骤的缓存槽键；泳道与步骤序号共同定位 */
 function stepSlot(item: ChatTurn, laneIndex: number, stepIndex: number): string {
   return `think:${item.key}:${laneIndex}:${stepIndex}`
+}
+
+/**
+ * 调试皮肤思考折叠条文案：与改动前一致，固定「思考过程」。
+ * 工作台消息流不再放全场轨迹，过程在各专家自己的「查看思考过程与工具调用」里。
+ *
+ * @param item 助手轮（保留入参以兼容既有调用点）
+ * @return 折叠条标题
+ */
+function thinkToggleLabel(item: ChatTurn) {
+  return '思考过程'
+}
+
+/**
+ * 空状态快捷卡片：填入输入框并立刻发送（与点发送等价）。
+ *
+ * @param prompt 卡片文案
+ */
+function sendQuick(prompt: string) {
+  const content = prompt.trim()
+  if (!content || !props.canSend || !props.sessionReady || props.sending) {
+    return
+  }
+  text.value = content
+  submit()
 }
 
 function submit() {
@@ -1424,6 +2442,11 @@ function removeAttachment(index: number) {
   height: 100%;
 }
 
+/* 工作台：消息流与输入框同一中轴（大屏绝对居中） */
+.chat.is-workbench {
+  align-items: center;
+}
+
 .messages {
   flex: 1;
   min-height: 0;
@@ -1448,13 +2471,112 @@ function removeAttachment(index: number) {
   font-size: 13px;
 }
 
+.quick-cards {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 12px;
+  max-width: 720px;
+  margin: 28px auto 0;
+  text-align: left;
+}
+
+.quick-card {
+  padding: 14px 16px;
+  border: none;
+  border-radius: 12px;
+  background: #fff;
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.05);
+  color: var(--ah-text);
+  font: inherit;
+  font-size: 13px;
+  line-height: 1.5;
+  cursor: pointer;
+  transition: transform 0.15s ease, box-shadow 0.15s ease;
+}
+
+.quick-card:hover:not(:disabled) {
+  transform: translateY(-2px);
+  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.08);
+}
+
+.quick-card:disabled {
+  cursor: not-allowed;
+  opacity: 0.55;
+}
+
+/* 消息行容器负责左右对齐：AI 靠左、User 靠右；限宽居中在上层 .messages 上，勿在行上再收窄 */
 .row {
+  display: flex;
+  width: 100%;
   margin-bottom: 14px;
 }
 
 .row.user {
-  display: flex;
   justify-content: flex-end;
+}
+
+.row.assistant {
+  justify-content: flex-start;
+}
+
+.speak-row {
+  display: flex;
+  gap: 10px;
+  align-items: flex-start;
+  width: 100%;
+}
+
+.speak-row.is-user {
+  justify-content: flex-end;
+}
+
+.speak-row.is-assistant {
+  justify-content: flex-start;
+}
+
+.speak-row.is-assistant .card {
+  flex: 1;
+  min-width: 0;
+}
+
+.msg-avatar {
+  display: grid;
+  place-items: center;
+  width: 36px;
+  height: 36px;
+  overflow: hidden;
+  flex: none;
+  border-radius: 50%;
+  font-size: 14px;
+  font-weight: 650;
+}
+
+.msg-avatar img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+}
+
+/* Agent 形象为「白底圆角方座 + 线框」，与列表/详情同形：方座等比圆角，不做正圆裁切；
+   白底落在白卡上会糊，用内描边兜住轮廓 */
+.msg-avatar.is-assistant {
+  border-radius: 9px;
+  box-shadow: inset 0 0 0 1px #e5e7eb;
+}
+
+/* 图形自带白底方座，铺满整块，不再留内边距 */
+.msg-avatar.is-assistant img {
+  padding: 0;
+}
+
+/* 工作台 AI 名称行：头像右侧、气泡上方，深灰小字；User 消息不渲染 */
+.msg-name {
+  margin: 0 0 4px;
+  padding-left: 2px;
+  color: #374151;
+  font-size: 14px;
+  font-weight: 600;
+  line-height: 1.3;
 }
 
 .bubble {
@@ -1472,6 +2594,443 @@ function removeAttachment(index: number) {
   background: #fff;
   border: 1px solid transparent;
   border-radius: 12px;
+}
+
+/* —— 工作台沉浸皮肤：限宽居中 / AI 气泡 / 思考摘要 / 输入区 focus —— */
+.chat.is-workbench .messages,
+.chat.is-workbench .composer {
+  flex: none;
+  width: 100%;
+  max-width: 800px;
+  margin-left: auto;
+  margin-right: auto;
+}
+
+.chat.is-workbench .messages {
+  flex: 1;
+  min-height: 0;
+  align-self: center;
+}
+
+.chat.is-workbench .composer {
+  align-self: center;
+}
+
+.chat.is-workbench .empty h3 {
+  font-size: 22px;
+  font-weight: 650;
+}
+
+.chat.is-workbench .bubble {
+  background: var(--ah-primary, #635bff);
+  color: #fff;
+  border-radius: 14px;
+}
+
+.chat.is-workbench .card {
+  padding: 8px 4px;
+  background: transparent;
+  border: none;
+  border-radius: 0;
+}
+
+/* AI 正文气泡：只包 answer-block，不含折叠灰字 / 线路 chip / 友好报错。
+   宽度按内容收缩（短答不再拉满整列），上限与 User 气泡同档视觉宽度 */
+.chat.is-workbench .answer-block {
+  width: fit-content;
+  max-width: min(100%, 640px);
+  background-color: #f9fafb;
+  padding: 16px 20px;
+  border: 1px solid #e5e7eb;
+  border-radius: 12px;
+  border-bottom-left-radius: 4px;
+}
+
+.chat.is-workbench .md.answer {
+  color: #1f2937;
+  line-height: 1.6;
+}
+
+/* 兜底：若文首 heading 仍进了 HTML，不展示（strip 函数是主路径） */
+.chat.is-workbench .md.answer :deep(h1:first-child),
+.chat.is-workbench .md.answer :deep(h2:first-child),
+.chat.is-workbench .md.answer :deep(h3:first-child),
+.chat.is-workbench .md.answer :deep(h4:first-child),
+.chat.is-workbench .md.answer :deep(h5:first-child),
+.chat.is-workbench .md.answer :deep(h6:first-child) {
+  display: none;
+}
+
+.chat.is-workbench .think-toggle {
+  padding: 0 0 4px;
+  border-bottom: none;
+}
+
+/* 工作台展示名：只属于正文气泡，宽度跟气泡一致而不是撑满整列 */
+.chat.is-workbench .msg-name {
+  width: fit-content;
+  max-width: min(100%, 640px);
+  margin: 10px 0 4px;
+  font-size: 13px;
+}
+
+/* 正文气泡上方的身份行：小头像 + 名称，与气泡左缘对齐 */
+.chat.is-workbench .wb-answer-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin: 10px 0 6px;
+}
+
+.chat.is-workbench .wb-answer-head .msg-name {
+  margin: 0;
+}
+
+.chat.is-workbench .wb-answer-avatar {
+  display: grid;
+  place-items: center;
+  flex: none;
+  width: 24px;
+  height: 24px;
+  overflow: hidden;
+  border-radius: 7px;
+  box-shadow: inset 0 0 0 1px #e5e7eb;
+  font-size: 11px;
+  font-weight: 650;
+}
+
+.chat.is-workbench .wb-answer-avatar img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+}
+
+/* 消息流：居中判定条 + 每位专家一条。思考默认收起，不再用 200px 常开空框 */
+.wb-actors {
+  display: flex;
+  flex-direction: column;
+  gap: 18px;
+  margin-top: 4px;
+}
+
+.wb-gate {
+  display: flex;
+  justify-content: center;
+}
+
+.wb-gate-badge {
+  max-width: 100%;
+  padding: 6px 16px;
+  border: 1px solid #e5e7eb;
+  border-radius: 20px;
+  background: #f3f4f6;
+  color: #4b5563;
+  font-size: 13px;
+  line-height: 1.5;
+}
+
+/* 方案分发条：与入口判定条同一形态，色相区分，仍然是一行紧凑条，不占消息位 */
+.wb-gate.is-route .wb-gate-badge {
+  border-color: #e4e0ff;
+  background: #f6f4ff;
+  color: #5b54c9;
+}
+
+.wb-actor {
+  display: flex;
+  align-items: flex-start;
+  gap: 12px;
+}
+
+.wb-actor-main {
+  min-width: 0;
+  flex: 1;
+}
+
+.wb-actor-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 6px;
+}
+
+.wb-actor-avatar {
+  display: grid;
+  place-items: center;
+  flex: none;
+  width: 36px;
+  height: 36px;
+  overflow: hidden;
+  border-radius: 9px;
+  box-shadow: inset 0 0 0 1px #e5e7eb;
+  background: #fff;
+  font-size: 14px;
+  font-weight: 650;
+}
+
+.wb-actor-avatar img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+}
+
+.wb-actor-name {
+  font-size: 14px;
+  font-weight: 650;
+  color: #1f2430;
+}
+
+.wb-actor-role {
+  padding: 0 6px;
+  border-radius: 999px;
+  background: #f4f3ff;
+  color: #635bff;
+  font-size: 12px;
+  line-height: 18px;
+}
+
+.wb-actor-fold .think-toggle {
+  padding: 0;
+}
+
+/* 方案块这一步可见的结果（分流句）：与正文同宽，不占折叠 */
+.wb-actor-result {
+  margin: 0 0 8px;
+  color: #4b5160;
+  font-size: 13px;
+  line-height: 1.6;
+}
+
+.wb-actor-fold-body {
+  max-height: 240px;
+  overflow: auto;
+  margin: 6px 0 8px;
+  padding: 8px 10px;
+  border-left: 2px solid #e5e7eb;
+  border-radius: 0 8px 8px 0;
+  background: #f9fafb;
+}
+
+.wb-actor-line,
+.wb-actor-reasoning {
+  margin: 0 0 6px;
+  color: #4b5160;
+  font-size: 13px;
+  line-height: 1.55;
+  white-space: pre-wrap;
+}
+
+.wb-actor-steps {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.wb-actor-step-title {
+  display: block;
+  margin-bottom: 2px;
+  color: #6b7280;
+  font-size: 12px;
+}
+
+.wb-actor-pre {
+  margin: 0 0 8px;
+  white-space: pre-wrap;
+  word-break: break-word;
+  color: #374151;
+  font-size: 12px;
+  font-family: inherit;
+}
+
+/* 有思考面板时行首不再有大头像，卡片直接占满宽度 */
+.chat.is-workbench .speak-row.is-assistant > .card {
+  width: 100%;
+}
+
+.chat.is-workbench .think-toggle.is-summary .section-label,
+.chat.is-workbench .section-label.is-summary {
+  color: #9ca3af;
+  font-size: 12px;
+  font-weight: 400;
+}
+
+/* 生成中标题：只在文字上跑一道浅浅的高光，不做色块 / 进度条 / 跑马灯 */
+.chat.is-workbench .think-toggle .section-label.is-streaming {
+  background: linear-gradient(90deg, #9ca3af 0%, #635bff 45%, #9ca3af 90%);
+  background-size: 220% 100%;
+  background-clip: text;
+  -webkit-background-clip: text;
+  color: transparent;
+  animation: wb-think-shimmer 1.8s linear infinite;
+}
+
+@keyframes wb-think-shimmer {
+  0% {
+    background-position: 120% 0;
+  }
+
+  100% {
+    background-position: -120% 0;
+  }
+}
+
+.chat.is-workbench .composer {
+  padding: 12px 14px 10px;
+  border: 1px solid transparent;
+  border-radius: 16px;
+  background: #f5f7fa;
+  box-shadow: none;
+  box-sizing: border-box;
+}
+
+/* focus：主题色边框 + 紫色光圈（截图验收硬条件） */
+.chat.is-workbench .composer:focus-within {
+  background: #fff;
+  border-color: var(--ah-primary, #635bff);
+  box-shadow: 0 0 0 3px rgba(99, 91, 255, 0.22);
+}
+
+.chat.is-workbench .composer :deep(.el-textarea__inner) {
+  background: transparent !important;
+  box-shadow: none !important;
+  border-color: transparent !important;
+  /* 工作台输入框是普通文本框：两行起、随内容长高，不出现缩放手柄与内部滚动条 */
+  resize: none;
+  padding: 6px 0;
+  min-height: 56px;
+  line-height: 1.7;
+}
+
+/* 硬核不可用：柔和灰字系统提示，不用刺眼红字 */
+.wb-soft-error {
+  margin: 8px 0 0;
+  padding: 0;
+  color: #9ca3af;
+  font-size: 13px;
+  line-height: 1.5;
+}
+
+.gateway-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  flex: none;
+  padding: 2px 8px;
+  border-radius: 999px;
+  background: #eef2ff;
+  color: var(--ah-primary, #635bff);
+  font-size: 12px;
+  font-weight: 600;
+  line-height: 1.4;
+  white-space: nowrap;
+}
+
+.mention-chip-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin: 0 0 8px;
+}
+
+.mention-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 2px 8px 2px 10px;
+  border-radius: 999px;
+  background: #efeefe;
+  color: var(--ah-primary, #635bff);
+  font-size: 12px;
+  font-weight: 600;
+  line-height: 1.4;
+}
+
+.mention-chip-x {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 16px;
+  height: 16px;
+  padding: 0;
+  border: none;
+  border-radius: 50%;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  font-size: 14px;
+  line-height: 1;
+  cursor: pointer;
+}
+
+.mention-chip-x:hover:not(:disabled) {
+  background: rgba(99, 91, 255, 0.15);
+}
+
+.mention-chip-x:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.at-panel {
+  position: absolute;
+  left: 12px;
+  right: 12px;
+  bottom: calc(100% + 6px);
+  z-index: 12;
+  max-height: 220px;
+  margin: 0;
+  padding: 6px 0;
+  overflow: auto;
+  list-style: none;
+  border: 1px solid var(--ah-border-soft, #e8eaef);
+  border-radius: 12px;
+  background: #fff;
+  box-shadow: 0 8px 24px rgba(15, 23, 42, 0.08);
+}
+
+.at-item {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 6px 10px;
+  padding: 8px 14px;
+  cursor: pointer;
+}
+
+.at-item:hover,
+.at-item.active {
+  background: #f5f3ff;
+}
+
+.at-name {
+  color: var(--ah-text, #1f2937);
+  font-size: 13px;
+  font-weight: 600;
+}
+
+.at-desc {
+  flex: 1;
+  min-width: 0;
+  color: #9ca3af;
+  font-size: 12px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.at-type {
+  flex: none;
+  padding: 0 6px;
+  border-radius: 4px;
+  background: #f3f4f6;
+  color: #6b7280;
+  font-size: 11px;
+}
+
+.at-empty {
+  padding: 10px 14px;
+  color: #9ca3af;
+  font-size: 12px;
 }
 
 .phase {
@@ -2158,6 +3717,7 @@ function removeAttachment(index: number) {
 }
 
 .composer {
+  position: relative;
   flex: none;
   margin-top: 12px;
 }

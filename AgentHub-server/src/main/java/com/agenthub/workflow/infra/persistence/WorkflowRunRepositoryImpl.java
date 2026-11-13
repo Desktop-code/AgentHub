@@ -1,6 +1,7 @@
 package com.agenthub.workflow.infra.persistence;
 
 import com.agenthub.common.api.PageQuery;
+import com.agenthub.workflow.domain.enums.WorkflowRunStatus;
 import com.agenthub.workflow.domain.model.WorkflowRun;
 import com.agenthub.workflow.domain.repository.WorkflowRunRepository;
 import com.agenthub.workflow.infra.persistence.entity.WorkflowRunEntity;
@@ -44,6 +45,7 @@ public class WorkflowRunRepositoryImpl implements WorkflowRunRepository {
         entity.setTriggeredBy(run.getTriggeredBy());
         entity.setAppId(run.getAppId());
         entity.setClientRequestId(run.getClientRequestId());
+        entity.setWorkbenchSessionId(run.getWorkbenchSessionId());
         entity.setInputJson(run.getInputJson());
         entity.setOutputJson(run.getOutputJson());
         entity.setErrorSummary(run.getErrorSummary());
@@ -156,6 +158,23 @@ public class WorkflowRunRepositoryImpl implements WorkflowRunRepository {
         return entity == null ? Optional.empty() : Optional.of(toDomain(entity));
     }
 
+    /** {@inheritDoc} */
+    @Override
+    public Optional<WorkflowRun> findActiveByWorkbenchSession(Long workflowId, Long workbenchSessionId) {
+        if (workflowId == null || workbenchSessionId == null) {
+            return Optional.empty();
+        }
+        // 只看未结束两态：终态 run 不阻止下一轮重新发起
+        WorkflowRunEntity entity = mapper.selectOne(new LambdaQueryWrapper<WorkflowRunEntity>()
+                .eq(WorkflowRunEntity::getWorkflowId, workflowId)
+                .eq(WorkflowRunEntity::getWorkbenchSessionId, workbenchSessionId)
+                .in(WorkflowRunEntity::getStatus,
+                        WorkflowRunStatus.RUNNING.name(), WorkflowRunStatus.PAUSED_HUMAN.name())
+                .orderByDesc(WorkflowRunEntity::getId)
+                .last("LIMIT 1"));
+        return entity == null ? Optional.empty() : Optional.of(toDomain(entity));
+    }
+
     private WorkflowRun toDomain(WorkflowRunEntity entity) {
         WorkflowRun run = new WorkflowRun();
         run.setId(entity.getId());
@@ -170,6 +189,7 @@ public class WorkflowRunRepositoryImpl implements WorkflowRunRepository {
         run.setTriggeredBy(entity.getTriggeredBy());
         run.setAppId(entity.getAppId());
         run.setClientRequestId(entity.getClientRequestId());
+        run.setWorkbenchSessionId(entity.getWorkbenchSessionId());
         run.setInputJson(entity.getInputJson());
         run.setOutputJson(entity.getOutputJson());
         run.setErrorSummary(entity.getErrorSummary());

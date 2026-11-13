@@ -1,5 +1,6 @@
 package com.agenthub.runtime.application;
 
+import com.agenthub.runtime.application.router.NestedRoute;
 import com.agenthub.runtime.domain.model.EventType;
 import com.agenthub.runtime.domain.model.GeneratedFile;
 import com.agenthub.runtime.domain.model.RunEvent;
@@ -58,6 +59,10 @@ final class TrialTimelineWriter {
     /**
      * Router 思考按子分段落库：可选决策块 → 每子一条 ROUTE → 该子 reasoning/tool。
      * 无 segments 时退回旧的单条 summary + 合并 traces（兼容）。
+     *
+     * <p>目标方案（MA）内部还有一跳：本段写完后紧接着把方案自己分给各子专家的
+     * 「路由到」行与它们的 reasoning/tool 落库，时间线才能按「方案 → 各子专家」逐块展示，
+     * 而不是只留一句「子编排内部：路由到…」。
      */
     int appendRouterSegments(Long sessionId, int seq, RouterTrialExecutor.RoutedTurn routed,
                              List<RunEvent> written) {
@@ -79,8 +84,47 @@ final class TrialTimelineWriter {
                 written.add(writer.append(sessionId, seq++, EventType.SYSTEM,
                         "子 Agent 失败：" + segment.error(), null, null));
             }
-            if (segment.turn() != null) {
+            /*
+             * 目标方案的终答 turn 已把各子的 traces 并进来（AnswerAggregator#mergeTurns）：
+             * 这种情况不能再整体写一次，否则既重复，又会让子专家的思考全部挂在方案名下。
+             * 改为逐跳写：方案之后紧跟「路由到 子专家」+ 该子自己的 traces。
+             */
+            if (!segment.children().isEmpty()) {
+                seq = appendNested(sessionId, seq, segment.children(), written);
+            } else if (segment.turn() != null) {
                 seq = appendTraces(sessionId, seq, segment.turn(), written);
+            }
+        }
+        return seq;
+    }
+
+    /**
+     * 写目标方案内部的各跳。层级最深只有一层（装载时已剔除目标方案自己的 MA 候选），
+     * 因此只需顺序写 routeLine + traces，失败同样落一条中文 SYSTEM。
+     *
+     * @param sessionId 会话主键
+     * @param seq       当前序号
+     * @param children  方案内部各跳；可空
+     * @param written   已写事件收集器
+     * @return 推进后的下一条序号
+     */
+    private int appendNested(Long sessionId, int seq, List<NestedRoute> children, List<RunEvent> written) {
+        if (children == null || children.isEmpty()) {
+            return seq;
+        }
+        for (NestedRoute child : children) {
+            if (child == null) {
+                continue;
+            }
+            if (child.routeLine() != null && !child.routeLine().isBlank()) {
+                written.add(writer.append(sessionId, seq++, EventType.ROUTE, child.routeLine(), null, null));
+            }
+            if (child.error() != null && !child.error().isBlank()) {
+                written.add(writer.append(sessionId, seq++, EventType.SYSTEM,
+                        "子 Agent 失败：" + child.error(), null, null));
+            }
+            if (child.turn() != null) {
+                seq = appendTraces(sessionId, seq, child.turn(), written);
             }
         }
         return seq;

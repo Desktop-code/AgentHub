@@ -74,17 +74,23 @@ export function recallTrialSession(ownerId?: number, scope: TrialSessionScope = 
   return typeof id === 'number' && id > 0 ? id : undefined
 }
 
-/** 归属类型：同一数字在 agent / ma 两个空间里互不影响 */
-export type TrialSessionScope = 'agent' | 'ma'
+/** 归属类型：同一数字在 agent / ma 两个空间里互不影响；工作台无归属 id，单独占一个键 */
+export type TrialSessionScope = 'agent' | 'ma' | 'workbench'
 
 /**
- * 存储键：agent 沿用旧键（老用户已有记录不失效），ma 加前缀区分。
- * @param ownerId 归属主键
+ * 存储键：agent 沿用旧键（老用户已有记录不失效），ma / workbench 加前缀区分。
+ * @param ownerId 归属主键；工作台固定传 1
  * @param scope   归属类型
  * @return sessionStorage 表内的键
  */
 function ownerKey(ownerId: number, scope: TrialSessionScope): string {
-  return scope === 'ma' ? `ma:${ownerId}` : String(ownerId)
+  if (scope === 'ma') {
+    return `ma:${ownerId}`
+  }
+  if (scope === 'workbench') {
+    return 'workbench'
+  }
+  return String(ownerId)
 }
 
 /**

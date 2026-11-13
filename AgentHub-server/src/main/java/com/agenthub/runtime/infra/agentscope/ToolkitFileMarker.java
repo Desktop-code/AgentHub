@@ -2,6 +2,7 @@ package com.agenthub.runtime.infra.agentscope;
 
 import com.agenthub.runtime.domain.model.GeneratedFile;
 import com.agenthub.runtime.domain.model.PromptInjectionStats;
+import com.agenthub.runtime.domain.service.ToolResultOffloadPolicy;
 import io.agentscope.core.tool.AgentTool;
 import io.agentscope.core.tool.Toolkit;
 
@@ -53,13 +54,20 @@ public final class ToolkitFileMarker {
         }
         // 先收集名字再替换，避免遍历期间改 registry
         Set<String> names = new HashSet<>(toolkit.getToolNames());
+        /*
+         * 读文件工具必须从「本轮真实注册」的名字里取：检索类专家通常只绑了检索工具，
+         * 若摘要里照样写「请调用 workspaceReadFile」，模型会调一个不存在的工具，
+         * 失败几次就把自己熔断掉。取不到就返回 null，落盘侧据此不落盘、不点名。
+         */
+        String readToolName = ToolResultOffloadPolicy.readToolIn(names);
         for (String name : names) {
             AgentTool original = toolkit.getTool(name);
             if (original == null || original instanceof FileMarkerAgentTool) {
                 continue;
             }
             toolkit.removeTool(name);
-            toolkit.registerAgentTool(new FileMarkerAgentTool(original, sink, offload, offloadMaxChars, stats));
+            toolkit.registerAgentTool(new FileMarkerAgentTool(original, sink, offload, offloadMaxChars, stats,
+                    readToolName));
         }
         return toolkit;
     }

@@ -31,6 +31,8 @@ public class WorkflowRunEntity {
     private Long appId;
     /** 调用方幂等键；试跑为空 */
     private String clientRequestId;
+    /** 工作台会话 agent_run_session.id；仅 trigger_type=WORKBENCH 写入 */
+    private Long workbenchSessionId;
     private String inputJson;
     private String outputJson;
     private String errorSummary;

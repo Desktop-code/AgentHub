@@ -11,9 +11,12 @@
  */
 import { reactive } from 'vue'
 import { listPromptTemplates } from '@/api/agentPrompt'
+import type { PromptTemplateOption } from '@/types/agent'
 
 /** id → 模板名；模块级共享，跨组件复用，避免切换 Agent 时重复请求 */
 const nameById = reactive<Record<number, string>>({})
+/** purpose@locale → 当前生效版本；新建默认绑定与摘要行共用同一份列表结果 */
+const defaultByPurpose = reactive<Record<string, PromptTemplateOption>>({})
 /** purpose → 加载 Promise；同一用途并发调用只发一次请求 */
 const pending = new Map<string, Promise<void>>()
 /** 已完成的用途，命中后不再请求 */
@@ -40,8 +43,17 @@ function ensureLoaded(purpose: string, locale = 'zh-CN'): Promise<void> {
   }
   const task = listPromptTemplates({ purpose, locale })
     .then(({ data }) => {
-      for (const item of data.data || []) {
+      const items = data.data || []
+      for (const item of items) {
         nameById[item.id] = item.name || item.templateKey || ''
+      }
+      // 同一 purpose+locale 至多一条 is_active=1（管理端发布时按用途熄灭其它行），
+      // 这里把它记成「默认」，供未绑定摘要显示「保存时会钉哪条」，不再多发一次 default 请求
+      const active = items.find((item) => item.isActive === 1)
+      if (active) {
+        defaultByPurpose[key] = active
+      } else {
+        delete defaultByPurpose[key]
       }
       loaded.add(key)
     })
@@ -68,7 +80,24 @@ export function promptTemplateName(templateId?: number | null): string {
   return nameById[templateId] || ''
 }
 
-/** 供组件引用：拉取入口 + 解析入口（nameById 是 reactive，模板里读它会自动追踪） */
+/**
+ * 该用途当前生效（已发布 + is_active=1）的模板版本。
+ * <p>
+ * 与后端 {@code AgentPromptTemplatePort#defaultOption} 同源，用于「未绑定但保存时会自动钉住」的摘要展示。
+ * 名称目录未加载完成时返回 undefined，调用方应按「未知」处理而不是当成没有模板。
+ *
+ * @param purpose 用途码
+ * @param locale  语言；默认 zh-CN
+ * @return 生效版本；未加载或该用途无生效模板时为空
+ */
+export function promptTemplateDefault(purpose: string, locale = 'zh-CN'): PromptTemplateOption | undefined {
+  if (!purpose) {
+    return undefined
+  }
+  return defaultByPurpose[`${purpose}@${locale}`]
+}
+
+/** 供组件引用：拉取入口 + 解析入口（nameById / defaultByPurpose 是 reactive，模板里读它会自动追踪） */
 export function usePromptTemplateCatalog() {
-  return { ensureLoaded, promptTemplateName }
+  return { ensureLoaded, promptTemplateName, promptTemplateDefault }
 }

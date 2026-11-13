@@ -36,22 +36,16 @@
       />
 
       <!--
-        未挂模板的 CHAT：业务提示词仍需可写（历史配置不能只读锁死）。
-        这里只给单栏文本框，不恢复「右侧平台约束」双栏——L1 只在预览/出站组装结果里出现。
-        已挂模板时整块不出现：模板与整段业务正文不再并行维护。
+        存量「业务提示词」只读展示：这是未挂 L2 时的旧自由文本通道，已不再是常规编辑路径。
+        这里不给输入框，避免重新长出「模板 + 整段业务正文」双轨；保存时由服务端
+        （或页面提交链路）把这段正文并入「追加要求」并清空 system_prompt。
       -->
-      <div v-if="isChat && !draft.templateId" class="legacy-block">
-        <p class="block-title">业务提示词（未挂模板时生效）</p>
-        <el-input
-          v-model="legacyDraft"
-          type="textarea"
-          :rows="8"
-          :maxlength="PROMPT_MAX_CHARS"
-          :disabled="disabled"
-          placeholder="只写业务要求。平台约束会在运行时自动加在前面"
-        />
+      <div v-if="isChat && legacyText" class="legacy-block">
+        <p class="block-title">原「系统提示词」正文（历史配置）</p>
+        <pre class="legacy-text">{{ legacyText }}</pre>
         <p class="block-hint">
-          选定模板后本区不再参与出站；这里已有的正文会在保存时自动并入「追加要求」，不需要手工迁移。
+          该 Agent 目前按这段旧正文运行。保存后会钉住平台默认对话模板，并把这段正文并入「追加要求」，
+          不需要手工迁移。
         </p>
       </div>
     </div>
@@ -92,9 +86,6 @@ import { computed, reactive, ref, watch } from 'vue'
 import { ElMessage } from 'element-plus'
 import PromptL3Form from '@/components/agent/PromptL3Form.vue'
 import type { PromptBinding } from '@/types/agent'
-
-/** 与后端 PromptSafetyChecker / AgentPromptBindingService 的用户段上限对齐 */
-const PROMPT_MAX_CHARS = 12000
 
 /** 各用途在弹窗标题里的中文名；CHAT 不叫「对话 · 提示词」而叫「系统提示词」 */
 const TITLE_BY_PURPOSE: Record<string, string> = {
@@ -149,11 +140,11 @@ const previewing = ref(false)
 /** CHAT 走追加区常显；非 CHAT 默认折叠，避免判路由 / 摘要这类用途被无关输入框干扰 */
 const isChat = computed(() => props.purpose === 'CHAT')
 const dialogTitle = computed(() => TITLE_BY_PURPOSE[props.purpose] || `${props.purpose} · 提示词`)
-/** 弹窗内的业务提示词草稿（仅 CHAT 使用）；保存时一并回传父级 */
-const legacyDraft = ref('')
+/** 弹窗内的历史业务正文（只读）；保存时由提交链路并入追加要求，不再作为独立编辑区 */
+const legacyText = computed(() => (props.legacyPrompt || '').trim())
 
 /**
- * 打开时把已保存的四列与旧正文深拷贝进草稿。
+ * 打开时把已保存的四列深拷贝进草稿。
  * override 必须新建对象，否则弹窗内编辑会直接改到详情表单里的那份数据。
  */
 watch(
@@ -167,7 +158,6 @@ watch(
     draft.templateVersion = props.binding?.templateVersion ?? null
     draft.override = { ...(props.binding?.override || {}) }
     draft.promptExtra = props.binding?.promptExtra || ''
-    legacyDraft.value = props.legacyPrompt || ''
     submitting.value = false
     // 预览可用态先按「已绑模板」预估，随后由子表单回传精确值；
     // 避免换用途后短暂沿用上一个用途的可用态
@@ -206,14 +196,7 @@ function submit() {
     ElMessage.error(error)
     return
   }
-  if (isChat.value && !draft.templateId && legacyDraft.value.length > PROMPT_MAX_CHARS) {
-    ElMessage.error(`业务提示词超过长度，最长 ${PROMPT_MAX_CHARS}`)
-    return
-  }
-  // 业务提示词随四列一起回传：弹窗内改过但未保存时不能丢
-  if (isChat.value && legacyDraft.value !== (props.legacyPrompt || '')) {
-    emit('update:legacyPrompt', legacyDraft.value)
-  }
+  // 未选模板时前端不拦：后端会钉住平台默认模板；该用途确实没有模板时由后端给出明确失败文案
   submitting.value = true
   emit(
     'save',
@@ -264,6 +247,23 @@ function submit() {
   color: var(--ah-text, #1f2430);
   font-size: 13px;
   font-weight: 600;
+}
+
+/* 旧正文只读预览：等宽 + 限高滚动，长正文不把页脚顶出视口 */
+.legacy-text {
+  max-height: 240px;
+  margin: 0;
+  overflow: auto;
+  padding: 10px 12px;
+  background: #fafbfd;
+  border: 1px solid var(--ah-border, #e6e8ef);
+  border-radius: 6px;
+  white-space: pre-wrap;
+  word-break: break-word;
+  font-family: ui-monospace, Consolas, monospace;
+  font-size: 12px;
+  line-height: 1.6;
+  color: #4b5563;
 }
 
 .block-hint {

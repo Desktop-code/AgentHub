@@ -4,6 +4,7 @@ import com.agenthub.common.api.PageResult;
 import com.agenthub.runtime.domain.model.RunSession;
 import com.agenthub.runtime.domain.model.SessionQuery;
 
+import java.time.LocalDateTime;
 import java.util.List;
 import java.util.Optional;
 
@@ -75,6 +76,19 @@ public interface RunSessionRepository {
     boolean updateAutoTitleIfAbsent(Long id, String title, Long operatorId);
 
     /**
+     * 只改线路粘性列（sticky_route_key / sticky_agent_id），并刷新 updated_at。
+     *
+     * <p>为什么单独一条更新：粘性只在「本轮成功且单意图」或「用户手动换线」时变，
+     * 与轮次 / 预览 / 错误的写入口径不同，混进 {@link #updateOutcome} 会让失败轮也顺手改线路。
+     *
+     * @param id         会话主键
+     * @param routeKey   沿用的 route_key；null 表示清空（多意图轮）
+     * @param agentId    该线路的子 Agent；清空时传 null
+     * @param operatorId 更新人
+     */
+    void updateStickyRoute(Long id, String routeKey, Long agentId, Long operatorId);
+
+    /**
      * 清空消息后的会话：状态回到 RUNNING，轮次和错误摘要清掉，结束时间置空。标题保留。
      *
      * @param id         会话主键
@@ -88,4 +102,16 @@ public interface RunSessionRepository {
      * @param id 会话主键
      */
     void logicDelete(Long id);
+
+    /**
+     * 仅当该行仍是 RUNNING、且 update_time 与读到的一致时，写成 CANCELLED 并写入结束时间。
+     * 启动窗口里若本轮已经推进过 update_time，条件不命中，避免把刚发起的请求收成中断。
+     * 不改标题、轮次、预览、错误摘要，也不删消息。
+     *
+     * @param id                 会话主键
+     * @param expectedUpdateTime 扫到该行时的 update_time；库值为 null 时传 null
+     * @param endedAt            结束时间，同时写入 end_time 与 update_time
+     * @return true 表示这一行确实从 RUNNING 改成了 CANCELLED
+     */
+    boolean interruptIfUnchanged(Long id, LocalDateTime expectedUpdateTime, LocalDateTime endedAt);
 }

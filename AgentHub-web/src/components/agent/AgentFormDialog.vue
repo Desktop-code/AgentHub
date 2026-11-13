@@ -17,17 +17,19 @@
                   <div class="run-mode-tip">
                     <div><strong>ReAct</strong>：单 Agent 边推理边调用工具/技能，适合探索式、交互式任务。</div>
                     <div><strong>Plan-Execute</strong>：先拆成有序计划再逐步执行，复杂多步骤更可控（可人工确认计划）。</div>
-                    <div><strong>Router</strong>：按意图分发给一层子 Agent，父节点只做路由，不直接跑工具链。</div>
                   </div>
                 </template>
                 <el-icon class="tip-icon"><QuestionFilled /></el-icon>
               </el-tooltip>
             </span>
           </template>
+          <!--
+            本页只建单兵：Router 已迁到「多智能体」，新建下拉不再出现该类型，
+            以免在 Agent 管理里造出多智能体列表看不到的孤立路由根。
+          -->
           <el-radio-group v-model="form.runMode" class="run-mode-group">
             <el-radio-button value="REACT" class="is-react">ReAct</el-radio-button>
             <el-radio-button value="PLAN_AND_EXECUTE" class="is-plan">Plan-Execute</el-radio-button>
-            <el-radio-button value="ROUTER" class="is-router">Router</el-radio-button>
           </el-radio-group>
         </el-form-item>
         <el-form-item label="状态">
@@ -46,6 +48,15 @@
             :run-mode="form.runMode"
             @update:prompt="onPromptChange"
           />
+          <!-- 平台没有可钉的对话模板时提前说明：保存会被拒，避免用户先填一堆再失败 -->
+          <el-alert
+            v-if="form.runMode !== 'ROUTER' && !form.prompt.templateId && !defaultPrompt"
+            class="no-default-alert"
+            type="warning"
+            :closable="false"
+            show-icon
+            title="平台还没有已发布生效的对话用途模板（CHAT）：请先在「提示词」页发布，再新建 Agent。"
+          />
         </el-form-item>
         <el-form-item class="span-2" label="备注">
           <el-input v-model="form.remark" type="textarea" maxlength="500" :rows="2" />
@@ -62,15 +73,18 @@
 <script setup lang="ts">
 /**
  * 新建 Agent 弹窗。所属域：agent。
- * 系统提示词不再预填任何默认模板：新建即空，由配置者在「配置提示词」里按需选择模板或填写业务正文，
- * 避免一打开弹窗就带着一段需要「删除或迁移」的默认正文。
+ * <p>
+ * 新建即钉住平台当前生效的对话模板：打开弹窗时拉一次默认版本写入 L3 四列，
+ * 配置者只在「可覆盖段 + 追加要求」里改，或换同用途其他已发布模板；
+ * 不再有「未配置提示词模板 + 空白业务提示词」这个默认态。
  * 默认 ReAct，启停固定为正常。编辑基本信息在详情区完成。
  */
 import { reactive, ref, watch } from 'vue'
 import { QuestionFilled } from '@element-plus/icons-vue'
 import { ElMessage } from 'element-plus'
 import AgentPromptEditor from '@/components/agent/AgentPromptEditor.vue'
-import type { AgentSave, PromptBinding } from '@/types/agent'
+import { getDefaultPromptTemplate } from '@/api/agentPrompt'
+import type { AgentSave, PromptBinding, PromptTemplateOption } from '@/types/agent'
 import { checkUserPrompt, settleLegacyPrompt, PROMPT_MAX_CHARS } from '@/utils/promptSafety'
 
 /** 新建默认运行配置：Router 那组（多意图开 / 拼接 / N=3 / ROUTER_PARALLEL）与计划那组（自动执行 / 8 步 / 0 重试），与后端 defaults 对齐 */
@@ -99,6 +113,8 @@ const emit = defineEmits<{
 
 const saving = ref(false)
 const promptEditor = ref<{ reveal: () => { errors: string[]; warnings: string[] } } | null>(null)
+/** 平台当前生效的对话模板；打开弹窗时拉取，用于把新建表单直接置于 L3 绑定态 */
+const defaultPrompt = ref<PromptTemplateOption | null>(null)
 const form = reactive({
   name: '',
   code: '',
@@ -106,8 +122,8 @@ const form = reactive({
   description: '',
   systemPrompt: '',
   /**
-   * L3 四列。新建时默认不挂模板（templateId 为空）：
-   * Router 模式下 supported=false，本区只提示去 ROUTER 用途槽配置；其它模式可在弹窗里选模板。
+   * L3 四列。新建默认钉住平台当前生效的 CHAT 模板（有版本即钉死）；
+   * 平台确实没有已发布生效模板时保持为空，由保存接口给出明确失败文案。
    */
   prompt: {
     supported: true,
@@ -138,22 +154,54 @@ watch(
     form.code = ''
     form.runMode = 'REACT'
     form.description = ''
-    // 新建不预填默认提示词：留空交给配置者选择模板或自行填写，避免每次都先删默认正文
+    // 新建不再提供「空白业务提示词」主路径：正文保持为空，提示词一律走 L3 模板 + 追加要求
     form.systemPrompt = ''
-    // 新建默认不挂 L2 模板：保留自由业务段的过渡路径，需要治理时再选模板
-    form.prompt = {
-      supported: true,
-      templateId: null,
-      templateVersion: null,
-      override: {},
-      promptExtra: ''
-    }
+    form.prompt = emptyBinding()
     form.remark = ''
     saving.value = false
+    // 打开即钉平台当前生效的对话模板（有版本即钉死）；拉不到时保持空，由后端保存时给出明确失败
+    void pinDefaultTemplate()
   }
 )
 
-/** 切 ReAct / Router：不再自动填默认模板，正文始终保持用户自己写的内容。 */
+/** 空四列。用于切换模式时重置，避免把上一个用途的模板带到新用途。 */
+function emptyBinding(): PromptBinding {
+  return { supported: true, templateId: null, templateVersion: null, override: {}, promptExtra: '' }
+}
+
+/**
+ * 拉平台当前生效的 CHAT 模板并写入四列。
+ * <p>
+ * 只在用户还没有显式选择模板时补（避免把用户选好的版本覆盖掉）；
+ * 失败按无默认处理，不阻断新建——保存接口会给出「平台未发布对话模板」的明确文案。
+ */
+async function pinDefaultTemplate() {
+  try {
+    const { data } = await getDefaultPromptTemplate({ purpose: 'CHAT', locale: 'zh-CN' })
+    const option = data.data || null
+    defaultPrompt.value = option
+    if (!option || form.prompt.templateId) {
+      return
+    }
+    form.prompt = {
+      supported: true,
+      templateId: option.id,
+      templateVersion: option.version,
+      override: {},
+      promptExtra: ''
+    }
+  } catch {
+    defaultPrompt.value = null
+  }
+}
+
+/**
+ * 运行模式切换：新建表单已移除 Router 选项，只留 ReAct / 计划执行两种单兵模式。
+ *
+ * <p>下方 Router 分支只为兼容历史数据（旧深链打开 Router 时 runMode 仍是 ROUTER）；
+ * 正常编辑不会走到——详情里 ROUTER 只出只读标签，不给单选组。
+ * 切模式时重新钉 CHAT 默认模板，避免沿用上一个模式的绑定。
+ */
 watch(
   () => form.runMode,
   (next, prev) => {
@@ -164,8 +212,9 @@ watch(
     if (next === 'ROUTER') {
       form.prompt = { supported: false, templateId: null, templateVersion: null, override: {}, promptExtra: '' }
     } else if (prev === 'ROUTER') {
-      // 切回非 Router 时恢复可配置能力，但模板仍需用户重新选择
-      form.prompt = { supported: true, templateId: null, templateVersion: null, override: {}, promptExtra: '' }
+      // 切回非 Router：重新进入 L3 绑定态（钉平台当前生效版本）
+      form.prompt = emptyBinding()
+      void pinDefaultTemplate()
     }
   }
 )
@@ -200,7 +249,8 @@ function submit() {
       runMode: form.runMode,
       description: form.description.trim(),
       systemPrompt: settled.systemPrompt,
-      // 未挂模板时提交空四列（templateId 为空即「不挂模板」），后端按此清空
+      // 极端情况下弹窗打开时没拉到默认模板（模板未发布）：四列提交为空，后端会再次解析默认并给出明确失败，
+      // 不会落成「未挂模板」——CHAT 保存后必须处于已绑定状态
       prompt: {
         templateId: form.prompt.templateId ?? null,
         templateVersion: form.prompt.templateVersion ?? null,
@@ -232,6 +282,10 @@ function submit() {
   display: inline-flex;
   align-items: center;
   gap: 4px;
+}
+
+.no-default-alert {
+  margin-top: 8px;
 }
 
 .tip-icon {

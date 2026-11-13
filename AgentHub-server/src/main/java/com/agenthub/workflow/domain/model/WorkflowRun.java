@@ -30,7 +30,7 @@ public class WorkflowRun {
     private String traceId;
     /** 状态码（WorkflowRunStatus） */
     private String status;
-    /** 触发类型（WorkflowTriggerType）；本刀恒 TRIAL */
+    /** 触发类型（WorkflowTriggerType）；试跑 TRIAL / 应用 APP / 工作台 WORKBENCH */
     private String triggerType;
     /** 发起人；应用触发时为空（无平台用户） */
     private Long triggeredBy;
@@ -38,6 +38,14 @@ public class WorkflowRun {
     private Long appId;
     /** 调用方幂等键；仅 APP 触发写入，同 app 下唯一 */
     private String clientRequestId;
+    /**
+     * 工作台会话 agent_run_session.id；仅 WORKBENCH 触发写入。
+     *
+     * <p>两个用途：① 人工恢复后把终态结果追写回同一条工作台会话；
+     * ② 同一会话同一工作流未结束（RUNNING / PAUSED_HUMAN）时禁止重复开跑。
+     * 试跑 / 应用触发恒为空，不改变现网观测口径。
+     */
+    private Long workbenchSessionId;
     /** 试跑输入 JSON 文本 */
     private String inputJson;
     /** 终态输出 JSON 文本 */

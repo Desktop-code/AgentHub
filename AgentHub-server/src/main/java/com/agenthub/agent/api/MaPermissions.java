@@ -17,6 +17,12 @@ public final class MaPermissions {
     public static final String VIEW = "ma:def:view";
     public static final String EDIT = "ma:def:edit";
     public static final String RUN = "ma:def:run";
+    /**
+     * 工作台入口维护授权。默认接待页下线后，该码不再代表独立页面，
+     * 只用于「工作台未就绪时是否展示去配置入口」的按钮显隐；
+     * 实际编辑走 {@link #EDIT} 的多智能体方案详情。
+     */
+    public static final String RECEPTION = "ma:def:reception";
 
     private MaPermissions() {
     }

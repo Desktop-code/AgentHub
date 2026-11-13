@@ -15,6 +15,7 @@ import com.baomidou.mybatisplus.extension.plugins.pagination.Page;
 import org.springframework.stereotype.Repository;
 
 import java.time.LocalDateTime;
+import java.util.List;
 import java.util.Optional;
 
 /**
@@ -134,6 +135,25 @@ public class WorkflowDefRepositoryImpl implements WorkflowDefRepository {
                 .set(WorkflowDefEntity::getDeleted, 1)
                 .set(WorkflowDefEntity::getUpdatedBy, operatorId)
                 .set(WorkflowDefEntity::getUpdateTime, LocalDateTime.now()));
+    }
+
+
+    /** {@inheritDoc} */
+    @Override
+    public List<WorkflowDef> listRoutable(long tenantId, int limit) {
+        // 说明非空是硬条件：判路由靠它，空说明的工作流即使发布也不该出现在下拉里
+        int size = (int) PageQuery.clampSize(limit, 200);
+        return mapper.selectList(new LambdaQueryWrapper<WorkflowDefEntity>()
+                        .eq(WorkflowDefEntity::getTenantId, tenantId)
+                        .eq(WorkflowDefEntity::getStatus, "HAS_RELEASE")
+                        .isNotNull(WorkflowDefEntity::getDefaultReleaseId)
+                        .isNotNull(WorkflowDefEntity::getDescription)
+                        .apply("TRIM(`description`) <> ''")
+                        .orderByDesc(WorkflowDefEntity::getId)
+                        .last("LIMIT " + size))
+                .stream()
+                .map(this::toDomain)
+                .toList();
     }
 
 

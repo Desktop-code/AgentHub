@@ -3,6 +3,7 @@ package com.agenthub.agent.api;
 import cn.dev33.satoken.annotation.SaCheckPermission;
 import cn.dev33.satoken.annotation.SaMode;
 import com.agenthub.agent.api.dto.AgentCardResp;
+import com.agenthub.agent.api.dto.AgentCopyReq;
 import com.agenthub.agent.api.dto.AgentCreateReq;
 import com.agenthub.agent.api.dto.AgentDetailResp;
 import com.agenthub.agent.api.dto.AgentPageReq;
@@ -91,6 +92,20 @@ public class AgentController {
     @PostMapping
     public Result<AgentDetailResp> create(@Valid @RequestBody AgentCreateReq req) {
         return Result.ok(agents.create(req));
+    }
+
+    /**
+     * 复制 Agent：继承源定义与 CHAT 的 L3 四列（模板、钉死版本、覆盖、追加）。
+     * 只允许改名称与编码，其余由服务端复制，避免前端漏传导致复制品配置残缺。
+     *
+     * @param id  源 Agent 主键
+     * @param req 复制品的名称与编码
+     * @return 复制品详情
+     */
+    @SaCheckPermission(AgentPermissions.ADD)
+    @PostMapping("/{id:\\d+}/copy")
+    public Result<AgentDetailResp> copy(@PathVariable Long id, @Valid @RequestBody AgentCopyReq req) {
+        return Result.ok(agents.copy(id, req));
     }
 
     /**

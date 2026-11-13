@@ -37,6 +37,8 @@ export interface MeInfo {
   userId: number
   username: string
   nickname: string
+  /** 头像相对 URL；未上传为空，侧栏用首字兜底 */
+  avatarUrl?: string | null
   deptId?: number
   deptName?: string
   platformAdmin: boolean

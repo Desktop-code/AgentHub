@@ -1,0 +1,9 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 80 80" fill="none">
+  <!-- 支持：客服耳机 -->
+  <circle cx="40" cy="40" r="26" fill="#fff" fill-opacity=".16"/>
+  <path d="M25 45v-5a15 15 0 0 1 30 0v5" stroke="#fff" stroke-width="3.4" stroke-opacity=".95" stroke-linecap="round"/>
+  <rect x="21" y="43" width="9" height="14" rx="4.5" fill="#fff" fill-opacity=".95"/>
+  <rect x="50" y="43" width="9" height="14" rx="4.5" fill="#fff" fill-opacity=".95"/>
+  <path d="M54.5 57v1.5A7.5 7.5 0 0 1 47 66h-4" stroke="#fff" stroke-width="3.2" stroke-opacity=".9" stroke-linecap="round"/>
+  <circle cx="40" cy="66" r="2.6" fill="#fff" fill-opacity=".95"/>
+</svg>

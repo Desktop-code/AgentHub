@@ -14,6 +14,8 @@ public class AgentCardResp {
     private String name;
     private String code;
     private String description;
+    /** 形象配置；null 表示未配置 */
+    private AgentAvatarConfigDto avatarConfig;
     private String runMode;
     /**
      * 是否允许被编排挂为子专家。编排「添加候选」弹层据此过滤私有 Agent；

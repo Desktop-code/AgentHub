@@ -21,6 +21,11 @@ public class MaCandidateEntity {
     private Long id;
     private Long maId;
     private Long agentId;
+    /** 候选目标类型：AGENT / MA / WORKFLOW；存量行为 AGENT，列 NOT NULL */
+    private String targetType;
+    private Long maDefId;
+    /** target_type=WORKFLOW 时指向 workflow_def.id */
+    private Long workflowDefId;
     private String routeKey;
     private String intentDesc;
     private Integer sortNo;

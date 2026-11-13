@@ -74,6 +74,19 @@ public final class AgentChecks {
     }
 
     /**
+     * 列表口径：是否只要单兵。
+     *
+     * <p>只认 {@code SINGLE}（大小写不敏感）；其它值 / 空值一律按全量处理，
+     * 避免误传把评测、计费等 Agent 下拉收窄成单兵。
+     *
+     * @param raw 请求里的 scope
+     * @return true＝排除 Router 与方案绑根的主控
+     */
+    public static boolean singleScope(String raw) {
+        return raw != null && "SINGLE".equalsIgnoreCase(raw.trim());
+    }
+
+    /**
      * 收口「允许被编排调用」开关。
      * <p>ROUTER 必须为关：编排根本身就是父节点，被挂为子会形成 Router 套 Router，
      * 因此即便请求体传 true 也强制写 0，与 {@code allow_orchestrated} 的 SQL 回填口径一致。

@@ -109,22 +109,8 @@ watch(
 }
 </style>
 
-<style>
-/*
- * 深色提示框（挂 body，必须全局）：限宽 360px；正文限高 220px 内部滚动。
- * 「黑框不要很长」——长问题只弹一块可读区域，不再拉成整列宽的长条。
- */
-.clamp-tip.el-popper {
-  max-width: 360px;
-  padding: 8px 10px;
-}
-
-.clamp-tip__body {
-  max-height: 220px;
-  overflow-y: auto;
-  font-size: 12px;
-  line-height: 1.55;
-  white-space: pre-wrap;
-  word-break: break-word;
-}
-</style>
+<!--
+  提示气泡样式（.clamp-tip / .clamp-tip__body）已移到 styles/index.css：
+  它被 Agent / 模型 / 工具 / Skill 等异步分包页面共用，
+  留在本组件里会随 Trace 页的懒加载分包才生效，别的页面拿不到。
+-->

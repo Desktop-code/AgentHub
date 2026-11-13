@@ -1,0 +1,7 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 80 80" fill="none">
+  <!-- 研发：代码尖括号 -->
+  <circle cx="40" cy="40" r="26" fill="#fff" fill-opacity=".16"/>
+  <path d="M31.5 29.5 21 40l10.5 10.5" stroke="#fff" stroke-width="3.6" stroke-opacity=".95" stroke-linecap="round" stroke-linejoin="round"/>
+  <path d="M48.5 29.5 59 40 48.5 50.5" stroke="#fff" stroke-width="3.6" stroke-opacity=".95" stroke-linecap="round" stroke-linejoin="round"/>
+  <path d="M44 26 36 54" stroke="#fff" stroke-width="3.4" stroke-opacity=".7" stroke-linecap="round"/>
+</svg>

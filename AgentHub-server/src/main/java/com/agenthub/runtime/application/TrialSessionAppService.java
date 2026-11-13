@@ -17,6 +17,7 @@ import com.agenthub.runtime.api.dto.AgentOptionResp;
 import com.agenthub.runtime.api.dto.EventResp;
 import com.agenthub.runtime.api.dto.SessionPageReq;
 import com.agenthub.runtime.api.dto.SessionResp;
+import com.agenthub.runtime.domain.model.EntryChannel;
 import com.agenthub.runtime.domain.model.RunEvent;
 import com.agenthub.runtime.domain.model.MaRunSpec;
 import com.agenthub.runtime.domain.model.RunSession;
@@ -185,6 +186,8 @@ public class TrialSessionAppService {
         query.setSize(historySize(req.getSize()));
         query.setAgentId(req.getAgentId());
         query.setMaId(req.getMaId());
+        // 调试左栏只查调试会话：工作台正式对话走独立渠道，两套列表互不串
+        query.setEntryChannel(EntryChannel.DEBUG.name());
         // 过滤键只有当前用户。不按租户，也不因 is_admin 放开。不再懒结案。
         long userId = operatorContext.requireUserId();
         query.setUserId(userId);
@@ -257,8 +260,8 @@ public class TrialSessionAppService {
     }
 
     /**
-     * 从方案新建试跑会话（虚拟根入口）。绑根方案也允许建，但会话同时记 agentId；
-     * 虚拟根保持 agentId 为空，执行时由 {@link MaTrialSpecLoader} 提供模板与候选。
+     * 从方案新建试跑会话（方案页「去调试」）。方案以自己为根：
+     * 会话只记 {@code ma_def_id}，不再回填任何 Agent 根，历史根值也不会带进新会话。
      *
      * @param maId 方案主键
      * @return 新会话，状态 RUNNING
@@ -269,10 +272,10 @@ public class TrialSessionAppService {
         MaRunSpec spec = maSpecs.requireForCreate(maId);
         long userId = operatorContext.requireUserId();
         RunSession session = new RunSession();
-        // 绑根方案回填 rootAgentId；虚拟根保持为空，列表与详情据此区分入口
-        session.setAgentId(spec.rootAgentId());
+        // 方案就是根：agentId 恒为空，执行时由 MaTrialSpecLoader 提供模板与候选
+        session.setAgentId(null);
         session.setMaDefId(spec.maId());
-        // 方案执行只有一层编排语义：运行模式固定 ROUTER，不跟随 rootAgent 的其它模式
+        // 方案执行只有一层编排语义：运行模式固定 ROUTER
         session.setRunMode(AgentRunMode.ROUTER.name());
         session.setUserId(userId);
         session.setStatus(RunStatus.RUNNING.name());
@@ -282,6 +285,62 @@ public class TrialSessionAppService {
         operLogWriter.write("runtime", "create", "agent_run_session", String.valueOf(id),
                 "创建方案试跑会话 " + id + "，方案 " + spec.maId());
         return toResp(sessions.findById(id).orElseThrow());
+    }
+
+    /**
+     * 工作台默认接待建会话。
+     *
+     * <p>与 {@link #createFromMa(Long)} 的差别：
+     * <ul>
+     *   <li>不接收前端传入的 agentId / maId，一律用服务端解析出的默认接待方案；</li>
+     *   <li>落 {@code entry_channel = WORKBENCH} 与 {@code reception_ma_id}，与调试列表隔离；</li>
+     *   <li>方案以自己为根：会话只记 maId，不回填任何 Agent 根。</li>
+     * </ul>
+     *
+     * @param spec 默认接待方案解析结果（非空）
+     * @return 新会话，状态 RUNNING
+     */
+    @Transactional
+    public SessionResp createForWorkbench(MaRunSpec spec) {
+        long userId = operatorContext.requireUserId();
+        RunSession session = new RunSession();
+        session.setAgentId(null);
+        session.setMaDefId(spec.maId());
+        session.setEntryChannel(EntryChannel.WORKBENCH.name());
+        session.setReceptionMaId(spec.maId());
+        // 方案执行恒为一层编排语义：运行模式固定 ROUTER
+        session.setRunMode(AgentRunMode.ROUTER.name());
+        session.setUserId(userId);
+        session.setStatus(RunStatus.RUNNING.name());
+        session.setStartTime(LocalDateTime.now());
+        session.setMessageCount(0);
+        Long id = sessions.insert(session, userId);
+        operLogWriter.write("runtime", "workbench_create", "agent_run_session", String.valueOf(id),
+                "工作台新建会话 " + id + "，默认接待方案 " + spec.maId());
+        return toResp(sessions.findById(id).orElseThrow());
+    }
+
+    /**
+     * 工作台左栏：当前用户全部正式对话会话，按开始时间倒序。
+     *
+     * <p>不按 agentId / maId 过滤：换默认方案后历史会话仍要能看到；
+     * 渠道过滤与用户隔离由仓储层完成。
+     *
+     * @param current 页码
+     * @param size    页大小；受全站上限约束
+     * @return 会话页
+     */
+    public PageResult<SessionResp> pageWorkbench(long current, long size) {
+        SessionQuery query = new SessionQuery();
+        query.setCurrent(current);
+        query.setSize(historySize(size));
+        query.setEntryChannel(EntryChannel.WORKBENCH.name());
+        query.setUserId(operatorContext.requireUserId());
+        PageResult<RunSession> page = sessions.page(query);
+        Map<Long, MaDef> maCache = new HashMap<>();
+        Map<Long, String> agentNames = prefetchAgentNames(page.getRecords());
+        return PageResult.of(page.getTotal(), page.getCurrent(), page.getSize(),
+                page.getRecords().stream().map(item -> toResp(item, maCache, agentNames)).toList());
     }
 
     /**
@@ -330,6 +389,25 @@ public class TrialSessionAppService {
         long userId = operatorContext.requireUserId();
         sessions.updateTitle(id, cleanTitle, TitleSource.MANUAL.name(), userId);
         operLogWriter.write("runtime", "rename", "agent_run_session", String.valueOf(id), "重命名试跑会话 " + id);
+        return toResp(sessions.findById(id).orElseThrow());
+    }
+
+    /**
+     * 写会话的线路粘性（刀3）。只由工作台门面在渠道校验通过后调用：
+     * 调试会话不该因为工作台接口而改变执行线路。
+     *
+     * @param id       会话主键
+     * @param routeKey 沿用的 route_key；null 表示清空
+     * @param agentId  该线路的子 Agent；清空时传 null
+     * @return 更新后的会话
+     */
+    @Transactional
+    public SessionResp bindStickyRoute(Long id, String routeKey, Long agentId) {
+        access.require(id);
+        long userId = operatorContext.requireUserId();
+        sessions.updateStickyRoute(id, routeKey, agentId, userId);
+        operLogWriter.write("runtime", "workbench_route", "agent_run_session", String.valueOf(id),
+                "工作台会话 " + id + (routeKey == null ? " 清除线路沿用" : " 手动换线"));
         return toResp(sessions.findById(id).orElseThrow());
     }
 
@@ -445,7 +523,7 @@ public class TrialSessionAppService {
             resp.setMaCode(ma.getCode());
             resp.setMaName(ma.getName());
         }
-        // 虚拟根：Agent 名留空，由方案名兜底；绑根仍展示 Agent 名（方案名另列）
+        // 方案会话没有 Agent：Agent 名留空，由方案名兜底；旧 Agent 试跑仍展示 Agent 名
         resp.setAgentName(agentName.isBlank() && ma != null ? ma.getName() : agentName);
         resp.setRunMode(session.getRunMode());
         resp.setUserId(session.getUserId());
@@ -458,6 +536,9 @@ public class TrialSessionAppService {
         resp.setLastMsgPreview(session.getLastMsgPreview());
         resp.setErrorSummary(session.getErrorSummary());
         resp.setUpdateTime(session.getUpdateTime());
+        resp.setEntryChannel(session.getEntryChannel());
+        resp.setReceptionMaId(session.getReceptionMaId());
+        resp.setStickyRouteKey(session.getStickyRouteKey());
         return resp;
     }
 

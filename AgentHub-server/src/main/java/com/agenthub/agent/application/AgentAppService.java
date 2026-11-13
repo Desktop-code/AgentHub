@@ -1,6 +1,8 @@
 package com.agenthub.agent.application;
 
 import com.agenthub.agent.api.dto.AgentCardResp;
+import com.agenthub.agent.api.dto.AgentAvatarConfigDto;
+import com.agenthub.agent.api.dto.AgentCopyReq;
 import com.agenthub.agent.api.dto.AgentCreateReq;
 import com.agenthub.agent.api.dto.AgentDetailResp;
 import com.agenthub.agent.api.dto.AgentPageReq;
@@ -13,7 +15,9 @@ import com.agenthub.agent.api.dto.PromptBindingReq;
 import com.agenthub.agent.api.dto.PromptBindingResp;
 import com.agenthub.agent.api.dto.RuntimeLimitsViewResp;
 import com.agenthub.agent.domain.model.AgentDef;
+import com.agenthub.agent.domain.model.AgentAvatarConfig;
 import com.agenthub.agent.domain.model.AgentPromptBinding;
+import com.agenthub.agent.domain.model.AgentPromptTemplateOption;
 import com.agenthub.agent.domain.model.AgentQuery;
 import com.agenthub.agent.domain.model.AgentRoute;
 import com.agenthub.agent.domain.model.AgentRunMode;
@@ -62,6 +66,9 @@ public class AgentAppService {
     /** L3 提示词挂接端口；实现落在 prompt 域，agent 域只依赖接口 */
     private final AgentPromptTemplatePort promptTemplates;
 
+    /** 默认绑定的语言；L2 管理端按用途+locale 只允许一条生效，新建统一钉 zh-CN。 */
+    private static final String DEFAULT_PROMPT_LOCALE = "zh-CN";
+
     /**
      * @param agents          定义仓储
      * @param modelBinds      模型绑定，删除时一起清
@@ -102,6 +109,11 @@ public class AgentAppService {
     }
 
     /**
+     * Agent 列表。
+     *
+     * <p>scope=SINGLE（Agent 管理页固定传）：只返回单兵，服务端排除 ROUTER 运行模式
+     * 与多智能体方案绑根的主控；其它业务下拉不传 scope，仍可拿到 Router。
+     *
      * @param req 分页和可选筛选
      * @return 列表页，不含系统提示词
      */
@@ -112,6 +124,8 @@ public class AgentAppService {
         query.setKeyword(req.getKeyword());
         query.setRunMode(AgentChecks.optionalRunMode(req.getRunMode()));
         query.setStatus(AgentChecks.optionalStatus(req.getStatus()));
+        // 只有显式 SINGLE 才收窄口径，避免评测 / 计费等下拉拿不到 Router
+        query.setSingleOnly(AgentChecks.singleScope(req.getScope()));
         PageResult<AgentDef> page = agents.page(query);
         return PageResult.of(page.getTotal(), page.getCurrent(), page.getSize(),
                 page.getRecords().stream().map(this::toCard).toList());
@@ -170,11 +184,14 @@ public class AgentAppService {
         agent.setName(AgentChecks.requiredText(req.getName(), 64, "名称"));
         agent.setCode(AgentChecks.requiredText(req.getCode(), 64, "编码"));
         codes.assertUnique(agent.getCode(), null);
-        List<String> warnings = fillProfile(agent, req.getDescription(),
+        // fillProfile 返回不可变列表；后续默认绑定 / 旧正文并入会追加告警，这里复制成可变集合
+        List<String> warnings = new java.util.ArrayList<>(fillProfile(agent, req.getDescription(),
                 req.getRunMode() == null ? AgentRunMode.REACT.name() : req.getRunMode(),
-                req.getSystemPrompt(), req.getRemark());
-        // CHAT 的 L3 四列跟着 Agent 一起落库；未传 prompt 视为不挂模板
-        applyPromptBinding(agent, req.getPrompt());
+                req.getSystemPrompt(), req.getRemark()));
+        // 形象/色板：整份 JSON 落库；空=清除为未配置
+        agent.setAvatarConfigJson(toAvatarJson(req.getAvatarConfig()));
+        // CHAT 的 L3 四列跟着 Agent 一起落库；未选模板时自动钉平台当前生效的对话模板
+        applyPromptBinding(agent, req.getPrompt(), true, warnings);
         limitValidator.apply(agent, req.getTimeoutMs(), req.getMaxRounds(), req.getToolTimeoutMs(),
                 req.getToolMaxRetries(), req.getMaxToolCalls(), req.getLlmTimeoutMs(),
                 req.getMaxLlmCalls(), req.getConsecutiveFailAbort(), req.getToolResultMaxChars());
@@ -201,8 +218,11 @@ public class AgentAppService {
         codes.assertUnique(code, id);
         existing.setName(AgentChecks.requiredText(req.getName(), 64, "名称"));
         existing.setCode(code);
-        List<String> warnings = fillProfile(existing, req.getDescription(), req.getRunMode(),
-                req.getSystemPrompt(), req.getRemark());
+        // fillProfile 返回不可变列表；默认绑定补钉会追加告警，这里复制成可变集合
+        List<String> warnings = new java.util.ArrayList<>(fillProfile(existing, req.getDescription(), req.getRunMode(),
+                req.getSystemPrompt(), req.getRemark()));
+        // 每次保存都整体覆盖：空对象=清除未配置；非法键/色/URL 直接拒绝
+        existing.setAvatarConfigJson(toAvatarJson(req.getAvatarConfig()));
         limitValidator.apply(existing, req.getTimeoutMs(), req.getMaxRounds(), req.getToolTimeoutMs(),
                 req.getToolMaxRetries(), req.getMaxToolCalls(), req.getLlmTimeoutMs(),
                 req.getMaxLlmCalls(), req.getConsecutiveFailAbort(), req.getToolResultMaxChars());
@@ -219,14 +239,95 @@ public class AgentAppService {
         existing.setAllowOrchestrated(allowReq == null
                 ? (existing.allowOrchestratedOn() ? 1 : 0)
                 : AgentChecks.allowOrchestrated(allowReq, existing.getRunMode()));
-        // 只有显式传了 prompt 才改四列，避免只改名称时把 L3 配置清空
-        if (req.getPrompt() != null) {
-            applyPromptBinding(existing, req.getPrompt());
-        }
+        // 未传 prompt 且已有绑定 = 本次不改；未传且仍未挂模板（存量）则保存时补钉默认，拒绝继续「无模板」
+        applyPromptBinding(existing, req.getPrompt(), false, warnings);
         agents.updateProfile(existing, operatorContext.requireUserId());
         // 刀3 起本路径只写 agent_def；多智能体方案以 ma_def 为唯一真源，不再反向镜像配置。
         operLogWriter.write("agent", "update", "agent_def", String.valueOf(id), "更新 Agent " + existing.getName());
         return toDetail(existing, warnings);
+    }
+
+    /**
+     * 复制 Agent：只复制定义本身（基本信息 / 运行限制 / 编排策略），
+     * 以及 CHAT 的 L3 四列（模板、钉死版本、覆盖、追加）——复制品必须继承原绑定，
+     * 不得在复制时打回默认模板，也不得打回「业务提示词」。
+     * <p>
+     * 不复制子路由 / 模型 / 工具 / Skill 绑定：那些是独立配置，复制出来会与源 Agent 争用同一批实例；
+     * 需要时在复制品的详情页重新绑定。源 Agent 若本身是存量未挂模板（仅业务提示词），
+     * 复制时按新建口径补钉平台默认模板，并把旧正文并入追加要求，避免复制品重新落回「无模板」。
+     *
+     * @param sourceId 源 Agent 主键
+     * @param req      复制品的名称与编码（编码未删除范围内唯一）
+     * @return 复制品详情
+     * @throws BizException 源不存在、编码重复或平台无生效 CHAT 模板
+     */
+    @Transactional
+    public AgentDetailResp copy(Long sourceId, AgentCopyReq req) {
+        AgentDef source = lookup.require(sourceId);
+        AgentDef agent = new AgentDef();
+        agent.setName(AgentChecks.requiredText(req.getName(), 64, "名称"));
+        agent.setCode(AgentChecks.requiredText(req.getCode(), 64, "编码"));
+        codes.assertUnique(agent.getCode(), null);
+        // 基本信息与运行限制原样继承；启停重置为正常，避免复制品直接带着停用态
+        agent.setDescription(source.getDescription());
+        agent.setAvatarConfigJson(source.getAvatarConfigJson());
+        agent.setRunMode(source.getRunMode());
+        agent.setSystemPrompt(source.getSystemPrompt());
+        agent.setRemark(source.getRemark());
+        agent.setTimeoutMs(source.getTimeoutMs());
+        agent.setMaxRounds(source.getMaxRounds());
+        agent.setToolTimeoutMs(source.getToolTimeoutMs());
+        agent.setToolMaxRetries(source.getToolMaxRetries());
+        agent.setMaxToolCalls(source.getMaxToolCalls());
+        agent.setLlmTimeoutMs(source.getLlmTimeoutMs());
+        agent.setMaxLlmCalls(source.getMaxLlmCalls());
+        agent.setConsecutiveFailAbort(source.getConsecutiveFailAbort());
+        agent.setToolResultMaxChars(source.getToolResultMaxChars());
+        agent.setRuntimeConfigJson(source.getRuntimeConfigJson());
+        agent.setAllowOrchestrated(source.allowOrchestratedOn() ? 1 : 0);
+        agent.setStatus(AgentStatus.ENABLED);
+        List<String> warnings = inheritPromptBinding(agent, source);
+        Long id = agents.insert(agent, operatorContext.requireUserId());
+        operLogWriter.write("agent", "copy", "agent_def", String.valueOf(id),
+                "复制 Agent " + source.getName() + " → " + agent.getName());
+        return toDetail(lookup.require(id), warnings);
+    }
+
+    /**
+     * 复制时的 L3 继承：源已挂模板则逐列照搬（不做版本校验，避免源模板恰好不可解析时复制失败）；
+     * 源未挂模板且非 ROUTER 时补钉平台默认，与新建口径一致。
+     *
+     * @param agent  复制品（systemPrompt 已从源带过来）
+     * @param source 源定义
+     * @return 本次复制产生的告警
+     */
+    private List<String> inheritPromptBinding(AgentDef agent, AgentDef source) {
+        List<String> warnings = new java.util.ArrayList<>();
+        // ROUTER 模式的提示词挂在 ROUTER 用途槽，agent_def 四列保持为空
+        if (AgentRunMode.ROUTER.name().equals(source.getRunMode())) {
+            clearPromptColumns(agent);
+            return warnings;
+        }
+        if (source.getPromptTemplateId() != null) {
+            String extra = mergeLegacyBusiness(agent, source.getPromptExtra(), warnings);
+            agent.setPromptTemplateId(source.getPromptTemplateId());
+            agent.setTemplateVersion(source.getTemplateVersion());
+            agent.setPromptOverrideJson(source.getPromptOverrideJson());
+            agent.setPromptExtra(extra);
+            return warnings;
+        }
+        // 源是存量未挂模板：复制品补钉默认，旧正文并入追加要求（不带着「无模板」再复制一份）
+        AgentPromptTemplateOption def = promptTemplates.defaultOption(
+                AgentPromptTemplatePort.PURPOSE_CHAT, DEFAULT_PROMPT_LOCALE);
+        if (def == null) {
+            throw new BizException(ErrorCode.BAD_REQUEST,
+                    "平台还没有已发布生效的对话用途模板（CHAT），请先在「提示词」页发布后再复制 Agent");
+        }
+        String extra = mergeLegacyBusiness(agent, null, warnings);
+        applyBinding(agent, promptTemplates.normalize(AgentPromptTemplatePort.PURPOSE_CHAT,
+                def.getId(), def.getVersion(), null, extra));
+        warnings.add("源 Agent 未挂模板，已为复制品绑定平台默认对话模板");
+        return warnings;
     }
 
     /**
@@ -294,32 +395,101 @@ public class AgentAppService {
      * 而是由 Assembler 以「业务提示词」标注追加在 L2 之后、prompt_extra 之前，
      * 因此不会绕过 soft 段校验（不允许用 system_prompt 覆盖 core）。
      *
-     * @param agent 正在保存的定义（runMode 已规范化）
-     * @param req   前端提交的四列；为 null 表示本次不改
-     * @throws BizException 段落键非法、core 段、版本不一致、用途不符或 ROUTER 模式误配
+     * @param agent    正在保存的定义（runMode 已规范化）
+     * @param req      前端提交的四列；为 null 表示本次未提交
+     * @param creating true=新建（必须完成绑定）；false=更新（已有绑定且未提交则保留）
+     * @param warnings 本次保存的告警，用于回告「自动绑定 / 旧正文已并入」
+     * @throws BizException 段落键非法、core 段、版本不一致、用途不符、ROUTER 模式误配或平台无生效模板
      */
-    private void applyPromptBinding(AgentDef agent, PromptBindingReq req) {
-        if (req == null) {
-            // 新建未传即「不挂模板」：把四列显式置空，避免请求对象残留旧值
-            agent.setPromptTemplateId(null);
-            agent.setTemplateVersion(null);
-            agent.setPromptOverrideJson(null);
-            agent.setPromptExtra(null);
+    private void applyPromptBinding(AgentDef agent, PromptBindingReq req, boolean creating, List<String> warnings) {
+        // ROUTER 模式：agent_def 只承载 CHAT，保持既有拒绝语义；显式空值仅清列，不做默认绑定
+        if (AgentRunMode.ROUTER.name().equals(agent.getRunMode())) {
+            if (req != null) {
+                assertChatMountable(agent.getRunMode(), req);
+                clearPromptColumns(agent);
+            }
             return;
         }
-        assertChatMountable(agent.getRunMode(), req);
-        // 绑模板后禁止 system_prompt 与 L3 双轨：前者会被 Assembler 当作「业务提示词」整段追加，
-        // 等于绕过 soft 段校验自行改写业务语义。要求配置者显式迁移到追加区（页面提供一键迁移）。
-        if (req.getTemplateId() != null && agent.getSystemPrompt() != null && !agent.getSystemPrompt().isBlank()) {
-            throw new BizException(ErrorCode.BAD_REQUEST,
-                    "已绑定提示词模板，请把「系统提示词」正文迁移到追加要求后再保存（避免与模板双轨各写一套业务提示词）");
+        // 更新且已有绑定：未提交 prompt 视为「只改其它字段」，保留原四列（不静默换版）
+        if (!creating && req == null && agent.getPromptTemplateId() != null) {
+            return;
         }
-        AgentPromptBinding binding = promptTemplates.normalize(AgentPromptTemplatePort.PURPOSE_CHAT,
-                req.getTemplateId(), req.getTemplateVersion(), req.getOverride(), req.getPromptExtra());
+        // 显式选了模板：沿用既有硬闸（用途对齐、版本钉死、core 段拒绝）
+        if (req != null && req.getTemplateId() != null) {
+            assertChatMountable(agent.getRunMode(), req);
+            String extra = mergeLegacyBusiness(agent, req.getPromptExtra(), warnings);
+            applyBinding(agent, promptTemplates.normalize(AgentPromptTemplatePort.PURPOSE_CHAT,
+                    req.getTemplateId(), req.getTemplateVersion(), req.getOverride(), extra));
+            return;
+        }
+        // 未选模板（新建 / 存量补钉 / 显式清空）：钉平台该用途当前生效版本，禁止回到「未挂模板」
+        AgentPromptTemplateOption def = promptTemplates.defaultOption(
+                AgentPromptTemplatePort.PURPOSE_CHAT, DEFAULT_PROMPT_LOCALE);
+        if (def == null) {
+            throw new BizException(ErrorCode.BAD_REQUEST,
+                    "平台还没有已发布生效的对话用途模板（CHAT），请先在「提示词」页发布后再保存 Agent");
+        }
+        // 追加区：本次传了就用本次的；没传（更新）则保留库内已有值，避免只改名称时丢追加要求
+        String requestedExtra = req == null ? agent.getPromptExtra() : req.getPromptExtra();
+        String extra = mergeLegacyBusiness(agent, requestedExtra, warnings);
+        // 换到默认模板后旧覆盖键对新版模板无意义，这里不带覆盖，交由配置者在弹窗里重填
+        applyBinding(agent, promptTemplates.normalize(AgentPromptTemplatePort.PURPOSE_CHAT,
+                def.getId(), def.getVersion(), null, extra));
+        String label = def.getName() == null || def.getName().isBlank() ? def.getTemplateKey() : def.getName();
+        warnings.add("已自动绑定平台默认对话模板「" + label + " v" + def.getVersion() + "」");
+    }
+
+    /**
+     * 把四列写进定义。抽成方法是为了让「显式选择」与「默认绑定」两条路径落同样的值。
+     *
+     * @param agent   正在保存的定义
+     * @param binding 已通过保存闸的绑定值
+     */
+    private static void applyBinding(AgentDef agent, AgentPromptBinding binding) {
         agent.setPromptTemplateId(binding.getTemplateId());
         agent.setTemplateVersion(binding.getTemplateVersion());
         agent.setPromptOverrideJson(binding.getOverrideJson());
         agent.setPromptExtra(binding.getPromptExtra());
+    }
+
+    /** 清空 CHAT 四列。仅 ROUTER 模式使用：该模式的提示词挂在 ROUTER 用途槽。 */
+    private static void clearPromptColumns(AgentDef agent) {
+        agent.setPromptTemplateId(null);
+        agent.setTemplateVersion(null);
+        agent.setPromptOverrideJson(null);
+        agent.setPromptExtra(null);
+    }
+
+    /**
+     * 存量「业务提示词」收口：绑上模板后不再与 L3 双轨维护整段正文。
+     * <p>
+     * 沿用现网前端的并入口径（追加要求在前、旧正文在后，空行分隔），并把
+     * {@code system_prompt} 清空——Assembler 会以【业务提示词】标注再追加一次，
+     * 若不清空就变成同一段正文出现两遍。
+     * <p>
+     * 长度超限直接拒绝，不静默截断：配置者需要知道合并后放不下。
+     *
+     * @param agent         正在保存的定义（含已落库或本轮提交的 systemPrompt）
+     * @param requestedExtra 本次请求带来的追加要求；可空
+     * @param warnings      告警收集器
+     * @return 合并后的追加要求；无任何正文时返回原值（可能为 null）
+     * @throws BizException 合并后超过追加区上限
+     */
+    private String mergeLegacyBusiness(AgentDef agent, String requestedExtra, List<String> warnings) {
+        String legacy = agent.getSystemPrompt() == null ? "" : agent.getSystemPrompt().trim();
+        String extra = requestedExtra == null ? "" : requestedExtra.trim();
+        if (legacy.isEmpty()) {
+            return extra.isEmpty() ? null : extra;
+        }
+        String merged = extra.isEmpty() ? legacy : extra + "\n\n" + legacy;
+        if (merged.length() > AgentChecks.PROMPT_MAX) {
+            throw new BizException(ErrorCode.BAD_REQUEST,
+                    "业务提示词并入追加要求后超过长度，最长 " + AgentChecks.PROMPT_MAX + "，请先精简正文");
+        }
+        // 已并入追加区：清空旧列，杜绝同一段正文在出站时被追加两遍
+        agent.setSystemPrompt(null);
+        warnings.add("原「系统提示词」正文已并入追加要求");
+        return merged;
     }
 
     /**
@@ -345,6 +515,7 @@ public class AgentAppService {
         resp.setName(agent.getName());
         resp.setCode(agent.getCode());
         resp.setDescription(agent.getDescription());
+        resp.setAvatarConfig(toAvatarResp(agent.getAvatarConfigJson()));
         resp.setRunMode(agent.getRunMode());
         resp.setAllowOrchestrated(agent.allowOrchestratedOn());
         resp.setStatus(agent.getStatus());
@@ -357,6 +528,7 @@ public class AgentAppService {
         resp.setName(agent.getName());
         resp.setCode(agent.getCode());
         resp.setDescription(agent.getDescription());
+        resp.setAvatarConfig(toAvatarResp(agent.getAvatarConfigJson()));
         resp.setRunMode(agent.getRunMode());
         resp.setAllowOrchestrated(agent.allowOrchestratedOn());
         resp.setSystemPrompt(agent.getSystemPrompt());
@@ -408,6 +580,32 @@ public class AgentAppService {
      * ROUTER：多意图开 + CONCAT + N=3；PLAN_AND_EXECUTE：自动执行 + 8 步 + 0 重试。
      * 两组字段一起收，规范化和夹紧由 {@link AgentRuntimeConfig#toStorageJson} 统一做。
      */
+    /**
+     * 请求体形象配置 → 落库 JSON。全空落 null，表示清除。
+     *
+     * @param dto 请求体；可空
+     * @return JSON；未配置时 null
+     * @throws BizException 预置键 / 色值 / 上传 URL 非法
+     */
+    private static String toAvatarJson(AgentAvatarConfigDto dto) {
+        if (dto == null) {
+            return null;
+        }
+        AgentAvatarConfig config = AgentAvatarConfig.of(
+                dto.getType(), dto.getIcon(), dto.getColor(), dto.getUrl());
+        return config == null ? null : config.toJson();
+    }
+
+    /**
+     * 库内 JSON → 响应体。脏值按未配置处理，不阻断详情。
+     *
+     * @param json 库内原文
+     * @return 响应体；未配置时 null
+     */
+    private static AgentAvatarConfigDto toAvatarResp(String json) {
+        return AgentAvatarConfigDto.fromJson(json);
+    }
+
     private static String toRuntimeJson(AgentRuntimeConfigReq req, String runMode) {
         AgentRuntimeConfig config = new AgentRuntimeConfig();
         if (req != null) {

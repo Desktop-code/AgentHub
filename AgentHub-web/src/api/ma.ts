@@ -6,12 +6,12 @@
  */
 import request from '@/utils/request'
 import type { PageResult, Result } from '@/types'
-import type { MaDefDetail, MaDefRow, MaDefSave } from '@/types/ma'
+import type { MaDefDetail, MaDefRow, MaDefSave, MaJudgeModelOption } from '@/types/ma'
 
 /**
  * 分页查询方案。
  *
- * @param params 页码/条数/关键字/启停/模板/是否绑根
+ * @param params 页码/条数/关键字/启停/模板（方案已与 Agent 根断开，不再有绑根筛选）
  * @return 方案列表行
  */
 export function pageMaDefs(params: {
@@ -20,7 +20,6 @@ export function pageMaDefs(params: {
   keyword?: string
   enabled?: number
   template?: string
-  hasRoot?: boolean
 }) {
   return request.get<Result<PageResult<MaDefRow>>>('/api/agent/multi-agents', { params })
 }
@@ -33,6 +32,18 @@ export function pageMaDefs(params: {
  */
 export function getMaDef(id: number) {
   return request.get<Result<MaDefDetail>>(`/api/agent/multi-agents/${id}`)
+}
+
+/**
+ * 判路由模型下拉：启用中、用途属于对话形态的实例。
+ *
+ * <p>对话路由（对话入口）与普通场景 Router 共用同一份候选；页面用它在方案编辑页配置
+ * {@code config.maJudgeModelInstanceId}，不再需要单独的入口模型接口。
+ *
+ * @return 可选实例列表（按 ma:def:view 鉴权，不要求模型中心权限）
+ */
+export function listMaJudgeModels() {
+  return request.get<Result<MaJudgeModelOption[]>>('/api/agent/multi-agents/judge-models')
 }
 
 /**

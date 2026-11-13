@@ -35,4 +35,13 @@ public class TrialFlight {
     public boolean running(Long sessionId) {
         return running.contains(sessionId);
     }
+
+    /**
+     * 停机收口用的快照。拷贝一份，避免收口过程中别的请求增删导致并发修改。
+     *
+     * @return 当前占着单飞的会话主键
+     */
+    public Set<Long> snapshot() {
+        return Set.copyOf(running);
+    }
 }

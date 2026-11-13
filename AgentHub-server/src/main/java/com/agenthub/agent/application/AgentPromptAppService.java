@@ -51,18 +51,42 @@ public class AgentPromptAppService {
     public List<PromptTemplateOptionResp> options(String purpose, String locale) {
         List<PromptTemplateOptionResp> items = new ArrayList<>();
         for (AgentPromptTemplateOption option : promptTemplates.publishedOptions(purpose, locale)) {
-            PromptTemplateOptionResp resp = new PromptTemplateOptionResp();
-            resp.setId(option.getId());
-            resp.setTemplateKey(option.getTemplateKey());
-            resp.setName(option.getName());
-            resp.setPurpose(option.getPurpose());
-            resp.setLocale(option.getLocale());
-            resp.setVersion(option.getVersion());
-            resp.setIsActive(option.getIsActive());
-            resp.setUpdateTime(option.getUpdateTime());
-            items.add(resp);
+            items.add(toOptionResp(option));
         }
         return items;
+    }
+
+    /**
+     * 平台该用途当前生效的模板版本（新建 Agent 默认钉住的那一条）。
+     * <p>
+     * 前端新建 / 存量补钉时用它回显「将绑定哪条模板 + 哪一版」，避免页面自己按 is_active 猜一套口径。
+     *
+     * @param purpose 用途码
+     * @param locale  语言；空白由端口回落 zh-CN
+     * @return 生效版本；该用途没有已发布生效模板时为 null
+     */
+    public PromptTemplateOptionResp defaultOption(String purpose, String locale) {
+        AgentPromptTemplateOption option = promptTemplates.defaultOption(purpose, locale);
+        return option == null ? null : toOptionResp(option);
+    }
+
+    /**
+     * 版本行 → 下拉 / 摘要 DTO。
+     *
+     * @param option prompt 域的版本行
+     * @return API DTO
+     */
+    private PromptTemplateOptionResp toOptionResp(AgentPromptTemplateOption option) {
+        PromptTemplateOptionResp resp = new PromptTemplateOptionResp();
+        resp.setId(option.getId());
+        resp.setTemplateKey(option.getTemplateKey());
+        resp.setName(option.getName());
+        resp.setPurpose(option.getPurpose());
+        resp.setLocale(option.getLocale());
+        resp.setVersion(option.getVersion());
+        resp.setIsActive(option.getIsActive());
+        resp.setUpdateTime(option.getUpdateTime());
+        return resp;
     }
 
     /**

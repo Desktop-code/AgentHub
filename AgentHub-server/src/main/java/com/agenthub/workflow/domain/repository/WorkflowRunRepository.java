@@ -87,4 +87,16 @@ public interface WorkflowRunRepository {
      * @return 已存在的 run；无则为空
      */
     Optional<WorkflowRun> findByAppAndClientRequestId(Long appId, String clientRequestId);
+
+    /**
+     * 工作台防重查询：同一会话 + 同一工作流是否还有未结束的 run（RUNNING / PAUSED_HUMAN）。
+     *
+     * <p>为什么按库查而不是只靠内存：工作台一轮是同步等待，人工卡点会把 run 停在
+     * PAUSED_HUMAN 跨请求存活，只有库里的状态能跨请求判重。
+     *
+     * @param workflowId        工作流定义 id
+     * @param workbenchSessionId 工作台会话 id
+     * @return 最近一条未结束 run；没有为空
+     */
+    Optional<WorkflowRun> findActiveByWorkbenchSession(Long workflowId, Long workbenchSessionId);
 }

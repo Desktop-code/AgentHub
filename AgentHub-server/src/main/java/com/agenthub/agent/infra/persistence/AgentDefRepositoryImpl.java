@@ -2,6 +2,7 @@ package com.agenthub.agent.infra.persistence;
 
 import com.agenthub.agent.domain.model.AgentDef;
 import com.agenthub.agent.domain.model.AgentQuery;
+import com.agenthub.agent.domain.model.AgentRunMode;
 import com.agenthub.agent.domain.repository.AgentDefRepository;
 import com.agenthub.agent.infra.persistence.entity.AgentDefEntity;
 import com.agenthub.agent.infra.persistence.mapper.AgentDefMapper;
@@ -45,6 +46,13 @@ public class AgentDefRepositoryImpl implements AgentDefRepository {
         }
         if (query.getRunMode() != null) {
             wrapper.eq(AgentDefEntity::getRunMode, query.getRunMode());
+        }
+        if (query.isSingleOnly()) {
+            // 单兵口径：Router 已迁到「多智能体」，同时排除被方案绑根的主控
+            // （绑根天然是 ROUTER；这里再兜一道，防止历史数据里存在非 ROUTER 的根）
+            wrapper.ne(AgentDefEntity::getRunMode, AgentRunMode.ROUTER.name());
+            wrapper.notInSql(AgentDefEntity::getId,
+                    "select root_agent_id from ma_def where root_agent_id is not null");
         }
         String keyword = LikeText.contains(query.getKeyword());
         if (keyword != null) {
@@ -97,11 +105,27 @@ public class AgentDefRepositoryImpl implements AgentDefRepository {
 
     /** {@inheritDoc} */
     @Override
+    public List<AgentDef> listOrchestrable() {
+        // 只放两类可当子的运行模式；ROUTER 恒不能作子，allow_orchestrated=0 由用户显式关闭
+        return mapper.selectList(new LambdaQueryWrapper<AgentDefEntity>()
+                        .eq(AgentDefEntity::getStatus, 1)
+                        .eq(AgentDefEntity::getAllowOrchestrated, 1)
+                        .in(AgentDefEntity::getRunMode, AgentRunMode.REACT.name(),
+                                AgentRunMode.PLAN_AND_EXECUTE.name())
+                        .orderByDesc(AgentDefEntity::getId))
+                .stream()
+                .map(this::toDomain)
+                .toList();
+    }
+
+    /** {@inheritDoc} */
+    @Override
     public Long insert(AgentDef agent, Long operatorId) {
         AgentDefEntity entity = new AgentDefEntity();
         entity.setName(agent.getName());
         entity.setCode(agent.getCode());
         entity.setDescription(agent.getDescription());
+        entity.setAvatarConfig(agent.getAvatarConfigJson());
         entity.setRunMode(agent.getRunMode());
         entity.setAllowOrchestrated(agent.getAllowOrchestrated());
         entity.setSystemPrompt(agent.getSystemPrompt());
@@ -126,6 +150,7 @@ public class AgentDefRepositoryImpl implements AgentDefRepository {
                 .set(AgentDefEntity::getName, agent.getName())
                 .set(AgentDefEntity::getCode, agent.getCode())
                 .set(AgentDefEntity::getDescription, agent.getDescription())
+                .set(AgentDefEntity::getAvatarConfig, agent.getAvatarConfigJson())
                 .set(AgentDefEntity::getRunMode, agent.getRunMode())
                 .set(AgentDefEntity::getAllowOrchestrated, agent.getAllowOrchestrated())
                 .set(AgentDefEntity::getSystemPrompt, agent.getSystemPrompt())
@@ -183,6 +208,7 @@ public class AgentDefRepositoryImpl implements AgentDefRepository {
         agent.setName(entity.getName());
         agent.setCode(entity.getCode());
         agent.setDescription(entity.getDescription());
+        agent.setAvatarConfigJson(entity.getAvatarConfig());
         agent.setRunMode(entity.getRunMode());
         agent.setAllowOrchestrated(entity.getAllowOrchestrated());
         agent.setSystemPrompt(entity.getSystemPrompt());

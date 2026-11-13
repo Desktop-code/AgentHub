@@ -48,11 +48,29 @@ public class AgentPromptController {
      * @return 版本行；用途无模板维度时为空列表
      */
     @SaCheckPermission(value = {AgentPermissions.LIST, AgentPermissions.ADD,
-            AgentPermissions.EDIT, AgentPermissions.BIND}, mode = SaMode.OR)
+            AgentPermissions.EDIT, AgentPermissions.BIND, MaPermissions.RECEPTION,
+            MaPermissions.VIEW}, mode = SaMode.OR)
     @GetMapping("/templates")
     public Result<List<PromptTemplateOptionResp>> templates(@RequestParam(required = false) String purpose,
                                                             @RequestParam(required = false) String locale) {
         return Result.ok(prompts.options(purpose, locale));
+    }
+
+    /**
+     * 平台该用途当前生效的模板版本；没有时 data 为 null（不是 400）。
+     * 前端据此把「新建默认绑定」提前显示出来，避免打开弹窗才看到空模板。
+     *
+     * @param purpose 用途码（CHAT / ROUTER / REWRITE / SUMMARY / MEMORY）
+     * @param locale  语言；空则 zh-CN
+     * @return 生效版本行；无生效模板时 data 为空
+     */
+    @SaCheckPermission(value = {AgentPermissions.LIST, AgentPermissions.ADD,
+            AgentPermissions.EDIT, AgentPermissions.BIND, MaPermissions.RECEPTION,
+            MaPermissions.VIEW}, mode = SaMode.OR)
+    @GetMapping("/default")
+    public Result<PromptTemplateOptionResp> defaultTemplate(@RequestParam(required = false) String purpose,
+                                                            @RequestParam(required = false) String locale) {
+        return Result.ok(prompts.defaultOption(purpose, locale));
     }
 
     /**
@@ -62,7 +80,8 @@ public class AgentPromptController {
      * @return 模板与段落；草稿或不存在的模板返回业务错误
      */
     @SaCheckPermission(value = {AgentPermissions.LIST, AgentPermissions.ADD,
-            AgentPermissions.EDIT, AgentPermissions.BIND}, mode = SaMode.OR)
+            AgentPermissions.EDIT, AgentPermissions.BIND, MaPermissions.RECEPTION,
+            MaPermissions.VIEW}, mode = SaMode.OR)
     @GetMapping("/templates/{id:\\d+}")
     public Result<PromptTemplateViewResp> template(@PathVariable Long id) {
         return Result.ok(prompts.view(id));
@@ -76,7 +95,8 @@ public class AgentPromptController {
      * @param req 用途 + 四列表单值
      * @return 正文与版本统计
      */
-    @SaCheckPermission(value = {AgentPermissions.EDIT, AgentPermissions.BIND}, mode = SaMode.OR)
+    @SaCheckPermission(value = {AgentPermissions.EDIT, AgentPermissions.BIND,
+            MaPermissions.RECEPTION, MaPermissions.EDIT}, mode = SaMode.OR)
     @PostMapping("/preview")
     public Result<PromptPreviewResp> preview(@RequestBody PromptPreviewReq req) {
         return Result.ok(prompts.preview(req));

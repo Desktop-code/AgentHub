@@ -21,6 +21,9 @@ public class AgentUpdateReq {
     @Size(max = 1000, message = "最长 1000")
     private String description;
 
+    /** 形象配置；不传或全空=清除为未配置 */
+    private AgentAvatarConfigDto avatarConfig;
+
     @NotBlank(message = "不能为空")
     @Size(max = 32, message = "最长 32")
     private String runMode;

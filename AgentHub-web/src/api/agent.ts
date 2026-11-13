@@ -17,7 +17,14 @@ import type {
 } from '@/types/agent'
 
 /** 分页。size 不超过 100。 */
-export function pageAgents(params: { current: number; size: number; keyword?: string; runMode?: string; status?: number }) {
+export function pageAgents(params: {
+  current: number
+  size: number
+  keyword?: string
+  runMode?: string
+  status?: number
+  scope?: 'SINGLE'
+}) {
   return request.get<Result<PageResult<AgentCard>>>('/api/agent/agents', { params })
 }
 
@@ -41,9 +48,34 @@ export function createAgent(data: AgentSave) {
   return request.post<Result<AgentDetail>>('/api/agent/agents', data)
 }
 
+/**
+ * 复制 Agent。所属域：agent。
+ * <p>
+ * 只提交名称与编码：运行模式、运行限制、编排策略与 CHAT 的 L3 四列
+ * 全部由后端从源 Agent 继承，避免前端漏传把复制品的模板配置打回空。
+ *
+ * @param id   源 Agent 主键
+ * @param data 复制品的名称与编码
+ */
+export function copyAgent(id: number, data: { name: string; code: string }) {
+  return request.post<Result<AgentDetail>>(`/api/agent/agents/${id}/copy`, data)
+}
+
 /** 保存基本信息，不改启停。 */
 export function updateAgent(id: number, data: AgentSave) {
   return request.put<Result<AgentDetail>>(`/api/agent/agents/${id}`, data)
+}
+
+/**
+ * 上传 Agent 自定义形象（jpg/png/webp，≤2MB）。所属域：agent。
+ * <p>只落盘并回 URL，不写库；由配置页点「确定」后随 Agent 保存。
+ *
+ * @param file 图片文件
+ */
+export function uploadAgentAvatar(file: File) {
+  const form = new FormData()
+  form.append('file', file)
+  return request.post<Result<{ url: string }>>('/api/agent/agents/avatar-upload', form)
 }
 
 /** 逻辑删除定义及其绑定、路由。 */

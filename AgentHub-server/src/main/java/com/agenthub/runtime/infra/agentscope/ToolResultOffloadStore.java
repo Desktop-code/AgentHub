@@ -63,15 +63,20 @@ public class ToolResultOffloadStore {
     /**
      * 按策略判断并落盘。
      *
+     * <p>调用方必须已经确认当前专家绑定了读文件工具（见
+     * {@link ToolResultOffloadPolicy#readToolIn(java.util.Collection)}）：没有读文件工具时
+     * 落盘只会留下一个「说了也读不到」的路径，还会把模型逼去调不存在的工具。
+     *
      * @param rawSessionId    引擎注入的 sessionId，可空
      * @param toolName        工具调用名，可空
      * @param text            原始结果正文，可空
      * @param success         引擎报告的成败
      * @param offloadMaxChars 落盘阈值；≤0 关闭
+     * @param readToolName    当前专家已绑定的读文件工具名；空串表示不写读取指令（防御分支）
      * @return 落盘成功时给出手柄；不需要落盘、工作区不可用或写失败时为空
      */
     public Optional<ToolResultHandle> offload(String rawSessionId, String toolName, String text,
-                                              boolean success, int offloadMaxChars) {
+                                              boolean success, int offloadMaxChars, String readToolName) {
         if (!ToolResultOffloadPolicy.shouldOffload(toolName, text, success, offloadMaxChars)) {
             return Optional.empty();
         }
@@ -93,7 +98,7 @@ public class ToolResultOffloadStore {
 
             String virtualPath = WorkspaceSandbox.VIRTUAL_PREFIX + WorkspaceSandbox.relativeOf(root, target);
             String preview = ToolResultOffloadPolicy.previewOf(
-                    toolName, text, virtualPath, properties.offloadPreviewChars());
+                    toolName, text, virtualPath, properties.offloadPreviewChars(), readToolName);
             // 只记路径与长度：结果正文可能含业务数据，不进日志
             log.info("[Agent][offload] 工具结果已落盘 tool={} chars={} path={}", toolName, text.length(), virtualPath);
             return Optional.of(new ToolResultHandle(

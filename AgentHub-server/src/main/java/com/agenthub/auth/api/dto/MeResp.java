@@ -14,6 +14,8 @@ public class MeResp {
     private Long userId;
     private String username;
     private String nickname;
+    /** 头像相对 URL；未上传为空，侧栏用首字兜底 */
+    private String avatarUrl;
     private Long deptId;
     private String deptName;
     private boolean platformAdmin;

@@ -1,0 +1,8 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 80 80" fill="none">
+  <!-- 学者：学士帽 -->
+  <circle cx="40" cy="40" r="26" fill="#fff" fill-opacity=".16"/>
+  <path d="M40 24 60 32 40 40 20 32Z" fill="#fff" fill-opacity=".95"/>
+  <path d="M27 35.5v7.5c0 4.4 5.8 7.5 13 7.5s13-3.1 13-7.5v-7.5" stroke="#fff" stroke-width="3.2" stroke-opacity=".95" stroke-linecap="round"/>
+  <path d="M60 32v11" stroke="#fff" stroke-width="2.8" stroke-opacity=".9" stroke-linecap="round"/>
+  <circle cx="60" cy="45.5" r="2.6" fill="#fff" fill-opacity=".95"/>
+</svg>

@@ -26,6 +26,14 @@ public class MaDefSaveReq {
     @Size(max = 128, message = "最长 128")
     private String name;
 
+    /**
+     * 方案说明（刀5）：被别的方案当作路由目标时，这段文案就是判路由提示词里的职责简介。
+     *
+     * <p>可空；但空说明的方案不能被加入任何路由池。与 Agent 简介同语义，只在这一处维护。
+     */
+    @Size(max = 512, message = "最长 512")
+    private String description;
+
     /** 五值模板之一；服务端还会做白名单校验 */
     @NotBlank(message = "编排模板不能为空")
     @Size(max = 32, message = "最长 32")
@@ -35,7 +43,17 @@ public class MaDefSaveReq {
     @Valid
     private AgentRuntimeConfigReq config;
 
-    /** 绑定的 ROUTER 主键；空＝虚拟根（本刀只建档，不可试跑） */
+    /**
+     * 方案自有形象：与 Agent 形象同一套 preset / custom 结构与白名单。
+     *
+     * <p>可空＝未配置（前端按方案名走 8 套机器人兜底）。不再借「编排根 Agent」的形象。
+     */
+    private AgentAvatarConfigDto avatarConfig;
+
+    /**
+     * 历史绑根字段：<b>已停用</b>。保留仅为兼容旧前端请求，服务端忽略并写 null；
+     * 方案以 {@code ma_def} 自己为根，不再要求 / 不再写入 Agent 根。
+     */
     private Long rootAgentId;
 
     /** 1 启用 / 0 停用；空默认 1 */

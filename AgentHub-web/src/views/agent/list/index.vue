@@ -65,7 +65,6 @@
             <el-option label="全部" value="ALL" />
             <el-option label="ReAct" value="REACT" />
             <el-option label="Plan-Execute" value="PLAN_AND_EXECUTE" />
-            <el-option label="Router" value="ROUTER" />
           </el-select>
         </el-form-item>
         <el-form-item label="状态">
@@ -121,30 +120,57 @@
               @keyup.enter="handleGridCardClick(row, $event)"
             >
               <template #header>
-                <!-- 右上灰色 ×；stop 防止进详情；二次确认后删除 -->
-                <el-popconfirm
-                  v-if="user.hasPerm('agent:remove')"
-                  width="280"
-                  :title="`删除 Agent「${row.name}」？绑定和子路由会一并移除。`"
-                  confirm-button-text="删除"
-                  cancel-button-text="取消"
-                  confirm-button-type="danger"
-                  @confirm="removeCard(row)"
-                >
-                  <template #reference>
-                    <button
-                      type="button"
-                      class="card-del"
-                      :aria-label="`删除 ${row.name}`"
-                      :disabled="removingId === row.id"
-                      @click.stop
-                    >
-                      ×
-                    </button>
+                <!--
+                  身份区：40px 正圆头像 + 名称 / 编码，Flex 左右并排、垂直居中。
+                  头像只读：有形象图（preset 预设图 / custom 上传图）就渲染图片并 cover 居中，
+                  没有则用名称首字 + 色板色兜底；与用户头像字段完全分开。
+                -->
+                <div class="card-id">
+                  <AgentAvatar :name="row.name" :config="row.avatarConfig" :size="40" />
+                  <div class="card-id-text">
+                    <h3 class="card-name" :title="row.name">{{ row.name }}</h3>
+                    <p class="code" :title="row.code">{{ row.code }}</p>
+                  </div>
+                </div>
+                <!--
+                  右上「…」：默认低对比，Hover / 键盘聚焦才清晰。
+                  注意：el-dropdown 把 click 声明成了组件 emit，写在组件上的 `@click.stop`
+                  会被当成组件事件、修饰符失效（不会 stopPropagation），点击便会冒泡进卡片详情。
+                  因此 .stop 必须写在原生 button 上，并在 handleGridCardClick 里再按 target 兜一道。
+                -->
+                <el-dropdown class="card-more" trigger="click" placement="bottom-end">
+                  <button
+                    type="button"
+                    class="card-more-btn"
+                    :aria-label="`${row.name} 更多操作`"
+                    @click.stop
+                    @mousedown.stop
+                    @keydown.stop
+                    @keyup.stop
+                  >
+                    <el-icon :size="16"><MoreFilled /></el-icon>
+                  </button>
+                  <template #dropdown>
+                    <el-dropdown-menu>
+                      <!-- 编辑：进现网详情（走路由，由 syncFromRoute 切主从态），不做飞卡动画 -->
+                      <el-dropdown-item @click="editFromCard(row)">编辑</el-dropdown-item>
+                      <el-dropdown-item v-if="user.hasPerm('agent:add')" @click="openCopy(row)">复制</el-dropdown-item>
+                      <!-- 启停互斥：按当前状态只出现一项，沿用现网 PUT /status -->
+                      <el-dropdown-item v-if="user.hasPerm('agent:enable')" @click="toggleCardStatus(row)">
+                        {{ row.status === 1 ? '禁用' : '启用' }}
+                      </el-dropdown-item>
+                      <!-- 删除：标红 + 二次确认（与现网删除文案一致），不直接删 -->
+                      <el-dropdown-item
+                        v-if="user.hasPerm('agent:remove')"
+                        class="menu-danger"
+                        divided
+                        @click="confirmRemoveCard(row)"
+                      >
+                        删除
+                      </el-dropdown-item>
+                    </el-dropdown-menu>
                   </template>
-                </el-popconfirm>
-                <h3 class="card-name" :title="row.name">{{ row.name }}</h3>
-                <p class="code" :title="row.code">{{ row.code }}</p>
+                </el-dropdown>
                 <div class="badges">
                   <el-tag size="small" effect="plain" :type="row.runMode === 'ROUTER' ? 'warning' : row.runMode === 'PLAN_AND_EXECUTE' ? 'success' : 'primary'">
                     {{ runModeLabel(row.runMode) }}
@@ -154,7 +180,18 @@
                   </el-tag>
                 </div>
               </template>
-              <el-tooltip :content="row.description?.trim() || '暂无简介'" placement="top">
+              <!--
+                卡片简介两行截断；完整内容用统一气泡兜底
+                （popper-class=clamp-tip 与模型 / 工具 / Skill 共用，宽 320px、限高自滚）
+              -->
+              <el-tooltip
+                placement="top"
+                popper-class="clamp-tip"
+                :disabled="!row.description?.trim()"
+              >
+                <template #content>
+                  <div class="clamp-tip__body">{{ row.description?.trim() }}</div>
+                </template>
                 <span :class="{ muted: !row.description?.trim() }">{{ row.description?.trim() || '暂无简介' }}</span>
               </el-tooltip>
             </ConfigCard>
@@ -167,6 +204,7 @@
           v-model:size="agentBrowse.size"
           :total="total"
           mode="grid"
+          class="grid-pager"
           :total-text="`共 ${total} 个智能体`"
           pager-on-multi-page-only
           @change="loadRows"
@@ -285,6 +323,29 @@
 
     <AgentFormDialog v-model="createOpen" @submit="saveCreate" />
 
+    <!--
+      复制 Agent：只让用户确认名称与编码，其余配置由后端从源 Agent 继承
+      （含 CHAT 的模板 / 钉死版本 / 可覆盖段 / 追加要求），避免前端漏传把配置打回默认。
+    -->
+    <el-dialog v-model="copyOpen" title="复制 Agent" width="520px" :close-on-click-modal="false">
+      <el-form label-width="80px">
+        <el-form-item label="名称" required>
+          <el-input v-model="copyForm.name" maxlength="64" placeholder="复制品名称" />
+        </el-form-item>
+        <el-form-item label="编码" required>
+          <el-input v-model="copyForm.code" maxlength="64" placeholder="未删除范围内唯一" />
+        </el-form-item>
+      </el-form>
+      <p class="copy-hint">
+        复制继承：运行模式、运行限制、编排策略，以及提示词模板（模板 / 钉死版本 / 可覆盖段 / 追加要求）。
+        模型、工具、技能与子路由不复制，需要时在复制品详情里重新绑定。
+      </p>
+      <template #footer>
+        <el-button @click="copyOpen = false">取消</el-button>
+        <el-button type="primary" :loading="copying" @click="submitCopy">复制并编辑</el-button>
+      </template>
+    </el-dialog>
+
     <FlipGhost :snap="ghostSnap" :frame="ghostFrame" :landing="ghostLanding" />
   </div>
 </template>
@@ -297,11 +358,12 @@ defineOptions({ name: 'AgentManage' })
  * 网格↔主从用同页 viewMode，飞卡过程不卸载网格 DOM；飞完再 replace URL。
  * 飞时源/落点 visibility:hidden；克隆按 Last 定尺寸，Invert translate+scale，尺寸连续变到落点。
  */
-import { computed, h, nextTick, onActivated, onBeforeUnmount, onDeactivated, ref, watch } from 'vue'
-import { ElMessage } from 'element-plus'
+import { computed, h, nextTick, onActivated, onBeforeUnmount, onDeactivated, reactive, ref, watch } from 'vue'
+import { ElMessage, ElMessageBox } from 'element-plus'
 import { useRoute, useRouter } from 'vue-router'
-import { Grid, Plus, RefreshRight, Search } from '@element-plus/icons-vue'
-import { createAgent, deleteAgent, pageAgents } from '@/api/agent'
+import { Grid, MoreFilled, Plus, RefreshRight, Search } from '@element-plus/icons-vue'
+import { changeAgentStatus, copyAgent, createAgent, deleteAgent, pageAgents } from '@/api/agent'
+import AgentAvatar from '@/components/agent/AgentAvatar.vue'
 import AgentDetail from '@/components/agent/AgentDetail.vue'
 import AgentDetailSkeleton from '@/components/agent/AgentDetailSkeleton.vue'
 import AgentFormDialog from '@/components/agent/AgentFormDialog.vue'
@@ -363,6 +425,8 @@ const detailSuspended = ref(false)
 const listError = ref('')
 const createOpen = ref(false)
 const removingId = ref(0)
+/** 正在即时切换启停的卡片 id；非 0 时禁止重复点，避免并发改写状态 */
+const statusSavingId = ref(0)
 /** 网格卡片紧凑档；暂无切换入口，固定 false → ConfigCard normal。 */
 const isCompact = false
 /** 网格当前页。 */
@@ -567,8 +631,9 @@ let railSearchTimer = 0
 let railObserver: IntersectionObserver | null = null
 
 /**
- * 深链约定：`/agent/list/:id?tab=orchestration` 由「编排 → 多智能体」列表使用，
- * 详情壳据此落在「编排」Tab；其它入口不带 tab，仍落基本信息。
+ * 深链约定：`/agent/list/:id?tab=xxx` 透传给详情壳。
+ * 单兵详情已无「编排」Tab，旧深链的 orchestration 会落回基本信息；
+ * 方案编排统一去「多智能体」列表打开。
  */
 const initialTab = computed(() => {
   if (!route.path.startsWith('/agent/list/')) {
@@ -674,9 +739,15 @@ const {
 /**
  * 网格卡点击入口：试跑抽屉打开时忽略；去程期间挂起右栏详情，
  * 把 AgentDetail 的挂载与并发请求推迟到落地之后。
+ * <p>「…」菜单区域内的点击 / 回车必须整体忽略：el-dropdown 的 click 是组件 emit，
+ * 组件上的 @click.stop 不生效，只靠原生 button 的 .stop 兜不住所有路径
+ *（例如 popper 触发元素被克隆、或用户用键盘触发），这里按 target 再拦一道。
  */
 async function handleGridCardClick(row: AgentCard, event: Event) {
   if (trialOpen.value) {
+    return
+  }
+  if (isFromCardMore(event)) {
     return
   }
   detailSuspended.value = true
@@ -685,6 +756,17 @@ async function handleGridCardClick(row: AgentCard, event: Event) {
   } finally {
     detailSuspended.value = false
   }
+}
+
+/**
+ * 判断事件是否来自卡片右上「…」菜单（含其内部按钮与键盘触发）。
+ *
+ * @param event 卡片收到的点击 / 回车事件
+ * @return true 表示应忽略，不当作「打开卡片」
+ */
+function isFromCardMore(event: Event): boolean {
+  const target = event.target as HTMLElement | null
+  return !!target?.closest?.('.card-more')
 }
 
 /** 工具栏「列表」入口：与卡片点击同一套守卫与详情挂起 */
@@ -768,11 +850,19 @@ watch(
   { immediate: true }
 )
 
+/**
+ * 列表筛选参数。
+ *
+ * <p>固定 scope=SINGLE：本页只展示单兵（ReAct / 计划执行），
+ * Router 与多智能体方案绑根的主控由服务端收口，不靠前端过滤兜底。
+ */
 function filterParams() {
   return {
     keyword: agentBrowse.keyword.trim() || undefined,
     runMode: agentBrowse.runMode === 'ALL' ? undefined : agentBrowse.runMode,
-    status: agentBrowse.status === 'ALL' ? undefined : Number(agentBrowse.status)
+    status: agentBrowse.status === 'ALL' ? undefined : Number(agentBrowse.status),
+    /* 单兵口径：Agent 管理只要 ReAct / Plan-Execute 专家，Router 与方案主控归「多智能体」 */
+    scope: 'SINGLE' as const
   }
 }
 
@@ -1269,6 +1359,65 @@ async function removeCard(row: AgentCard) {
   }
 }
 
+/**
+ * 「…」菜单 → 编辑：进现网详情（主从态）。
+ * <p>不做飞卡动画：菜单点击的起点不是卡片本体，飞卡起始矩形无意义。
+ * 这里只改路由，由 {@link syncFromRoute} 统一切到 master、按需拉左栏并加载详情。
+ *
+ * @param row 目标 Agent 卡片
+ */
+function editFromCard(row: AgentCard) {
+  if (flipBusy.value || trialOpen.value) {
+    return
+  }
+  void router.push(`/agent/list/${row.id}`)
+}
+
+/**
+ * 「…」菜单 → 禁用 / 启用：沿用现网 PUT /api/agent/agents/{id}/status。
+ * <p>成功后重新取数而不是就地改 status：状态筛选生效时，被停用的卡应立刻从列表消失。
+ *
+ * @param row 目标 Agent 卡片
+ */
+async function toggleCardStatus(row: AgentCard) {
+  if (statusSavingId.value || flipBusy.value || trialOpen.value) {
+    return
+  }
+  const next = row.status === 1 ? 0 : 1
+  statusSavingId.value = row.id
+  try {
+    await changeAgentStatus(row.id, next)
+    ElMessage.success(next === 1 ? '已启用' : '已停用')
+    await loadRows()
+  } finally {
+    statusSavingId.value = 0
+  }
+}
+
+/**
+ * 「…」菜单 → 删除：先二次确认（文案与现网一致），确认后才调删除接口。
+ * <p>菜单里的项无法像卡片按钮那样挂 el-popconfirm 的 reference，
+ * 因此用与现网同口径的 MessageBox 确认，不绕过确认直接删。
+ *
+ * @param row 目标 Agent 卡片
+ */
+async function confirmRemoveCard(row: AgentCard) {
+  if (removingId.value || flipBusy.value) {
+    return
+  }
+  try {
+    await ElMessageBox.confirm(
+      `删除 Agent「${row.name}」？绑定和子路由会一并移除。`,
+      '删除确认',
+      { confirmButtonText: '删除', cancelButtonText: '取消', type: 'warning' }
+    )
+  } catch {
+    // 用户取消：什么都不做
+    return
+  }
+  await removeCard(row)
+}
+
 async function saveCreate(payload: AgentSave, done: () => void) {
   try {
     const { data } = await createAgent(payload)
@@ -1291,6 +1440,70 @@ async function saveCreate(payload: AgentSave, done: () => void) {
     await loadRows()
   } finally {
     done()
+  }
+}
+
+/** 复制弹窗：预填「名称 副本 / 编码_copy」，编码仍允许手改（未删除范围内唯一）。 */
+const copyOpen = ref(false)
+const copying = ref(false)
+const copySource = ref<AgentCard | null>(null)
+const copyForm = reactive({ name: '', code: '' })
+
+/**
+ * 打开复制弹窗。
+ * <p>
+ * 只复制定义本身；提示词模板等由后端从源 Agent 继承，不在前端拼装四列，
+ * 避免「复制时漏传 override / 追加要求」把复制品打回默认模板。
+ *
+ * @param row 被复制的源 Agent 卡片
+ */
+function openCopy(row: AgentCard) {
+  if (flipBusy.value) {
+    return
+  }
+  copySource.value = row
+  copyForm.name = `${row.name} 副本`.slice(0, 64)
+  copyForm.code = `${row.code}_copy`.slice(0, 64)
+  copyOpen.value = true
+}
+
+/**
+ * 提交复制：成功后直接进入复制品的详情（新行从第一页重来，避免不在已加载区间内）。
+ */
+async function submitCopy() {
+  const source = copySource.value
+  if (!source || copying.value) {
+    return
+  }
+  if (!copyForm.name.trim() || !copyForm.code.trim()) {
+    ElMessage.warning('请填写名称和编码')
+    return
+  }
+  copying.value = true
+  try {
+    const { data } = await copyAgent(source.id, {
+      name: copyForm.name.trim(),
+      code: copyForm.code.trim()
+    })
+    const warnings = data.data?.warnings || []
+    if (warnings.length) {
+      ElMessage.warning(warnings.join('；'))
+    }
+    ElMessage.success('已复制')
+    copyOpen.value = false
+    const id = data.data?.id
+    if (id) {
+      activeId.value = id
+      viewMode.value = 'master'
+      railSource.value = rows.value.slice()
+      await replaceMasterUrl(id)
+      void resetRail()
+      return
+    }
+    agentBrowse.current = 1
+    await loadRows()
+  } finally {
+    copying.value = false
   }
 }
 
@@ -1452,40 +1665,89 @@ function onTrial(payload: { agentId: number; name: string; runMode: string }) {
 }
 
 /* 外观由 ConfigCard 接管；此处仅保留飞卡选择器所需的 .card 与内部排版 */
-.card-del {
+/* 身份区：40px 正圆头像 + 名称 / 编码，左右并排、垂直居中；右侧留出「…」的位置 */
+.card-id {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-width: 0;
+  padding-right: 30px;
+}
+
+/* 头像尺寸死锁：AgentAvatar 自己按 size 出宽高，这里再锁一次防止被 flex 压扁 */
+.card-id :deep(.agent-avatar) {
+  flex: none;
+  width: 40px;
+  height: 40px;
+}
+
+.card-id-text {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+
+/*
+ * 右上「…」：默认低对比（Hover 卡片或键盘聚焦才清晰）。
+ * 绝对定位不占 header 高度，卡片高度仍由 ConfigCard 死锁。
+ */
+.card-more {
   position: absolute;
   top: 8px;
   right: 8px;
-  z-index: 1;
+  z-index: 2;
+  opacity: 0.35;
+  transition: opacity 0.15s ease;
+}
+
+.card:hover .card-more,
+.card:focus-visible .card-more,
+.card-more:focus-within {
+  opacity: 1;
+}
+
+.card-more-btn {
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  width: 28px;
-  height: 28px;
+  width: 26px;
+  height: 26px;
   padding: 0;
   border: 0;
   border-radius: 6px;
   background: transparent;
   color: #9ca3af;
-  font-size: 20px;
-  font-weight: 400;
+  font-size: 16px;
   line-height: 1;
   cursor: pointer;
 }
 
-.card-del:hover:not(:disabled) {
-  color: #ef4444;
-  background: #fef2f2;
+.card-more-btn:hover {
+  color: var(--ah-text, #303133);
+  background: rgba(15, 23, 42, 0.06);
 }
 
-.card-del:disabled {
-  cursor: not-allowed;
-  opacity: 0.45;
+/* 下拉里唯一危险项：删除文案标红。菜单 teleport 到 body，但类名带本组件作用域仍能命中 */
+.menu-danger {
+  color: #ef4444;
+}
+
+/* 底栏分割线：按设计稿用主题边框 token（#ebeef5），只在本页收紧，不动共用组件 */
+.grid-pager :deep(.table-pager.is-grid) {
+  border-top-color: var(--ah-border, #ebeef5);
+}
+
+/* 复制弹窗说明：灰字一行，写清继承与不继承的范围 */
+.copy-hint {
+  margin: 0;
+  color: var(--ah-text-muted, #9ca3af);
+  font-size: 12px;
+  line-height: 1.6;
 }
 
 .card-name {
   margin: 0;
-  padding-right: 32px;
   overflow: hidden;
   font-size: 15px;
   font-weight: 650;
@@ -1507,6 +1769,12 @@ function onTrial(payload: { agentId: number; name: string; runMode: string }) {
   display: flex;
   flex-wrap: wrap;
   gap: 6px;
+}
+
+/* 网格卡内的标签行禁止换行：一旦折行会挤压描述区，破坏同行卡片等高 */
+.card .badges {
+  flex-wrap: nowrap;
+  overflow: hidden;
 }
 
 .badge-on {

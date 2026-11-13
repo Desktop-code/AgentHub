@@ -26,6 +26,43 @@ public class AgentRuntimeConfig {
     public static final String TEMPLATE_ROUTER_PARALLEL = "ROUTER_PARALLEL";
 
     /**
+     * 工作台入口模板：平台唯一的那个入口 Router 专用类型。
+     *
+     * <p>为什么单列一个码而不是复用 {@link #TEMPLATE_ROUTER_PARALLEL}：
+     * <ul>
+     *   <li>入口是<b>数据锁定的唯一行</b>（{@code is_reception_default = 1} 的那条 ma_def），
+     *       类型上必须能和普通 Router 方案（如场景级「企业综合台」）区分开，
+     *       否则列表无法只对入口锁身份字段、路由池无法只拒绝入口入池；</li>
+     *   <li>执行语义与 ROUTER_PARALLEL 完全一致（判路由 → 命中子并行 → 汇总），
+     *       所以执行器不需要为它新写一条分支，模板判断里按「路由并行」同等对待即可。</li>
+     * </ul>
+     *
+     * <p><b>不可由页面选择</b>：新建 / 编辑接口一律拒绝设置该值，只能由增量 SQL 把默认接待那一行迁过来；
+     * 因此它不在 {@link #validTemplate(String)} 的六值白名单里，而在
+     * {@link #validStoredTemplate(String)} 的「可读入库值」集合里。
+     */
+    public static final String TEMPLATE_ENTRY_ROUTER = "ENTRY_ROUTER";
+
+    /**
+     * 入口行固定展示名：列表 / 详情 / 抽屉标题统一显示「Router」。
+     *
+     * <p>为什么不是库里的中文名：入口是全平台唯一的一条网关，展示口径必须唯一且稳定，
+     * 不能随着谁改了一个名字就变成别的叫法；因此名称、编码、说明这三项身份字段一并锁定，
+     * 页面只读、后端同样拒绝改（见 {@code MaDefPolicy.assertEntryIdentity}）。
+     */
+    public static final String ENTRY_ROUTER_NAME = "Router";
+
+    /**
+     * 入口行固定说明（备注）：写清它是什么、负责什么、哪些动作被禁止。
+     *
+     * <p>与 {@link #ENTRY_ROUTER_NAME} 一样属于入口身份字段：页面只读，保存时不允许被改写；
+     * 长度控制在 512 以内，与 {@code ma_def.description} 列宽一致。
+     */
+    public static final String ENTRY_ROUTER_DESCRIPTION =
+            "对话入口：负责规划、选择专家或普通方案并决定是否收尾；"
+                    + "不可删除、不可改名称/类型、不可加入路由池、不可作为子专家。";
+
+    /**
      * 固定串行模板：跳过判路由，按 sort_order 依次执行全部启用候选 S1→S2→…→Sn，再汇总。
      * <p>后一步可见「用户原问 + 前置步骤终答摘要」（{@link #CONTEXT_PRIOR_SUMMARY_ONLY}）。
      */
@@ -71,6 +108,25 @@ public class AgentRuntimeConfig {
     /** 竞争选优最少参与候选数：1 个候选谈不上「竞争」，保存与运行都按此拦 */
     public static final int MIN_COMPETE_CANDIDATES = 2;
 
+    /**
+     * 方案嵌套分发的运行时上限（含本次即将进入的那一层）。
+     * <p>入口 → 方案 → 专家只进入一层方案，远低于此上限；超过才熔断。
+     */
+    public static final int MAX_MA_NEST_DEPTH = 3;
+
+    /**
+     * 保存时仍提交「路由后串行 + 隔离 / 共享草稿」的拒绝文案。
+     * <p>只用于保存校验。读详情和运行装载遇到历史隔离时改收口成继承，不再拿这句当错误抛出。
+     */
+    public static final String SERIAL_CONTEXT_REJECTED =
+            "路由后串行必须继承前置结果，不能改为隔离。如需 3 步以上复杂依赖或条件判断，请使用工作流。";
+
+    /**
+     * 方案套方案超过 {@link #MAX_MA_NEST_DEPTH} 层时的熔断文案。
+     */
+    public static final String NEST_DEPTH_REJECTED =
+            "嵌套分发已超过 3 层，本轮已熔断。入口分到方案、方案再分到专家不受影响；更长的方案套方案请改用工作流。";
+
     /** 上下文策略：子 Agent 互相隔离，只吃 sub_query / 用户原问（现网多意图硬规则） */
     public static final String CONTEXT_ISOLATED = "ISOLATED";
 
@@ -84,8 +140,8 @@ public class AgentRuntimeConfig {
     /**
      * 上下文策略：本轮编排内提供键控可读写草稿区（{@link ScratchBoard}），子经
      * {@code ma_scratch_get} / {@code ma_scratch_put} 主动读写。
-     * <p>五值模板都可选；与 {@link #CONTEXT_PRIOR_SUMMARY_ONLY} 是同一个字段的单选值，
-     * 因此串行模板选了本策略就<b>不再</b>叠加前置摘要自动拼接。
+     * <p>五值模板都可选。串行模板即使选了本策略，运行时仍会把上一专家的成文结论交给下一位；
+     * 草稿区只是额外的键控便签，不能代替这段交接。
      * <p>同键只允许首次写入（拒绝双写），不做覆盖；草稿仅内存、随本轮 run 结束丢弃。
      */
     public static final String CONTEXT_SHARED_SCRATCH = "SHARED_SCRATCH";
@@ -116,6 +172,9 @@ public class AgentRuntimeConfig {
 
     /** 评审环轮次平台硬顶：再多就不是「有限回修」，容易变成死循环 */
     public static final int MAX_CRITIC_ROUNDS_CAP = 3;
+
+    /** ROUTER 判路由提示词 L3 追加区硬顶：一句角色语气 + 几条要求足够，超长会挤占候选简介预算 */
+    public static final int MAX_JUDGE_PROMPT_EXTRA = 2000;
 
     /**
      * 编排模板；六值可持久：ROUTER_PARALLEL | FIXED_SEQUENCE | FIXED_PARALLEL | CRITIC_LOOP |
@@ -188,8 +247,8 @@ public class AgentRuntimeConfig {
 
     /**
      * 判路由 / 终答汇总用的模型实例；MA-P2 刀2 起执行器从 {@code ma_def.config_json} 读它。
-     * <p>虚拟根（{@code root_agent_id IS NULL}）没有 Agent 模型槽，必须靠它才能判路由；
-     * 绑根方案为空时回落该 ROUTER Agent 的 ROUTER / CHAT 槽，保持旧行为。
+     * <p>方案（含入口 Router）以自己为根，没有 Agent 模型槽可回落时必须显式绑定才能判路由；
+     * 为空时执行器回落平台 ROUTER / CHAT 能力槽。
      * <p>值语义：{@code model_instance.id}；不写库内密码、不参与出站凭证解析。
      */
     private Long maJudgeModelInstanceId;
@@ -200,6 +259,32 @@ public class AgentRuntimeConfig {
      * {@code model_id} 或展示名大小写不敏感匹配。两者同时存在时以 id 为准。
      */
     private String maJudgeModel;
+
+    /**
+     * Router 判路由提示词引用的 ROUTER 用途模板主键（默认接待页可配）。
+     * <p>与 {@link #maJudgePromptTemplateVersion} 必须成对出现：有 id 无 version 视为未钉死，
+     * 执行侧按 purpose 取当前生效版。只影响 ROUTER 网关，不影响任何专家的人设模板。
+     */
+    private Long maJudgePromptTemplateId;
+
+    /**
+     * 与 {@link #maJudgePromptTemplateId} 配对的模板版本；版本漂移时执行侧按配置错误处理 / 回退。
+     */
+    private Integer maJudgePromptTemplateVersion;
+
+    /**
+     * Router 判路由提示词的 L3 追加区（append-only）。
+     * <p>用于追加角色语气 / 额外要求；锁定段与核心契约仍由已发布 ROUTER 模板提供，
+     * 禁止把业务提示词写回 Java。为空表示不追加。
+     */
+    private String maJudgePromptExtra;
+
+    /**
+     * Router 判路由提示词的 L3 soft 段覆盖 JSON（seg_key → 文案）。
+     * <p>与专家配提示词同一套语义：只有 {@code mutable=1} 的段可覆盖，锁定段不可改；
+     * 未钉模板时不许存在覆盖值（{@link #normalize} 会清空）。
+     */
+    private String maJudgePromptOverrideJson;
 
     /**
      * 竞争选优（{@link #TEMPLATE_COMPETE}）的选优策略：JUDGE_PICK | FIRST_SUCCESS。
@@ -293,10 +378,11 @@ public class AgentRuntimeConfig {
     }
 
     /**
-     * @return 归一化后的编排模板；六值白名单之外一律回落 ROUTER_PARALLEL
+     * @return 归一化后的编排模板；白名单之外一律回落 ROUTER_PARALLEL
+     * <p>入口类型 {@code ENTRY_ROUTER} 属于「库内可读值」，原样保留，不会被打回路由并行。
      */
     public String maTemplateOrDefault() {
-        return validTemplate(maTemplate) ? maTemplate : TEMPLATE_ROUTER_PARALLEL;
+        return validStoredTemplate(maTemplate) ? maTemplate : TEMPLATE_ROUTER_PARALLEL;
     }
 
     /**
@@ -370,10 +456,12 @@ public class AgentRuntimeConfig {
     }
 
     /**
-     * @return 执行期是否按「前置摘要」拼串行输入；只有串行模板 + PRIOR_SUMMARY_ONLY 才为 true
+     * @return 串行模板是否把上一专家的成文结论交给下一位
+     * <p>这是串行本身的运行时纪律，不看上下文策略开关：显式隔离或共享草稿区也不会关掉交接。
+     * 并行 / 评审环恒为 false，子之间互不传结论。
      */
     public boolean priorSummaryOn() {
-        return isSerialTemplate() && CONTEXT_PRIOR_SUMMARY_ONLY.equals(maContextPolicyOrDefault());
+        return isSerialTemplate();
     }
 
     /**
@@ -402,7 +490,7 @@ public class AgentRuntimeConfig {
 
     /**
      * @param template 模板码
-     * @return 是否是六值白名单内的合法模板
+     * @return 是否是六值白名单内的合法模板（页面可选值）
      */
     public static boolean validTemplate(String template) {
         return TEMPLATE_ROUTER_PARALLEL.equals(template)
@@ -411,6 +499,112 @@ public class AgentRuntimeConfig {
                 || TEMPLATE_CRITIC_LOOP.equals(template)
                 || TEMPLATE_ROUTER_THEN_SEQUENCE.equals(template)
                 || TEMPLATE_COMPETE.equals(template);
+    }
+
+    /**
+     * 是否是工作台入口类型（{@link #TEMPLATE_ENTRY_ROUTER}）。
+     *
+     * <p>调用方用它做三件事：列表隐藏、路由池拒绝入池、编辑页锁定模板 / 绑定根。
+     * 普通 scheme 的保存校验（{@link #validTemplate(String)}）必须继续拒绝该值。
+     *
+     * @param template 模板码；可空
+     * @return true 表示这是平台唯一的工作台入口
+     */
+    public static boolean isEntryRouterTemplate(String template) {
+        return TEMPLATE_ENTRY_ROUTER.equals(template);
+    }
+
+    /**
+     * 把方案上的历史模板收成两种协作模式。
+     *
+     * <p>并行类（路由并行、固定并行、竞争选优、评审环）收成意图路由分发；
+     * 串行类（固定串行、路由后串行）收成路由后串行。入口类型原样保留。
+     * 候选、模型、终答模式不在这里改，只改模板码。
+     * <p>Agent 自身 runtime_config 的六值模板不走这条，避免把单兵编排一起洗掉。
+     *
+     * @param template 库内或请求里的模板码；可空
+     * @return 归一后的模板码；认不出时返回 null
+     */
+    public static String canonicalMaTemplate(String template) {
+        if (template == null || template.isBlank()) {
+            return null;
+        }
+        String raw = template.trim();
+        if (isEntryRouterTemplate(raw)) {
+            return TEMPLATE_ENTRY_ROUTER;
+        }
+        if (TEMPLATE_ROUTER_THEN_SEQUENCE.equals(raw) || TEMPLATE_FIXED_SEQUENCE.equals(raw)) {
+            return TEMPLATE_ROUTER_THEN_SEQUENCE;
+        }
+        if (TEMPLATE_ROUTER_PARALLEL.equals(raw)
+                || TEMPLATE_FIXED_PARALLEL.equals(raw)
+                || TEMPLATE_COMPETE.equals(raw)
+                || TEMPLATE_CRITIC_LOOP.equals(raw)) {
+            return TEMPLATE_ROUTER_PARALLEL;
+        }
+        return null;
+    }
+
+    /**
+     * 列表按新协作模式筛选时，要把尚未重存的历史模板码一并算进去。
+     *
+     * @param requested 页面传来的模板码
+     * @return 库内可能出现的模板码；请求不是两种新模式时只含原值
+     */
+    public static List<String> storedTemplatesForFilter(String requested) {
+        if (requested == null || requested.isBlank()) {
+            return List.of();
+        }
+        String raw = requested.trim();
+        if (TEMPLATE_ROUTER_PARALLEL.equals(raw)) {
+            return List.of(TEMPLATE_ROUTER_PARALLEL, TEMPLATE_FIXED_PARALLEL, TEMPLATE_COMPETE, TEMPLATE_CRITIC_LOOP);
+        }
+        if (TEMPLATE_ROUTER_THEN_SEQUENCE.equals(raw)) {
+            return List.of(TEMPLATE_ROUTER_THEN_SEQUENCE, TEMPLATE_FIXED_SEQUENCE);
+        }
+        return List.of(raw);
+    }
+
+    /**
+     * 是否是「可以出现在库里」的模板值：六值白名单 + 入口类型。
+     *
+     * <p>与 {@link #validTemplate(String)} 的分工：
+     * 前者是「页面能选什么」，后者是「从库里读出来算不算合法」。
+     * 归一化必须用后者，否则入口行一保存就被洗成普通路由并行。
+     *
+     * @param template 模板码；可空
+     * @return true 表示可原样保留
+     */
+    public static boolean validStoredTemplate(String template) {
+        return validTemplate(template) || isEntryRouterTemplate(template);
+    }
+
+    /**
+     * 该模板是否「先判路由」。
+     *
+     * <p>刀5：只有会判路由的模板才能把另一套编排方案当作候选——固定模板 / 评审环 / 竞争选优
+     * 都不判路由，挂一个「按方案再跑一层」的目标没有语义，也会让「路由目标」这个概念失真。
+     *
+     * @param template 模板码
+     * @return true 表示 ROUTER_PARALLEL / ROUTER_THEN_SEQUENCE
+     */
+    public static boolean validRouterTemplate(String template) {
+        return TEMPLATE_ROUTER_PARALLEL.equals(template)
+                || TEMPLATE_ROUTER_THEN_SEQUENCE.equals(template);
+    }
+
+    /**
+     * 该模板能否「向外派发到别的方案 / 工作流」——即作为父方案时是否具备判路由能力。
+     *
+     * <p>与 {@link #validRouterTemplate(String)} 的区别：入口 {@code ENTRY_ROUTER} 的执行语义就是
+     * 路由并行，它<b>可以</b>把普通 Router 方案当候选（多级分流：入口 → 场景方案 → 专家），
+     * 但它自己<b>不能</b>作为任何方案的目标，所以「目标侧」的过滤继续只用三值白名单。
+     *
+     * @param template 模板码
+     * @return true 表示会判路由，可以把方案 / 工作流挂进自己的候选
+     */
+    public static boolean routesByJudge(String template) {
+        return validRouterTemplate(template) || isEntryRouterTemplate(template);
     }
 
     /**
@@ -587,8 +781,9 @@ public class AgentRuntimeConfig {
 
     private static AgentRuntimeConfig normalize(AgentRuntimeConfig source, AgentRuntimeConfig defaults) {
         AgentRuntimeConfig out = new AgentRuntimeConfig();
-        // 模板五值可持久：显式选了固定/评审/路由后串行模板就原样落库，非法/空才回落 ROUTER_PARALLEL
-        String template = validTemplate(source.getMaTemplate())
+        // 模板白名单：显式选了固定 / 评审 / 路由后串行模板就原样落库；
+        // 入口类型 ENTRY_ROUTER 也原样保留（它只能由迁移写入），非法 / 空才回落 ROUTER_PARALLEL
+        String template = validStoredTemplate(source.getMaTemplate())
                 ? source.getMaTemplate()
                 : TEMPLATE_ROUTER_PARALLEL;
         out.setMaTemplate(template);
@@ -647,6 +842,28 @@ public class AgentRuntimeConfig {
         // 判路由模型：只做原样透传，是否可用在开跑时按实例启停与凭证校验，避免保存即锁死
         out.setMaJudgeModelInstanceId(source.getMaJudgeModelInstanceId());
         out.setMaJudgeModel(source.getMaJudgeModel() == null ? null : source.getMaJudgeModel().trim());
+        // ROUTER 提示词引用：id + version 成对才生效；只给一半时丢弃，避免执行侧读到「半钉死」状态
+        Long promptTemplateId = source.getMaJudgePromptTemplateId();
+        Integer promptTemplateVersion = source.getMaJudgePromptTemplateVersion();
+        if (promptTemplateId != null && promptTemplateVersion != null && promptTemplateVersion > 0) {
+            out.setMaJudgePromptTemplateId(promptTemplateId);
+            out.setMaJudgePromptTemplateVersion(promptTemplateVersion);
+        }
+        // L3 追加区：只追加不覆盖，空串归一成 null 便于前端判空；硬顶 2000 字防呆
+        String promptExtra = source.getMaJudgePromptExtra();
+        if (promptExtra != null) {
+            String trimmed = promptExtra.trim();
+            if (trimmed.length() > MAX_JUDGE_PROMPT_EXTRA) {
+                trimmed = trimmed.substring(0, MAX_JUDGE_PROMPT_EXTRA);
+            }
+            out.setMaJudgePromptExtra(trimmed.isEmpty() ? null : trimmed);
+        }
+        // soft 段覆盖只在「已钉死模板版本」时有意义：未钉模板时保留覆盖值会变成永不生效的脏数据
+        if (out.getMaJudgePromptTemplateId() != null) {
+            String overrideJson = source.getMaJudgePromptOverrideJson();
+            out.setMaJudgePromptOverrideJson(overrideJson == null || overrideJson.isBlank()
+                    ? null : overrideJson.trim());
+        }
         // 竞争选优策略：白名单外（含空）回落 JUDGE_PICK；非竞争模板也保留，便于切回时恢复选择
         out.setCompeteStrategy(validCompeteStrategy(source.getCompeteStrategy())
                 ? source.getCompeteStrategy()
