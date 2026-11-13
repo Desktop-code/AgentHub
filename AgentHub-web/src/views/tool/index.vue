@@ -139,7 +139,8 @@
               <template v-if="item.type !== 'MCP'">
                 工具数 {{ builtinCountText(item.id, 'total') }} · 已启用 {{ builtinCountText(item.id, 'enabled') }}
               </template>
-              <el-tooltip v-else :content="metaTitle(item)" placement="top">
+              <!-- MCP 同步摘要：完整信息用统一气泡兜底（clamp-tip：宽 320px） -->
+              <el-tooltip v-else :content="metaTitle(item)" placement="top" popper-class="clamp-tip">
                 <span class="sync-status">
                   <i
                     class="sync-dot"

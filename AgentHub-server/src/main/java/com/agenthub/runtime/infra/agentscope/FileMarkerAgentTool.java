@@ -28,8 +28,9 @@ import java.util.function.Consumer;
  *   <li><b>产物标记</b>：{@code [FILE_GENERATED]{"fileName":...}[/FILE_GENERATED]} 这串机械字符
  *       若留在上下文里，模型会把它当待解释的文本复述出来，反而更脏。这里提取后<b>物理剔除</b>；</li>
  *   <li><b>超长结果</b>：几万字的网页正文/日志若整段回灌，后续每一轮都要重新计费。
- *       超过阈值就落到会话工作区，只回灌「摘要 + 虚拟路径」，模型要看细节再调
- *       {@code workspaceReadFile}。</li>
+ *       超过阈值就落到会话工作区，只回灌「摘要 + 虚拟路径」，模型要看细节再按行读。
+ *       落盘的前提是<b>当前专家真的绑定了读文件工具</b>：没有就保持原样交给回灌截断，
+ *       绝不写成「请调用某个未绑定的工具」——那会把专家逼进反复重搜→自我熔断。</li>
  * </ol>
  *
  * <p>套用顺序（见 {@code ReActTrialExecutor}）：配额 → 必填闸门 → 本类 → RAG 上下文。
@@ -58,6 +59,13 @@ public final class FileMarkerAgentTool implements AgentTool {
      * ThreadLocal 不会跨线程传播，取到的必然是 null。装配时就把统计传进来，才记得到账。
      */
     private final PromptInjectionStats stats;
+    /**
+     * 当前专家已绑定的读文件工具名；空串表示「没有可回读的工具」。
+     * <p>
+     * 它决定超长结果要不要落盘：没有读文件工具时落盘只会留下一个读不到的路径，
+     * 还会把模型逼去调用不存在的工具（检索号专家自我熔断的根因就在这）。
+     */
+    private final String readToolName;
 
     /**
      * 只做标记剔除（不启用句柄化）。
@@ -66,7 +74,22 @@ public final class FileMarkerAgentTool implements AgentTool {
      * @param sink     产物出口，可空；空则只剔除标记、不推送
      */
     public FileMarkerAgentTool(AgentTool delegate, Consumer<GeneratedFile> sink) {
-        this(delegate, sink, null, 0, null);
+        this(delegate, sink, null, 0, null, null);
+    }
+
+    /**
+     * 兼容构造：不声明读文件工具（老测试与不需要该能力的链路）。
+     *
+     * @param delegate        原工具
+     * @param sink            产物出口，可空
+     * @param offload         落盘器，可空；空则不启用句柄化
+     * @param offloadMaxChars 落盘阈值（字符）；≤0 关闭
+     * @param stats           本轮注入统计，可空
+     */
+    public FileMarkerAgentTool(AgentTool delegate, Consumer<GeneratedFile> sink,
+                               ToolResultOffloadStore offload, int offloadMaxChars,
+                               PromptInjectionStats stats) {
+        this(delegate, sink, offload, offloadMaxChars, stats, null);
     }
 
     /**
@@ -75,15 +98,17 @@ public final class FileMarkerAgentTool implements AgentTool {
      * @param offload         落盘器，可空；空则不启用句柄化
      * @param offloadMaxChars 落盘阈值（字符）；≤0 关闭
      * @param stats           本轮注入统计，可空；非空时记录落盘条数与原始字符数
+     * @param readToolName    当前专家已绑定的读文件工具名；空表示不落盘、只在结果里留可读正文
      */
     public FileMarkerAgentTool(AgentTool delegate, Consumer<GeneratedFile> sink,
                                ToolResultOffloadStore offload, int offloadMaxChars,
-                               PromptInjectionStats stats) {
+                               PromptInjectionStats stats, String readToolName) {
         this.delegate = delegate;
         this.sink = sink;
         this.offload = offload;
         this.offloadMaxChars = offloadMaxChars;
         this.stats = stats;
+        this.readToolName = readToolName == null ? "" : readToolName.trim();
     }
 
     /** {@inheritDoc} */
@@ -232,6 +257,10 @@ public final class FileMarkerAgentTool implements AgentTool {
      * <p>
      * 只看第一段文本块：一条工具结果里出现多个文本块是极少数情况，
      * 逐块落盘会产生一堆小文件，反而更难让模型找。超长时整条结果合成一份文件。
+     * <p>
+     * <b>没有读文件工具就不落盘</b>：那会把结果换成一个读不到的路径，还会诱导模型
+     * 去调不存在的工具（检索专家反复重搜直到 consecutive_fail_abort 就是这么来的）。
+     * 此时保持原样，交给回灌截断吐出一段可读头部正文，当前专家能直接据它作答。
      *
      * @param result    已剔除标记的结果
      * @param sessionId 会话标识，可空
@@ -240,6 +269,10 @@ public final class FileMarkerAgentTool implements AgentTool {
      */
     private ToolResultBlock handleOversize(ToolResultBlock result, String sessionId, String toolName) {
         if (offload == null || offloadMaxChars <= 0) {
+            return result;
+        }
+        if (readToolName.isEmpty()) {
+            // 当前专家没有读文件工具：不落盘、不点名，正文留给回灌截断（可读的头部）
             return result;
         }
         List<ContentBlock> output = result.getOutput();
@@ -257,7 +290,7 @@ public final class FileMarkerAgentTool implements AgentTool {
             return result;
         }
         ToolResultHandle handle = offload
-                .offload(sessionId, toolName, text, true, offloadMaxChars)
+                .offload(sessionId, toolName, text, true, offloadMaxChars, readToolName)
                 .orElse(null);
         if (handle == null || !handle.stored()) {
             return result;

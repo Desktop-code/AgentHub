@@ -4,6 +4,7 @@ import com.agenthub.audit.domain.OperLogWriter;
 import com.agenthub.common.error.BizException;
 import com.agenthub.common.error.ErrorCode;
 import com.agenthub.common.web.OperatorContext;
+import com.agenthub.common.text.UserFacingText;
 import com.agenthub.workflow.api.dto.WorkflowRunDetailResp;
 import com.agenthub.workflow.api.dto.WorkflowRunTrialReq;
 import com.agenthub.workflow.domain.enums.WorkflowRunStatus;
@@ -16,6 +17,7 @@ import com.agenthub.workflow.domain.model.WorkflowNodeRun;
 import com.agenthub.workflow.domain.model.WorkflowRelease;
 import com.agenthub.workflow.domain.model.WorkflowRun;
 import com.agenthub.workflow.domain.model.WorkflowRunDetail;
+import com.agenthub.workflow.domain.model.WorkflowWorkbenchOutcome;
 import com.agenthub.workflow.domain.repository.WorkflowDefRepository;
 import com.agenthub.workflow.domain.repository.WorkflowHumanTaskRepository;
 import com.agenthub.workflow.domain.repository.WorkflowNodeRunRepository;
@@ -26,6 +28,7 @@ import com.agenthub.workflow.domain.service.WorkflowTraceWriter;
 import com.agenthub.workflow.infra.WorkflowProperties;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.databind.node.ObjectNode;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.stereotype.Service;
@@ -33,6 +36,7 @@ import org.springframework.stereotype.Service;
 import java.time.LocalDateTime;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Optional;
 
 /**
  * 工作流试跑 / 运行详情 / 取消 用例。所属域：workflow 的 application。
@@ -168,6 +172,128 @@ public class WorkflowRunAppService {
                 "试跑工作流 code=" + def.getCode() + " release=" + release.getId());
         engine.execute(run, operatorId);
         return detail(runId, tenantId);
+    }
+
+    /**
+     * 工作台触发一次工作流（刀5B）：只绑默认发布指针，结果由调用方投影回同一条会话。
+     *
+     * <p>为什么单独一个入口而不复用 {@link #trial(WorkflowRunTrialReq)}：
+     * <ul>
+     *   <li>试跑可以指定任意 release，工作台<b>只认默认发布指针</b>（禁跑草稿）；</li>
+     *   <li>试跑不记会话，工作台要写 {@code workbench_session_id} 才能做防重与人工恢复追写；</li>
+     *   <li>触发类型不同（WORKBENCH vs TRIAL），观测与操作日志口径要能区分。</li>
+     * </ul>
+     *
+     * <p>防重：同一会话 + 同一工作流还有 RUNNING / PAUSED_HUMAN 时，不新建 run，直接返回那条；
+     * 调用方据此给出「仍在进行 / 等待人工处理」，<b>不</b>自动取消旧 run。
+     *
+     * <p>入参：{@code {"query": "<本轮用户消息>"}}，与定稿的 {@code $.input.query} 对齐。
+     *
+     * <p>执行：同步推进到终态或 PAUSED_HUMAN（与试跑同一套引擎）。工作流引擎与
+     * Agent/MA 对话栈保持分离，这里只负责建 run 与调用引擎。
+     *
+     * @param workflowId 工作流定义 id
+     * @param query      本轮用户消息；会作为 {@code input.query}
+     * @param sessionId  工作台会话 id
+     * @param userId     平台用户（工作台会话归属人）
+     * @return 新 run 或复用的未结束 run
+     * @throws BizException 定义不存在 / 未发布 / 无默认发布 / 图不可执行 / 入参非法
+     */
+    public WorkflowWorkbenchOutcome runFromWorkbench(Long workflowId, String query, long sessionId, long userId) {
+        if (query == null || query.isBlank()) {
+            throw new BizException(ErrorCode.BAD_REQUEST, "工作流入参不能为空");
+        }
+        long tenantId = tenantProvider.currentTenantId();
+        WorkflowDef def = requireDef(workflowId, tenantId);
+        WorkflowRelease release = requireDefaultRelease(def);
+
+        // 先查未结束 run：命中就不建第二条，也不消耗一次调度
+        Optional<WorkflowRun> active = runs.findActiveByWorkbenchSession(workflowId, sessionId);
+        if (active.isPresent()) {
+            WorkflowRun existing = active.get();
+            if (WorkflowRunStatus.parse(existing.getStatus()) == WorkflowRunStatus.PAUSED_HUMAN) {
+                // 顺带做一次懒超时结算：到期策略可能已经把它推到终态，用户这轮就能看到结果
+                humanTaskService.resolveExpired(existing);
+                existing = runs.findById(existing.getId()).orElse(existing);
+            }
+            return new WorkflowWorkbenchOutcome(existing, true);
+        }
+
+        // 建 run 前先确认图可执行，避免留下「已创建但永远动不了」的脏实例
+        WorkflowGraph graph = codec.parse(release.getGraphJson());
+        WorkflowRuntimeGraph runtime = WorkflowRuntimeGraph.of(graph);
+        int nodeRunsCap = properties.effectiveMaxNodeRunsPerRun();
+        if (runtime.nodes().size() > nodeRunsCap) {
+            throw new BizException(ErrorCode.BAD_REQUEST,
+                    "该图有 " + runtime.nodes().size() + " 个节点，超过单次运行上限 " + nodeRunsCap
+                            + "（agenthub.workflow.max-node-runs-per-run）；请拆分工作流");
+        }
+
+        ObjectNode input = json.createObjectNode();
+        input.put("query", query.trim());
+        WorkflowRun run = new WorkflowRun();
+        run.setTenantId(tenantId);
+        run.setWorkflowId(def.getId());
+        run.setReleaseId(release.getId());
+        run.setReleaseVersion(release.getVersion());
+        run.setFingerprint(release.getFingerprint());
+        run.setStatus(WorkflowRunStatus.CREATED.name());
+        run.setTriggerType(WorkflowTriggerType.WORKBENCH.name());
+        run.setTriggeredBy(userId);
+        run.setWorkbenchSessionId(sessionId);
+        run.setInputJson(input.toString());
+        // 发布快照原文拷贝进 run：之后再发布不影响本实例
+        run.setGraphJson(release.getGraphJson());
+        run.setStartTime(LocalDateTime.now());
+        run.setCreatedBy(userId);
+        Long runId = runs.insert(run);
+        run.setId(runId);
+        nodeRuns.insertBatch(pendingRows(runId, runtime));
+
+        operLogWriter.write("workflow", "run_workbench", "workflow_run", String.valueOf(runId),
+                "工作台运行工作流 code=" + def.getCode() + " release=" + release.getId()
+                        + " session=" + sessionId);
+        executeSafely(run, userId);
+        WorkflowRun fresh = runs.findById(runId).orElse(run);
+        return new WorkflowWorkbenchOutcome(fresh, false);
+    }
+
+    /**
+     * 工作台入口的引擎调用：意外异常时把 run 收成 FAILED，避免留下永久 RUNNING 的实例。
+     *
+     * <p>正常失败（节点失败、墙钟、撞限）由引擎自己落终态；这里只兜「引擎本身抛异常」
+     * 这种极小概率情况。收口失败（并发已被别人改写）只记日志，以库里的状态为准。
+     *
+     * @param run        已落库的 run
+     * @param userId     操作人（会话归属人）
+     */
+    private void executeSafely(WorkflowRun run, long userId) {
+        try {
+            engine.execute(run, userId);
+        } catch (RuntimeException ex) {
+            log.warn("工作台工作流执行异常 runId={} type={}", run.getId(), ex.getClass().getSimpleName(), ex);
+            WorkflowRunStatus current = WorkflowRunStatus.parse(run.getStatus());
+            if (current != null && !current.terminal()) {
+                runs.updateStatusIfMatches(run.getId(), current.name(), WorkflowRunStatus.FAILED.name(),
+                        UserFacingText.safeMessage(ex, "工作流运行失败"), null, LocalDateTime.now(), userId);
+            }
+        }
+    }
+
+    /**
+     * 工作台只跑默认发布指针：未发布 / 指针缺失都明确拒绝，绝不回落到草稿。
+     *
+     * @param def 已校验归属的定义
+     * @return 默认发布版本
+     * @throws BizException 尚未发布，或默认发布记录缺失
+     */
+    private WorkflowRelease requireDefaultRelease(WorkflowDef def) {
+        if (def.getDefaultReleaseId() == null) {
+            throw new BizException(ErrorCode.BAD_REQUEST,
+                    "工作流「" + def.getName() + "」尚未发布，对话只能运行已发布版本");
+        }
+        return releases.findById(def.getDefaultReleaseId())
+                .orElseThrow(() -> new BizException(ErrorCode.NOT_FOUND, "默认发布版本记录缺失，请重新发布"));
     }
 
     /**

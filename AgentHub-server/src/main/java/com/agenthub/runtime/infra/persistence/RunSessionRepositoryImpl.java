@@ -2,6 +2,7 @@ package com.agenthub.runtime.infra.persistence;
 
 import com.agenthub.common.api.PageQuery;
 import com.agenthub.common.api.PageResult;
+import com.agenthub.runtime.domain.model.EntryChannel;
 import com.agenthub.runtime.domain.model.RunSession;
 import com.agenthub.runtime.domain.model.RunStatus;
 import com.agenthub.runtime.domain.model.SessionQuery;
@@ -53,6 +54,10 @@ public class RunSessionRepositoryImpl implements RunSessionRepository {
         if (query.getMaId() != null) {
             wrapper.eq(RunSessionEntity::getMaDefId, query.getMaId());
         }
+        // 入口渠道隔离：工作台与调试左栏各查各的，避免同一条会话出现在两处
+        if (query.getEntryChannel() != null && !query.getEntryChannel().isBlank()) {
+            wrapper.eq(RunSessionEntity::getEntryChannel, EntryChannel.normalize(query.getEntryChannel()));
+        }
         // 调用追踪左栏：标题与预览都参与模糊匹配，纯数字同时能点中会话 id。试跑不传 keyword
         if (query.getKeyword() != null && !query.getKeyword().isBlank()) {
             String keyword = query.getKeyword().trim();
@@ -103,6 +108,11 @@ public class RunSessionRepositoryImpl implements RunSessionRepository {
         RunSessionEntity entity = new RunSessionEntity();
         entity.setAgentId(session.getAgentId());
         entity.setMaDefId(session.getMaDefId());
+        // 渠道空值回落 DEBUG：调试入口的历史调用方不用逐个补参数
+        entity.setEntryChannel(EntryChannel.normalize(session.getEntryChannel()));
+        entity.setReceptionMaId(session.getReceptionMaId());
+        entity.setStickyRouteKey(session.getStickyRouteKey());
+        entity.setStickyAgentId(session.getStickyAgentId());
         entity.setRunMode(session.getRunMode());
         entity.setUserId(session.getUserId());
         entity.setStatus(session.getStatus());
@@ -180,6 +190,18 @@ public class RunSessionRepositoryImpl implements RunSessionRepository {
 
     /** {@inheritDoc} */
     @Override
+    public void updateStickyRoute(Long id, String routeKey, Long agentId, Long operatorId) {
+        // 显式 set null：清空多意图轮留下的线路，不能靠实体更新策略（它会跳过 null）
+        mapper.update(null, new LambdaUpdateWrapper<RunSessionEntity>()
+                .eq(RunSessionEntity::getId, id)
+                .set(RunSessionEntity::getStickyRouteKey, routeKey)
+                .set(RunSessionEntity::getStickyAgentId, agentId)
+                .set(RunSessionEntity::getUpdatedBy, operatorId)
+                .set(RunSessionEntity::getUpdateTime, LocalDateTime.now()));
+    }
+
+    /** {@inheritDoc} */
+    @Override
     public void resetMessages(Long id, Long operatorId) {
         // UpdateWrapper 会把 end_time 写成 NULL。实体更新策略会跳过 null，所以不走实体。
         mapper.update(null, new LambdaUpdateWrapper<RunSessionEntity>()
@@ -196,6 +218,32 @@ public class RunSessionRepositoryImpl implements RunSessionRepository {
     @Override
     public void logicDelete(Long id) {
         mapper.deleteById(id);
+    }
+
+    /**
+     * {@inheritDoc}
+     * WHERE 同时卡住 status 与 update_time：启动扫描和正在跑的新请求可能交错，
+     * 只有「扫到之后这行没再被推进」才允许收成取消。
+     */
+    @Override
+    public boolean interruptIfUnchanged(Long id, LocalDateTime expectedUpdateTime, LocalDateTime endedAt) {
+        if (id == null || endedAt == null) {
+            return false;
+        }
+        LambdaUpdateWrapper<RunSessionEntity> wrapper = new LambdaUpdateWrapper<RunSessionEntity>()
+                .eq(RunSessionEntity::getId, id)
+                .eq(RunSessionEntity::getStatus, RunStatus.RUNNING.name())
+                .set(RunSessionEntity::getStatus, RunStatus.CANCELLED.name())
+                .set(RunSessionEntity::getEndTime, endedAt)
+                .set(RunSessionEntity::getUpdatedBy, 0L)
+                .set(RunSessionEntity::getUpdateTime, endedAt);
+        // 读到的更新时间为空时必须用 IS NULL，eq(null) 在 SQL 里对不上
+        if (expectedUpdateTime == null) {
+            wrapper.isNull(RunSessionEntity::getUpdateTime);
+        } else {
+            wrapper.eq(RunSessionEntity::getUpdateTime, expectedUpdateTime);
+        }
+        return mapper.update(null, wrapper) > 0;
     }
 
     /**
@@ -217,6 +265,10 @@ public class RunSessionRepositoryImpl implements RunSessionRepository {
         session.setId(entity.getId());
         session.setAgentId(entity.getAgentId());
         session.setMaDefId(entity.getMaDefId());
+        session.setEntryChannel(entity.getEntryChannel());
+        session.setReceptionMaId(entity.getReceptionMaId());
+        session.setStickyRouteKey(entity.getStickyRouteKey());
+        session.setStickyAgentId(entity.getStickyAgentId());
         session.setRunMode(entity.getRunMode());
         session.setUserId(entity.getUserId());
         session.setStatus(entity.getStatus());

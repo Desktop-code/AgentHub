@@ -1,5 +1,10 @@
 <template>
-  <div class="trial" :class="variant">
+  <!--
+    工作台是独立入口（无 Agent / 方案归属），状态与请求在 useWorkbenchChat；
+    本组件只做分支，调试三态（page / drawer / ma）的模板与行为完全不动。
+  -->
+  <WorkbenchChat v-if="variant === 'workbench'" />
+  <div v-else class="trial" :class="variant">
     <section v-if="variant === 'page'" class="picker-bar">
       <el-select v-model="pickedId" filterable placeholder="选择启用中的 Agent" class="agent-select">
         <el-option v-for="item in agents" :key="item.id" :label="item.name" :value="item.id" />
@@ -29,6 +34,7 @@
         :groups="historyGroups"
         :active-id="session?.id"
         :owner-id="ownerId"
+        :can-create="!!ownerId"
         :can-run="canRun"
         :session="session"
         :sending="sending"
@@ -222,14 +228,19 @@ import { useMaTurnTraces } from '@/composables/useMaTurnTraces'
 import { useUserStore } from '@/stores/user'
 import TrialChildPlanBar from '@/components/runtime/trial/TrialChildPlanBar.vue'
 import TrialSessionList from '@/components/runtime/trial/TrialSessionList.vue'
+import WorkbenchChat from '@/components/runtime/workbench/WorkbenchChat.vue'
 import type { SessionGroup } from '@/components/runtime/trial/sessionGroup'
 import { groupSessionsByDay, parseSessionTime } from '@/components/runtime/trial/sessionGroup'
+import { rowShowsSpinner, sessionStillRunning, shouldResumeTurn } from '@/components/runtime/sessionProgress'
 import type { ChatTurn, TrialAgent, TrialEvent, TrialPlanView, TrialSession } from '@/types/runtime'
 
 const props = withDefaults(
   defineProps<{
-    /** page：整页试跑；drawer：管理页右侧抽屉；ma：多智能体运行页三栏 */
-    variant?: 'page' | 'drawer' | 'ma'
+    /**
+     * page：整页试跑；drawer：管理页右侧抽屉；ma：多智能体运行页三栏；
+     * workbench：工作台正式对话（无归属，只做分支，逻辑在 WorkbenchChat）
+     */
+    variant?: 'page' | 'drawer' | 'ma' | 'workbench'
     /** 抽屉由外部指定当前 Agent；整页只当作初始选中 */
     agentId?: number
     runMode?: string
@@ -517,12 +528,13 @@ const historyGroups = computed(() => {
 
 /**
  * 该行是否显示「执行中」转圈。
- * 依据模块级 running 集合（关面板、切会话都不丢），不看服务端 status：
- * 试跑会话多轮期间 status 一直是 RUNNING，拿它判断会让所有历史行都在转。
+ * 依据模块级 running 集合（关面板、切会话都不丢）。
+ * 不单凭服务端 status：试跑会话多轮期间 status 一直是 RUNNING，拿它判断会让所有历史行都在转。
+ * 终态再挡一层：重启收口后的取消会话不再转。
  * @param item 左栏会话
  */
 function isRowRunning(item: TrialSession) {
-  return !isTempSession(item) && isTurnRunning(item.id)
+  return rowShowsSpinner(item.status, isTurnRunning(item.id), isTempSession(item))
 }
 
 /**
@@ -1353,8 +1365,9 @@ async function openHistory(id: number, force = false) {
     }
     // 用已取到的事件补齐标题/轮次，避免续订期间左栏仍是「新对话」且被当成空壳
     syncSessionFromEvents(events)
-    // 有内存增量 = 这一轮确实在跑且能看到过程：直接进续订，第一拍就是最新内容
-    if (fetched.live && events.length) {
+    // 有内存增量 = 这一轮确实在跑且能看到过程：直接进续订，第一拍就是最新内容。
+    // 终态不再续，避免重启收口后的旧会话一直显示进行中
+    if (fetched.live && events.length && sessionStillRunning(progressStatus(id))) {
       // 增量比刷新前的快照新，必须用它首发，不能保留旧快照
       beginResume(id, events, false, true)
       return
@@ -1504,7 +1517,22 @@ async function attachSessionMeta(id: number) {
 }
 
 /**
- * 重进后是否要续订。两种情况都要：
+ * 续订判定用的状态。列表行优先，避免本地壳还停在 RUNNING 时盖掉服务端终态。
+ * @param id 会话主键
+ */
+function progressStatus(id: number): string | undefined {
+  const listed = history.value.find((item) => item.id === id)
+  if (listed?.status) {
+    return listed.status
+  }
+  if (session.value?.id === id) {
+    return session.value.status
+  }
+  return undefined
+}
+
+/**
+ * 重进后是否要续订。终态不续。其余两种情况仍要：
  * 1. 已有事件且末尾不是助手正文/失败说明 —— 本轮还在跑；
  * 2. 事件为空但会话是刚建的 —— USER 事件可能还没入库，属于本轮刚开始的极短窗口。
  * 历史僵尸 RUNNING（末尾事件很久以前）不续订，避免每次重进都白转一圈。
@@ -1512,18 +1540,17 @@ async function attachSessionMeta(id: number) {
  * @param events 刚拉到的事件
  */
 function shouldResume(id: number, events: TrialEvent[]) {
-  if (hasOpenTurn(events)) {
-    return !openTurnStale(events, RESUME_FRESH_MS)
-  }
-  if (events.length) {
-    return false
-  }
   const current = session.value
-  if (!current || current.id !== id) {
-    return false
-  }
-  const stamp = parseSessionTime(current.startTime || current.updateTime)
-  return stamp > 0 && Date.now() - stamp <= PENDING_FIRST_EVENT_MS
+  const same = !!current && current.id === id
+  return shouldResumeTurn({
+    status: progressStatus(id),
+    open: hasOpenTurn(events),
+    stale: openTurnStale(events, RESUME_FRESH_MS),
+    hasEvents: events.length > 0,
+    pendingMs: PENDING_FIRST_EVENT_MS,
+    sessionStamp: same ? parseSessionTime(current?.startTime || current?.updateTime) : 0,
+    sameSession: same
+  })
 }
 
 /**

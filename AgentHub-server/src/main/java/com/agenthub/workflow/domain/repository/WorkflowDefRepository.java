@@ -4,6 +4,7 @@ import com.agenthub.common.api.PageResult;
 import com.agenthub.workflow.domain.model.WorkflowDef;
 import com.agenthub.workflow.domain.model.WorkflowDefQuery;
 
+import java.util.List;
 import java.util.Optional;
 
 /**
@@ -75,4 +76,16 @@ public interface WorkflowDefRepository {
      * @return 影响行数；0 表示不存在或跨租户
      */
     int softDelete(Long id, long tenantId, Long operatorId);
+
+    /**
+     * 可作为路由目标的工作流：未删除、已发布（HAS_RELEASE 且有默认发布指针）、说明非空。
+     *
+     * <p>只给「默认接待 / 方案路由池」的下拉与装载用，不代表全部工作流；
+     * 草稿-only、无默认发布、空说明的定义一律不返回（它们不能被路由到）。
+     *
+     * @param tenantId 当前租户
+     * @param limit    条数上限（实现方钳制）
+     * @return 按 id 倒序的定义列表；没有为空列表
+     */
+    List<WorkflowDef> listRoutable(long tenantId, int limit);
 }

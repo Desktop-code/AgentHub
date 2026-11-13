@@ -52,6 +52,16 @@ public interface AgentDefRepository {
     boolean existsByCode(String code, Long excludeId);
 
     /**
+     * 可被编排挂为子专家的启用 Agent（REACT / PLAN_AND_EXECUTE，allow_orchestrated=1）。
+     *
+     * <p>用于默认接待的「添加子 Agent」下拉：先把库层能当子集的都取出来，
+     * 应用层再剔除已挂到任一套方案的 Agent。ROUTER / 停用 / 软删不在结果里。
+     *
+     * @return 候选子 Agent；按 id 倒序（新建的在前）
+     */
+    List<AgentDef> listOrchestrable();
+
+    /**
      * @param agent      新定义
      * @param operatorId 创建人
      * @return 新主键

@@ -6,7 +6,8 @@
   <div class="l3-form">
     <!-- 未挂模板 / 未选模板时的提示：本组件不提供任何「整段覆盖 L2」的自由大文本框 -->
     <p class="l3-lead">
-      选定平台已发布的用途模板后，仅「可覆盖段落」可在此填写业务要求；锁定段由平台维护，运行时原样注入。
+      本 Agent 默认钉住平台当前生效的用途模板（已选版本即钉死，平台发新版只提示、不静默升级）。
+      仅「可覆盖段落」与「追加要求」可改；锁定段由平台维护，运行时原样注入。
     </p>
 
     <!-- MEMORY 的运行时口径与页面预览不同：只认平台生效模板的锁定段，模板版本/段覆盖不参与抽取 -->
@@ -348,6 +349,10 @@ function shorten(text: string) {
 
 /**
  * 拉该用途的可发布版本。失败时清空下拉并提示，不让用户对着空列表猜原因。
+ * <p>
+ * 拉完后若当前还没选模板，自动钉住该用途当前生效版本：新建 / 存量未挂模板打开弹窗时
+ * 进来就是「已选模板 + 可覆盖段 + 追加」的 L3 绑定态，而不是空的「未配置提示词模板」。
+ * 这里只在只读态之外补默认，避免只读浏览顺手改到父级表单。
  */
 async function loadOptions() {
   if (!props.purpose) {
@@ -358,11 +363,32 @@ async function loadOptions() {
   try {
     const { data } = await listPromptTemplates({ purpose: props.purpose, locale: props.locale || 'zh-CN' })
     options.value = data.data || []
+    await pinDefaultIfAbsent()
   } catch {
     options.value = []
   } finally {
     loadingOptions.value = false
   }
+}
+
+/**
+ * 未选模板时补钉平台生效版本。
+ * <p>
+ * 判定与后端 {@code AgentPromptTemplatePort#defaultOption} 同源：取已发布列表里
+ * {@code isActive=1} 的那条；没有生效版本就保持未选（该用途确实没模板，交给保存时报错）。
+ * 只在「本来就没选」时补一次，用户换模板后不会被反复覆盖。
+ */
+async function pinDefaultIfAbsent() {
+  if (props.disabled || props.draft.templateId) {
+    return
+  }
+  const active = options.value.find((item) => item.isActive === 1)
+  if (!active) {
+    return
+  }
+  emit('update:templateId', active.id)
+  emit('update:templateVersion', active.version)
+  await loadView(active.id)
 }
 
 /**

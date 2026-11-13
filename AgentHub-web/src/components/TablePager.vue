@@ -1,6 +1,26 @@
 <template>
   <div class="table-pager" :class="`is-${mode}`">
+    <!-- 网格底栏：左总数（数字加粗）+ 右方块分页，space-between -->
+    <template v-if="isGrid">
+      <span v-if="gridTotalParts" class="pager-total">
+        共 <strong>{{ gridTotalParts.n }}</strong> {{ gridTotalParts.rest }}
+      </span>
+      <span v-else-if="totalText" class="pager-total">{{ totalText }}</span>
+      <span v-else class="pager-total">共 <strong>{{ total }}</strong> 条</span>
+      <el-pagination
+        v-if="gridPagerLayout"
+        :current-page="current"
+        :page-size="size"
+        :total="total"
+        :layout="gridPagerLayout"
+        :small="small"
+        :background="true"
+        @update:current-page="onCurrentChange"
+      />
+    </template>
+    <!-- 表格底栏：完整分页，行为不变 -->
     <el-pagination
+      v-else
       :current-page="current"
       :page-size="size"
       :page-sizes="pageSizes"
@@ -10,12 +30,7 @@
       :background="background"
       @update:current-page="onCurrentChange"
       @update:page-size="onSizeChange"
-    >
-      <!-- 网格模式：用业务总数文案（共 N 个智能体…）取代内置「共 x 条」；表格模式不渲染此插槽 -->
-      <template v-if="isGrid && totalText" #default>
-        <span class="pager-total">{{ totalText }}</span>
-      </template>
-    </el-pagination>
+    />
   </div>
 </template>
 
@@ -23,18 +38,16 @@
 /**
  * 分页底栏。所属域：前端壳。
  *
- * 两种模式严格分开，禁止互相渗透（上轮教训：精简规则误伤表格）：
- * - `table`（默认，表格 / 列表视图）：完整分页 —— 总数 + 每页条数 + 页码 + 跳页，
- *   pageSize 由调用方在 10/20/50/100 里选，不做任何一屏容量推算。
- * - `grid`（卡片墙）：精简底栏 —— 「共 N 个{对象}」常显，页码仅多页时出现，
- *   不出现 sizes / jumper；pageSize 由 `useGridPageSize` 一屏容量实测写入。
+ * 两种模式严格分开，禁止互相渗透：
+ * - `table`（默认）：完整分页 —— 总数 + 每页条数 + 页码 + 跳页。
+ * - `grid`（卡片墙）：全宽 Footer，左「共 N 个…」（数字加粗）、右方块分页（background）；
+ *   页码仅多页时出现；不出现 sizes / jumper。
  *
  * 约束：
- * 1. 不持有分页状态，页码与每页条数由调用方 reactive 对象保管（v-model:current / v-model:size）。
- * 2. 只在「用户操作」时抛 change，父组件主动改页码（如查询回第一页）不会再触发一次请求。
- * 3. 切每页条数时页码归一到第 1 页；Element Plus 随后可能同步纠正页码并发 current-change，
- *    用一次性标记吞掉那次事件，保证一次操作只请求一次。
- * 4. grid 模式下 size 是只读结果（由一屏容量决定），故 sizes 选择器必须剔除。
+ * 1. 不持有分页状态，页码与每页条数由调用方保管。
+ * 2. 只在「用户操作」时抛 change。
+ * 3. 切每页条数时页码归一到第 1 页；用一次性标记吞掉 Element Plus 纠正事件。
+ * 4. grid 模式下 size 只读（一屏容量），故无 sizes 选择器。
  */
 import { computed } from 'vue'
 import {
@@ -64,11 +77,11 @@ const props = withDefaults(
     layout?: string
     /** 紧凑模式，用于卡片或抽屉内的窄分页 */
     small?: boolean
-    /** 页码是否带底色 */
+    /** 页码是否带底色；table 默认 false；grid 默认 true（可显式关掉） */
     background?: boolean
     /**
      * 业务总数文案；仅 grid 模式渲染（如「共 12 个智能体」）。
-     * table 模式传了也忽略，避免表格被换成业务口径。
+     * table 模式传了也忽略。
      */
     totalText?: string
     /**
@@ -89,24 +102,38 @@ const props = withDefaults(
 )
 
 const emit = defineEmits<{
-  /** 页码双向绑定 */
   (e: 'update:current', current: number): void
-  /** 每页条数双向绑定 */
   (e: 'update:size', size: number): void
-  /** 用户翻页或切每页条数后通知调用方重新请求（状态已同步） */
   (e: 'change'): void
 }>()
 
-/** 是否网格卡片墙的精简底栏 */
 const isGrid = computed(() => props.mode === 'grid')
 
-/** 总页数；至少 1，供「仅一页」判断使用 */
 const pageCount = computed(() => pagerPageCount(props.total, props.size))
 
 /**
- * 实际交给 Element Plus 的布局串。
- * table 恒为完整分页（补齐 sizes / jumper）；grid 走精简规则（剔除 sizes / jumper）。
+ * 解析「共 N 个智能体」→ 数字加粗；解析失败则整段灰字展示。
  */
+const gridTotalParts = computed(() => {
+  const matched = props.totalText.match(/^共\s*(\d+)\s*(.*)$/)
+  if (!matched) {
+    return null
+  }
+  return { n: matched[1], rest: matched[2] }
+})
+
+/** 网格页码：单页时不渲染；多页时仅 prev/pager/next */
+const gridPagerLayout = computed(() => {
+  if (props.pagerOnMultiPageOnly && pageCount.value <= 1) {
+    return ''
+  }
+  if (pageCount.value <= 1) {
+    return ''
+  }
+  return 'prev, pager, next'
+})
+
+/** 表格模式布局串 */
 const resolvedLayout = computed(() =>
   resolvePagerLayout({
     mode: props.mode,
@@ -116,7 +143,6 @@ const resolvedLayout = computed(() =>
   })
 )
 
-/** 切每页条数时置位，用于吞掉 Element Plus 紧随其后的页码纠正事件 */
 let absorbNextCurrent = false
 
 /**
@@ -136,8 +162,7 @@ function onCurrentChange(next: number) {
 }
 
 /**
- * 每页条数变化：先回第 1 页再请求一次；同一次点击内的页码纠正事件被忽略。
- * grid 模式下没有 sizes 选择器，本函数不会被触发。
+ * 每页条数变化：先回第 1 页再请求一次。
  *
  * @param next 目标每页条数
  */
@@ -149,7 +174,6 @@ function onSizeChange(next: number) {
   emit('update:size', next)
   emit('update:current', 1)
   emit('change')
-  // 标记只在本次点击的同步链路里有效，微任务后复位，避免影响后续翻页
   queueMicrotask(() => {
     absorbNextCurrent = false
   })
@@ -163,11 +187,25 @@ function onSizeChange(next: number) {
   margin-top: 12px;
 }
 
-/* 业务总数文案：与 Element Plus 内置「共 x 条」同字号同灰度（仅 grid 模式出现） */
+/* 网格卡片墙：全宽 Footer，顶部分割线，左右分布 */
+.table-pager.is-grid {
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  margin-top: 24px;
+  padding-top: 16px;
+  border-top: 1px solid var(--ah-border-soft, #f2f6fc);
+}
+
 .pager-total {
-  margin-right: 8px;
   color: var(--ah-text-secondary, #909399);
   font-size: 13px;
   line-height: 32px;
+  white-space: nowrap;
+}
+
+.pager-total strong {
+  color: var(--ah-text, #303133);
+  font-weight: 650;
 }
 </style>

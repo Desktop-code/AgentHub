@@ -77,6 +77,14 @@ springdoc:
     path: /swagger-ui.html
 
 agenthub:
+  avatar:
+    # 用户头像落盘根目录（相对进程工作目录）；文件不进 git，见 .gitignore 的 /data/
+    storage:
+      dir: ${AGENTHUB_AVATAR_DIR:./data/avatars}
+  agent-avatar:
+    # Agent 自定义形象落盘根目录；与用户头像目录分开，URL 前缀 /uploads/agent-avatars/
+    storage:
+      dir: ${AGENTHUB_AGENT_AVATAR_DIR:./data/agent-avatars}
   workspace:
     # 会话级文件工具（workspaceWriteFile / ReadFile / ListFiles）的落盘根目录，每个会话在其下建一级子目录。
     # 默认 ./workspace-test：相对路径按进程工作目录解析（项目内），本地开发可直接查看落盘文件，该目录已 gitignore。

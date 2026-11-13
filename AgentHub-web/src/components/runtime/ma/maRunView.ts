@@ -14,6 +14,7 @@ import type { ObsSpan } from '@/types/obs'
 import type { AssistantBlock, ChatTurn } from '@/types/runtime'
 import type { TimelineCardStatus } from '@/components/runtime/routerTimeline'
 import { processLanes } from '@/components/runtime/trialMessages'
+import { looksLikeRouteMachineJson } from '@/components/runtime/workbench/workbenchMessageMeta'
 import {
   LANE_TEMPLATE_COMPETE,
   LANE_TEMPLATE_FIXED_PARALLEL,
@@ -279,6 +280,23 @@ function compact(text: string): string {
 const SUMMARY_MAX = 600
 
 /**
+ * 决策泳道正文 → 卡片摘要。
+ *
+ * <p>决策泳道正文可能是机器 JSON（历史会话）或人话决策句（新数据）。机器 JSON 绝不能
+ * 当卡片摘要展示：它只用于分流与观测，展示层只保留「判定出几个意图」这条事实。
+ *
+ * @param body 决策泳道正文
+ * @return 可展示摘要；无法识别时退回通用清洗
+ */
+function decisionSummaryOf(body: string): string {
+  if (looksLikeRouteMachineJson(body)) {
+    const items = (body.match(/"sub_query"|"subQuery"/g) || []).length
+    return items > 0 ? `已判定 ${items} 个意图` : '已完成路由判定'
+  }
+  return summaryText(body)
+}
+
+/**
  * 卡片摘要清洗：去掉 Markdown 标题 / 加粗 / 行内代码等标记，截断到 {@link SUMMARY_MAX}。
  *
  * <p>只用于中栏「卡片摘要」（路由卡命中名单、兜底摘要）。模型回答正文不走这里，
@@ -297,8 +315,7 @@ function summaryText(text: string): string {
 }
 
 /** 取助手终答全文（可能多块）；中栏「模型回答」正文直接渲染它 */
-function answerOf(turn?: ChatTurn): string {
-  if (!turn) {
+function answerOf(turn?: ChatTurn): string {  if (!turn) {
     return ''
   }
   return turn.blocks
@@ -666,7 +683,7 @@ function cardsFromBlocks(group: MaRunGroup, now: number): MaRunCard[] {
   const routeSummary = agentTitles.length
     ? fallbackRouterSummary(agentTitles, turn.blocks)
     : decision?.body
-      ? summaryText(decision.body)
+      ? decisionSummaryOf(decision.body)
       : phaseText(turn.phase)
   cards.unshift({
     key: `${turn.key}:router`,

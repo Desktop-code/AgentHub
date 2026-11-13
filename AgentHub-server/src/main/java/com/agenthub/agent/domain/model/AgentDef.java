@@ -15,6 +15,8 @@ public class AgentDef {
     private String name;
     private String code;
     private String description;
+    /** 形象配置 JSON：preset{icon,color} 或 custom{url}；空=未配置 */
+    private String avatarConfigJson;
     /** REACT 或 ROUTER */
     private String runMode;
     /**

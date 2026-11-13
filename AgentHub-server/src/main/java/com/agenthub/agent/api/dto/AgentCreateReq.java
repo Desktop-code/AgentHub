@@ -21,6 +21,9 @@ public class AgentCreateReq {
     @Size(max = 1000, message = "最长 1000")
     private String description;
 
+    /** 形象配置；可空 */
+    private AgentAvatarConfigDto avatarConfig;
+
     @Size(max = 32, message = "最长 32")
     private String runMode;
 

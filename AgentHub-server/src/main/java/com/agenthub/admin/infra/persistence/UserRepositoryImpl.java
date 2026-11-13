@@ -121,6 +121,17 @@ public class UserRepositoryImpl implements UserRepository {
 
     /** {@inheritDoc} */
     @Override
+    public void updateNicknameAndAvatar(Long id, String nickname, String avatarUrl, Long operatorId) {
+        // 显式 set avatar_url（含 null）才能把「清除头像」写回库
+        userMapper.update(null, new LambdaUpdateWrapper<SysUserEntity>()
+                .eq(SysUserEntity::getId, id)
+                .set(SysUserEntity::getNickname, nickname)
+                .set(SysUserEntity::getAvatarUrl, avatarUrl)
+                .set(SysUserEntity::getUpdatedBy, operatorId));
+    }
+
+    /** {@inheritDoc} */
+    @Override
     public void updatePassword(Long id, String passwordHash, Long operatorId) {
         userMapper.update(null, new LambdaUpdateWrapper<SysUserEntity>()
                 .eq(SysUserEntity::getId, id)
@@ -190,6 +201,7 @@ public class UserRepositoryImpl implements UserRepository {
         user.setNickname(entity.getNickname());
         user.setEmail(entity.getEmail());
         user.setPhone(entity.getPhone());
+        user.setAvatarUrl(entity.getAvatarUrl());
         user.setStatus(entity.getStatus());
         user.setPlatformAdmin(entity.getIsAdmin() != null && entity.getIsAdmin() == 1);
         // 域模型仍用 createTime / lastLoginTime；库列已是 create_time / last_login_time

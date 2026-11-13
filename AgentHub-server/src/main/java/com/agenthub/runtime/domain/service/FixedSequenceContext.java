@@ -5,11 +5,11 @@ import java.util.List;
 /**
  * 串行模板（FIXED_SEQUENCE / ROUTER_THEN_SEQUENCE）的前置摘要拼装。所属域：runtime。
  *
- * <p>职责：把「本步问题 + 第 1..k-1 步的终答摘要」拼成第 k 步子 Agent 的输入文本。
+ * <p>职责：把「本步问题 + 第 1..k-1 步的成文结论」拼成第 k 步子 Agent 的输入文本。
  * 本步问题在固定串行里是用户原问全文，在路由后串行里是判路由切给该子的 sub_query。
  * <p>关键约束：
  * <ul>
- *   <li>只取前置子 Agent 的<b>最终助手正文</b>，绝不带工具原始结果、思考过程或密钥；</li>
+ *   <li>只取前置专家的<b>成文结论</b>（助手终答正文），绝不带工具原始 JSON、思考过程或密钥；</li>
  *   <li>单步摘要硬顶 {@link #SINGLE_STEP_LIMIT} 字符，累计前置摘要硬顶 {@link #TOTAL_PRIOR_LIMIT} 字符，
  *       超限尾截断并追加省略号，避免一步步把上下文撑爆；</li>
  *   <li>本类纯函数、无 IO、无模型调用——本阶段不额外跑摘要 LLM；</li>
@@ -24,8 +24,8 @@ public final class FixedSequenceContext {
     /** 累计前置摘要的字符上限（按步骤顺序累加，超限后整体尾截断） */
     public static final int TOTAL_PRIOR_LIMIT = 6000;
 
-    /** 摘要区标题；固定文案，便于人读与排查 */
-    private static final String PRIOR_HEADER = "【前置步骤摘要】";
+    /** 结论区标题；固定文案，便于人读与排查。正文是成文结论，不是工具原文 */
+    private static final String PRIOR_HEADER = "【前置专家结论】";
 
     /** 失败步的占位句前缀 */
     public static final String FAILED_PLACEHOLDER = "（该步未完成）";
@@ -74,7 +74,7 @@ public final class FixedSequenceContext {
         StringBuilder text = new StringBuilder();
         // 标题用「本轮问题」而不是「用户原问」：固定串行是整段原问，路由后串行是判路由切给本步的子问
         text.append("本轮问题：\n").append(questionText).append("\n\n");
-        text.append(PRIOR_HEADER).append("（仅终答摘要，供衔接上下文；不要复述工具调用细节）\n");
+        text.append(PRIOR_HEADER).append("（前面专家已经写成的结论，可直接依据它继续；不要复述工具原文，也不要再去工作区查找）\n");
         text.append(priorText);
         return text.toString();
     }

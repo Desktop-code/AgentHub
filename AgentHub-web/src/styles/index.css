@@ -8,7 +8,7 @@
   --ah-primary: #635bff;
   --ah-primary-hover: #5146f5;
   --ah-primary-active: #4338ca;
-  --ah-bg: #f5f6fa;
+  --ah-bg: #f5f7fa;
   --ah-surface: #ffffff;
   --ah-text: #1f2937;
   --ah-text-secondary: #6b7280;
@@ -19,7 +19,8 @@
   --ah-input-fill: #f5f7fa;
   --ah-radius-lg: 8px;
   --ah-radius-md: 6px;
-  --ah-shadow: 0 2px 12px 0 rgba(0, 0, 0, 0.04);
+  /* 全局卡片轻阴影：去生硬描边后的分层感 */
+  --ah-shadow: 0 1px 3px rgba(0, 0, 0, 0.05);
   --ah-sidebar: 240px;
   --ah-sidebar-collapsed: 64px;
 
@@ -39,8 +40,8 @@
   --el-border-color-extra-light: #fafafa;
   --el-border-radius-base: 8px;
   --el-border-radius-small: 6px;
-  --el-bg-color-page: #f5f6fa;
-  --el-box-shadow-light: 0 2px 12px 0 rgba(0, 0, 0, 0.04);
+  --el-bg-color-page: #f5f7fa;
+  --el-box-shadow-light: 0 1px 3px rgba(0, 0, 0, 0.05);
 }
 
 html,
@@ -53,16 +54,17 @@ body,
   background: var(--ah-bg);
 }
 
-/* 主滚动容器有条时预留槽位，减轻宽度跳动（布局 .main 亦设 scrollbar-gutter） */
+/*
+ * 壳层独占视口滚动：侧栏与主区各自 overflow，禁止 body 再出整页双滚动条。
+ * 主滚动容器有条时预留槽位，减轻宽度跳动（布局 .main 亦设 scrollbar-gutter）。
+ */
+html,
+body {
+  overflow: hidden;
+}
+
 html {
   scrollbar-gutter: stable;
-  /*
-   * 视口永不横向滚动：控制台没有「横向翻页」的需求，
-   * 而悬浮层（tooltip / popover 等 teleport 到 body 的绝对定位元素）一旦算出超宽，
-   * 就会在窗口最底部冒出横向滚动条（如 Trace 页右上角放大按钮的 tooltip）。
-   * 纵向滚动仍发生在 .main 内部，不受影响。
-   */
-  overflow-x: hidden;
 }
 
 * {
@@ -108,7 +110,7 @@ html {
 
 /**
  * 控制台滚动发生在布局 .main，body 本身没有滚动条。
- * Element Plus 弹窗/MessageBox 锁屏仍会给 body 加 padding-right，顶栏（含右上角退出）会整页左移。
+ * Element Plus 弹窗/MessageBox 锁屏仍会给 body 加 padding-right，会导致壳层整页左右跳动。
  * 去掉这笔补偿，并在打开时锁住主区滚动，避免遮罩后背景仍可滚。
  */
 body.el-popup-parent--hidden {
@@ -145,8 +147,8 @@ body.el-popup-parent--hidden .main {
   margin-bottom: 16px;
   padding: 12px 16px;
   background: var(--ah-surface);
-  border: 1px solid var(--ah-border);
-  border-radius: var(--ah-radius-lg);
+  border: none;
+  border-radius: 8px;
   box-shadow: var(--ah-shadow);
   min-height: 56px;
   box-sizing: border-box;
@@ -249,14 +251,14 @@ body.el-popup-parent--hidden .main {
    单类名的覆盖统一加 :root 前缀：Element Plus 改按需引入后组件 CSS 晚于本文件加载，
    同权重会被它反压（卡片描边 / 内边距会悄悄回到默认值），提一层根选择器才稳 */
 :root .el-card {
-  --el-card-border-color: var(--ah-border);
-  border: 1px solid var(--ah-border);
+  --el-card-border-color: transparent;
+  border: none;
   border-radius: 8px;
-  box-shadow: 0 2px 12px 0 rgba(0, 0, 0, 0.04);
+  box-shadow: var(--ah-shadow);
 }
 
 :root .el-card.is-never-shadow {
-  box-shadow: 0 2px 12px 0 rgba(0, 0, 0, 0.04);
+  box-shadow: var(--ah-shadow);
 }
 
 :root .el-card__header {
@@ -265,9 +267,9 @@ body.el-popup-parent--hidden .main {
 }
 
 .table-card {
-  border: 1px solid var(--ah-border);
+  border: none;
   border-radius: 8px;
-  box-shadow: 0 2px 12px 0 rgba(0, 0, 0, 0.04);
+  box-shadow: var(--ah-shadow);
   max-width: 100%;
 }
 
@@ -360,35 +362,57 @@ body.el-popup-parent--hidden .main {
   box-shadow: 0 0 0 2px rgba(99, 91, 255, 0.2) !important;
 }
 
-/* ========== 业务区块 panel（多区块页共用弱边框） ========== */
+/* ========== 业务区块 panel（多区块页共用：无描边 + 轻阴影） ========== */
 .panel {
   margin-bottom: 16px;
   padding: 16px;
   background: var(--ah-surface);
-  border: 1px solid var(--ah-border);
+  border: none;
   border-radius: 8px;
-  box-shadow: 0 2px 12px 0 rgba(0, 0, 0, 0.04);
+  box-shadow: var(--ah-shadow);
 }
 
 .panel:last-of-type {
   margin-bottom: 0;
 }
 
-/* ========== 供应商 / 工具源一类小卡片 ========== */
+/* ========== 供应商 / 工具源一类小卡片（可点：仅 hover 轻上浮） ========== */
 .ah-tile,
 .page .grid > .card {
-  border: 1px solid var(--ah-border);
-  border-radius: 6px;
-  box-shadow: none;
-  transition: border-color 0.15s ease, background-color 0.15s ease;
+  border: none;
+  border-radius: 8px;
+  box-shadow: var(--ah-shadow);
+  transition: box-shadow 0.2s ease, transform 0.2s ease, background-color 0.15s ease;
 }
 
 .page .grid > .card:hover {
-  border-color: var(--ah-primary);
+  transform: translateY(-2px);
+  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.08);
 }
 
 .page .grid > .card.is-selected {
-  border-color: var(--ah-primary);
   background: #f4f3ff;
-  box-shadow: none;
+  box-shadow: 0 1px 3px rgba(99, 91, 255, 0.12);
+}
+
+
+/* ========== 长文本预览气泡（Tooltip） ========== */
+/*
+ * Element Plus 的 tooltip 默认不限宽，长简介会被拉成横贯整屏的一条，压住下面的卡片。
+ * 这里统一锁宽 + 允许换行；正文再限高自滚，超长文本只弹一块可读区域。
+ * popper 是 teleport 到 body 的，scoped 样式管不到，只能写全局类。
+ * 使用方：ClampText（Trace 长问题）、Agent / 模型 / 工具 / Skill 的卡片简介与备注。
+ */
+.clamp-tip.el-popper {
+  max-width: 320px;
+  padding: 8px 10px;
+}
+
+.clamp-tip__body {
+  max-height: 220px;
+  overflow-y: auto;
+  font-size: 12px;
+  line-height: 1.55;
+  white-space: pre-wrap;
+  word-break: break-word;
 }

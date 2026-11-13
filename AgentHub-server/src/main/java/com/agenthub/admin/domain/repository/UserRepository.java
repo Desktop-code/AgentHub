@@ -56,6 +56,16 @@ public interface UserRepository {
     void updateProfile(User user);
 
     /**
+     * 本人改显示名与头像。不碰部门、状态、邮箱、手机。
+     *
+     * @param id         用户 id（必须是本人）
+     * @param nickname   显示名
+     * @param avatarUrl  头像 URL；传 null 表示清除
+     * @param operatorId 操作者
+     */
+    void updateNicknameAndAvatar(Long id, String nickname, String avatarUrl, Long operatorId);
+
+    /**
      * @param id           用户 id
      * @param passwordHash BCrypt 哈希
      * @param operatorId   操作者，可空

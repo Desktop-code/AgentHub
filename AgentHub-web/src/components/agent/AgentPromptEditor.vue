@@ -21,8 +21,13 @@
     <template v-else>
       <div class="entry-row">
         <div class="entry-main">
-          <span class="entry-label">{{ bound ? boundLabel : '未配置提示词模板' }}</span>
+          <span class="entry-label" :class="{ 'is-pending': !bound }">
+            {{ bound ? boundLabel : pendingLabel }}
+          </span>
           <el-tag v-if="bound" size="small" effect="plain" type="success" class="entry-tag">已钉版本</el-tag>
+          <el-tag v-else-if="defaultOption" size="small" effect="plain" type="warning" class="entry-tag">
+            保存时自动绑定
+          </el-tag>
         </div>
         <el-button type="primary" plain size="small" :disabled="disabled" @click="openDialog">
           配置提示词
@@ -31,6 +36,19 @@
       <p class="entry-hint">
         模板锁定段由平台维护；可覆盖段落与追加要求在大弹窗中编辑，保存前可预览最终注入内容。
       </p>
+      <!-- 存量未挂模板：明确保存后会补钉默认模板、旧正文并入追加要求，避免用户以为还可继续「只写正文」 -->
+      <el-alert
+        v-if="!bound && hasLegacyText"
+        type="info"
+        :closable="false"
+        show-icon
+        class="legacy-note"
+      >
+        <template #title>
+          该 Agent 目前按旧「系统提示词」正文运行；保存后会钉住平台默认对话模板，
+          并把这段正文并入「追加要求」，无需手工迁移。
+        </template>
+      </el-alert>
     </template>
 
     <!-- 统一大弹窗：与非 CHAT 用途（模型槽 / 记忆页）同一个组件、同一套交互 -->
@@ -66,7 +84,8 @@
 import { computed, ref, watch } from 'vue'
 import PromptL3Dialog from '@/components/agent/PromptL3Dialog.vue'
 import { usePromptTemplateCatalog } from '@/composables/promptTemplateCatalog'
-import type { PromptBinding } from '@/types/agent'
+import { getDefaultPromptTemplate } from '@/api/agentPrompt'
+import type { PromptBinding, PromptTemplateOption } from '@/types/agent'
 import { checkUserPrompt } from '@/utils/promptSafety'
 
 const props = defineProps<{
@@ -109,16 +128,68 @@ const boundLabel = computed(() => {
   return version ? `${name} · v${version}` : name
 })
 
+/**
+ * 未挂模板时的摘要：显示「保存时会钉住哪条模板」。
+ * <p>
+ * 这里不再把「未配置提示词模板」当作新建默认态——新建 / 存量未挂模板保存时，
+ * 服务端会自动钉住该用途当前生效版本，页面必须提前把这条信息说清楚。
+ */
+const defaultOption = ref<PromptTemplateOption | null>(null)
+
+const pendingLabel = computed(() => {
+  const option = defaultOption.value
+  if (!option) {
+    return '平台还没有已发布的对话模板'
+  }
+  const name = option.name || option.templateKey || `模板 #${option.id}`
+  return `${name} · v${option.version}`
+})
+
+/** 是否还残留旧「业务提示词」正文（未挂模板时它是当前唯一提示词来源） */
+const hasLegacyText = computed(() => (props.modelValue || '').trim().length > 0)
+
+/**
+ * 拉平台该用途当前生效模板，供未绑定态展示「保存时会绑哪条」。
+ * <p>
+ * 与后端自动绑定同一口径（status=PUBLISHED + is_active=1）；失败按无默认处理，
+ * 不阻断页面——真正保存时后端会给出明确失败文案。
+ */
+async function loadDefaultOption() {
+  if (isRouterMode.value) {
+    defaultOption.value = null
+    return
+  }
+  try {
+    const { data } = await getDefaultPromptTemplate({ purpose: 'CHAT', locale: props.locale || 'zh-CN' })
+    defaultOption.value = data.data || null
+  } catch {
+    defaultOption.value = null
+  }
+}
+
 // 绑定变化（含外部回填、切 Agent）时确保名称已缓存，摘要不会显示上一个模板的名字
 watch(
   () => props.prompt?.templateId,
   async (id) => {
     if (!id) {
+      // 未绑定：展示「保存时会钉住哪条」，避免新建默认态看起来是空的
+      await loadDefaultOption()
       return
     }
     await ensureLoaded('CHAT', props.locale || 'zh-CN')
   },
   { immediate: true }
+)
+
+// 运行模式切换会改变「是否走 CHAT 绑定」：切到 Router 清空默认摘要，切回来重新拉
+watch(
+  () => props.runMode,
+  () => {
+    if (props.prompt?.templateId) {
+      return
+    }
+    void loadDefaultOption()
+  }
 )
 
 /** 打开大弹窗；弹窗内部自己读段落与预览 */
@@ -215,6 +286,16 @@ defineExpose({ reveal })
   font-weight: 600;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+/* 未绑定态：弱化颜色，明确「这是待自动绑定的默认值」而不是已生效配置 */
+.entry-label.is-pending {
+  color: var(--ah-text-secondary, #6b7280);
+  font-weight: 500;
+}
+
+.legacy-note {
+  margin-top: 8px;
 }
 
 .entry-tag {

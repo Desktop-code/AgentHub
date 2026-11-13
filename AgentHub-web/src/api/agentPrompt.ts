@@ -25,6 +25,17 @@ export function listPromptTemplates(params: { purpose: string; locale?: string }
   return request.get<Result<PromptTemplateOption[]>>('/api/agent/prompts/templates', { params })
 }
 
+/**
+ * 平台该用途**当前生效**的模板版本（即新建 Agent 默认钉住的那一条）。
+ * <p>
+ * 与后端自动绑定使用同一个判定口径（status=PUBLISHED 且 is_active=1），
+ * 前端不自己按 is_active 猜一套，避免「页面显示的默认」与「保存后钉住的」不一致。
+ * 无生效模板时 data 为空。
+ */
+export function getDefaultPromptTemplate(params: { purpose: string; locale?: string }) {
+  return request.get<Result<PromptTemplateOption | null>>('/api/agent/prompts/default', { params })
+}
+
 /** 钉死版（或待升级版）模板与段落；mutable=0 只读，=1 可覆盖。 */
 export function getPromptTemplate(id: number) {
   return request.get<Result<PromptTemplateView>>(`/api/agent/prompts/templates/${id}`)

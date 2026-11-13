@@ -164,7 +164,7 @@ const emit = defineEmits<{
  */
 const showPromptEntry = computed(() => purposeSupportsPromptEntry(props.purpose, props.promptSupported))
 
-const { ensureLoaded, promptTemplateName } = usePromptTemplateCatalog()
+const { ensureLoaded, promptTemplateName, promptTemplateDefault } = usePromptTemplateCatalog()
 
 // 槽内有绑定时确保模板名已缓存，摘要行才能显示「摘要模板 · v2」而不是 id
 watch(
@@ -178,18 +178,25 @@ watch(
 )
 
 /**
- * 摘要文案：与 CHAT 侧一致，已绑显示「模板名 · vN」，未绑显示「未配置提示词模板」。
+ * 摘要文案：与 CHAT 侧一致，已绑显示「模板名 · vN」；
+ * 未绑时显示「保存时会自动钉哪条」而不是空态的「未配置提示词模板」——
+ * 首次绑定该用途模型时后端会钉住平台生效版本，页面不该把它显示成「没有配置」。
  *
  * @param row 槽内主模型绑定行
  * @return 摘要文本
  */
 function promptSummary(row?: ModelBind) {
   if (!row) {
-    return '未配置提示词模板'
+    return '请先绑定该用途的模型'
   }
   const bound = row.prompt
   if (!bound?.templateId) {
-    return '未配置提示词模板'
+    const def = promptTemplateDefault(props.purpose)
+    if (!def) {
+      return '未绑定（该用途暂无生效模板）'
+    }
+    const defName = def.name || def.templateKey || `模板 #${def.id}`
+    return `未绑定 · 保存时自动钉「${defName} · v${def.version}」`
   }
   const version = bound.templateVersion
   const name = promptTemplateName(bound.templateId) || `模板 #${bound.templateId}`

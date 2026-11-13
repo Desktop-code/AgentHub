@@ -2,11 +2,30 @@
  * Agent 配置接口类型。所属域：agent。绑定行不包含模型 Key 或 Skill 正文。
  */
 
+/**
+ * Agent 形象配置。所属域：agent。
+ * <p>
+ * preset = 平台预置图 + 固定色板；custom = 本站上传图片。
+ * 与 `sys_user.avatar_url` 完全分开，互不读取。
+ */
+export interface AvatarConfig {
+  /** preset | custom；后端只认这两种 */
+  type: 'preset' | 'custom' | string
+  /** preset 时的预置键，如 look-guide */
+  icon?: string | null
+  /** preset 时的色板色值 */
+  color?: string | null
+  /** custom 时的本站相对 URL */
+  url?: string | null
+}
+
 export interface AgentCard {
   id: number
   name: string
   code: string
   description?: string
+  /** 形象配置；null 表示未配置 */
+  avatarConfig?: AvatarConfig | null
   runMode: string
   /** 是否允许被编排挂为子专家；ROUTER 恒为 false */
   allowOrchestrated?: boolean
@@ -18,14 +37,20 @@ export interface AgentCard {
  * 详情变更时回传的卡片字段子集。
  * 与左栏展示的列一一对应；外层用它原地修补列表行，
  * 避免为刷新一个名称而重置分页、让左栏滚回顶部。
+ * `avatarConfig` 一并回传：形象已改为即时落库，改完要立刻刷新卡片头像。
  */
-export type AgentCardPatch = Pick<AgentCard, 'id' | 'name' | 'code' | 'runMode' | 'status' | 'description' | 'updateTime'>
+export type AgentCardPatch = Pick<
+  AgentCard,
+  'id' | 'name' | 'code' | 'runMode' | 'status' | 'description' | 'avatarConfig' | 'updateTime'
+>
 
 export interface AgentDetail {
   id: number
   name: string
   code: string
   description?: string
+  /** 形象配置；null 表示未配置，前端用名称首字 + 默认色 */
+  avatarConfig?: AvatarConfig | null
   runMode: string
   /** 是否允许被编排挂为子专家；ROUTER 恒为 false（开关禁用且为关） */
   allowOrchestrated?: boolean
@@ -137,6 +162,8 @@ export interface AgentSave {
   name: string
   code: string
   description?: string
+  /** 形象配置；null/全空=清除为未配置 */
+  avatarConfig?: AvatarConfig | null
   runMode: string
   /** 允许被编排调用；未传按模式默认（ROUTER→false，其它→true），ROUTER 服务端强制 false */
   allowOrchestrated?: boolean

@@ -1,0 +1,9 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 80 80" fill="none">
+  <!-- 管家：服务铃 -->
+  <circle cx="40" cy="40" r="26" fill="#fff" fill-opacity=".16"/>
+  <path d="M27 47a13 13 0 0 1 26 0" stroke="#fff" stroke-width="3.4" stroke-opacity=".95" stroke-linecap="round"/>
+  <path d="M22.5 47h35" stroke="#fff" stroke-width="3.4" stroke-opacity=".95" stroke-linecap="round"/>
+  <path d="M30 55.5h20" stroke="#fff" stroke-width="3.2" stroke-opacity=".8" stroke-linecap="round"/>
+  <path d="M40 30v4" stroke="#fff" stroke-width="3" stroke-opacity=".95" stroke-linecap="round"/>
+  <circle cx="40" cy="27" r="3.2" fill="#fff" fill-opacity=".95"/>
+</svg>

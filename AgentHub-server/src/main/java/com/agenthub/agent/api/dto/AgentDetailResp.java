@@ -16,6 +16,8 @@ public class AgentDetailResp {
     private String name;
     private String code;
     private String description;
+    /** 形象配置；null 表示未配置，前端用名称首字 + 默认色 */
+    private AgentAvatarConfigDto avatarConfig;
     private String runMode;
     /**
      * 是否允许被编排挂为子专家。ROUTER 恒为 false（编排根不可作子），

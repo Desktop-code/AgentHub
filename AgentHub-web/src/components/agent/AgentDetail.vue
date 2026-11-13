@@ -26,125 +26,171 @@
       -->
       <el-tabs v-model="tab" class="tabs" :before-leave="beforeTabLeave">
         <el-tab-pane label="基本信息" name="basic">
-          <el-form label-width="96px">
-            <div class="basic-grid">
-              <el-form-item label="名称" required>
-                <el-input v-model="form.name" maxlength="64" :disabled="!canEdit" />
-              </el-form-item>
-              <el-form-item label="编码" required>
-                <el-input v-model="form.code" maxlength="64" :disabled="!canEdit" />
-              </el-form-item>
-              <el-form-item required>
-                <template #label>
-                  <span class="label-with-tip">
-                    运行模式
-                    <el-tooltip placement="top" :show-after="200">
-                      <template #content>
-                        <div class="run-mode-tip">
-                          <div><strong>ReAct</strong>：单 Agent 边推理边调用工具/技能，适合探索式、交互式任务。</div>
-                          <div><strong>Plan-Execute</strong>：先拆成有序计划再逐步执行，复杂多步骤更可控（可人工确认计划）。</div>
-                          <div><strong>Router</strong>：按意图分发给一层子 Agent，父节点只做路由，不直接跑工具链。</div>
-                        </div>
-                      </template>
-                      <el-icon class="tip-icon"><QuestionFilled /></el-icon>
-                    </el-tooltip>
-                  </span>
-                </template>
-                <el-radio-group
-                  v-model="form.runMode"
-                  class="run-mode-group"
-                  :disabled="!canEdit"
-                  @change="onRunModeChange"
-                >
-                  <el-radio-button value="REACT" class="is-react">ReAct</el-radio-button>
-                  <el-radio-button value="PLAN_AND_EXECUTE" class="is-plan">Plan-Execute</el-radio-button>
-                  <el-radio-button value="ROUTER" class="is-router">Router</el-radio-button>
-                </el-radio-group>
-              </el-form-item>
-              <el-form-item label="状态">
-                <el-switch
-                  :model-value="form.status === 1"
-                  :loading="statusSaving"
-                  :disabled="!canEnable || statusSaving"
-                  :before-change="beforeStatusChange"
-                  @change="onStatusChanged"
-                />
-              </el-form-item>
-              <!--
-                允许被编排调用：关掉后其它编排根无法把本 Agent 选为候选专家。
-                ROUTER 恒为关且禁用（编排根不可作子），与后端强制写 0 的口径一致。
-              -->
-              <el-form-item class="span-2" label="允许被编排调用">
-                <div class="allow-orch">
-                  <el-switch
-                    :model-value="form.runMode === 'ROUTER' ? false : form.allowOrchestrated !== false"
-                    :disabled="!canEdit || form.runMode === 'ROUTER'"
-                    @change="onAllowOrchestratedChange"
-                  />
-                  <span class="allow-orch__hint">
-                    {{ form.runMode === 'ROUTER'
-                      ? '编排根不可作为子专家'
-                      : '关闭后，其它编排根无法将本 Agent 选为候选专家' }}
-                  </span>
-                </div>
-              </el-form-item>
-              <el-form-item class="span-2" label="简介">
-                <el-input v-model="form.description" type="textarea" maxlength="1000" :rows="2" :disabled="!canEdit" />
-              </el-form-item>
-              <el-form-item class="span-2" label="系统提示词">
-                <AgentPromptEditor
-                  ref="promptEditor"
-                  v-model="form.systemPrompt"
-                  :prompt="form.prompt"
-                  :agent-name="form.name"
-                  :run-mode="form.runMode"
-                  :disabled="!canEdit"
-                  @update:prompt="onPromptChange"
-                />
-              </el-form-item>
-              <el-form-item class="span-2" label="备注">
-                <el-input v-model="form.remark" type="textarea" maxlength="500" :rows="2" :disabled="!canEdit" />
-              </el-form-item>
-            </div>
-          </el-form>
-          <el-alert
-            v-if="form.runMode !== 'ROUTER' && savedMode === 'ROUTER'"
-            title="当前按所选模式隐藏「编排」。保存后已有子路由仍会保留，改回 Router 后可见。"
-            type="info"
-            show-icon
-            :closable="false"
-          />
-          <el-alert
-            v-else-if="form.runMode === 'ROUTER' && savedMode !== 'ROUTER'"
-            title="Router 不展示工具/技能/记忆（已有绑定保留）。保存为 Router 后才能添加子 Agent。"
-            type="info"
-            show-icon
-            :closable="false"
-          />
-          <p v-else-if="savedMode !== 'ROUTER' && routeCount > 0" class="keep-note">
-            已保留 {{ routeCount }} 条子路由，切回 Router 后可见。
-          </p>
-        </el-tab-pane>
-
-        <el-tab-pane v-if="showOrchestrationTab" label="编排" name="orchestration">
           <!--
-            编排 Tab：产品化现网一层路由。候选 CRUD 走现网 /routes 接口；
-            策略字段写回 form.runtimeConfig，由页面底栏统一保存。
+            左右分栏：左侧主表单（flex:1），右侧身份卡（固定 280px，sticky）。
+            1024px 以下改单列，身份卡用 order:-1 提到表单上方。
           -->
-          <AgentOrchestrationPanel
-            :agent-id="agentId"
-            :agent-name="form.name"
-            :agent-status="form.status"
-            :config="form.runtimeConfig || {}"
-            :routes="routes"
-            :can-edit="canEdit"
-            :can-bind="canBind"
-            :saved-router="savedMode === 'ROUTER'"
-            :can-trial="canTrial"
-            @update:config="onOrchestrationConfig"
-            @routes-changed="onRoutesChanged"
-            @trial="onTalk"
-          />
+          <div class="basic-layout">
+            <div class="basic-main">
+              <el-form label-width="96px">
+                <!-- 名称 / 编码各占一半；下方表单项整行排列，保证 Label 严格左对齐 -->
+                <div class="name-code-row">
+                  <el-form-item label="名称" required>
+                    <el-input v-model="form.name" maxlength="64" :disabled="!canEdit" />
+                  </el-form-item>
+                  <el-form-item label="编码" required>
+                    <el-input v-model="form.code" maxlength="64" :disabled="!canEdit" />
+                  </el-form-item>
+                </div>
+                <el-form-item required>
+                  <template #label>
+                    <span class="label-with-tip">
+                      运行模式
+                      <el-tooltip placement="top" :show-after="200">
+                        <template #content>
+                          <div class="run-mode-tip">
+                            <div><strong>ReAct</strong>：单 Agent 边推理边调用工具/技能，适合探索式、交互式任务。</div>
+                            <div><strong>Plan-Execute</strong>：先拆成有序计划再逐步执行，复杂多步骤更可控（可人工确认计划）。</div>
+                          </div>
+                        </template>
+                        <el-icon class="tip-icon"><QuestionFilled /></el-icon>
+                      </el-tooltip>
+                    </span>
+                  </template>
+                  <!--
+                    本页只编辑单兵：Router 已迁到「多智能体」，不再提供该选项。
+                    历史 ROUTER 行（直链打开）只读展示身份，避免误改成单兵或形成无画布的孤立路由根。
+                  -->
+                  <el-tag v-if="savedMode === 'ROUTER'" type="warning" effect="plain">
+                    Router（多智能体方案主控，请到「多智能体」维护）
+                  </el-tag>
+                  <el-radio-group
+                    v-else
+                    v-model="form.runMode"
+                    class="run-mode-group"
+                    :disabled="!canEdit"
+                    @change="onRunModeChange"
+                  >
+                    <el-radio-button value="REACT" class="is-react">ReAct</el-radio-button>
+                    <el-radio-button value="PLAN_AND_EXECUTE" class="is-plan">Plan-Execute</el-radio-button>
+                  </el-radio-group>
+                </el-form-item>
+                <el-form-item label="状态">
+                  <el-switch
+                    :model-value="form.status === 1"
+                    :loading="statusSaving"
+                    :disabled="!canEnable || statusSaving"
+                    :before-change="beforeStatusChange"
+                    @change="onStatusChanged"
+                  />
+                </el-form-item>
+                <!--
+                  允许被编排：关掉后其它编排根无法把本 Agent 选为候选专家。
+                  ROUTER 恒为关且禁用（编排根不可作子），与后端强制写 0 的口径一致。
+                -->
+                <el-form-item label="允许被编排">
+                  <div class="allow-orch">
+                    <el-switch
+                      :model-value="form.runMode === 'ROUTER' ? false : form.allowOrchestrated !== false"
+                      :disabled="!canEdit || form.runMode === 'ROUTER'"
+                      @change="onAllowOrchestratedChange"
+                    />
+                    <span class="allow-orch__hint">
+                      {{ form.runMode === 'ROUTER'
+                        ? '编排根不可作为子专家'
+                        : '关闭后，其它编排根无法将本 Agent 选为候选专家' }}
+                    </span>
+                  </div>
+                </el-form-item>
+                <el-form-item label="简介">
+                  <el-input
+                    v-model="form.description"
+                    type="textarea"
+                    class="desc-textarea"
+                    maxlength="1000"
+                    :rows="5"
+                    :disabled="!canEdit"
+                  />
+                </el-form-item>
+                <el-form-item label="系统提示词">
+                  <AgentPromptEditor
+                    ref="promptEditor"
+                    v-model="form.systemPrompt"
+                    :prompt="form.prompt"
+                    :agent-name="form.name"
+                    :run-mode="form.runMode"
+                    :disabled="!canEdit"
+                    @update:prompt="onPromptChange"
+                  />
+                </el-form-item>
+                <el-form-item label="备注">
+                  <el-input v-model="form.remark" type="textarea" maxlength="500" :rows="3" :disabled="!canEdit" />
+                </el-form-item>
+              </el-form>
+              <!--
+                历史遗留子路由提示：本页已无编排 Tab，Router 主控改到「多智能体」维护。
+                只做告知，不提供删除入口（删子路由会改变线上路由行为）。
+              -->
+              <p v-if="savedMode === 'ROUTER'" class="keep-note">
+                Router 主控的候选与路由规则请在「多智能体」对应方案的「可视化编排」中维护。
+              </p>
+              <p v-else-if="routeCount > 0" class="keep-note">
+                已保留 {{ routeCount }} 条历史子路由；本页不再维护编排，方案编排请到「多智能体」。
+              </p>
+            </div>
+
+            <!--
+              身份卡：只读展示当前表单里的名称 / 编码 / 形象（含未保存草稿，所见即所得）。
+              形象选择仍走 AgentAvatarDialog；弹窗确认后由本页即时落库（不等底栏保存）。
+              元信息用真实字段（创建 / 更新时间、绑定计数），不编造创建者。
+            -->
+            <aside class="identity-card">
+              <div class="identity-card__avatar">
+                <AgentAvatar :name="form.name" :config="form.avatarConfig" :size="60" />
+              </div>
+              <div class="identity-card__title">
+                <h3 class="identity-card__name">{{ (form.name || '').trim() || '未命名 Agent' }}</h3>
+                <span class="identity-card__code" :title="form.code">{{ (form.code || '').trim() || '未设置编码' }}</span>
+              </div>
+              <el-button
+                link
+                type="primary"
+                class="identity-card__edit"
+                :disabled="!canEdit || avatarSaving"
+                :loading="avatarSaving"
+                @click="avatarDialogVisible = true"
+              >
+                <el-icon><EditPen /></el-icon>
+                <span>修改形象</span>
+              </el-button>
+              <dl class="identity-card__meta">
+                <div>
+                  <dt>创建时间</dt>
+                  <dd>{{ formatMinute(form.createTime) }}</dd>
+                </div>
+                <div>
+                  <dt>更新时间</dt>
+                  <dd>{{ formatMinute(form.updateTime) }}</dd>
+                </div>
+                <div>
+                  <dt>模型绑定</dt>
+                  <dd>{{ form.modelBindCount ?? 0 }}</dd>
+                </div>
+                <div>
+                  <dt>工具绑定</dt>
+                  <dd>{{ form.toolBindCount ?? 0 }}</dd>
+                </div>
+                <div>
+                  <dt>技能绑定</dt>
+                  <dd>{{ form.skillBindCount ?? 0 }}</dd>
+                </div>
+                <div>
+                  <dt>知识库</dt>
+                  <dd>{{ kbBindCount === null ? '—' : kbBindCount }}</dd>
+                </div>
+              </dl>
+            </aside>
+          </div>
         </el-tab-pane>
 
         <el-tab-pane label="模型配置" name="model">
@@ -316,7 +362,7 @@
 
         <!-- 知识库绑定：与工具配置互补，工具管「能不能调检索」，这里管「能查哪些库」 -->
         <el-tab-pane v-if="showReactBindTabs" label="知识库" name="kb">
-          <AgentKbPanel :agent-id="agentId" />
+          <AgentKbPanel :agent-id="agentId" @changed="kbBindCount = $event" />
         </el-tab-pane>
 
         <el-tab-pane label="运行配置" name="limits">
@@ -420,19 +466,29 @@
     :disabled="!canBind"
     @submit="savePurposePrompt"
   />
+
+  <!-- 形象配置弹窗：内部只改草稿，确定后由本页即时落库（不等底栏保存） -->
+  <AgentAvatarDialog
+    v-model="avatarDialogVisible"
+    :name="form?.name"
+    :config="form?.avatarConfig || null"
+    :can-edit="canEdit"
+    @confirm="onAvatarConfirm"
+  />
   </div>
 </template>
 
 <script setup lang="ts">
 /**
  * Agent 详情表单。所属域：agent。
- * 固定 Tab：基本信息 /（编排，仅 Router）/ 模型配置 / 工具配置 / 技能配置 / 记忆配置 / 知识库 / 运行配置。
- * 基本信息与运行配置共用 Agent 保存；记忆配置在面板内取消/保存策略。模型/工具/技能即时落库。
+ * 固定 Tab：基本信息 / 模型配置 / 工具配置 / 技能配置 / 记忆配置 / 知识库 / 运行配置。
+ * 单兵不编子节点：原「编排」Tab 已下线，Router / 方案编排统一到「多智能体」。
+ * 基本信息与运行配置共用 Agent 保存；记忆配置在面板内取消/保存策略。形象、模型、工具、技能即时落库。
  * 用途槽只放模型能力（生成/多模态/音频/安全）；嵌入跟知识库向量实例、重排归「知识库」Tab 的检索链路。
  * 启停走 Switch；删除只在网格卡。标题行「对话」只通知外层打开已有抽屉。
  */
 import { computed, onActivated, onBeforeUnmount, reactive, ref, watch } from 'vue'
-import { InfoFilled, Plus, QuestionFilled } from '@element-plus/icons-vue'
+import { InfoFilled, Plus, QuestionFilled, EditPen } from '@element-plus/icons-vue'
 import { ElMessage } from 'element-plus'
 import {
   changeAgentStatus,
@@ -445,7 +501,6 @@ import {
   deleteSkillBind,
   deleteToolBind,
   listModelBinds,
-  listRoutes,
   listSkillBinds,
   listToolBinds,
   updateAgent,
@@ -455,22 +510,24 @@ import {
 } from '@/api/agent'
 import AgentMemoryPanel from '@/components/agent/AgentMemoryPanel.vue'
 import AgentKbPanel from '@/components/agent/AgentKbPanel.vue'
-import AgentOrchestrationPanel from '@/components/agent/AgentOrchestrationPanel.vue'
 import AgentPromptEditor from '@/components/agent/AgentPromptEditor.vue'
+import AgentAvatar from '@/components/agent/AgentAvatar.vue'
+import AgentAvatarDialog from '@/components/agent/AgentAvatarDialog.vue'
 import ModelBindDialog from '@/components/agent/ModelBindDialog.vue'
 import ModelPurposeSlots from '@/components/agent/ModelPurposeSlots.vue'
 import PurposePromptDialog from '@/components/agent/PurposePromptDialog.vue'
 import SkillBindDialog from '@/components/agent/SkillBindDialog.vue'
 import ToolBindDialog from '@/components/agent/ToolBindDialog.vue'
 import TablePager from '@/components/TablePager.vue'
+import { normalizeAgentAvatarConfig } from '@/constants/agentLooks'
 import { useUserStore } from '@/stores/user'
 import { pageInstances } from '@/api/model'
 import type {
   AgentCardPatch,
   AgentDetail,
-  AgentRouteRow,
   AgentRuntimeConfig,
   AgentSave,
+  AvatarConfig,
   ModelBind,
   PromptBinding,
   RuntimeLimitsView,
@@ -489,6 +546,8 @@ import {
 import { useFormDirty } from '@/composables/useFormDirty'
 import { registerDraft } from '@/composables/draftGuard'
 import { confirmDiscardUnsaved } from '@/utils/unsavedConfirm'
+import { formatMinute } from '@/utils/datetime'
+import { listAgentKbs } from '@/api/ragBind'
 
 /** 单条运行限制字段。占位用平台 default，max 用平台硬顶。 */
 type LimitFieldDef = {
@@ -595,6 +654,7 @@ function changedPatch(): AgentCardPatch | undefined {
     runMode: source.runMode,
     status: source.status,
     description: source.description,
+    avatarConfig: source.avatarConfig ?? null,
     updateTime: source.updateTime
   }
 }
@@ -681,7 +741,6 @@ function purposeAvailable(purpose: string): boolean {
 }
 const tools = ref<ToolBind[]>([])
 const skills = ref<SkillBind[]>([])
-const routes = ref<AgentRouteRow[]>([])
 /** 工具 / 技能绑定表前端分页；默认每页 10 条，与全站列表一致 */
 const toolPager = reactive({ current: 1, size: 10 })
 const skillPager = reactive({ current: 1, size: 10 })
@@ -820,6 +879,94 @@ const skillOpen = ref(false)
 const purposePromptOpen = ref(false)
 const purposePromptBind = ref<ModelBind | null>(null)
 const purposePromptPurpose = ref('')
+/** 形象配置弹窗显隐；弹窗内只改草稿，确定后由本页即时落库 */
+const avatarDialogVisible = ref(false)
+/** 形象落库中：用于禁用「修改形象」入口，避免并发提交把旧响应盖回新形象 */
+const avatarSaving = ref(false)
+/** 形象提交序号：只让最后一次提交的响应生效（连续快速改形象时旧响应直接丢弃） */
+let avatarSaveSeq = 0
+/**
+ * 知识库绑定数。null = 未知（无 rag:kb:list 权限或请求失败），卡片显示「—」，
+ * 不伪装成 0，避免把「看不到」误读成「没绑」。
+ */
+const kbBindCount = ref<number | null>(null)
+
+/**
+ * 取该 Agent 已绑定的知识库条数。
+ * <p>知识库绑定列表在 rag 域，详情接口不带该计数；这里单独拉一次，
+ * 失败只降到「未知」，不影响基本信息页其它内容。
+ */
+async function loadKbBindCount() {
+  if (!props.agentId) {
+    kbBindCount.value = null
+    return
+  }
+  try {
+    const { data } = await listAgentKbs(props.agentId)
+    kbBindCount.value = (data.data || []).length
+  } catch {
+    kbBindCount.value = null
+  }
+}
+
+/**
+ * 「修改形象」确定：先回写表单，再**即时落库**，不需要再点底栏「保存」。
+ *
+ * <p>落库体取「已落库快照 + 本次形象」，绝不把页面上其它未提交草稿（名称、提示词、
+ * 运行配置等）顺带写进库；成功后只把 avatarConfig 这一列洗白，
+ * 其它字段的脏态与底栏按钮状态保持原样。
+ *
+ * @param config 弹窗回写的配置；null 表示恢复默认（首字 + 默认紫）
+ */
+async function onAvatarConfirm(config: AvatarConfig | null) {
+  const target = form.value
+  if (!target) {
+    return
+  }
+  const next = normalizeAgentAvatarConfig(config)
+  const previous = normalizeAgentAvatarConfig(target.avatarConfig)
+  const snapshot = saved.value
+  // 先乐观回写：弹窗关掉立刻看到新形象，不必等请求返回
+  target.avatarConfig = next
+  /*
+   * 无编辑权限 / 还没拿到已落库快照：
+   * 只留作草稿交给底栏保存兜底（正常编辑态不会走到这里，属防御路径）。
+   */
+  if (!snapshot || !canEdit.value) {
+    return
+  }
+  const seq = ++avatarSaveSeq
+  avatarSaving.value = true
+  try {
+    const { data } = await updateAgent(props.agentId, {
+      ...payloadFromSaved(snapshot),
+      avatarConfig: next
+    })
+    // 切走 Agent 或已有更新的一次提交：本次响应作废，不覆盖界面
+    if (!active || !form.value || seq !== avatarSaveSeq) {
+      return
+    }
+    const landed = normalizeAgentAvatarConfig(data.data?.avatarConfig ?? next)
+    form.value.avatarConfig = landed
+    // 身份卡上的「更新时间」跟着本次落库走，避免显示旧时间
+    form.value.updateTime = data.data?.updateTime ?? form.value.updateTime
+    // 快照与脏基线同步为落库值：形象不再算「未保存」，底栏不会因它亮起
+    saved.value = { ...saved.value!, avatarConfig: landed }
+    patchBaseline({ avatarConfig: landed })
+    // 通知外层修补卡片（网格态会重取列表），左栏 / 卡片头像立刻刷新
+    emit('changed', changedPatch())
+    ElMessage.success('形象已保存')
+  } catch {
+    // 失败回滚界面，避免显示成「已保存」却仍是旧形象
+    if (form.value && seq === avatarSaveSeq) {
+      form.value.avatarConfig = previous
+    }
+  } finally {
+    if (seq === avatarSaveSeq) {
+      avatarSaving.value = false
+    }
+  }
+}
 const promptEditor = ref<{ reveal: () => { errors: string[]; warnings: string[] } } | null>(null)
 const limitView = ref<RuntimeLimitsView | null>(null)
 
@@ -832,13 +979,11 @@ const canEditMemory = computed(() => user.hasPerm('memory:policy:edit'))
 const canEnable = computed(() => user.hasPerm('agent:enable'))
 const canTrial = computed(() => user.hasPerm('runtime:trial:run') || user.hasPerm('runtime:trial:list'))
 const canBind = computed(() => user.hasPerm('agent:bind'))
-/** 跟表单上的运行模式走：切到非 Router 立刻收起编排，不必等保存。 */
-const showOrchestrationTab = computed(() => form.value?.runMode === 'ROUTER')
 /** Router 父节点不配工具/技能/记忆；REACT 与计划执行都要配，切模式立刻藏/显 Tab，绑定数据不删。 */
 const showReactBindTabs = computed(() => !!form.value && form.value.runMode !== 'ROUTER')
-/** 模型/工具/技能即时落库；基本信息 / 编排策略 / 运行配置走外层底栏（记忆配置自带底栏）。 */
-/** 基本信息 / 编排策略 / 运行限制 共用底栏保存 */
-const showStickyBar = computed(() => tab.value === 'basic' || tab.value === 'orchestration' || tab.value === 'limits')
+/** 形象 / 模型 / 工具 / 技能即时落库；基本信息 / 运行配置走外层底栏（记忆配置自带底栏）。 */
+/** 基本信息 / 运行限制 共用底栏保存（编排 Tab 已下线：方案编排统一到「多智能体」） */
+const showStickyBar = computed(() => tab.value === 'basic' || tab.value === 'limits')
 
 type MemoryPanelExpose = {
   deactivate: () => void
@@ -938,6 +1083,8 @@ interface DraftSnap {
   /** 允许被编排调用；ROUTER 快照恒为 false，切回其它模式默认 true */
   allowOrchestrated: boolean
   description: string
+  /** 形象配置；null=未配置（首字 + 默认色） */
+  avatarConfig: AvatarConfig | null
   systemPrompt: string
   /** L3 四列；取消时一并回滚，避免只回滚正文留下半套配置 */
   prompt: PromptBinding
@@ -1018,6 +1165,7 @@ function draftFromForm(source: AgentDetail | null): DraftSnap | null {
     // ROUTER 恒为关（编排根不可作子）；其它模式 undefined 视为开，与服务端默认一致
     allowOrchestrated: source.runMode === 'ROUTER' ? false : source.allowOrchestrated !== false,
     description: source.description || '',
+    avatarConfig: normalizeAgentAvatarConfig(source.avatarConfig),
     systemPrompt: source.systemPrompt || '',
     prompt: normalizePromptBinding(source.prompt),
     remark: source.remark || '',
@@ -1061,6 +1209,7 @@ function restoreDraft(snap: DraftSnap) {
   target.runMode = snap.runMode
   target.allowOrchestrated = snap.allowOrchestrated
   target.description = snap.description
+  target.avatarConfig = normalizeAgentAvatarConfig(snap.avatarConfig)
   target.systemPrompt = snap.systemPrompt
   target.prompt = normalizePromptBinding(snap.prompt)
   target.remark = snap.remark
@@ -1111,11 +1260,10 @@ watch(
   [() => props.agentId, () => props.autoLoad],
   () => {
     /*
-     * 默认回基本信息。从「编排 → 多智能体」进来时带 initialTab=orchestration，
-     * 需停在该 Tab；这里只做初值，等详情加载后若该 Agent 不是 ROUTER，
-     * 下方 showOrchestrationTab 的 watch 会把不可见 Tab 收回基本信息。
+     * 默认回基本信息。编排 Tab 已下线（方案编排统一到「多智能体」），
+     * 旧深链 query.tab=orchestration 一律落回基本信息，不再切空页。
      */
-    tab.value = props.initialTab === 'orchestration' ? 'orchestration' : 'basic'
+    tab.value = 'basic'
     /*
      * autoLoad 为 false 时只做准备不发请求。
      * 该 prop 是响应式的：调用方从 false 改成 true 时会自动触发 load，
@@ -1131,6 +1279,8 @@ watch(
      */
     form.value = null
     saved.value = null
+    // 计数属于上一个 Agent：先清成「未知」，避免切过去短暂显示旧数字
+    kbBindCount.value = null
     markClean()
     load(false)
   },
@@ -1150,24 +1300,16 @@ onActivated(() => {
 })
 
 /** 当前 Tab 被模式藏起时回到基本信息，避免停在不可见 pane。 */
-watch([showOrchestrationTab, showReactBindTabs], ([orchestrationVisible, reactVisible]) => {
-  if ((!orchestrationVisible && tab.value === 'orchestration') || (!reactVisible && ['tool', 'skill', 'memory', 'kb'].includes(tab.value))) {
+watch(showReactBindTabs, (reactVisible) => {
+  if (!reactVisible && ['tool', 'skill', 'memory', 'kb'].includes(tab.value)) {
     tab.value = 'basic'
   }
 })
 
 /**
- * 同一个 Agent 再次从「编排 → 多智能体」进入时，KeepAlive 复用详情实例，
- * agentId 未变 → 上面的重置 watch 不触发；这里只补一次 Tab 切换，不重拉详情。
+ * 旧的「编排 Tab」深链兼容：initialTab='orchestration' 不再切 Tab。
+ * 方案编排统一到「多智能体」，进入 Agent 详情只落基本信息。
  */
-watch(
-  () => props.initialTab,
-  (value) => {
-    if (value === 'orchestration' && showOrchestrationTab.value) {
-      tab.value = 'orchestration'
-    }
-  }
-)
 
 /**
  * 与表单 runMode 对齐的锚点：记录「上一次模式」，用于判断 Router ↔ 非 Router 的边界。
@@ -1287,14 +1429,15 @@ async function load(preserveDraft = true) {
      * getRuntimeLimits 是平台级常量，但与详情无依赖关系，
      * 因此放进同一个 Promise.all；失败不阻断主流程，故就地 catch 降级。
      */
-    const [detail, modelRes, toolRes, skillRes, routeRes, limitsRes] = await Promise.all([
+    const [detail, modelRes, toolRes, skillRes, limitsRes] = await Promise.all([
       getAgent(props.agentId),
       listModelBinds(props.agentId),
       listToolBinds(props.agentId),
       listSkillBinds(props.agentId),
-      listRoutes(props.agentId),
       getRuntimeLimits().catch(() => null)
     ])
+    // 知识库绑定数单独取：无 rag:kb:list 权限时接口会拒，按「未知」显示，不阻断详情
+    void loadKbBindCount()
     // 用途槽灰显探测与详情并行；整页只探一次，失败按「未知」处理（不灰显）
     if (!capabilityProbe) {
       capabilityProbe = loadAvailableCapabilities()
@@ -1311,6 +1454,7 @@ async function load(preserveDraft = true) {
     form.value = {
       ...agent,
       description: agent.description || '',
+      avatarConfig: normalizeAgentAvatarConfig(agent.avatarConfig),
       systemPrompt: agent.systemPrompt || '',
       prompt: normalizePromptBinding(agent.prompt),
       remark: agent.remark || '',
@@ -1331,7 +1475,6 @@ async function load(preserveDraft = true) {
     models.value = modelRes.data.data || []
     tools.value = toolRes.data.data || []
     skills.value = skillRes.data.data || []
-    routes.value = routeRes.data.data || []
     // 列表变短（如移除绑定、或别处删了目标）时把页码收回合法区间
     clampPager(toolPager, tools.value.length)
     clampPager(skillPager, skills.value.length)
@@ -1381,6 +1524,7 @@ function payload(): AgentSave | null {
     // ROUTER 一律上报 false（服务端也会强制）；其它模式按当前开关，undefined 视为开
     allowOrchestrated: form.value.runMode === 'ROUTER' ? false : form.value.allowOrchestrated !== false,
     description: form.value.description?.trim() || '',
+    avatarConfig: normalizeAgentAvatarConfig(form.value.avatarConfig),
     systemPrompt: settled.systemPrompt,
     // L3 四列整体回传：后端据 templateId 是否为空决定「挂模板 / 清空」
     prompt: {
@@ -1657,6 +1801,7 @@ function payloadFromSaved(snapshot: SavedSnap): AgentSave {
     // 必须带上：这两条即时接口也走整份保存，漏传会被服务端按默认值重新打开开关
     allowOrchestrated: snapshot.runMode === 'ROUTER' ? false : snapshot.allowOrchestrated,
     description: snapshot.description,
+    avatarConfig: normalizeAgentAvatarConfig(snapshot.avatarConfig),
     systemPrompt: settled.systemPrompt,
     prompt: {
       templateId: snapshot.prompt.templateId ?? null,
@@ -1694,13 +1839,13 @@ function payloadFromSaved(snapshot: SavedSnap): AgentSave {
 
 /**
  * 当前 Tab 是否有未提交的草稿。
- * 基本信息 / 编排 / 运行配置看页面级脏态；记忆配置看面板自己的脏态（它的底栏在面板内）。
+ * 基本信息 / 运行配置看页面级脏态；记忆配置看面板自己的脏态（它的底栏在面板内）。
  *
  * @param name Tab name
  * @return true 表示该 Tab 有未提交改动
  */
 function tabHasDraft(name: string | number): boolean {
-  if (name === 'basic' || name === 'orchestration' || name === 'limits') {
+  if (name === 'basic' || name === 'limits') {
     return isDirty.value
   }
   if (name === 'memory') {
@@ -2001,28 +2146,6 @@ async function removeSkill(row: SkillBind) {
   emit('changed', changedPatch())
 }
 
-/**
- * 编排 Tab 的策略变更：写回 form.runtimeConfig，跟随页面底栏保存。
- * 这里只做归一化，不直接落库——保存仍由 save() 统一提交。
- *
- * @param config 子组件回传的完整运行配置
- */
-function onOrchestrationConfig(config: AgentRuntimeConfig) {
-  if (!form.value) {
-    return
-  }
-  form.value.runtimeConfig = normalizeRuntimeConfig(config)
-}
-
-/**
- * 候选增删改/启停成功：重新拉详情与候选，刷新 routeCount 与关系图。
- * load() 默认保留未提交的编排草稿，不会把用户刚改的策略冲掉。
- */
-async function onRoutesChanged() {
-  await load()
-  emit('changed', changedPatch())
-}
-
 </script>
 
 <style scoped>
@@ -2278,7 +2401,7 @@ async function onRoutesChanged() {
   column-gap: 16px;
 }
 
-/* 「允许被编排调用」：开关 + 一句帮助文案，整行占位避免挤坏两列栅格 */
+/* 「允许被编排调用」：开关 + 一句帮助文案，同一行展示避免换行断开语义 */
 .allow-orch {
   display: flex;
   align-items: center;
@@ -2289,6 +2412,204 @@ async function onRoutesChanged() {
   color: var(--ah-text-secondary);
   font-size: 12px;
   line-height: 1.5;
+}
+
+/* 基本信息左右分栏：左表单自适应，右身份卡固定 260px 并吸顶 */
+.basic-layout {
+  display: flex;
+  gap: 32px;
+  align-items: flex-start;
+}
+
+.basic-main {
+  flex: 1;
+  /* 不加 min-width:0 时，长编码 / 提示词编辑器会把左侧列撑破 */
+  min-width: 0;
+}
+
+/* 名称 / 编码等宽同排，两列输入框视觉一致 */
+.name-code-row {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  column-gap: 16px;
+}
+
+/* 表单项之间留 24px，避免整页挤在一起 */
+.basic-main :deep(.el-form-item) {
+  margin-bottom: 24px;
+}
+
+/* 多行输入用浅灰底 + 细边框，跟纯白页面区分开，一眼能看出是可编辑区 */
+.basic-main :deep(.el-textarea__inner) {
+  background: #f9fafb;
+  border: 1px solid #ebeef5;
+  box-shadow: none;
+}
+
+/* 聚焦时恢复白底，避免文字与浅灰底叠在一起看不清 */
+.basic-main :deep(.el-textarea__inner:focus) {
+  background: #fff;
+  border-color: var(--ah-primary, #635bff);
+}
+
+/*
+ * 简介：比默认高一些但不撑出滚动条（5 行 / 最低 150px）。
+ * 首屏要把名称编码、运行模式、状态、简介、提示词、备注一屏放下，超出即出现滚动条。
+ * 需要更长时可手动纵向拖大（resize: vertical）。
+ */
+.desc-textarea :deep(.el-textarea__inner) {
+  min-height: 150px;
+  resize: vertical;
+}
+
+/*
+ * 身份卡：白底 + 极浅边框（不用大块灰底），260px 紧凑排版。
+ * top:80px 是相对 Tab 滚动区的吸顶偏移，滚很长也不会把右侧留成空白。
+ */
+.identity-card {
+  position: sticky;
+  top: 80px;
+  flex-shrink: 0;
+  width: 260px;
+  /* 上内边距压到最小，让头像贴着卡片顶边，不在上方留大片空白 */
+  padding: 6px 16px 16px;
+  box-sizing: border-box;
+  border: 1px solid #ebeef5;
+  border-radius: 8px;
+  background: #fff;
+  text-align: center;
+}
+
+.identity-card__avatar {
+  display: flex;
+  justify-content: center;
+  margin-bottom: 8px;
+}
+
+.identity-card__name {
+  margin: 0 0 3px;
+  font-size: 16px;
+  font-weight: 600;
+  line-height: 1.35;
+  color: var(--ah-text-primary, #1f2937);
+  /* 名称可能很长，允许折行但不撑破卡片 */
+  word-break: break-word;
+}
+
+.identity-card__code {
+  display: block;
+  font-family: var(--ah-font-mono, ui-monospace, SFMono-Regular, Menlo, Consolas, monospace);
+  font-size: 13px;
+  color: var(--ah-text-secondary, #9ca3af);
+  word-break: break-all;
+}
+
+/* 文字链接式按钮：只有主色文字 + 小图标，不再是大长条按钮 */
+.identity-card__edit {
+  margin-top: 8px;
+  padding: 0;
+  font-size: 13px;
+  height: auto;
+}
+
+.identity-card__edit .el-icon {
+  margin-right: 4px;
+  font-size: 13px;
+}
+
+/* 元信息：一条一行（标签左 / 值右），逐条展示避免右侧留大片空白 */
+.identity-card__meta {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin: 14px 0 0;
+  padding-top: 12px;
+  border-top: 1px dashed #f0f2f5;
+  text-align: left;
+}
+
+.identity-card__meta > div {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 10px;
+  font-size: 12px;
+  line-height: 1.6;
+}
+
+.identity-card__meta dt {
+  flex: none;
+  color: #b0b4bf;
+}
+
+.identity-card__meta dd {
+  margin: 0;
+  color: #6b7280;
+  text-align: right;
+  word-break: break-word;
+}
+
+/* < 1024px：单列，身份卡提到最上方并压缩成一行，避免占满首屏 */
+@media (max-width: 1024px) {
+  .basic-layout {
+    flex-direction: column;
+    gap: 20px;
+  }
+
+  .basic-main {
+    width: 100%;
+  }
+
+  .identity-card {
+    position: static;
+    order: -1;
+    display: grid;
+    grid-template-columns: auto 1fr auto;
+    align-items: center;
+    gap: 16px;
+    width: 100%;
+    padding: 16px;
+    text-align: left;
+  }
+
+  .identity-card__avatar {
+    margin-bottom: 0;
+  }
+
+  .identity-card__name {
+    margin: 0;
+  }
+
+  .identity-card__edit {
+    margin-top: 0;
+  }
+
+  /* 小屏把元信息压成一行横排，不占纵向高度 */
+  .identity-card__meta {
+    grid-column: 1 / -1;
+    flex-direction: row;
+    flex-wrap: wrap;
+    gap: 4px 18px;
+    margin-top: 4px;
+    padding-top: 12px;
+  }
+
+  .name-code-row {
+    grid-template-columns: 1fr;
+  }
+}
+
+/* 窄屏再收一档：身份卡改成两行，修改入口通栏，避免三列挤成一团 */
+@media (max-width: 640px) {
+  .identity-card {
+    grid-template-columns: auto 1fr;
+    row-gap: 12px;
+  }
+
+  .identity-card__edit {
+    grid-column: 1 / -1;
+    justify-self: start;
+  }
 }
 
 .limits-hint {
@@ -2346,10 +2667,6 @@ async function onRoutesChanged() {
   width: 100%;
 }
 
-.span-2 {
-  grid-column: 1 / -1;
-}
-
 @media (max-width: 960px) {
   .limits-grid {
     grid-template-columns: 1fr 1fr;
@@ -2360,10 +2677,6 @@ async function onRoutesChanged() {
   .basic-grid,
   .limits-grid {
     grid-template-columns: 1fr;
-  }
-
-  .span-2 {
-    grid-column: auto;
   }
 }
 

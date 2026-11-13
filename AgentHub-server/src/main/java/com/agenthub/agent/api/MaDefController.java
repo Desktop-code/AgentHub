@@ -6,6 +6,7 @@ import com.agenthub.agent.api.dto.MaDefEnabledReq;
 import com.agenthub.agent.api.dto.MaDefPageReq;
 import com.agenthub.agent.api.dto.MaDefRowResp;
 import com.agenthub.agent.api.dto.MaDefSaveReq;
+import com.agenthub.agent.api.dto.MaJudgeModelOptionResp;
 import com.agenthub.agent.application.MaDefAppService;
 import com.agenthub.common.api.PageResult;
 import com.agenthub.common.api.Result;
@@ -18,6 +19,8 @@ import org.springframework.web.bind.annotation.PutMapping;
 import org.springframework.web.bind.annotation.RequestBody;
 import org.springframework.web.bind.annotation.RequestMapping;
 import org.springframework.web.bind.annotation.RestController;
+
+import java.util.List;
 
 /**
  * 多智能体方案接口。所属域：agent。
@@ -77,6 +80,20 @@ public class MaDefController {
     @GetMapping("/by-root/{agentId:\\d+}")
     public Result<MaDefRowResp> getByRoot(@PathVariable Long agentId) {
         return Result.ok(service.getByRoot(agentId));
+    }
+
+    /**
+     * 判路由模型下拉：启用中、用途属于对话形态的实例。
+     *
+     * <p>入口 Router 与普通场景 Router 共用同一份候选。只读、不校验凭证、不出站；
+     * 页面用它配置 {@code config_json.maJudgeModelInstanceId}，不再需要单独的入口配置接口。
+     *
+     * @return 可选实例列表
+     */
+    @SaCheckPermission(MaPermissions.VIEW)
+    @GetMapping("/judge-models")
+    public Result<List<MaJudgeModelOptionResp>> judgeModels() {
+        return Result.ok(service.judgeModels());
     }
 
     /**

@@ -22,6 +22,8 @@ public class User {
     private String nickname;
     private String email;
     private String phone;
+    /** 头像相对 URL（/uploads/avatars/...）；未上传为空 */
+    private String avatarUrl;
     private Integer status;
     /** sys_user.is_admin = 1 */
     private boolean platformAdmin;

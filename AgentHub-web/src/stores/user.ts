@@ -20,12 +20,29 @@ export const useUserStore = defineStore('user', () => {
     localStorage.setItem(TOKEN_KEY, value)
   }
 
-  /** 拉取 /me。失败时清掉半截登录态。 */
+  /** 清本地登录态。拉取 /me 失败与主动注销共用，保证不留下半截 token。 */
+  function clearSession() {
+    token.value = ''
+    profile.value = null
+    loaded.value = false
+    localStorage.removeItem(TOKEN_KEY)
+  }
+
+  /**
+   * 拉取 /me，写入用户信息与权限。
+   * 失败说明当前 token 已不可用：先清掉本地登录态再抛错，
+   * 调用方（登录页 / 路由守卫）无需再自己回滚 token。
+   */
   async function loadMe() {
-    const { data } = await fetchMe()
-    profile.value = data.data
-    loaded.value = true
-    return profile.value
+    try {
+      const { data } = await fetchMe()
+      profile.value = data.data
+      loaded.value = true
+      return profile.value
+    } catch (error) {
+      clearSession()
+      throw error
+    }
   }
 
   /** 按钮是否显示。权限来自 /me，不在前端另造一套码。 */
@@ -58,10 +75,7 @@ export const useUserStore = defineStore('user', () => {
         await logoutApi()
       }
     } finally {
-      token.value = ''
-      profile.value = null
-      loaded.value = false
-      localStorage.removeItem(TOKEN_KEY)
+      clearSession()
     }
   }
 

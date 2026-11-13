@@ -51,9 +51,10 @@ withDefaults(
   padding: 0;
   overflow: hidden;
   background: #fff;
-  border: 1px solid #ebeef5;
+  /* 可点业务卡：无生硬描边，轻阴影分层；hover 才轻微上浮 */
+  border: none;
   border-radius: 8px;
-  box-shadow: 0 2px 12px 0 rgba(0, 0, 0, 0.05);
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.05);
   cursor: pointer;
   /*
    * 只过渡合成/绘制成本低的属性；禁止 transition: all ——
@@ -61,7 +62,7 @@ withDefaults(
    */
   transition:
     box-shadow 0.2s ease,
-    border-color 0.2s ease;
+    transform 0.2s ease;
 }
 
 /* 高度绝对死锁：min/max/height 同值，禁止被内部文本撑高 */
@@ -77,25 +78,24 @@ withDefaults(
   max-height: 120px;
 }
 
-/* 悬浮：主色浅边框 + 略加深阴影 */
+/* 悬浮：轻微上浮 + 略加深阴影（可点卡才有，静态表格容器勿仿） */
 .config-card:hover,
 .config-card:focus-visible {
-  border-color: #c5c2ff;
-  box-shadow: 0 4px 16px 0 rgba(0, 0, 0, 0.1);
+  transform: translateY(-2px);
+  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.08);
   outline: none;
 }
 
-/* 选中：主色边框 + 极浅紫底 */
+/* 选中：极浅紫底 + 品牌色轻阴影 */
 .config-card.is-selected {
-  border-color: #635bff;
   background-color: #f4f4ff;
-  box-shadow: 0 2px 12px 0 rgba(99, 91, 255, 0.12);
+  box-shadow: 0 1px 3px rgba(99, 91, 255, 0.12);
 }
 
 .config-card.is-selected:hover,
 .config-card.is-selected:focus-visible {
-  border-color: #635bff;
-  box-shadow: 0 4px 16px 0 rgba(0, 0, 0, 0.1);
+  transform: translateY(-2px);
+  box-shadow: 0 4px 12px rgba(99, 91, 255, 0.16);
 }
 
 .config-card__header {
@@ -129,9 +129,11 @@ withDefaults(
   padding: 8px 14px;
 }
 
-/* 描述文本：严格两行截断 */
+/* 描述文本：严格两行截断；min-height 锁满两行行高，
+   使「暂无简介」与超长简介的正文起点/占位一致，卡片底边绝对齐平 */
 .config-card__body-inner {
   display: -webkit-box;
+  min-height: calc(1.5em * 2);
   max-height: calc(1.5em * 2);
   overflow: hidden;
   color: #606266;
@@ -162,7 +164,7 @@ withDefaults(
   padding: 0 10px;
   overflow: hidden;
   background: #fafafa;
-  border-top: 1px solid #ebeef5;
+  border-top: 1px solid var(--ah-border-soft, #f2f6fc);
   color: #909399;
 }
 

@@ -88,8 +88,6 @@ import {
   MA_TRIAL_BASE_PATH,
   isMaTrialPath,
   maDefTrialEntryError,
-  maDefTrialPath,
-  maTrialPath,
   maTrialEntryError
 } from '@/utils/maTrial'
 
@@ -204,8 +202,8 @@ function backToList(message: string) {
 /**
  * 按入口拉详情并做进入校验。
  *
- * <p>两条入口共用一次校验流程：先做纯函数判定（缺 id / 无权限），再拉详情；
- * 绑根额外要求 run_mode=ROUTER，虚拟根额外要求方案存在且不属于「绑根方案」。
+ * <p>方案运行与旧 Agent 运行各走一次校验：先做纯函数判定（缺 id / 无权限），再拉详情。
+ * 方案以 {@code ma_def} 自己为根，不再按历史 {@code root_agent_id} 转到 Agent 运行页。
  *
  * @param id 当前入口主键；0 表示路径非法
  */
@@ -232,12 +230,6 @@ async function load(id: number) {
       const detail = data.data
       if (!detail) {
         backToList('编排方案不存在或已删除，已返回多智能体列表')
-        return
-      }
-      // 绑根方案必须从 Agent 入口进：本页的虚拟根路径没有 Agent 上下文（记忆 / 视觉 / 计量）
-      if (detail.rootAgentId) {
-        ElMessage.info('该方案绑定了 ROUTER，已转到对应 Agent 的运行入口')
-        void router.replace(maTrialPath(detail.rootAgentId))
         return
       }
       maDef.value = detail

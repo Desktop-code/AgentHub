@@ -24,9 +24,11 @@ import com.agenthub.workflow.domain.repository.WorkflowHumanTaskRepository;
 import com.agenthub.workflow.domain.repository.WorkflowNodeRunRepository;
 import com.agenthub.workflow.domain.repository.WorkflowRunRepository;
 import com.agenthub.workflow.domain.service.WorkflowAssigneeRule;
+import com.agenthub.workflow.domain.service.WorkflowOutcomeTexts;
 import com.agenthub.workflow.domain.service.WorkflowStateMachine;
 import com.agenthub.workflow.domain.service.WorkflowTenantProvider;
 import com.agenthub.workflow.domain.service.WorkflowTraceWriter;
+import com.agenthub.workflow.domain.service.WorkbenchTimelinePort;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import org.slf4j.Logger;
@@ -67,6 +69,8 @@ public class WorkflowHumanTaskAppService {
     private final ObjectMapper json;
     /** 埋点端口：驳回后直接 FAILED 的分支不经过引擎，需要自己收口根 trace */
     private final WorkflowTraceWriter traces;
+    /** 工作台时间线端口（刀5B）：人工恢复跑到终态后，把结果主动追写回原会话 */
+    private final WorkbenchTimelinePort workbenchTimeline;
 
     /**
      * @param humanTasks      待办仓储
@@ -81,6 +85,7 @@ public class WorkflowHumanTaskAppService {
      * @param defs            工作流定义（待办列表展示工作流名）
      * @param json            全站 ObjectMapper
      * @param traces          工作流埋点
+     * @param workbenchTimeline 工作台时间线（人工恢复后追写结果）；无工作台会话时不写
      */
     public WorkflowHumanTaskAppService(WorkflowHumanTaskRepository humanTasks,
                                        WorkflowNodeRunRepository nodeRuns,
@@ -93,7 +98,8 @@ public class WorkflowHumanTaskAppService {
                                        OperLogWriter operLogWriter,
                                        WorkflowDefRepository defs,
                                        ObjectMapper json,
-                                       WorkflowTraceWriter traces) {
+                                       WorkflowTraceWriter traces,
+                                       WorkbenchTimelinePort workbenchTimeline) {
         this.humanTasks = humanTasks;
         this.nodeRuns = nodeRuns;
         this.runs = runs;
@@ -106,6 +112,7 @@ public class WorkflowHumanTaskAppService {
         this.defs = defs;
         this.json = json;
         this.traces = traces;
+        this.workbenchTimeline = workbenchTimeline;
     }
 
     /**
@@ -376,7 +383,61 @@ public class WorkflowHumanTaskAppService {
                     String.valueOf(taskId), "人工驳回 run=" + run.getId());
         }
         WorkflowRun fresh = runs.findById(run.getId()).orElse(run);
+        // 刀5B：工作台触发的人工恢复，把终态结果 / 下一个卡点提示追写回原会话。
+        // 放在返回前、且自带 try/catch：时间线是旁路，写失败不能让人工处理变红。
+        projectWorkbench(fresh, approved);
         return assembler.detail(fresh);
+    }
+
+    /**
+     * 人工处理后的工作台追写（刀5B）。所属域：workflow 的 application。
+     *
+     * <p>只处理 {@code workbench_session_id} 非空的 run（即工作台触发）。
+     * 试跑 / 应用触发恒为空，因此不会往任何工作台会话里写调试内容。
+     *
+     * <p>两种落点：
+     * <ul>
+     *   <li>续跑又停在下一个 HUMAN 节点 → 一条 SYSTEM 提示继续去「编排 → 人工待办」；</li>
+     *   <li>已到终态 → 一条 SYSTEM 说明 + 一条助手正文（成功取 END 文本，失败/取消给原因）。</li>
+     * </ul>
+     *
+     * <p><b>禁止</b>在这里做任何审批动作：审批入口仍只在「编排 → 人工待办」。
+     *
+     * @param run      处理后的 run（状态以库里读回的为准）
+     * @param approved 本次是人工通过还是驳回；仅用于提示文案
+     */
+    private void projectWorkbench(WorkflowRun run, boolean approved) {
+        Long sessionId = run.getWorkbenchSessionId();
+        if (sessionId == null) {
+            return;
+        }
+        try {
+            WorkflowDef def = run.getWorkflowId() == null ? null
+                    : defs.findById(run.getWorkflowId()).orElse(null);
+            WorkflowRunStatus status = WorkflowRunStatus.parse(run.getStatus());
+            String label = WorkflowOutcomeTexts.label(def, run);
+            if (status == null) {
+                return;
+            }
+            if (status == WorkflowRunStatus.PAUSED_HUMAN) {
+                workbenchTimeline.appendSystem(sessionId,
+                        "工作流" + label + "人工待办已处理，运行停在下一个等待人工节点；"
+                                + "请继续到「编排 → 人工待办」处理");
+                return;
+            }
+            if (!status.terminal()) {
+                // 理论上同步续跑不会停在 RUNNING；真遇到就只提示还在跑，不伪造结果
+                workbenchTimeline.appendSystem(sessionId, "工作流" + label + "已继续运行，完成后结果会追加到本会话");
+                return;
+            }
+            workbenchTimeline.appendSystem(sessionId, "工作流" + label
+                    + (approved ? "人工待办已通过" : "人工待办已驳回")
+                    + "，运行已结束（版本 v" + (run.getReleaseVersion() == null ? 0 : run.getReleaseVersion()) + "）");
+            workbenchTimeline.appendAssistant(sessionId, WorkflowOutcomeTexts.assistantText(def, run, json));
+        } catch (RuntimeException ex) {
+            log.warn("人工处理后追写工作台时间线失败 runId={} sessionId={} type={}",
+                    run.getId(), sessionId, ex.getClass().getSimpleName());
+        }
     }
 
     /**

@@ -1,0 +1,7 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 80 80" fill="none">
+  <!-- 运维：齿轮 -->
+  <circle cx="40" cy="40" r="26" fill="#fff" fill-opacity=".16"/>
+  <circle cx="40" cy="40" r="10" stroke="#fff" stroke-width="3.2" stroke-opacity=".95"/>
+  <circle cx="40" cy="40" r="3.2" fill="#fff" fill-opacity=".95"/>
+  <path d="M40 20v6M40 54v6M20 40h6M54 40h6M25.9 25.9l4.2 4.2M50 50l4.1 4.1M54.1 25.9 50 30.1M30.1 50l-4.2 4.1" stroke="#fff" stroke-width="3.4" stroke-opacity=".95" stroke-linecap="round"/>
+</svg>

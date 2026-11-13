@@ -20,6 +20,8 @@ public class AgentDefEntity extends AgentAuditEntity {
     private String name;
     private String code;
     private String description;
+    /** 形象配置 JSON；列见 schema-delta-agent-avatar-config */
+    private String avatarConfig;
     private String runMode;
     /**
      * 是否允许被编排挂为子专家。1=允许，0=禁止。

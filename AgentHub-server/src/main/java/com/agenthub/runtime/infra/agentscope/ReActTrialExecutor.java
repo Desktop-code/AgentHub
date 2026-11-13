@@ -168,7 +168,12 @@ public class ReActTrialExecutor {
             toolkit = MaScratchTool.install(toolkit, scratch.board(), scratch.ownerRouteKey());
         }
         mcpTools.register(toolkit, plan.getMcpTools());
-        toolkit = ToolkitBudget.wrap(toolkit, budget);
+        /*
+         * 归属传本轮专家 id：熔断计数按专家分开。
+         * 「制度知识专家」把自己搜到 consecutive_fail_abort，不得连坐后面同方案的
+         * 「报告撰写专家」——每个专家的 ReAct 执行都有各自的 RunBudget，这里再把归属写实。
+         */
+        toolkit = ToolkitBudget.wrap(toolkit, budget, "agent-" + plan.getAgentId());
         // 必填参数闸门：被拦下的调用不执行、不占工具配额，也不产生任何出站
         toolkit = ToolkitRequiredArgs.wrap(toolkit, evidenceOf(plan, userText), rules(), factKeys::canonical,
                 new RequiredArgBlocks(), requiredArgProperties.isEnabled());

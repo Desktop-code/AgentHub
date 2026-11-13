@@ -36,7 +36,8 @@ const router = createRouter({
         {
           path: 'workspace',
           component: () => import('@/views/workspace/index.vue'),
-          meta: { title: '工作台', cacheName: 'Workspace' }
+          // hideTabs：工作台是整屏对话页，不要页签条；仅本页生效，其它页默认仍显示
+          meta: { title: '对话', cacheName: 'Workspace', hideTabs: true }
         },
         {
           path: 'system/user',
@@ -187,6 +188,15 @@ const router = createRouter({
           component: () => import('@/views/ma/trial/index.vue'),
           meta: { title: '多智能体运行', cacheName: 'MaTrial' }
         },
+        /*
+         * 默认接待页已整页下线：保留旧路径只为外部书签 / 旧深链不 404，
+         * 统一重定向到多智能体列表（对话路由就在那一份列表里）。
+         * 路由池维护已迁到入口方案详情的「可视化编排」Tab。
+         */
+        {
+          path: 'orchestration/reception',
+          redirect: '/orchestration/multi-agent'
+        },
         {
           path: 'agent/memory',
           component: () => import('@/views/memory/index.vue'),
@@ -216,16 +226,18 @@ router.beforeEach(async (to) => {
     }
     return true
   }
+  // 未登录时带上原路径，登录成功后回跳该深链
   if (!user.token) {
-    return '/login'
+    return { path: '/login', query: { redirect: to.fullPath } }
   }
   // 刷新后 Pinia 是空的，先补一次 /me，侧栏和按钮才有权限
   if (!user.loaded) {
     try {
       await user.loadMe()
     } catch {
+      // 补 /me 失败按未登录处理，同样保留深链，重登后仍能回到原页
       await user.logout()
-      return '/login'
+      return { path: '/login', query: { redirect: to.fullPath } }
     }
   }
   // 独立试跑页不再作为入口。有 Agent 时落到列表 query，由壳层打开抽屉。

@@ -61,6 +61,41 @@ public final class AgentRoutePolicy {
     }
 
     /**
+     * 方案（多智能体）候选的写入规则：方案本身就是编排根，不需要再合成父 Agent。
+     *
+     * <p>子侧门闩与 {@link #assertCanBind(AgentDef, AgentDef)} 完全一致：非 ROUTER、
+     * 子模式合法且被本方案允许、已启用、允许被编排调用。父配置直接取方案自己的运行配置。
+     *
+     * @param parentRuntime 方案运行配置（读允许的子运行模式）；可空，空按默认
+     * @param child         未删除的子 Agent；可空
+     * @throws BizException 子节点不是 REACT / 未被允许的计划执行、未启用或未允许被编排调用
+     */
+    public static void assertSchemeChild(AgentRuntimeConfig parentRuntime, AgentDef child) {
+        if (child == null) {
+            throw new BizException(ErrorCode.NOT_FOUND, "Agent 不存在");
+        }
+        // 子 ROUTER 仍被彻底禁止：方案只做一层路由，不允许 router-in-scheme
+        if (AgentRunMode.ROUTER.name().equals(child.getRunMode())) {
+            throw new BizException(ErrorCode.BAD_REQUEST, "子 Agent 不能是 ROUTER，一期不支持多层级路由");
+        }
+        if (!AgentRuntimeConfig.validChildRunMode(child.getRunMode())) {
+            throw new BizException(ErrorCode.BAD_REQUEST, "子 Agent 运行模式不受支持，只能是 ReAct 或计划执行");
+        }
+        AgentRuntimeConfig runtime = parentRuntime == null ? new AgentRuntimeConfig() : parentRuntime;
+        if (!runtime.allowsChildRunMode(child.getRunMode())) {
+            throw new BizException(ErrorCode.BAD_REQUEST, "编排未允许子使用"
+                    + modeText(child.getRunMode()) + "模式，请先在「编排」Tab 的「允许的子运行模式」中勾选");
+        }
+        if (child.getStatus() == null || child.getStatus() != AgentStatus.ENABLED) {
+            throw new BizException(ErrorCode.BAD_REQUEST, "只能绑定已启用的子 Agent");
+        }
+        if (!child.allowOrchestratedOn()) {
+            throw new BizException(ErrorCode.BAD_REQUEST,
+                    "「" + displayName(child) + "」未允许被编排调用，请先在该 Agent 的基本信息中开启「允许被编排调用」");
+        }
+    }
+
+    /**
      * 错误文案里的模式称呼。
      *
      * @param runMode REACT / PLAN_AND_EXECUTE

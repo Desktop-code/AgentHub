@@ -33,9 +33,17 @@ public class CorsConfig implements WebMvcConfigurer {
         if (origins == null || origins.isEmpty()) {
             return;
         }
+        String[] allowed = origins.toArray(String[]::new);
         registry.addMapping("/api/**")
-                .allowedOrigins(origins.toArray(String[]::new))
+                .allowedOrigins(allowed)
                 .allowedMethods("GET", "POST", "PUT", "DELETE", "OPTIONS")
+                .allowedHeaders("*")
+                .allowCredentials(false)
+                .maxAge(3600);
+        // 头像静态资源：<img src> 跨域拉 /uploads/avatars/**，与 /api 同白名单
+        registry.addMapping("/uploads/**")
+                .allowedOrigins(allowed)
+                .allowedMethods("GET", "OPTIONS")
                 .allowedHeaders("*")
                 .allowCredentials(false)
                 .maxAge(3600);

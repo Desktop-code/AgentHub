@@ -112,8 +112,15 @@
                   </el-tag>
                 </div>
               </template>
-              <!-- 卡片简介只占一行，超出省略；完整内容由 tooltip 兜底 -->
-              <el-tooltip :content="row.description?.trim() || '暂无简介'" placement="top">
+              <!-- 卡片简介只占一行，超出省略；完整内容由统一气泡兜底（clamp-tip：宽 320px、限高自滚） -->
+              <el-tooltip
+                placement="top"
+                popper-class="clamp-tip"
+                :disabled="!row.description?.trim()"
+              >
+                <template #content>
+                  <div class="clamp-tip__body">{{ row.description?.trim() }}</div>
+                </template>
                 <span class="card-desc" :class="{ muted: !row.description?.trim() }">
                   {{ row.description?.trim() || '暂无简介' }}
                 </span>

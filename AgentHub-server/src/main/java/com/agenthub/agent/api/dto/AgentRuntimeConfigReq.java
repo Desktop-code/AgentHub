@@ -6,6 +6,7 @@ import jakarta.validation.constraints.Size;
 import lombok.Data;
 
 import java.util.List;
+import java.util.Map;
 
 /**
  * Agent 运行配置请求。所属域：agent。
@@ -16,8 +17,10 @@ import java.util.List;
 public class AgentRuntimeConfigReq {
 
     /**
-     * 编排模板；六值可持久：ROUTER_PARALLEL | FIXED_SEQUENCE | FIXED_PARALLEL | CRITIC_LOOP |
+     * 编排模板；页面可持久六值：ROUTER_PARALLEL | FIXED_SEQUENCE | FIXED_PARALLEL | CRITIC_LOOP |
      * ROUTER_THEN_SEQUENCE | COMPETE。非法/空值由服务端回落 ROUTER_PARALLEL；显式选的模板不会被洗回路由并行。
+     * <p>入口专用类型 {@code ENTRY_ROUTER} 不由页面新建或改名产生：它只出现在默认接待那一行，
+     * 由迁移脚本写入，服务端 {@code MaDefPolicy} 拒绝把它当普通模板保存 / 互转。
      */
     @Size(max = 32, message = "最长 32")
     private String maTemplate;
@@ -85,6 +88,26 @@ public class AgentRuntimeConfigReq {
     /** 判路由模型兼容别名：数字按实例 id，名称按 model_id / 展示名匹配 */
     @Size(max = 128, message = "最长 128")
     private String maJudgeModel;
+
+    /**
+     * ROUTER 提示词：钉住的已发布模板主键。
+     * <p>与 {@link #maJudgePromptTemplateVersion} 成对出现；只给一半时服务端按「未配置」处理。
+     * 用途固定 ROUTER，由服务端写死，不从请求里取，避免页面把摘要 / 对话模板错绑到判路由上。
+     */
+    private Long maJudgePromptTemplateId;
+
+    /** ROUTER 提示词：钉住的模板版本号 */
+    private Integer maJudgePromptTemplateVersion;
+
+    /**
+     * ROUTER 提示词的 soft 段覆盖：seg_key → 文案。
+     * <p>只能覆盖模板里 {@code mutable=1} 的段落；锁定段 / 未知段由服务端闸门拒绝，不在前端重复实现。
+     */
+    private Map<String, String> maJudgePromptOverride;
+
+    /** ROUTER 提示词追加区（append-only）；最长 2000 字 */
+    @Size(max = 2000, message = "Router 追加要求超过长度，最长 2000")
+    private String maJudgePromptExtra;
 
     /**
      * 竞争选优（模板=COMPETE）的选优策略：JUDGE_PICK | FIRST_SUCCESS。

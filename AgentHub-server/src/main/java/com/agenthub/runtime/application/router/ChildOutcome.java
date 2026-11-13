@@ -17,9 +17,29 @@ import java.util.List;
  * @param turn    子终答与 token；失败 / 跳过时可空
  * @param error   失败或跳过说明；成功为 null
  * @param skipped true＝因超出并行上限未执行；false＝真跑过
+ * @param children 目标方案内部的下一层跳（只有 MA 目标可能非空）；其余为空表
  */
 public record ChildOutcome(RoutedIntent intent, List<String> notices, TrialTurn turn, String error,
-                           boolean skipped) {
+                           boolean skipped, List<NestedRoute> children) {
+
+    /**
+     * 兼容构造：普通子 Agent / 工作流目标没有下一层可展开。
+     *
+     * @param intent  执行意图
+     * @param notices 装配说明；可空
+     * @param turn    子终答
+     * @param error   失败或跳过说明；成功为 null
+     * @param skipped true＝未执行
+     */
+    public ChildOutcome(RoutedIntent intent, List<String> notices, TrialTurn turn, String error,
+                        boolean skipped) {
+        this(intent, notices, turn, error, skipped, List.of());
+    }
+
+    /** 下一层跳防御性归一：null → 空表，调用方不必逐处判空。 */
+    public ChildOutcome {
+        children = children == null ? List.of() : List.copyOf(children);
+    }
 
     /**
      * 成功结果：notices 做防御性拷贝，避免调用方后续修改子列表时污染汇总。
@@ -31,6 +51,21 @@ public record ChildOutcome(RoutedIntent intent, List<String> notices, TrialTurn 
      */
     public static ChildOutcome ok(RoutedIntent intent, List<String> notices, TrialTurn turn) {
         return new ChildOutcome(intent, notices == null ? List.of() : new ArrayList<>(notices), turn, null, false);
+    }
+
+    /**
+     * 成功结果（目标方案）：额外带上方案内部每一跳，供时间线逐块展示。
+     *
+     * @param intent   执行意图
+     * @param notices  装配说明；可空
+     * @param turn     目标方案终答
+     * @param children 方案内部每一跳；可空
+     * @return 成功结果
+     */
+    public static ChildOutcome ok(RoutedIntent intent, List<String> notices, TrialTurn turn,
+                                  List<NestedRoute> children) {
+        return new ChildOutcome(intent, notices == null ? List.of() : new ArrayList<>(notices), turn, null,
+                false, children);
     }
 
     /**

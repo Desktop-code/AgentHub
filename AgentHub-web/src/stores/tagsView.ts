@@ -52,7 +52,7 @@ const AFFIX_TAGS: TagView[] = [
     key: 'Workspace',
     path: '/workspace',
     fullPath: '/workspace',
-    title: '工作台',
+    title: '对话',
     query: {},
     cacheName: 'Workspace',
     affix: true

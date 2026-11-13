@@ -47,6 +47,29 @@ public interface TrialProgress {
     void assistant(String delta);
 
     /**
+     * 某个参与者的整段成文结论（不是 token 增量）。
+     *
+     * <p>默认空操作：正文已经按 token 流式推过的路径不能再整段补一次，否则会重影。
+     * 只有「静音子正文、避免并行交错」的包装器覆写它，在该参与者结束时按路由行钉回这一段结论。
+     *
+     * @param routeLine 该参与者的路由行（「路由到 …」）；可空
+     * @param text      成文结论；空则忽略
+     */
+    default void deliverParticipantConclusion(String routeLine, String text) {
+        // 流式路径已推过正文
+    }
+
+    /**
+     * 给「再跑一层方案」用的进度出口：静音包装器返回被包装的下游，
+     * 这样内层方案的子结论和汇总结论不会被外层静音吞掉。
+     *
+     * @return 能真正写出正文的进度；默认就是自己
+     */
+    default TrialProgress conclusionChannel() {
+        return this;
+    }
+
+    /**
      * 图片文字提取结果。在主模型开跑之前下发一次，整段文本而非增量。
      *
      * <p>为什么要单独一个事件而不是塞进 reasoning：识别结果不是模型的思考，

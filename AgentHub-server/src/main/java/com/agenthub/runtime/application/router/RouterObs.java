@@ -46,10 +46,8 @@ public final class RouterObs {
         fields.put("ma.def_id", spec.maId());
         fields.put("ma.code", spec.label());
         fields.put("ma.template", spec.template());
-        if (spec.virtualRoot()) {
-            // 只有虚拟根需要显式标注：绑根会话的 agent 维度已在 trace 上
-            fields.put("ma.root", "VIRTUAL");
-        }
+        // 方案就是自己的根：不再区分「绑根 / 虚拟根」，统一标注 SCHEME 供泳道识别
+        fields.put("ma.root", "SCHEME");
     }
 
     /**

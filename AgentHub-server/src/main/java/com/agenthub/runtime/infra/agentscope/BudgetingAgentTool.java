@@ -16,6 +16,9 @@ import java.util.Map;
 /**
  * 套在已注册工具外的配额包装。所属域：runtime。
  * 计次、连续失败中止；结果正文不截断（截断只发生在进模型消息路径）。
+ * <p>
+ * 熔断作用域：连败计数按 {@code owner}（本轮专家）归属，专家切换即清零。
+ * 一把 budget 只服务一个专家，这里显式传 owner 是为了把「不跨专家连坐」写成契约。
  */
 public final class BudgetingAgentTool implements AgentTool {
 
@@ -23,14 +26,26 @@ public final class BudgetingAgentTool implements AgentTool {
 
     private final AgentTool delegate;
     private final RunBudget budget;
+    /** 本轮专家归属（id / 展示名），用于把连续失败计数限定在本专家内 */
+    private final String owner;
 
     /**
      * @param delegate 原工具
      * @param budget   本轮配额
      */
     public BudgetingAgentTool(AgentTool delegate, RunBudget budget) {
+        this(delegate, budget, "");
+    }
+
+    /**
+     * @param delegate 原工具
+     * @param budget   本轮配额
+     * @param owner    本轮专家归属；空串表示不区分（老调用点）
+     */
+    public BudgetingAgentTool(AgentTool delegate, RunBudget budget, String owner) {
         this.delegate = delegate;
         this.budget = budget;
+        this.owner = owner == null ? "" : owner.trim();
     }
 
     /** {@inheritDoc} */
@@ -89,10 +104,10 @@ public final class BudgetingAgentTool implements AgentTool {
             return Mono.error(ex);
         }
         return delegate.callAsync(param)
-                .doOnNext(result -> budget.afterTool(isSuccess(result)))
+                .doOnNext(result -> budget.afterTool(owner, isSuccess(result)))
                 .doOnError(error -> {
                     if (!(error instanceof TrialFailure)) {
-                        budget.afterTool(false);
+                        budget.afterTool(owner, false);
                     }
                     // 工具链里的异常常被引擎转成错误块丢掉栈：这里带 Throwable 打一次，
                     // 才能看出是参数、网络还是工具内部实现炸了

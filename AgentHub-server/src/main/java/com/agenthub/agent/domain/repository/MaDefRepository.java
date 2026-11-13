@@ -31,6 +31,27 @@ public interface MaDefRepository {
     Optional<MaDef> findById(Long id);
 
     /**
+     * 批量按主键取方案（刀5：路由池里的 MA 候选要回填方案名与说明）。
+     *
+     * <p>不带租户条件：调用方必须自己按 {@code tenantId} 复核，避免跨租户回显。
+     *
+     * @param ids 方案主键集合；空集合直接返回空列表
+     * @return 命中的方案；不存在的 id 不出现
+     */
+    List<MaDef> findByIds(Collection<Long> ids);
+
+    /**
+     * 本租户全部（未删除）方案，更新时间倒序。
+     *
+     * <p>用途：默认接待「添加方案」下拉的候选来源；启用 / 默认位 / 叶子 / 说明等门闩
+     * 由应用层按与保存侧同一套规则再筛，仓储不做业务判断。
+     *
+     * @param tenantId 当前租户
+     * @return 方案列表；没有时为空
+     */
+    List<MaDef> listByTenant(long tenantId);
+
+    /**
      * @param tenantId 当前租户
      * @param code     方案编码
      * @return 同租户同编码方案；不存在为空
@@ -106,6 +127,39 @@ public interface MaDefRepository {
     int delete(Long id, long tenantId);
 
     /**
+     * 查平台默认接待方案（可能已停用，便于调用方区分「未配置」与「已停用」）。
+     *
+     * @param tenantId 当前租户
+     * @return 标记为默认接待的方案；未配置为空
+     */
+    Optional<MaDef> findReceptionDefault(long tenantId);
+
+    /**
+     * 本租户所有方案已占用的候选 Agent 主键（跨方案去重）。
+     *
+     * <p>用途：默认接待的「添加子 Agent」下拉要排除已被任一方案拉走的 Agent，
+     * 避免同一个 Agent 同时挂在两条入口上被重复调度。
+     *
+     * @param tenantId 当前租户
+     * @return 候选 Agent 主键集合；没有候选时为空
+     */
+    List<Long> listCandidateAgentIds(long tenantId);
+
+    /**
+     * 设置 / 取消平台默认接待方案。
+     *
+     * <p>设置时先清掉本租户其它默认位再落新值，唯一索引作为最终兜底；
+     * 取消时只清目标行。调用方负责事务边界。
+     *
+     * @param id         方案主键
+     * @param tenantId   当前租户
+     * @param on         true=设为默认，false=取消默认
+     * @param operatorId 操作人
+     * @return 命中并更新的方案行数（0 表示不存在或跨租户）
+     */
+    int updateReceptionDefault(Long id, long tenantId, boolean on, Long operatorId);
+
+    /**
      * 全量替换候选：先物理删除旧行再插入新行。候选是方案从属子资源，不做逻辑删除。
      *
      * @param maId       方案主键
@@ -117,4 +171,33 @@ public interface MaDefRepository {
      * @param maId 方案主键
      */
     void deleteCandidates(Long maId);
+
+    /**
+     * 追加一条候选（保留既有候选 id，供简易配置页增删改排序使用）。
+     *
+     * @param candidate 候选；maId 必填
+     * @return 新主键
+     */
+    Long insertCandidate(MaCandidate candidate);
+
+    /**
+     * 改候选的意图说明 / 排序 / 启停；方案归属作为条件，避免跨方案改行。
+     *
+     * @param id         候选主键
+     * @param maId       方案主键
+     * @param intentDesc 意图说明；null 表示不改
+     * @param sortNo     排序；null 表示不改
+     * @param enabled    启停；null 表示不改
+     * @return 影响行数；0 表示不存在或不属于该方案
+     */
+    int updateCandidate(Long id, Long maId, String intentDesc, Integer sortNo, Integer enabled);
+
+    /**
+     * 删除一条候选。
+     *
+     * @param id   候选主键
+     * @param maId 方案主键
+     * @return 影响行数；0 表示不存在或不属于该方案
+     */
+    int deleteCandidate(Long id, Long maId);
 }

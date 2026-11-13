@@ -89,3 +89,43 @@ export function groupSessionsByDay(items: TrialSession[], now: Date = new Date()
     items: buckets[label]
   }))
 }
+
+/** 工作台左栏分组：今天 / 7天内 / 更早（「30天内」并入「更早」，会话不丢） */
+export const WORKBENCH_SESSION_GROUP_LABELS = ['今天', '7天内', '更早'] as const
+
+/** 工作台分组标题类型 */
+export type WorkbenchSessionGroupLabel = (typeof WORKBENCH_SESSION_GROUP_LABELS)[number]
+
+/**
+ * 工作台会话分桶：比调试少一档「30天内」，文案用「今天」而非「今日」。
+ * 边界仍按本地自然日；不改调试侧 {@link groupSessionsByDay}。
+ *
+ * @param items 已排序的会话
+ * @param now   当前时间（测试可固定）
+ */
+export function groupSessionsForWorkbench(items: TrialSession[], now: Date = new Date()): SessionGroup[] {
+  const buckets: Record<WorkbenchSessionGroupLabel, TrialSession[]> = {
+    今天: [],
+    '7天内': [],
+    更早: []
+  }
+  const todayStart = startOfLocalDay(now).getTime()
+  const dayMs = 24 * 60 * 60 * 1000
+  const sevenDayStart = todayStart - RECENT_7_DAYS * dayMs
+
+  for (const item of items) {
+    const stamp = parseSessionTime(item.updateTime || item.startTime)
+    if (stamp > 0 && stamp >= todayStart) {
+      buckets['今天'].push(item)
+    } else if (stamp >= sevenDayStart) {
+      buckets['7天内'].push(item)
+    } else {
+      // 含原「30天内」与更早；脏时间也沉底，会话不丢
+      buckets['更早'].push(item)
+    }
+  }
+  return WORKBENCH_SESSION_GROUP_LABELS.filter((label) => buckets[label].length > 0).map((label) => ({
+    label,
+    items: buckets[label]
+  }))
+}

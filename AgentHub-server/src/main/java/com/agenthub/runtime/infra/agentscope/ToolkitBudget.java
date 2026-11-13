@@ -23,6 +23,18 @@ public final class ToolkitBudget {
      * @return 同一 toolkit
      */
     public static Toolkit wrap(Toolkit toolkit, RunBudget budget) {
+        return wrap(toolkit, budget, "");
+    }
+
+    /**
+     * 同上，并声明本轮专家归属；连续失败计数按该归属计量，专家切换时清零。
+     *
+     * @param toolkit 已装配工具集
+     * @param budget  本轮配额
+     * @param owner   本轮专家归属（id / 展示名）；空串表示不区分
+     * @return 同一 toolkit
+     */
+    public static Toolkit wrap(Toolkit toolkit, RunBudget budget, String owner) {
         if (toolkit == null || budget == null) {
             return toolkit;
         }
@@ -33,7 +45,7 @@ public final class ToolkitBudget {
                 continue;
             }
             toolkit.removeTool(name);
-            toolkit.registerAgentTool(new BudgetingAgentTool(original, budget));
+            toolkit.registerAgentTool(new BudgetingAgentTool(original, budget, owner));
         }
         return toolkit;
     }

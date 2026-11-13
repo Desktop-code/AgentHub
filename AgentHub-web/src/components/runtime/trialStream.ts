@@ -38,8 +38,9 @@ export interface LiveTurn {
 const streams = new Map<number, LiveTurn>()
 
 /**
- * 仍在执行中的会话集合，是左栏转圈的唯一依据。
- * 不能读 agent_run_session.status：试跑会话多轮期间恒为 RUNNING，拿它判断会让历史行全在转。
+ * 仍在执行中的会话集合，是左栏转圈的正向依据。
+ * 不能单凭 agent_run_session.status：试跑会话多轮期间恒为 RUNNING，拿它判断会让历史行全在转。
+ * 终态（取消 / 失败 / 成功）由 sessionProgress 再挡一层，重启收口后的行不再转。
  * 放模块级而非组件内，才能「切走再切回」「关面板再开」都不丢。
  */
 const running = ref<Set<number>>(new Set())

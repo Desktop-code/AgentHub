@@ -122,11 +122,9 @@ public class AnswerAggregator {
             notices.addAll(pick.notices());
             aggregateLine = pick.segmentLine();
             if (pick.winner() != null) {
-                // 终答＝赢家原文，不做二次改写 / 拼接；token 与产物仍按全部子汇总
+                // 终答＝赢家原文，不做二次改写 / 拼接；token 与产物仍按全部子汇总。
+                // 各位的结论已经按参与者推过，这里再推赢家会把同一段正文再贴一次。
                 TrialTurn turn = mergeTurns(outcomes, pick.winner().turn().getAssistantText());
-                if (progress != null) {
-                    progress.assistant(turn.getAssistantText());
-                }
                 return new AggregateOutcome(turn, notices, aggregateLine,
                         indexOfOutcome(outcomes, pick.winner()));
             }
@@ -140,7 +138,11 @@ public class AnswerAggregator {
                 try {
                     RouterClock.assertBefore(deadlineNanos);
                     if (progress != null) {
-                        progress.route("终答汇总中…");
+                        // 方案有自己的汇总结论时用「方案结论」标记，消息流据此在子专家之后再出一块，
+                        // 而不是把汇总正文塞进前面的分流块。旧 Agent 路径仍用原来的汇总提示。
+                        progress.route(spec != null
+                                ? "方案结论：" + rootName(parent, spec)
+                                : "终答汇总中…");
                     }
                     if (trace != null) {
                         // 汇总 LLM 挂在 ROUTE 下，与判路由 LLM 同级兄弟
@@ -149,8 +151,8 @@ public class AnswerAggregator {
                     long remainingMs = Math.max(1000L, (deadlineNanos - System.nanoTime()) / 1_000_000L);
                     EffectiveLimits summarizeLimits = parentLimits.withTimeoutMs(
                             Math.min(parentLimits.timeoutMs(), remainingMs));
-                    MeterScope scope = MeterScope.console(parent.getId(), parentModel.get(), sessionId, userId);
-                    String prompt = summarizePrompt(parent, userText);
+                    MeterScope scope = MeterScope.console(rootId(parent), parentModel.get(), sessionId, userId);
+                    String prompt = summarizePrompt(rootName(parent, spec), userText);
                     String input = summarizeUser(userText, outcomes);
                     String summary;
                     if (relay == null) {
@@ -205,14 +207,15 @@ public class AnswerAggregator {
             }
         }
         TrialTurn turn = mergeTurns(outcomes, concat);
-        // 多子 / 单子失败 / 曾屏蔽子 assistant：等齐后推终稿；单子 CONCAT 成功时子 ReAct 已流式推过
-        boolean needPush = outcomes.size() > 1
-                || (outcomes.size() == 1 && outcomes.get(0).error() != null)
+        // 多子 / 投票 / 汇总已经按参与者交出过结论：再推拼接稿会把子正文复制一遍。
+        // 只剩「单子失败、当时没有流式正文」才补一段失败说明。
+        boolean participantsAlreadyShown = outcomes.size() > 1
                 || mode == RouterAnswerMode.SUMMARIZE
-                // VOTE 也屏蔽过子正文：降级拼接时必须整段补推一次
                 || mode == RouterAnswerMode.VOTE;
+        boolean needPush = !participantsAlreadyShown
+                && outcomes.size() == 1
+                && outcomes.get(0).error() != null;
         // 汇总已经推过正文时不再补推：前半段是流式原文、后半段是拼接全文，拼起来会是一段错乱答复。
-        // 这种情况下前端在本轮结束时会按落库事件重放，页面最终仍对齐到真实的拼接终答。
         if (progress != null && needPush && !answerDelivered) {
             progress.assistant(turn.getAssistantText());
         }
@@ -220,9 +223,12 @@ public class AnswerAggregator {
     }
 
     /**
-     * 判路由 / 汇总模型解析：方案优先，绑根回落 Agent 槽。
+     * 判路由 / 汇总模型解析：方案优先，旧 Agent 试跑才回落 Agent 模型槽。
      *
-     * @param parent 编排根；虚拟根为合成的只读壳，id 为空
+     * <p>方案链路没有 Agent 根：{@code parent} 为 null，模型只认方案的 judge 槽；
+     * 只有旧单兵 ROUTER 试跑才会带 parent 去读 agent_def。
+     *
+     * @param parent 旧 Agent 试跑的 ROUTER；方案链路为 null
      * @param spec   方案执行来源；可空
      * @return 模型实例 id；都不可用时为空
      */
@@ -234,6 +240,30 @@ public class AnswerAggregator {
             return Optional.empty();
         }
         return loader.findRouterModel(parent.getId());
+    }
+
+    /**
+     * 编排根主键：方案试跑没有 Agent 根，返回 null；旧 Agent 试跑返回 Agent 主键。
+     *
+     * @param parent 旧 Agent 试跑的 ROUTER；可为 null
+     * @return Agent 主键或 null
+     */
+    private static Long rootId(AgentDef parent) {
+        return parent == null ? null : parent.getId();
+    }
+
+    /**
+     * 编排根展示名：方案名优先（方案就是根），旧 Agent 路径用 Agent 名。
+     *
+     * @param parent 旧 Agent 试跑的 ROUTER；可为 null
+     * @param spec   方案来源；可空
+     * @return 展示名；都为空时 null
+     */
+    private static String rootName(AgentDef parent, MaRunSpec spec) {
+        if (spec != null) {
+            return RouterObs.maRootName(spec);
+        }
+        return parent == null ? null : parent.getName();
     }
 
     /**
@@ -282,8 +312,8 @@ public class AnswerAggregator {
                 trace.bindParent(routeSpan);
             }
             String reply = react.judge(
-                    MeterScope.console(parent.getId(), judgeModel.get(), sessionId, userId),
-                    votePrompt(parent, userText, pool), voteUserText(userText, pool), voteLimits);
+                    MeterScope.console(rootId(parent), judgeModel.get(), sessionId, userId),
+                    votePrompt(rootName(parent, spec), userText, pool), voteUserText(userText, pool), voteLimits);
             // 解析契约与 COMPETE 共用同一份 Parser：两处都是 {"winner","reason"}，禁止各写一套格式
             Optional<CompeteVerdictParser.Verdict> verdict = CompeteVerdictParser.parse(reply,
                     pool.stream().map(ChildOutcome::keyOf).toList());
@@ -347,16 +377,17 @@ public class AnswerAggregator {
     /**
      * 投票的评委提示词：只要求输出 JSON，不辩论、不改写候选正文。
      *
-     * @param parent   编排根（取平台提示词前缀）
+     * @param rootName 编排根名（方案名 / 旧 Agent 名）；可空
      * @param userText 用户原问
      * @param pool     成功子结果
      * @return 系统提示
      */
-    private String votePrompt(AgentDef parent, String userText, List<ChildOutcome> pool) {
+    private String votePrompt(String rootName, String userText, List<ChildOutcome> pool) {
         StringBuilder prompt = new StringBuilder();
-        // 平台前缀沿用父 ROUTER 的用途模板，避免与判路由 / 汇总两套前缀并存
-        String assembled = prompts.build(parent, userText);
-        if (!assembled.isBlank()) {
+        // 平台前缀沿用 ROUTER 用途模板，避免与判路由 / 汇总两套前缀并存；
+        // 装配器异常 / 未装配时返回 null，不能把投票提示词整段弄崩
+        String assembled = prompts.buildRoot(rootName, userText);
+        if (assembled != null && !assembled.isBlank()) {
             prompt.append(assembled).append("\n\n");
         }
         prompt.append("你是终答投票的评审。下面有 ").append(pool.size())
@@ -367,9 +398,10 @@ public class AnswerAggregator {
                 .append("候选：\n");
         for (ChildOutcome outcome : pool) {
             prompt.append("- ").append(keyOf(outcome));
-            String intent = outcome.intent().candidate().route().getIntent();
-            if (intent != null && !intent.isBlank()) {
-                prompt.append('：').append(intent.trim());
+            // 意图说明单一真源：读 Agent 简介，不再读 ma_candidate.intent_desc
+            String brief = RouterTexts.descriptionOf(outcome.intent().candidate().agent());
+            if (brief != null) {
+                prompt.append('：').append(brief);
             }
             prompt.append('\n');
         }
@@ -463,17 +495,19 @@ public class AnswerAggregator {
     }
 
     /**
-     * 汇总的系统提示：沿用父 ROUTER 用途前缀，再追加「综合成一篇中文答复」的硬要求。
+     * 汇总的系统提示：沿用 ROUTER 用途前缀，再追加「综合成一篇中文答复」的硬要求。
      *
-     * @param parent   编排根
+     * @param rootName 编排根名（方案名 / 旧 Agent 名）；可空
      * @param userText 用户原问（模板里的 {{user_query}} 需要值）
      * @return 系统提示
      */
-    private String summarizePrompt(AgentDef parent, String userText) {
+    private String summarizePrompt(String rootName, String userText) {
         StringBuilder prompt = new StringBuilder();
         // ROUTER 用途模板里的 {{user_query}} 需要本轮原问；否则父汇总阶段读不到用户问了什么
-        String assembled = prompts.build(parent, userText);
-        if (!assembled.isBlank()) {
+        // 平台前缀沿用 ROUTER 用途模板，避免与判路由 / 汇总两套前缀并存；
+        // 装配器异常 / 未装配时返回 null，不能把汇总提示词整段弄崩
+        String assembled = prompts.buildRoot(rootName, userText);
+        if (assembled != null && !assembled.isBlank()) {
             prompt.append(assembled).append("\n\n");
         }
         prompt.append("你是路由父助手。下方给出用户原问与各子 Agent 的回答（已打码敏感信息）。\n");

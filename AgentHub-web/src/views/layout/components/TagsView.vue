@@ -1,5 +1,5 @@
 <template>
-  <!-- 多页签条：固定在顶栏下方、主内容区上方；40px 定高，浅灰底，不参与主区滚动 -->
+  <!-- 多页签条：紧贴右侧主区顶；40px 定高（≤45px），浅灰底，不参与主区滚动 -->
   <div class="tags-view">
     <!-- 横向滚动：标签多时只在这里滚，不影响主区；原生隐藏滚动条，靠滚轮/触摸拖动 -->
     <el-scrollbar ref="scrollRef" class="tags-scroll" :always="false">
@@ -44,6 +44,7 @@
  *
  * 职责：把访问过的路由渲染成横向标签，支持点击切换、单个关闭、关闭其他、关闭所有。
  * 状态全部落在 stores/tagsView.ts，本组件只负责渲染与路由跳转，不自行维护标签数组。
+ * 视觉：紧贴右侧主区顶，定高 40px（≤45px），与内容区同色浅灰；不改缓存协议。
  *
  * 关键约束：
  * 1. 标签唯一键是 path：同一页面换 query 只更新标签，不新增标签。
@@ -205,14 +206,19 @@ onMounted(() => {
 </script>
 
 <style scoped>
+/*
+ * 轻量页签条：与主区同色浅灰，仅底部分割线；定高 40px（验收上限 45px）。
+ * 不改 visitedViews / KeepAlive 协议，只动视觉。
+ */
 .tags-view {
   display: flex;
   align-items: center;
   flex: none;
   height: 40px;
+  max-height: 45px;
   padding: 0 8px 0 12px;
-  background: var(--ah-bg);
-  border-bottom: 1px solid var(--ah-border);
+  background: #f5f7fa;
+  border-bottom: 1px solid var(--ah-border-soft, #f2f6fc);
   box-sizing: border-box;
 }
 
@@ -224,50 +230,49 @@ onMounted(() => {
 .tags-track {
   display: flex;
   align-items: center;
-  gap: 6px;
+  gap: 4px;
   height: 40px;
   white-space: nowrap;
 }
 
-/* 普通标签：透明底 + 次级文字，hover 才浮出一点白 */
+/* 普通标签：更小更紧凑，透明底 */
 .tag-item {
   display: inline-flex;
   align-items: center;
-  gap: 6px;
+  gap: 4px;
   flex: none;
-  height: 26px;
-  padding: 0 10px;
+  height: 24px;
+  padding: 0 8px;
   border: 1px solid transparent;
   border-radius: var(--ah-radius-md);
   color: var(--ah-text-secondary);
-  font-size: 13px;
+  font-size: 12px;
   line-height: 1;
   cursor: pointer;
   user-select: none;
 }
 
 .tag-item:hover {
-  background: #fff;
+  background: rgba(255, 255, 255, 0.72);
   color: var(--ah-text);
 }
 
-/* 激活标签：白底 + 紫字 + 紫色描边，与极简工具栏的克制风格一致 */
+/* 当前页：品牌色浅底 + 品牌色字，保留关闭按钮 */
 .tag-item.is-active {
-  background: #fff;
-  border-color: var(--el-color-primary-light-7);
+  background: var(--el-color-primary-light-9, #f4f3ff);
+  border-color: transparent;
   color: var(--ah-primary);
   font-weight: 600;
-  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.04);
 }
 
 .tag-text {
-  max-width: 160px;
+  max-width: 140px;
   overflow: hidden;
   text-overflow: ellipsis;
 }
 
 .tag-close {
-  font-size: 12px;
+  font-size: 11px;
   border-radius: 50%;
   color: inherit;
   opacity: 0.55;
@@ -283,14 +288,14 @@ onMounted(() => {
   display: flex;
   align-items: center;
   flex: none;
-  padding-left: 6px;
+  padding-left: 4px;
 }
 
 .tags-more {
   display: grid;
   place-items: center;
-  width: 26px;
-  height: 26px;
+  width: 24px;
+  height: 24px;
   padding: 0;
   border: 1px solid transparent;
   border-radius: var(--ah-radius-md);
@@ -300,8 +305,7 @@ onMounted(() => {
 }
 
 .tags-more:hover {
-  background: #fff;
-  border-color: var(--ah-border);
+  background: rgba(255, 255, 255, 0.72);
   color: var(--ah-text);
 }
 

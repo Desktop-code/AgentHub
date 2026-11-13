@@ -156,6 +156,7 @@
                   v-if="user.hasPerm('model:provider:remove') && item.platformLocked"
                   content="该供应商下有平台级模型实例，不能删除；请先取消平台级或换绑到其他实例"
                   placement="top-start"
+                  popper-class="clamp-tip"
                 >
                   <span class="card-lock" aria-label="已锁定，不可删除" @click.stop>
                     <el-icon><Lock /></el-icon>
@@ -190,11 +191,15 @@
                   </el-tag>
                 </div>
               </template>
+              <!-- 备注 / 地址：卡片内截断，完整内容用统一气泡兜底（clamp-tip：宽 320px、限高自滚） -->
               <el-tooltip
-                :content="item.remark || item.baseUrl || '暂无备注'"
                 placement="top"
+                popper-class="clamp-tip"
                 :disabled="!(item.remark || item.baseUrl)"
               >
+                <template #content>
+                  <div class="clamp-tip__body">{{ item.remark || item.baseUrl }}</div>
+                </template>
                 <span :class="{ muted: !(item.remark || item.baseUrl) }">
                   {{ item.remark || item.baseUrl || '暂无备注' }}
                 </span>
@@ -1671,9 +1676,32 @@ onUnmounted(() => {
   margin-bottom: 12px;
 }
 
-/* 记忆向量可观测条：与网格/主从共用同一页头间距，不撑开筛选区 */
+/* 记忆向量可观测条：圆角 + 柔和浅黄底，去掉突兀实线边框（class 挂在 el-alert 根上） */
 .vector-alert {
   margin-bottom: 12px;
+  border: none !important;
+  border-radius: 8px;
+  overflow: hidden;
+}
+
+.vector-alert.el-alert--warning {
+  --el-alert-bg-color: #fffbeb;
+  background-color: #fffbeb;
+}
+
+.vector-alert.el-alert--error {
+  --el-alert-bg-color: #fef2f2;
+  background-color: #fef2f2;
+}
+
+.vector-alert.el-alert--info {
+  --el-alert-bg-color: #f0f5ff;
+  background-color: #f0f5ff;
+}
+
+.vector-alert.el-alert--success {
+  --el-alert-bg-color: #ecfdf5;
+  background-color: #ecfdf5;
 }
 
 .vector-alert-body {

@@ -20,6 +20,7 @@ CREATE TABLE `agent_def`  (
   `name` varchar(64) CHARACTER SET utf8mb4 COLLATE utf8mb4_general_ci NOT NULL COMMENT '展示名',
   `code` varchar(64) CHARACTER SET utf8mb4 COLLATE utf8mb4_general_ci NOT NULL COMMENT '业务编码（未删范围内唯一，应用层校验）',
   `description` varchar(1000) CHARACTER SET utf8mb4 COLLATE utf8mb4_general_ci NULL DEFAULT NULL COMMENT '简介',
+  `avatar_config` json NULL COMMENT '形象配置：preset{icon,color} 或 custom{url}',
   `run_mode` varchar(32) CHARACTER SET utf8mb4 COLLATE utf8mb4_general_ci NOT NULL COMMENT 'REACT / ROUTER',
   `system_prompt` text CHARACTER SET utf8mb4 COLLATE utf8mb4_general_ci NULL COMMENT '系统提示词；ROUTER 父节点也可写路由说明',
   `prompt_template_id` bigint(20) NULL DEFAULT NULL COMMENT 'CHAT 引用 L2 模板 id',

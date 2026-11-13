@@ -148,6 +148,14 @@ const props = defineProps<{
   agentId: number
 }>()
 
+/**
+ * 绑定条数变化时通知父级（Agent 基本信息右侧身份卡展示「知识库」计数）。
+ * 只在加载 / 增删成功后发送，失败不发，避免把「未知」误报成 0。
+ */
+const emit = defineEmits<{
+  (e: 'changed', count: number): void
+}>()
+
 const user = useUserStore()
 const loading = ref(false)
 const errorText = ref('')
@@ -281,6 +289,7 @@ async function load() {
   try {
     const { data } = await listAgentKbs(props.agentId)
     rows.value = data.data || []
+    emit('changed', rows.value.length)
   } catch {
     errorText.value = '知识库绑定加载失败'
     rows.value = []

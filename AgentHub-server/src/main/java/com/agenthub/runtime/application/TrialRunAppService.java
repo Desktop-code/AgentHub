@@ -4,6 +4,7 @@ import com.agenthub.agent.domain.model.AgentDef;
 import com.agenthub.agent.domain.model.AgentRunMode;
 import com.agenthub.agent.domain.model.AgentStatus;
 import com.agenthub.agent.domain.repository.AgentDefRepository;
+import com.agenthub.agent.application.ReceptionSchemeResolver;
 import com.agenthub.audit.domain.OperLogWriter;
 import com.agenthub.common.error.BizException;
 import com.agenthub.common.error.ErrorCode;
@@ -16,6 +17,7 @@ import com.agenthub.obs.domain.model.SpanClose;
 import com.agenthub.obs.domain.model.SpanType;
 import com.agenthub.obs.domain.service.ObsAttrs;
 import com.agenthub.runtime.domain.model.ChildPlanPendingView;
+import com.agenthub.runtime.domain.model.EntryChannel;
 import com.agenthub.runtime.domain.model.EventType;
 import com.agenthub.runtime.domain.model.MaRunSpec;
 import com.agenthub.runtime.domain.model.MeterScope;
@@ -23,6 +25,8 @@ import com.agenthub.runtime.domain.model.PendingPlan;
 import com.agenthub.runtime.domain.model.PlanState;
 import com.agenthub.runtime.domain.model.PlanView;
 import com.agenthub.runtime.domain.model.RunEvent;
+import com.agenthub.runtime.domain.model.RouteHint;
+import com.agenthub.runtime.domain.model.RouteSticky;
 import com.agenthub.runtime.domain.model.RunSession;
 import com.agenthub.runtime.domain.model.RunStatus;
 import com.agenthub.runtime.domain.model.TrialIdemGuard;
@@ -55,7 +59,9 @@ import java.util.Optional;
 
 /**
  * 发送一轮试跑。所属域：runtime。模型调用在事务外，成功或失败后再落事件。
- * 会话在多轮期间保持 RUNNING，不写结束时间。操作日志只记会话，不记用户原文、助手正文和工具实参。
+ * 会话在多轮期间保持 RUNNING，不写结束时间。业务失败写 error 事件后仍保持 RUNNING，方便续聊。
+ * 只有一轮没走到成功或失败收尾就逃出时，才经 {@link StaleRunCloser} 收成取消。
+ * 操作日志只记会话，不记用户原文、助手正文和工具实参。
  */
 @Service
 public class TrialRunAppService {
@@ -87,6 +93,12 @@ public class TrialRunAppService {
     private final MaTrialSpecLoader maSpecs;
     /** 发消息幂等：同会话 + 同 Idempotency-Key 只真正执行一次 */
     private final TrialMessageIdempotency idempotency;
+    /** 默认接待判路由模型回落：仅工作台虚拟根会话使用，调试会话语义不变 */
+    private final ReceptionSchemeResolver reception;
+    /** 工作台手动换线的一次性强制标记；调试路径从不读取 */
+    private final WorkbenchRouteForceRegistry routeForce;
+    /** 一轮没能正常收尾时，把仍是 RUNNING 且没被占用的会话收成取消 */
+    private final StaleRunCloser staleRuns;
 
     /**
      * @param sessions        会话
@@ -110,6 +122,8 @@ public class TrialRunAppService {
      * @param titleGenerator  首轮结束后异步生成会话标题；失败不影响本轮
      * @param maSpecs         方案读源；虚拟根没有 Agent 时由它提供模板、候选与判路由模型
      * @param idempotency     发消息幂等闸门；无键请求不改变原行为
+     * @param routeForce      工作台手动换线的一次性强制标记（进程内，只作用一轮）
+     * @param staleRuns      异常逃出时收口遗留 RUNNING；正常成功 / 业务失败不走这里
      */
     public TrialRunAppService(RunSessionRepository sessions, RunEventRepository events, AgentDefRepository agents,
                               TrialAccess access, TrialBindingLoader loader, ReActTrialExecutor react,
@@ -119,7 +133,8 @@ public class TrialRunAppService {
                               OperatorContext operatorContext, OperLogWriter operLogWriter, TrialObsHooks obs,
                               TrialMemoryCoordinator memory, TrialLiveBuffer live, VisionOcrExecutor vision,
                               SessionTitleGeneratorAppService titleGenerator, MaTrialSpecLoader maSpecs,
-                              TrialMessageIdempotency idempotency) {
+                              TrialMessageIdempotency idempotency, ReceptionSchemeResolver reception,
+                              WorkbenchRouteForceRegistry routeForce, StaleRunCloser staleRuns) {
         this.sessions = sessions;
         this.events = events;
         this.agents = agents;
@@ -142,6 +157,9 @@ public class TrialRunAppService {
         this.titleGenerator = titleGenerator;
         this.maSpecs = maSpecs;
         this.idempotency = idempotency;
+        this.reception = reception;
+        this.routeForce = routeForce;
+        this.staleRuns = staleRuns;
     }
 
     /**
@@ -286,6 +304,8 @@ public class TrialRunAppService {
         }
         List<RunEvent> written = new ArrayList<>();
         ObsTraceScope trace = null;
+        // 只有没走到 succeed / fail 就逃出时才收口；业务失败仍保持 RUNNING
+        boolean settled = false;
         try {
             trace = obs.begin(session, pending.userText());
             AgentDef agent = session.getAgentId() == null ? null
@@ -307,24 +327,34 @@ public class TrialRunAppService {
             TrialTurn turn = executePendingPlan(agent, pending, session, written, seq, recorder);
             obs.finishOk(trace);
             // 同一轮的续跑：不重复累加 message_count
-            return succeed(session, turn, written, pending.userText(), false);
+            MessageResp done = succeed(session, turn, written, pending.userText(), false);
+            settled = true;
+            return done;
         } catch (TrialFailure ex) {
             logTrialFailure("批准计划后试跑失败", sessionId, ex, ex.getMessage());
             // 有 cause 时把脱敏摘要提到 trace 级：面板第一行就能看到真正原因
             obs.finishError(trace, ex.getMessage(), ex.getFinishReason(), ex.getCause());
-            return fail(session, written, ex.getMessage(), pending.userText(), false);
+            MessageResp failed = fail(session, written, ex.getMessage(), pending.userText(), false);
+            settled = true;
+            return failed;
         } catch (RuntimeException ex) {
             // 批准续跑失败：带栈 + 脱敏 cause，便于区分「模型出站失败」与「装配缺失」
             log.warn("批准计划后执行失败 sessionId={} type={} cause={}",
                     sessionId, ex.getClass().getSimpleName(), CauseDigest.of(ex), ex);
             obs.finishError(trace, "试跑失败", null, ex);
-            return fail(session, written, "试跑失败", pending.userText(), false);
+            MessageResp failed = fail(session, written, "试跑失败", pending.userText(), false);
+            settled = true;
+            return failed;
         } finally {
             PromptInjectionHolder.clear();
             obs.clear();
             // 本轮结束：内存快照完成使命，权威数据是刚落库的事件
             live.clear(sessionId);
             flight.finish(sessionId);
+            // fail() 自己抛错时错误事件可能没写上，会话会停在 RUNNING，刷新后左栏一直转
+            if (!settled) {
+                staleRuns.abandonIfIdle(sessionId);
+            }
         }
     }
 
@@ -516,6 +546,8 @@ public class TrialRunAppService {
         }
         List<RunEvent> written = new ArrayList<>();
         ObsTraceScope trace = null;
+        // 正常成功 / 业务失败都算收尾；只有没走到那两支就逃出才把会话收成取消
+        boolean settled = false;
         try {
             // 新提问即放弃上一条待批准的计划：旧计划基于旧上下文，继续执行会张冠李戴
             pendingPlans.drop(sessionId);
@@ -533,6 +565,9 @@ public class TrialRunAppService {
             // 执行读源：有 ma_def_id 一律读方案；绑根按「当前启用方案」实时解析；
             // 都没有才回落 Agent 旧配置（在 run() 里写可见提醒）
             MaRunSpec spec = maSpecs.resolve(session, agent);
+            // 工作台虚拟根：方案没配判路由模型时回落平台 ROUTER / CHAT 槽；
+            // 调试会话（DEBUG）不经过这一步，/api/runtime/trial/** 语义保持原样
+            spec = applyWorkbenchJudge(session, spec);
             if (agent == null && spec == null) {
                 throw new TrialFailure("该会话既没有 Agent 也没有可用的编排方案，无法执行");
             }
@@ -571,25 +606,35 @@ public class TrialRunAppService {
             }
             TrialTurn turn = run(agent, spec, content, visionNote, session, written, seq, mirrored);
             obs.finishOk(trace);
-            return succeed(session, turn, written, content);
+            MessageResp done = succeed(session, turn, written, content);
+            settled = true;
+            return done;
         } catch (TrialFailure ex) {
             // TrialFailure 映射处：文案已是人话，挂了 cause 时补一次全栈，
             // 否则「连通测成功、试跑失败」在控制台仍只剩一句业务短句
             logTrialFailure("试跑失败", sessionId, ex, ex.getMessage());
             obs.finishError(trace, ex.getMessage(), ex.getFinishReason(), ex.getCause());
-            return fail(session, written, ex.getMessage(), content);
+            MessageResp failed = fail(session, written, ex.getMessage(), content);
+            settled = true;
+            return failed;
         } catch (RuntimeException ex) {
             // 同步路径兜底 catch：带栈打，保证「再传图失败」时控制台有完整栈
             log.warn("试跑失败 sessionId={} type={} cause={}",
                     sessionId, ex.getClass().getSimpleName(), CauseDigest.of(ex), ex);
             obs.finishError(trace, "试跑失败", null, ex);
-            return fail(session, written, "试跑失败", content);
+            MessageResp failed = fail(session, written, "试跑失败", content);
+            settled = true;
+            return failed;
         } finally {
             PromptInjectionHolder.clear();
             obs.clear();
             // 整轮结束（无论成败）：内存快照完成使命，权威数据是刚落库的事件
             live.clear(sessionId);
             flight.finish(sessionId);
+            // 请求被掐断、fail 写库再抛：错误事件可能没落上，不收口的话刷新后会一直续订
+            if (!settled) {
+                staleRuns.abandonIfIdle(sessionId);
+            }
         }
     }
 
@@ -625,16 +670,16 @@ public class TrialRunAppService {
     private TrialTurn run(AgentDef agent, MaRunSpec spec, String content, String ocrText, RunSession session,
                           List<RunEvent> written, int seq, TrialProgress progress) {
         long userId = session.getUserId();
-        // 用户事件已经入库。这里追加窗口并在触顶时滚动摘要，再把摘要和短期记忆拼进本轮。
-        // 注意：窗口里存的是用户原文 content，不是 OCR 结果——OCR 只在「本轮」有效，
-        // 存进窗口会让后续每轮都把上次的图片文字再喂一遍，既浪费 token 也容易串味。
-        // 虚拟根没有 Agent 记忆策略：直接用原文，避免把方案会话写进某个 Agent 的窗口。
-        String modelUser = agent == null ? content : memory.prepareUser(session, content);
+        // 方案会话（spec 非空）以方案自己为根：没有 Agent 记忆策略，直接用原文，
+        // 避免把方案会话写进某个 Agent 的窗口；历史绑根会话即便还带 agentId 也按此口径。
+        boolean schemeTurn = spec != null;
+        String modelUser = schemeTurn || agent == null ? content : memory.prepareUser(session, content);
         // 多模态：识别结果只拼到「送给模型的那一版」，用户事件与标题仍保持原文
         String query = VisionOcrTexts.composeQuery(ocrText, content);
         modelUser = VisionOcrTexts.applyToModelUser(modelUser, ocrText, content);
-        // 运行模式以会话快照为准：虚拟根会话固定 ROUTER，没有 Agent 可读
-        String runMode = agent != null ? agent.getRunMode() : session.getRunMode();
+        // 运行模式：方案会话固定 ROUTER（方案只有一层编排语义），其余按 Agent / 会话快照
+        String runMode = schemeTurn ? AgentRunMode.ROUTER.name()
+                : (agent != null ? agent.getRunMode() : session.getRunMode());
         if (AgentRunMode.ROUTER.name().equals(runMode)) {
             if (spec == null) {
                 // 绑根但没有启用方案：回落 Agent 旧配置，必须在时间线留痕，避免用户以为读的是方案
@@ -642,16 +687,19 @@ public class TrialRunAppService {
                         "该编排根未绑定启用中的方案，本轮按 Agent 侧旧配置执行；到「多智能体」为它启用方案后，"
                                 + "执行读源才会切到方案（模板 / 候选 / 判路由模型）", null, null));
             }
-            // 虚拟根没有 agent_def 行：合成只读壳只为装配（提示词前缀 / 限制解析 / 计量归属），不落库
-            AgentDef root = agent != null ? agent : virtualRoot(spec);
+            // 方案就是根：不再合成 AgentDef 壳，执行器直接以方案（spec）为根跑；
+            // 只有旧 Agent 试跑路径（spec 为空）才把真实 Agent 传进去。
+            AgentDef root = schemeTurn ? null : agent;
             // 路由判定也要看得到图片里的文字，否则「这张发票什么时候到期」会判不出意图
             RouterTrialExecutor.RoutedTurn routed = router.execute(root, spec, query, modelUser, userId,
-                    session.getId(), progress);
+                    session.getId(), progress, workbenchHint(session));
+            // 刀3：单意图成功轮写回沿用线路，多意图轮清空；失败 / 取消走不到这里，不改旧值
+            applyStickyRoute(session, routed);
             // 按子分段落库：决策块 + 每子「路由到」+ 该子 traces，禁止拼成单条时间线
             seq = timeline.appendRouterSegments(session.getId(), seq, routed, written);
             seq = appendNotices(session.getId(), seq, routed.notices(), written);
             written.add(timeline.assistant(session.getId(), seq, routed.turn()));
-            if (agent != null) {
+            if (!schemeTurn && agent != null) {
                 memory.afterAssistant(session, routed.turn().getAssistantText());
             }
             return routed.turn();
@@ -712,34 +760,77 @@ public class TrialRunAppService {
     }
 
     /**
-     * 虚拟根的执行壳：把方案伪装成一个只读 {@link AgentDef}，供装配层复用既有入口。
+     * 工作台方案会话的判路由模型回落。
      *
-     * <p>为什么需要它：判路由提示词前缀、生效限制解析、计量归属都按 Agent 取值；
-     * 虚拟根在 {@code agent_def} 里没有行，若各处判空会散落大量分支。
-     * 这里只填「标识 + ROUTER 模式 + 启用」，<b>不写库</b>，也不会被当成真实 Agent 查到；
-     * 模型槽与记忆策略仍由方案提供（判路由模型来自 {@code maJudgeModelInstanceId}）。
+     * <p>方案自己配了判路由模型就尊重方案；没配才用平台 ROUTER → CHAT 槽。
+     * 只对 {@code entry_channel=WORKBENCH} 的会话生效，调试入口的
+     * 「未配置 → 使用第一条候选」行为完全不变。
      *
-     * @param spec 方案来源；调用方保证非空
-     * @return 只读合成 Agent（id 为空）
+     * @param session 当前会话
+     * @param spec    方案执行来源，可空
+     * @return 可能补了判路由模型的执行来源
      */
-    private static AgentDef virtualRoot(MaRunSpec spec) {
-        AgentDef root = new AgentDef();
-        root.setName(virtualRootName(spec));
-        root.setCode(spec == null ? null : spec.label());
-        root.setRunMode(AgentRunMode.ROUTER.name());
-        root.setStatus(AgentStatus.ENABLED);
-        return root;
+    private MaRunSpec applyWorkbenchJudge(RunSession session, MaRunSpec spec) {
+        if (spec == null || spec.judgeModelInstanceId() != null) {
+            return spec;
+        }
+        if (!EntryChannel.isWorkbench(session.getEntryChannel())) {
+            return spec;
+        }
+        return spec.withJudgeModel(reception.platformJudgeModel().orElse(null));
     }
 
-    /** 虚拟根展示名：方案名 → 编码 → 中性中文（会话标题与提示词都用它）。 */
-    private static String virtualRootName(MaRunSpec spec) {
-        if (spec == null) {
-            return "编排根";
+    /**
+     * 组装本轮的线路提示（刀3）。所属域：runtime。
+     *
+     * <p>只有工作台正式对话会返回非空：
+     * <ul>
+     *   <li>调试会话返回 {@code null}，判路由链路与刀3 之前完全一致；</li>
+     *   <li>有一次性强制标记时消费掉它（{@link WorkbenchRouteForceRegistry#take(Long)}），
+     *       保证「手动换线」只作用一轮；</li>
+     *   <li>没有强制标记但有沿用线路时，只把「优先沿用」注入判路由提示词。</li>
+     * </ul>
+     *
+     * @param session 当前会话
+     * @return 线路提示；无提示时为空
+     */
+    private RouteHint workbenchHint(RunSession session) {
+        if (!EntryChannel.isWorkbench(session.getEntryChannel())) {
+            return null;
         }
-        if (spec.name() != null && !spec.name().isBlank()) {
-            return spec.name().trim();
+        String sticky = session.getStickyRouteKey();
+        String forced = routeForce.take(session.getId()).orElse(null);
+        if (forced == null) {
+            return sticky == null ? null : RouteHint.sticky(sticky);
         }
-        return spec.label().isBlank() ? "编排根" : spec.label();
+        return RouteHint.forced(sticky, forced);
+    }
+
+    /**
+     * 回写线路粘性（刀3）。所属域：runtime。
+     *
+     * <p>边界：
+     * <ul>
+     *   <li>只有工作台会话写；调试会话不因试跑而改变线路；</li>
+     *   <li>待批准（本轮没有终答）不写：这一轮还没结束，不能把「已定线」提前落库；</li>
+     *   <li>{@code sticky == null}（固定模板 / 评审环 / 竞争选优）保持原值不动。</li>
+     * </ul>
+     *
+     * @param session 当前会话
+     * @param routed  本轮路由结果
+     */
+    private void applyStickyRoute(RunSession session, RouterTrialExecutor.RoutedTurn routed) {
+        RouteSticky sticky = routed.sticky();
+        if (sticky == null || !EntryChannel.isWorkbench(session.getEntryChannel())) {
+            return;
+        }
+        if (routed.turn() != null && routed.turn().isAssistantSuppressed()) {
+            return;
+        }
+        sessions.updateStickyRoute(session.getId(), sticky.routeKey(), sticky.agentId(), session.getUserId());
+        // 同步本地对象：同一请求内后续若再读会话，不会拿到旧线路
+        session.setStickyRouteKey(sticky.routeKey());
+        session.setStickyAgentId(sticky.agentId());
     }
 
     private int appendNotices(Long sessionId, int seq, List<String> notices, List<RunEvent> written) {

@@ -115,6 +115,7 @@ public class AuthAppService {
         resp.setUserId(user.getId());
         resp.setUsername(user.getUsername());
         resp.setNickname(user.getNickname());
+        resp.setAvatarUrl(user.getAvatarUrl());
         resp.setDeptId(user.getDeptId());
         if (user.getDeptId() != null) {
             depts.findById(user.getDeptId()).ifPresent(dept -> resp.setDeptName(dept.getName()));

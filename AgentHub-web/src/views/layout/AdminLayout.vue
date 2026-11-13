@@ -1,163 +1,192 @@
 <template>
-  <div class="shell">
-    <header class="topbar">
-      <AppLogo class="brand" />
-      <el-dropdown trigger="click" @command="onAccountCommand">
-        <button type="button" class="account" aria-label="用户菜单">
-          <span class="avatar">{{ initials }}</span>
-          <span class="user-name">{{ displayName }}</span>
-          <el-icon class="account-caret"><ArrowDown /></el-icon>
-        </button>
-        <template #dropdown>
-          <el-dropdown-menu>
-            <el-dropdown-item command="logout">退出登录</el-dropdown-item>
-          </el-dropdown-menu>
-        </template>
-      </el-dropdown>
-    </header>
-    <div class="body" :class="{ 'is-editor-focus': focusActive }">
-      <aside class="aside" :class="{ 'is-collapsed': collapsed }">
-        <nav class="nav">
-          <!-- 工作台顶层入口，不包在「概览」目录下 -->
-          <router-link
-            to="/workspace"
-            class="nav-link nav-top"
-            :class="{ 'is-current': isCurrent('/workspace') }"
-            :title="collapsed ? '工作台' : undefined"
+  <!--
+    左右分栏壳：左侧导航通顶（Logo / 菜单 / 折叠 / 用户），右侧仅页签 + 主内容。
+    无顶部 Header；KeepAlive / 页签缓存协议保持原样。
+  -->
+  <div class="shell" :class="{ 'is-editor-focus': focusActive }">
+    <aside class="aside" :class="{ 'is-collapsed': collapsed }">
+      <!-- 顶部品牌区：原顶栏 Logo 移入；折叠时只出角标 -->
+      <div class="brand-zone">
+        <AppLogo class="brand" :show-text="!collapsed" />
+      </div>
+      <nav class="nav">
+        <!-- 工作台顶层入口，不包在「概览」目录下 -->
+        <router-link
+          to="/workspace"
+          class="nav-link nav-top"
+          :class="{ 'is-current': isCurrent('/workspace') }"
+          :title="collapsed ? '对话' : undefined"
+        >
+          <el-icon><House /></el-icon>
+          <span class="nav-label">对话</span>
+        </router-link>
+        <section v-for="dir in directories" :key="dir.id" class="dir">
+          <!-- 不折叠分组：收起时标题隐藏，子菜单图标仍平铺显示 -->
+          <template v-if="dir.flat">
+            <div class="dir-heading">
+              <span class="nav-label">{{ dir.name }}</span>
+            </div>
+          </template>
+          <!-- 可折叠目录：收起时只留图标，子项进右侧飞出层 -->
+          <el-popover
+            v-else
+            :disabled="!collapsed"
+            placement="right-start"
+            :width="200"
+            trigger="hover"
+            :show-arrow="false"
+            :offset="8"
+            popper-class="aside-flyout"
+            :hide-after="80"
           >
-            <el-icon><House /></el-icon>
-            <span class="nav-label">工作台</span>
-          </router-link>
-          <section v-for="dir in directories" :key="dir.id" class="dir">
-            <!-- 不折叠分组：收起时标题隐藏，子菜单图标仍平铺显示 -->
-            <template v-if="dir.flat">
-              <div class="dir-heading">
-                <span class="nav-label">{{ dir.name }}</span>
+            <template #reference>
+              <div class="dir-ref">
+                <button
+                  type="button"
+                  class="dir-btn"
+                  :class="{ 'is-current': collapsed && dirContainsCurrent(dir) }"
+                  @click="onDirClick(dir.id)"
+                >
+                  <el-icon><component :is="iconOf(dir.icon)" /></el-icon>
+                  <span class="nav-label">{{ dir.name }}</span>
+                  <el-icon class="caret"><component :is="isOpen(dir.id) ? ArrowDown : ArrowRight" /></el-icon>
+                </button>
               </div>
             </template>
-            <!-- 可折叠目录：收起时只留图标，子项进右侧飞出层 -->
-            <el-popover
-              v-else
-              :disabled="!collapsed"
-              placement="right-start"
-              :width="200"
-              trigger="hover"
-              :show-arrow="false"
-              :offset="8"
-              popper-class="aside-flyout"
-              :hide-after="80"
-            >
-              <template #reference>
-                <div class="dir-ref">
-                  <button
-                    type="button"
-                    class="dir-btn"
-                    :class="{ 'is-current': collapsed && dirContainsCurrent(dir) }"
-                    @click="onDirClick(dir.id)"
-                  >
-                    <el-icon><component :is="iconOf(dir.icon)" /></el-icon>
-                    <span class="nav-label">{{ dir.name }}</span>
-                    <el-icon class="caret"><component :is="isOpen(dir.id) ? ArrowDown : ArrowRight" /></el-icon>
-                  </button>
-                </div>
-              </template>
-              <div class="flyout">
-                <div class="flyout-title">{{ dir.name }}</div>
-                <template v-for="item in dir.children" :key="item.id">
-                  <div v-if="item.kind === 'group'" class="flyout-group">
-                    <div class="flyout-group-title">{{ item.name }}</div>
-                    <router-link
-                      v-for="leaf in item.children"
-                      :key="leaf.id"
-                      :to="leaf.path"
-                      class="flyout-link"
-                      :class="{ 'is-current': isCurrent(leaf.path) }"
-                    >
-                      {{ leaf.name }}
-                    </router-link>
-                  </div>
-                  <router-link
-                    v-else
-                    :to="item.path"
-                    class="flyout-link"
-                    :class="{ 'is-current': isCurrent(item.path) }"
-                  >
-                    {{ item.name }}
-                  </router-link>
-                </template>
-              </div>
-            </el-popover>
-            <!-- 不折叠：收起后子菜单仍显示；可折叠：仅展开态内联显示 -->
-            <div
-              v-show="dir.flat || (!collapsed && isOpen(dir.id))"
-              class="children"
-              :class="{ 'is-flat': dir.flat }"
-            >
+            <div class="flyout">
+              <div class="flyout-title">{{ dir.name }}</div>
               <template v-for="item in dir.children" :key="item.id">
-                <template v-if="item.kind === 'group'">
-                  <div class="dir-heading dir-heading-nested">
-                    <span class="nav-label">{{ item.name }}</span>
-                  </div>
+                <div v-if="item.kind === 'group'" class="flyout-group">
+                  <div class="flyout-group-title">{{ item.name }}</div>
                   <router-link
                     v-for="leaf in item.children"
                     :key="leaf.id"
                     :to="leaf.path"
-                    class="nav-link"
+                    class="flyout-link"
                     :class="{ 'is-current': isCurrent(leaf.path) }"
-                    :title="collapsed ? leaf.name : undefined"
                   >
-                    <el-icon><component :is="iconOf(leaf.icon)" /></el-icon>
-                    <span class="nav-label">{{ leaf.name }}</span>
+                    {{ leaf.name }}
                   </router-link>
-                </template>
+                </div>
                 <router-link
                   v-else
                   :to="item.path"
-                  class="nav-link"
+                  class="flyout-link"
                   :class="{ 'is-current': isCurrent(item.path) }"
-                  :title="collapsed ? item.name : undefined"
                 >
-                  <el-icon><component :is="iconOf(item.icon)" /></el-icon>
-                  <span class="nav-label">{{ item.name }}</span>
+                  {{ item.name }}
                 </router-link>
               </template>
             </div>
-          </section>
-        </nav>
-        <footer class="foot">
-          <button type="button" class="collapse" @click="toggleCollapse">
-            <!-- 收起态：图标居中，tooltip 提示可展开 -->
-            <el-tooltip v-if="collapsed" content="展开侧边栏" placement="right">
-              <el-icon class="collapse-icon"><Expand /></el-icon>
-            </el-tooltip>
-            <!-- 展开态：Fold + 文案靠左 -->
-            <template v-else>
-              <el-icon class="collapse-icon"><Fold /></el-icon>
-              <span class="nav-label">收起侧边栏</span>
+          </el-popover>
+          <!-- 不折叠：收起后子菜单仍显示；可折叠：仅展开态内联显示 -->
+          <div
+            v-show="dir.flat || (!collapsed && isOpen(dir.id))"
+            class="children"
+            :class="{ 'is-flat': dir.flat }"
+          >
+            <template v-for="item in dir.children" :key="item.id">
+              <template v-if="item.kind === 'group'">
+                <div class="dir-heading dir-heading-nested">
+                  <span class="nav-label">{{ item.name }}</span>
+                </div>
+                <router-link
+                  v-for="leaf in item.children"
+                  :key="leaf.id"
+                  :to="leaf.path"
+                  class="nav-link"
+                  :class="{ 'is-current': isCurrent(leaf.path) }"
+                  :title="collapsed ? leaf.name : undefined"
+                >
+                  <el-icon><component :is="iconOf(leaf.icon)" /></el-icon>
+                  <span class="nav-label">{{ leaf.name }}</span>
+                </router-link>
+              </template>
+              <router-link
+                v-else
+                :to="item.path"
+                class="nav-link"
+                :class="{ 'is-current': isCurrent(item.path) }"
+                :title="collapsed ? item.name : undefined"
+              >
+                <el-icon><component :is="iconOf(item.icon)" /></el-icon>
+                <span class="nav-label">{{ item.name }}</span>
+              </router-link>
             </template>
-          </button>
-        </footer>
-      </aside>
-      <!-- 右侧内容列：页签条与主区上下排列，避免 TagsView 变成 .body 横向 flex 的第三个子项 -->
-      <div class="content">
-        <!-- 编辑页专注模式：页签条也让位，主区高度全给画布 -->
-        <TagsView v-if="!focusActive" />
-        <main class="main">
-          <!--
-            缓存策略：include 用 store 派生的 cachedViews（组件名），关页签即移出、组件被销毁。
-            key 用 cacheName 而非 route.path：Agent 列表与详情共用同一组件（/agent/list ↔ /agent/list/1），
-            若按路径做 key，翻卡结束后 replace URL 会把刚飞完的页面整块重挂，动画与状态全丢。
-          -->
-          <router-view v-slot="{ Component }">
-            <keep-alive :include="cachedViews">
-              <component :is="Component" :key="pageKey" />
-            </keep-alive>
-          </router-view>
-        </main>
-      </div>
+          </div>
+        </section>
+      </nav>
+      <!-- 底部用户行：头像 + 名称 + 下拉箭头；箭头右侧是收起/展开按钮 -->
+      <footer class="foot">
+        <div class="account-row">
+          <el-dropdown
+            class="account-dropdown"
+            trigger="click"
+            placement="top-start"
+            popper-class="aside-account-popper"
+            @command="onAccountCommand"
+          >
+            <button
+              type="button"
+              class="account"
+              aria-label="用户菜单"
+              :title="collapsed ? displayName : undefined"
+            >
+              <span class="avatar" :class="{ 'has-photo': !!avatarSrc }" :style="avatarFallbackStyle">
+                <img v-if="avatarSrc" :src="avatarSrc" alt="" />
+                <template v-else>{{ initials }}</template>
+              </span>
+              <span class="account-meta">
+                <span class="user-name">{{ displayName }}</span>
+                <span v-if="roleLabel" class="role-tag">{{ roleLabel }}</span>
+              </span>
+              <!-- 下拉箭头在用户区最右，紧挨外侧收起按钮左侧 -->
+              <el-icon class="account-caret"><ArrowDown /></el-icon>
+            </button>
+            <template #dropdown>
+              <el-dropdown-menu>
+                <el-dropdown-item command="profile">个人设置</el-dropdown-item>
+                <el-dropdown-item divided command="logout">退出登录</el-dropdown-item>
+              </el-dropdown-menu>
+            </template>
+          </el-dropdown>
+          <el-tooltip
+            :content="collapsed ? '展开侧边栏' : '收起侧边栏'"
+            :placement="collapsed ? 'right' : 'top'"
+          >
+            <button
+              type="button"
+              class="collapse-btn"
+              :aria-label="collapsed ? '展开侧边栏' : '收起侧边栏'"
+              @click="toggleCollapse"
+            >
+              <el-icon class="collapse-icon">
+                <component :is="collapsed ? Expand : Fold" />
+              </el-icon>
+            </button>
+          </el-tooltip>
+        </div>
+      </footer>
+    </aside>
+    <!-- 右侧内容列：页签条与主区上下排列；折叠时靠 aside 宽度过渡让位 -->
+    <div class="content">
+      <!-- 编辑页专注模式：页签条也让位，主区高度全给画布；工作台等整屏页按 meta.hideTabs 隐藏 -->
+      <TagsView v-if="!focusActive && !hideTabs" />
+      <main class="main" :class="{ 'is-flush': onWorkspace }">
+        <!--
+          缓存策略：include 用 store 派生的 cachedViews（组件名），关页签即移出、组件被销毁。
+          key 用 cacheName 而非 route.path：Agent 列表与详情共用同一组件（/agent/list ↔ /agent/list/1），
+          若按路径做 key，翻卡结束后 replace URL 会把刚飞完的页面整块重挂，动画与状态全丢。
+        -->
+        <router-view v-slot="{ Component }">
+          <keep-alive :include="cachedViews">
+            <component :is="Component" :key="pageKey" />
+          </keep-alive>
+        </router-view>
+      </main>
     </div>
     <!--
-      试跑抽屉：首次打开后才挂载（v-if=mounted），之后常驻。
+      运行抽屉：首次打开后才挂载（v-if=mounted），之后常驻。
       目的是让壳首屏不预取 TrialPanel 整树（ChatPanel / maRunView / 编排泳道），
       这一块的 chunk 体积远超壳本身，而大多数会话并不会运行。
       异步组件与 composable 共用同一个 chunk，`openAgentTrial` 会等它就绪再置可见。
@@ -169,16 +198,18 @@
       :agent-name="trialTarget.name"
       :run-mode="trialTarget.runMode"
     />
+    <!-- 个人设置：侧栏用户菜单进入；与 Agent 形象配置分开 -->
+    <ProfileSettingsDialog v-model="profileOpen" />
   </div>
 </template>
 
 <script setup lang="ts">
 /**
  * 控制台壳。所属域：前端布局。
- * 顶栏放品牌和当前用户（点击用户名下拉退出）；侧栏只渲染目录和菜单。按钮权限不进侧栏。
+ * 左右分栏：左侧导航通顶（Logo / 菜单 / 折叠 / 用户下拉），右侧仅多页签 + 主内容；无顶部 Header。
  * 「工作台」为顶层入口（默认落地页）；type=1 可折叠（进系统默认收起），type=4 无折叠分组。
- * 试跑抽屉挂在壳上，列表和详情共用，不占路由。侧栏不渲染 /agent/trial。
- * 壳上挂载 sessionKeepAlive：可见时每 10min 打 /me 做滑动续期保活。
+ * 运行抽屉挂在壳上，列表和详情共用，不占路由。侧栏不渲染 /agent/trial。
+ * KeepAlive include / pageKey 协议不变。壳上挂载 sessionKeepAlive：可见时每 10min 打 /me 保活。
  */
 import { computed, defineAsyncComponent, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
@@ -191,7 +222,12 @@ import {
   House
 } from '@element-plus/icons-vue'
 import AppLogo from '@/components/AppLogo.vue'
+import ProfileSettingsDialog from '@/components/profile/ProfileSettingsDialog.vue'
 import { resolveMenuIcon, preloadMenuIcons } from '@/components/menu/menuIcons'
+import {
+  USER_AVATAR_FALLBACK_COLOR,
+  resolveAvatarUrl
+} from '@/constants/agentLooks'
 import { openAgentTrial, preloadTrialDrawer, TRIAL_MENU_PATH, useAgentTrial } from '@/composables/agentTrial'
 import { useSessionKeepAlive } from '@/composables/sessionKeepAlive'
 import { useWorkflowFocus } from '@/composables/workflowFocus'
@@ -216,6 +252,13 @@ const { focusActive } = useWorkflowFocus()
 
 /** 只记侧栏收起，和登录 token 无关。 */
 const COLLAPSE_KEY = 'agenthub_sidebar_collapsed'
+/**
+ * 全局折叠偏好（localStorage）。工作台只在**本页**默认收起，
+ * 不写这里、也不改用户已有的全局偏好。
+ */
+const collapsedGlobal = ref(localStorage.getItem(COLLAPSE_KEY) === '1')
+/** 工作台本页的临时展开态：离开本页即失效，不持久化。 */
+const workspaceExpanded = ref(false)
 
 /** 侧栏叶子页面 */
 interface NavItem {
@@ -253,9 +296,24 @@ const router = useRouter()
 const user = useUserStore()
 const tags = useTagsViewStore()
 const { open: trialOpen, target: trialTarget, mounted: trialDrawerMounted } = useAgentTrial()
-const collapsed = ref(localStorage.getItem(COLLAPSE_KEY) === '1')
+/** 当前是否工作台：唯一正式对话入口，整屏 + 默认收起侧栏。 */
+const onWorkspace = computed(() => route.path === '/workspace')
+/** 实际侧栏折叠：工作台默认收起；其它页沿用全局偏好。 */
+const collapsed = computed(() => (onWorkspace.value ? !workspaceExpanded.value : collapsedGlobal.value))
+/** 隐藏页签：只认路由 meta.hideTabs（当前仅工作台），其它页默认保持原样。 */
+const hideTabs = computed(() => route.meta?.hideTabs === true)
 /** 目录默认收起。用户点开后记在这里，true 才是展开。 */
 const directoryOpen = ref<Record<string, boolean>>({})
+
+// 离开工作台即丢掉本页临时展开态：下次进入仍默认收起，不改全局偏好
+watch(
+  () => route.path,
+  (path) => {
+    if (path !== '/workspace') {
+      workspaceExpanded.value = false
+    }
+  }
+)
 
 /** KeepAlive include 名单：由页签派生，关页签即从缓存释放 */
 const cachedViews = computed(() => tags.cachedViews)
@@ -273,6 +331,24 @@ const pageKey = computed(() => {
 
 const displayName = computed(() => user.profile?.nickname || user.profile?.username || '用户')
 const initials = computed(() => displayName.value.trim().slice(0, 1).toUpperCase() || 'A')
+/** 已上传头像时用图片；否则首字 + 中性底色 */
+const avatarSrc = computed(() => resolveAvatarUrl(user.profile?.avatarUrl))
+const avatarFallbackStyle = computed(() =>
+  avatarSrc.value ? undefined : { background: USER_AVATAR_FALLBACK_COLOR, color: '#fff' }
+)
+/** 个人设置弹窗 */
+const profileOpen = ref(false)
+/**
+ * 角色标签：取 /me 返回的角色编码（去空）；无角色时平台管理员兜底文案。
+ * 禁止写死「系统管理员」——那是种子用户的昵称，不是角色字段。
+ */
+const roleLabel = computed(() => {
+  const roles = (user.profile?.roles ?? []).map((item) => item.trim()).filter(Boolean)
+  if (roles.length) {
+    return roles[0]
+  }
+  return user.profile?.platformAdmin ? '平台管理员' : ''
+})
 
 /** 仅后端菜单目录；工作台在模板里单独顶层渲染。 */
 const directories = computed(() =>
@@ -513,16 +589,25 @@ watch(trialOpen, (opened) => {
 })
 
 function toggleCollapse() {
-  collapsed.value = !collapsed.value
-  localStorage.setItem(COLLAPSE_KEY, collapsed.value ? '1' : '0')
+  // 工作台只切换本页临时态：不写 localStorage，离开后回到用户的全局偏好
+  if (onWorkspace.value) {
+    workspaceExpanded.value = !workspaceExpanded.value
+    return
+  }
+  collapsedGlobal.value = !collapsedGlobal.value
+  localStorage.setItem(COLLAPSE_KEY, collapsedGlobal.value ? '1' : '0')
 }
 
 /**
- * 顶栏用户下拉命令。
+ * 侧栏底部用户下拉命令（原顶栏整份迁入，菜单项不丢）。
  *
  * @param command 菜单项标识
  */
 async function onAccountCommand(command: string | number) {
+  if (command === 'profile') {
+    profileOpen.value = true
+    return
+  }
   if (command !== 'logout') {
     return
   }
@@ -534,94 +619,44 @@ async function onAccountCommand(command: string | number) {
 <style scoped>
 .shell {
   display: flex;
-  flex-direction: column;
-  height: 100%;
+  flex-direction: row;
+  height: 100vh;
   overflow: hidden;
   background: var(--ah-bg);
 }
 
-.topbar {
+.brand-zone {
   display: flex;
   align-items: center;
-  justify-content: space-between;
-  height: 56px;
   flex: none;
-  padding: 0 20px 0 16px;
-  background: #fff;
-  border-bottom: 1px solid var(--ah-border);
+  height: 60px;
+  padding: 0 16px;
+  border-bottom: 1px solid var(--ah-border-soft, #f2f6fc);
+  box-sizing: border-box;
 }
 
 .brand {
   min-width: 0;
 }
 
-.account {
-  display: flex;
-  align-items: center;
-  gap: 10px;
-  min-width: 0;
-}
-
-.account {
-  border: 0;
-  padding: 4px 6px;
-  border-radius: 8px;
-  background: transparent;
-  color: inherit;
-  font: inherit;
-  cursor: pointer;
-}
-
-.account:hover {
-  background: #f5f6fa;
-}
-
-.account-caret {
-  color: var(--ah-text-secondary);
-  font-size: 12px;
-}
-
-.avatar {
-  display: grid;
-  place-items: center;
-  width: 28px;
-  height: 28px;
-  flex: none;
-  border-radius: 8px;
-  background: #e4e2ff;
-  color: var(--ah-primary-hover);
-  font-size: 13px;
-  font-weight: 650;
-}
-
-.user-name {
-  font-size: 14px;
-  font-weight: 600;
-}
-
 .dir-btn,
-.collapse {
+.collapse-btn {
   border: 0;
   background: transparent;
   color: var(--ah-text-secondary);
   font: inherit;
   cursor: pointer;
-}
-
-.body {
-  display: flex;
-  flex: 1;
-  min-height: 0;
 }
 
 .aside {
   display: flex;
   flex-direction: column;
   width: var(--ah-sidebar);
+  height: 100vh;
   flex: none;
   background: #fff;
   border-right: 1px solid var(--ah-border);
-  transition: width 0.2s ease;
+  transition: width 0.3s ease;
 }
 
 .aside.is-collapsed {
@@ -632,20 +667,22 @@ async function onAccountCommand(command: string | number) {
  * 工作流编辑专注模式：左侧主导航宽度归零（沿用 .aside 的宽度过渡），
  * 主区留白同步压缩，让画布贴着窗口边缘。
  */
-.body.is-editor-focus .aside {
+.shell.is-editor-focus .aside {
   width: 0;
   overflow: hidden;
   border-right-color: transparent;
 }
 
-.body.is-editor-focus .main {
+.shell.is-editor-focus .main {
   padding: 8px 10px;
   scrollbar-gutter: auto;
 }
 
 .nav {
   flex: 1;
-  overflow: auto;
+  min-height: 0;
+  overflow-x: hidden;
+  overflow-y: auto;
   padding: 12px 0;
 }
 
@@ -725,25 +762,127 @@ async function onAccountCommand(command: string | number) {
 }
 
 .foot {
+  display: flex;
+  flex: none;
   width: 100%;
   padding: 0;
-  border-top: 1px solid var(--ah-border);
+  border-top: 1px solid var(--ah-border-soft, #f2f6fc);
 }
 
-/* 底部收起/展开：满宽；展开靠左，收起时再居中 */
-.collapse {
+/* 单行：用户区占满左侧，折叠按钮钉在最右 */
+.account-row {
   display: flex;
   align-items: center;
-  justify-content: flex-start;
-  gap: 10px;
+  gap: 4px;
   width: 100%;
-  height: 44px;
-  margin: 0;
-  padding: 0 20px;
-  border-radius: 0;
+  height: 64px;
+  padding: 0 8px 0 10px;
+  box-sizing: border-box;
 }
 
-.collapse:hover {
+.account-dropdown {
+  flex: 1;
+  min-width: 0;
+}
+
+.foot :deep(.account-dropdown.el-dropdown) {
+  display: block;
+  width: 100%;
+}
+
+/* 用户区：头像 → 名称 → 下拉箭头；箭头外侧紧挨收起按钮 */
+.account {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  height: 48px;
+  min-width: 0;
+  margin: 0;
+  padding: 0 6px;
+  border: 0;
+  border-radius: 8px;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  cursor: pointer;
+  box-sizing: border-box;
+}
+
+.account:hover {
+  background: #f5f6fa;
+}
+
+.avatar {
+  display: grid;
+  place-items: center;
+  width: 32px;
+  height: 32px;
+  overflow: hidden;
+  flex: none;
+  border-radius: 50%;
+  background: #e4e2ff;
+  color: var(--ah-primary-hover);
+  font-size: 13px;
+  font-weight: 650;
+}
+
+.avatar.has-photo {
+  background: transparent;
+}
+
+.avatar img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+}
+
+.account-caret {
+  flex: none;
+  color: var(--ah-text-secondary);
+  font-size: 12px;
+}
+
+.account-meta {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+  flex: 1;
+  text-align: left;
+}
+
+.user-name {
+  overflow: hidden;
+  font-size: 13px;
+  font-weight: 600;
+  line-height: 1.2;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.role-tag {
+  overflow: hidden;
+  color: var(--ah-text-muted, #9ca3af);
+  font-size: 11px;
+  font-weight: 500;
+  line-height: 1.2;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* 最右侧收起/展开：只出图标，不占整行文案 */
+.collapse-btn {
+  display: grid;
+  place-items: center;
+  flex: none;
+  width: 32px;
+  height: 32px;
+  padding: 0;
+  border-radius: 8px;
+}
+
+.collapse-btn:hover {
   background: #f3f4f6;
   color: var(--ah-text);
 }
@@ -752,16 +891,18 @@ async function onAccountCommand(command: string | number) {
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  flex: none;
+  font-size: 16px;
 }
 
-/* 右侧列：页签条定高，主区吃满剩余高度并独立滚动 */
+/* 右侧列：页签条定高，主区吃满剩余高度并独立滚动；折叠时宽度随 flex 平滑让位 */
 .content {
   display: flex;
   flex-direction: column;
   flex: 1;
   min-width: 0;
   min-height: 0;
+  height: 100vh;
+  transition: width 0.3s ease;
 }
 
 .main {
@@ -771,12 +912,33 @@ async function onAccountCommand(command: string | number) {
   /* 滚动条始终占位，避免有无滚动条时主区宽度抖动导致卡片换行错位 */
   scrollbar-gutter: stable;
   /* 弹窗锁滚另见 styles/index.css */
-  padding: 24px 28px 24px;
+  padding: 16px 16px 20px;
+  background: #f5f7fa;
+}
+
+/*
+ * 整屏页面（工作台）：去掉主区留白、滚动与外层滚动条占位，
+ * 高度与滚动全部交给页面内部（左会话 / 右对话各自滚），避免出现双滚动条。
+ */
+.main.is-flush {
+  display: flex;
+  flex-direction: column;
+  padding: 0;
+  overflow: hidden;
+  scrollbar-gutter: auto;
 }
 
 .is-collapsed .nav-label,
-.is-collapsed .caret {
+.is-collapsed .caret,
+.is-collapsed .account-meta,
+.is-collapsed .account-caret {
   display: none;
+}
+
+/* 收起态：品牌区只居中角标 */
+.is-collapsed .brand-zone {
+  justify-content: center;
+  padding: 0 8px;
 }
 
 /* 收起态：顶层入口 / 可折叠目录 / 不折叠分组下的子菜单图标居中 */
@@ -801,12 +963,34 @@ async function onAccountCommand(command: string | number) {
   display: none;
 }
 
-/* 收起态：底部按钮满宽水平居中，仅图标 */
-.is-collapsed .collapse {
+/*
+ * 收起态 64px：头像与展开按钮纵向叠放，避免并排挤爆。
+ * 上头像（仍可下拉退出），下展开图标。
+ */
+.is-collapsed .account-row {
+  flex-direction: column;
+  justify-content: center;
+  gap: 2px;
+  height: auto;
+  min-height: 64px;
+  padding: 8px 0;
+}
+
+.is-collapsed .account-dropdown {
+  flex: none;
+  width: 100%;
+}
+
+.is-collapsed .account {
   justify-content: center;
   width: 100%;
-  margin: 0;
+  height: 40px;
   padding: 0;
+}
+
+.is-collapsed .collapse-btn {
+  width: 32px;
+  height: 32px;
 }
 </style>
 

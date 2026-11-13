@@ -12,6 +12,7 @@ import type {
 } from '@/types/runtime'
 import { renderSimpleMarkdown } from '@/utils/simpleMarkdown'
 import { nextBlockId } from '@/components/runtime/trialTimeline'
+import { parseRouteParticipant } from './workbench/workbenchRouteText.ts'
 
 /**
  * 按 seq 回放。用户单独成气泡，其后的步骤并进一张助手卡片。
@@ -353,9 +354,7 @@ export function processSteps(blocks: AssistantBlock[]): ProcessStep[] {
       continue
     }
     const meta: string[] = []
-    if (lane.routeKey) {
-      meta.push(`route_key：${lane.routeKey}`)
-    }
+    // route_key 是内部定位键，不对终端用户展示（工作台 / 运行气泡）
     if (lane.body?.trim()) {
       meta.push(lane.body.trim())
     }
@@ -429,6 +428,9 @@ export function processLanes(blocks: AssistantBlock[]): ProcessLane[] {
 
 /**
  * 旧数据可能把多条「路由到」用中文分号拼成一条；新数据一条事件一段。
+ *
+ * <p>固定模板 / 串行模板的子块标题是「固定并行 1/2 · 某专家（key）」这一类，
+ * 也要按分号切开，否则多个子会被当成一段说明。
  */
 function splitRoutePieces(raw: string): string[] {
   const text = (raw || '').trim()
@@ -439,9 +441,20 @@ function splitRoutePieces(raw: string): string[] {
     return [text]
   }
   return text
-    .split(/；(?=路由到)/)
+    .split(/；(?=路由到|固定并行|固定串行|路由后串行|竞争选优)/)
     .map((part) => part.trim())
     .filter(Boolean)
+}
+
+/**
+ * 固定模板 / 串行模板的子块标题解析。
+ *
+ * <p>这些子块不是判路由出来的，但同样是「这一位参与者开始作答」的真实事件：
+ * 后端写成「固定并行 1/2 · 制度知识专家（policy）」。只把它当说明句，
+ * 消息流就会看不见这些专家。这里归一成与「路由到 X」同构的参与者块。
+ */
+function parseChildTitle(raw: string): { name: string; key: string } | undefined {
+  return parseRouteParticipant(raw)
 }
 
 /**
@@ -455,6 +468,16 @@ function routeLane(raw: string): ProcessLane | undefined {
   if (text.startsWith('路由决策')) {
     const body = text.replace(/^路由决策\s*/, '').trim()
     return { kind: 'decision', title: '路由决策', body: body || text, steps: [] }
+  }
+  // 固定模板 / 串行模板的子块：同样是某位专家开始作答，归一成参与者块
+  const child = parseChildTitle(text)
+  if (child?.name) {
+    return {
+      kind: 'agent',
+      title: `路由到 ${child.name}`,
+      routeKey: child.key || undefined,
+      steps: []
+    }
   }
   const matched = /^路由到\s*(.+?)(?:（([^）]*)）)?(?:，依据[：:]\s*(.*))?$/s.exec(text)
   if (!matched) {

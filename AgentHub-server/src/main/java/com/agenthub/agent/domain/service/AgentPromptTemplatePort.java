@@ -48,6 +48,30 @@ public interface AgentPromptTemplatePort {
     List<AgentPromptTemplateOption> publishedOptions(String purpose, String locale);
 
     /**
+     * 平台该用途**当前生效**的模板版本，供「新建 Agent 默认钉住」与「存量未挂模板保存时补钉」使用。
+     * <p>
+     * 生效口径：{@code status=PUBLISHED} 且 {@code is_active=1}；同一个 purpose+locale
+     * 至多一条生效（发布逻辑按用途熄灭其它行），因此「默认」不需要额外的 default 列，
+     * 也不需要在配置里维护 key 白名单。
+     * <p>
+     * 默认实现基于 {@link #publishedOptions} 挑 is_active=1 的那条：
+     * 这样实现方不必重复查询，测试替身也只要实现一个方法。无生效版本时返回 {@code null}
+     * ——调用方据此决定「拒绝保存」还是「交给运行时的用途未配置失败语义」。
+     *
+     * @param purpose 用途码
+     * @param locale  语言；空白由实现回落 zh-CN
+     * @return 生效版本行；无生效版本或用途不支持时为 null
+     */
+    default AgentPromptTemplateOption defaultOption(String purpose, String locale) {
+        for (AgentPromptTemplateOption option : publishedOptions(purpose, locale)) {
+            if (option != null && option.getIsActive() != null && option.getIsActive() == 1) {
+                return option;
+            }
+        }
+        return null;
+    }
+
+    /**
      * 取某个已发布版本行及其段落，供 L3 表单按 mutable 分栏渲染。
      *
      * @param templateId 版本行主键

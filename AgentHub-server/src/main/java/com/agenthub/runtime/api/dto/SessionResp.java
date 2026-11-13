@@ -37,4 +37,15 @@ public class SessionResp {
     private String errorSummary;
     /** 最近变更时间。列表上的相对时间用它，没有则退回 startTime */
     private LocalDateTime updateTime;
+    /** 入口渠道：WORKBENCH 工作台对话 / DEBUG 控制台调试 */
+    private String entryChannel;
+    /** 工作台会话落定的默认接待方案；调试会话为空 */
+    private Long receptionMaId;
+    /**
+     * 沿用的线路 route_key（刀3）。
+     *
+     * <p>只给前端做「当前 chip 是否有效」的比较用；芯片本身只展示候选名，
+     * 不把 route_key 直接暴露给用户。空表示本会话尚未定线，下一轮交给判路由。
+     */
+    private String stickyRouteKey;
 }
