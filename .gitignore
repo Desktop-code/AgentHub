@@ -92,7 +92,9 @@ secrets/
 
 # 文件目录
 docs/*
-!docs/架构设计.md
+# 正式架构文档与截图需要入库（docs/实现、docs/历史、docs/grok-working 等仍忽略）
+!docs/architecture/
+!docs/architecture/**
 bin/
 
 # 会话级文件工具的本地工作区（agenthub.workspace.root-path 默认 ./workspace-test）
@@ -102,9 +104,7 @@ bin/
 sql/*
 !sql/agenthub.sql
 !sql/data-init.sql
-# 根目录「当期增量」脚本随仓交付（README 约定：结构变更以 sql/ 根目录增量为准）。
-# 只放行根目录 schema-delta-*.sql；sql/temp/ 历史归档仍全部忽略，禁止 force add。
-!sql/schema-delta-*.sql
+!sql/data-init-agent.sql
 
 # AI工具本地配置
 .cursor/
