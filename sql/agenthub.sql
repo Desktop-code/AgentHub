@@ -1,12 +1,29 @@
--- AgentHub 数据库结构（全量建表）
+-- =============================================================================
+-- AgentHub · 表结构初始化（唯一一份建表脚本）
+-- 文件：sql/agenthub.sql
 --
--- 本文件由本地库导出后做过脱敏整理：
---   * 不保留导出工具标识、导出时间与本机地址/端口；
---   * 各表 AUTO_INCREMENT 统一归 1，不反映任何真实数据量；
---   * 只有建表结构，没有任何业务数据 INSERT。
+-- 【定位】
+--   新库三份正式初始化脚本的第 1 份：本文件 → sql/data-init.sql → sql/data-init-agent.sql
+--   本文件**只建表与索引，不含任何业务行**；业务数据全部在后两份里。
+--   测试 / 演示另有一份可选脚本 sql/data-init-test-tmp.sql（新库不跑也能对话）。
 --
--- 用途：初始化空库。文件内含 DROP TABLE IF EXISTS，对已有数据的库重复执行会清空表数据，
--- 只允许用于新库，详见根目录 README「快速开始 / 导入数据库全量脚本」。
+-- 【已含全部结构增量】
+--   本文件是现库结构的完整快照，已包含 sql/schema-delta-*.sql 的全部表 / 列 / 索引
+--   （avatar_config、platform_locked / embedding_dim / platform_slot、
+--    ma_def.is_reception_default / reception_slot、ma_candidate.target_type /
+--    ma_def_id / workflow_def_id、agent_run_session.entry_channel 等）。
+--   新库**不需要**再单独跑任何增量脚本。
+--   存量库升级：**对照**本文件的表 / 列 / 索引人工补齐缺项；本文件含 DROP，**禁止**在旧库重跑，
+--   不能拿建表脚本当升级脚本；结构增量脚本以后单独出，未出之前只做人工对照。
+--
+-- 【执行口径】
+--   ⚠ 本文件含 DROP TABLE IF EXISTS，**只用于新库或整库重建**。
+--   已初始化的库执行会清表；禁止在生产 / 有数据的库上直接跑。
+--   MySQL 5.7+（兼容 8.0），禁止 8.0-only 语法。
+--
+-- 【脱敏】各表 AUTO_INCREMENT 统一归 1，不反映任何真实数据量；
+--   表内只有结构，没有任何业务数据 INSERT（业务数据见 data-init*.sql）。
+-- =============================================================================
 
 SET NAMES utf8mb4;
 SET FOREIGN_KEY_CHECKS = 0;
@@ -126,6 +143,26 @@ CREATE TABLE `agent_route`  (
 ) ENGINE = InnoDB AUTO_INCREMENT = 1 CHARACTER SET = utf8mb4 COLLATE = utf8mb4_general_ci COMMENT = 'Router 子 Agent 路由配置' ROW_FORMAT = Dynamic;
 
 -- ----------------------------
+-- Table structure for agent_run_event
+-- ----------------------------
+DROP TABLE IF EXISTS `agent_run_event`;
+CREATE TABLE `agent_run_event`  (
+  `id` bigint(20) NOT NULL AUTO_INCREMENT COMMENT '主键',
+  `session_id` bigint(20) NOT NULL COMMENT 'agent_run_session.id',
+  `seq` int(11) NOT NULL COMMENT '会话内序号，从 1 递增',
+  `event_type` varchar(32) CHARACTER SET utf8mb4 COLLATE utf8mb4_general_ci NOT NULL COMMENT 'user / assistant / tool / route / system / error',
+  `summary` varchar(500) CHARACTER SET utf8mb4 COLLATE utf8mb4_general_ci NULL DEFAULT NULL COMMENT '步骤摘要或截断正文；禁止密钥',
+  `content_text` mediumtext CHARACTER SET utf8mb4 COLLATE utf8mb4_general_ci NULL COMMENT '展示正文（助手Markdown/推理/工具结果摘要）；禁止密钥',
+  `token_prompt` int(11) NULL DEFAULT NULL COMMENT '可选 prompt token',
+  `token_completion` int(11) NULL DEFAULT NULL COMMENT '可选 completion token',
+  `create_time` datetime NOT NULL DEFAULT CURRENT_TIMESTAMP COMMENT '创建时间',
+  PRIMARY KEY (`id`) USING BTREE,
+  INDEX `idx_session_id`(`session_id`) USING BTREE,
+  INDEX `idx_session_seq`(`session_id`, `seq`) USING BTREE,
+  INDEX `idx_event_type`(`event_type`) USING BTREE
+) ENGINE = InnoDB AUTO_INCREMENT = 1 CHARACTER SET = utf8mb4 COLLATE = utf8mb4_general_ci COMMENT = 'Agent 试跑步骤事件摘要' ROW_FORMAT = DYNAMIC;
+
+-- ----------------------------
 -- Table structure for agent_run_idempotency
 -- ----------------------------
 DROP TABLE IF EXISTS `agent_run_idempotency`;
@@ -147,26 +184,6 @@ CREATE TABLE `agent_run_idempotency`  (
 ) ENGINE = InnoDB AUTO_INCREMENT = 1 CHARACTER SET = utf8mb4 COLLATE = utf8mb4_general_ci COMMENT = '发消息幂等占位与终态' ROW_FORMAT = Dynamic;
 
 -- ----------------------------
--- Table structure for agent_run_event
--- ----------------------------
-DROP TABLE IF EXISTS `agent_run_event`;
-CREATE TABLE `agent_run_event`  (
-  `id` bigint(20) NOT NULL AUTO_INCREMENT COMMENT '主键',
-  `session_id` bigint(20) NOT NULL COMMENT 'agent_run_session.id',
-  `seq` int(11) NOT NULL COMMENT '会话内序号，从 1 递增',
-  `event_type` varchar(32) CHARACTER SET utf8mb4 COLLATE utf8mb4_general_ci NOT NULL COMMENT 'user / assistant / tool / route / system / error',
-  `summary` varchar(500) CHARACTER SET utf8mb4 COLLATE utf8mb4_general_ci NULL DEFAULT NULL COMMENT '步骤摘要或截断正文；禁止密钥',
-  `content_text` mediumtext CHARACTER SET utf8mb4 COLLATE utf8mb4_general_ci NULL COMMENT '展示正文（助手Markdown/推理/工具结果摘要）；禁止密钥',
-  `token_prompt` int(11) NULL DEFAULT NULL COMMENT '可选 prompt token',
-  `token_completion` int(11) NULL DEFAULT NULL COMMENT '可选 completion token',
-  `create_time` datetime NOT NULL DEFAULT CURRENT_TIMESTAMP COMMENT '创建时间',
-  PRIMARY KEY (`id`) USING BTREE,
-  INDEX `idx_session_id`(`session_id`) USING BTREE,
-  INDEX `idx_session_seq`(`session_id`, `seq`) USING BTREE,
-  INDEX `idx_event_type`(`event_type`) USING BTREE
-) ENGINE = InnoDB AUTO_INCREMENT = 1 CHARACTER SET = utf8mb4 COLLATE = utf8mb4_general_ci COMMENT = 'Agent 试跑步骤事件摘要' ROW_FORMAT = DYNAMIC;
-
--- ----------------------------
 -- Table structure for agent_run_session
 -- ----------------------------
 DROP TABLE IF EXISTS `agent_run_session`;
@@ -174,6 +191,10 @@ CREATE TABLE `agent_run_session`  (
   `id` bigint(20) NOT NULL AUTO_INCREMENT COMMENT '主键',
   `agent_id` bigint(20) NULL DEFAULT NULL COMMENT 'agent_def.id（开跑时快照）；虚拟根试跑为空',
   `ma_def_id` bigint(20) NULL DEFAULT NULL COMMENT 'ma_def.id；虚拟根试跑归属（绑根会话可空）',
+  `entry_channel` varchar(32) CHARACTER SET utf8mb4 COLLATE utf8mb4_general_ci NOT NULL DEFAULT 'DEBUG' COMMENT '入口渠道：WORKBENCH 工作台对话 / DEBUG 控制台调试',
+  `reception_ma_id` bigint(20) NULL DEFAULT NULL COMMENT '建会话时的默认接待方案快照 ma_def.id',
+  `sticky_route_key` varchar(64) CHARACTER SET utf8mb4 COLLATE utf8mb4_general_ci NULL DEFAULT NULL COMMENT '刀3 路由沿用：上次命中的 route_key；本刀不读写',
+  `sticky_agent_id` bigint(20) NULL DEFAULT NULL COMMENT '刀3 路由沿用：上次命中的子 Agent；本刀不读写',
   `run_mode` varchar(32) CHARACTER SET utf8mb4 COLLATE utf8mb4_general_ci NOT NULL COMMENT '开跑时快照：REACT / ROUTER',
   `user_id` bigint(20) NOT NULL COMMENT '平台用户 sys_user.id',
   `status` varchar(32) CHARACTER SET utf8mb4 COLLATE utf8mb4_general_ci NOT NULL DEFAULT 'RUNNING' COMMENT 'RUNNING / SUCCESS / FAILED / CANCELLED',
@@ -195,7 +216,8 @@ CREATE TABLE `agent_run_session`  (
   INDEX `idx_status`(`status`) USING BTREE,
   INDEX `idx_start_time`(`start_time`) USING BTREE,
   INDEX `idx_deleted`(`deleted`) USING BTREE,
-  INDEX `idx_run_session_ma`(`ma_def_id`, `start_time`) USING BTREE
+  INDEX `idx_run_session_ma`(`ma_def_id`, `start_time`) USING BTREE,
+  INDEX `idx_run_session_channel`(`entry_channel`, `user_id`, `start_time`) USING BTREE
 ) ENGINE = InnoDB AUTO_INCREMENT = 1 CHARACTER SET = utf8mb4 COLLATE = utf8mb4_general_ci COMMENT = 'Agent 试跑会话元数据' ROW_FORMAT = Dynamic;
 
 -- ----------------------------
@@ -489,7 +511,10 @@ DROP TABLE IF EXISTS `ma_candidate`;
 CREATE TABLE `ma_candidate`  (
   `id` bigint(20) NOT NULL AUTO_INCREMENT COMMENT '主键',
   `ma_id` bigint(20) NOT NULL COMMENT 'ma_def.id',
-  `agent_id` bigint(20) NOT NULL COMMENT '候选子 agent_def.id',
+  `target_type` varchar(16) CHARACTER SET utf8mb4 COLLATE utf8mb4_general_ci NOT NULL DEFAULT 'AGENT' COMMENT '候选目标类型：AGENT=子 Agent / MA=另一套编排方案 / WORKFLOW=已发布工作流',
+  `agent_id` bigint(20) NULL DEFAULT NULL COMMENT '候选子 agent_def.id；target_type=AGENT 时必填，MA 候选为 NULL',
+  `ma_def_id` bigint(20) NULL DEFAULT NULL COMMENT 'target_type=MA 时指向 ma_def.id；AGENT 恒为 NULL',
+  `workflow_def_id` bigint(20) NULL DEFAULT NULL COMMENT 'target_type=WORKFLOW 时指向 workflow_def.id；AGENT / MA 恒为 NULL',
   `route_key` varchar(64) CHARACTER SET utf8mb4 COLLATE utf8mb4_general_ci NOT NULL COMMENT '方案内唯一的路由键/意图标签',
   `intent_desc` varchar(512) CHARACTER SET utf8mb4 COLLATE utf8mb4_general_ci NOT NULL COMMENT '意图说明，喂给判路由或作为串行步骤说明',
   `sort_no` int(11) NOT NULL DEFAULT 0 COMMENT '排序，越小越靠前',
@@ -499,7 +524,9 @@ CREATE TABLE `ma_candidate`  (
   PRIMARY KEY (`id`) USING BTREE,
   UNIQUE INDEX `uk_ma_candidate_ma_route`(`ma_id`, `route_key`) USING BTREE,
   INDEX `idx_ma_candidate_ma_sort`(`ma_id`, `sort_no`) USING BTREE,
-  INDEX `idx_ma_candidate_agent`(`agent_id`) USING BTREE
+  INDEX `idx_ma_candidate_agent`(`agent_id`) USING BTREE,
+  INDEX `idx_ma_candidate_ma_target`(`ma_def_id`) USING BTREE,
+  INDEX `idx_ma_candidate_workflow_target`(`workflow_def_id`) USING BTREE
 ) ENGINE = InnoDB AUTO_INCREMENT = 1 CHARACTER SET = utf8mb4 COLLATE = utf8mb4_general_ci COMMENT = '多智能体方案候选（MA-P2 刀1）' ROW_FORMAT = Dynamic;
 
 -- ----------------------------
@@ -511,10 +538,15 @@ CREATE TABLE `ma_def`  (
   `tenant_id` bigint(20) NOT NULL DEFAULT 1 COMMENT '租户；一期由配置项提供',
   `code` varchar(64) CHARACTER SET utf8mb4 COLLATE utf8mb4_general_ci NOT NULL COMMENT '方案编码，租户内唯一',
   `name` varchar(128) CHARACTER SET utf8mb4 COLLATE utf8mb4_general_ci NOT NULL COMMENT '方案名称',
+  `description` varchar(512) CHARACTER SET utf8mb4 COLLATE utf8mb4_general_ci NULL DEFAULT NULL COMMENT '方案说明：被当作路由目标时的意图说明，与 agent_def.description 同语义',
+  `avatar_config` json NULL COMMENT '方案形象：preset{icon,color} 或 custom{url}',
   `template` varchar(32) CHARACTER SET utf8mb4 COLLATE utf8mb4_general_ci NOT NULL DEFAULT 'ROUTER_PARALLEL' COMMENT '编排模板：ROUTER_PARALLEL/FIXED_SEQUENCE/FIXED_PARALLEL/CRITIC_LOOP/ROUTER_THEN_SEQUENCE',
+  `entry_slot` varchar(16) CHARACTER SET utf8mb4 COLLATE utf8mb4_general_ci GENERATED ALWAYS AS (if((`template` = 'ENTRY_ROUTER'),'ENTRY',NULL)) STORED COMMENT '入口唯一槽：非入口恒为 NULL，配合唯一索引保证每租户仅一条入口' NULL,
   `config_json` text CHARACTER SET utf8mb4 COLLATE utf8mb4_general_ci NULL COMMENT '与 agent_def.runtime_config_json 同构的编排配置',
   `root_agent_id` bigint(20) NULL DEFAULT NULL COMMENT '绑定的 ROUTER；NULL=虚拟根（本刀不可试跑）',
   `enabled` tinyint(4) NOT NULL DEFAULT 1 COMMENT '1启用 0停用；同一 root_agent_id 最多一条启用中',
+  `is_reception_default` tinyint(4) NOT NULL DEFAULT 0 COMMENT '1=平台默认接待方案；唯一索引保证每租户仅一条',
+  `reception_slot` varchar(16) CHARACTER SET utf8mb4 COLLATE utf8mb4_general_ci GENERATED ALWAYS AS (if((`is_reception_default` = 1),'DEFAULT',NULL)) STORED COMMENT '默认接待唯一槽：非默认恒为 NULL' NULL,
   `version` int(11) NOT NULL DEFAULT 1 COMMENT '方案版本，每次保存 +1',
   `created_by` bigint(20) NULL DEFAULT NULL COMMENT '创建人用户ID',
   `create_time` datetime NOT NULL DEFAULT CURRENT_TIMESTAMP COMMENT '创建时间',
@@ -522,6 +554,8 @@ CREATE TABLE `ma_def`  (
   `update_time` datetime NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP COMMENT '更新时间',
   PRIMARY KEY (`id`) USING BTREE,
   UNIQUE INDEX `uk_ma_def_tenant_code`(`tenant_id`, `code`) USING BTREE,
+  UNIQUE INDEX `uk_ma_def_reception`(`tenant_id`, `reception_slot`) USING BTREE,
+  UNIQUE INDEX `uk_ma_def_entry_slot`(`tenant_id`, `entry_slot`) USING BTREE,
   INDEX `idx_ma_def_tenant_root`(`tenant_id`, `root_agent_id`) USING BTREE,
   INDEX `idx_ma_def_tenant_enabled`(`tenant_id`, `enabled`) USING BTREE
 ) ENGINE = InnoDB AUTO_INCREMENT = 1 CHARACTER SET = utf8mb4 COLLATE = utf8mb4_general_ci COMMENT = '多智能体方案（MA-P2 刀1）' ROW_FORMAT = Dynamic;
@@ -656,7 +690,7 @@ CREATE TABLE `model_instance`  (
   `create_time` datetime NOT NULL DEFAULT CURRENT_TIMESTAMP COMMENT '创建时间',
   `updated_by` bigint(20) NULL DEFAULT NULL COMMENT '更新人用户ID',
   `update_time` datetime NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP COMMENT '更新时间',
-  `platform_slot` varchar(32) CHARACTER SET utf8mb4 COLLATE utf8mb4_general_ci GENERATED ALWAYS AS (IF(`platform_locked` = 1 AND `deleted` = 0, `capability`, NULL)) STORED COMMENT '平台级唯一槽：EMBEDDING/RERANK 各最多一条（NULL 不参与唯一）',
+  `platform_slot` varchar(32) CHARACTER SET utf8mb4 COLLATE utf8mb4_general_ci GENERATED ALWAYS AS (if(((`platform_locked` = 1) and (`deleted` = 0)),`capability`,NULL)) STORED COMMENT '平台级唯一槽：EMBEDDING/RERANK 各最多一条（NULL 不参与唯一）' NULL,
   PRIMARY KEY (`id`) USING BTREE,
   UNIQUE INDEX `uk_platform_slot`(`platform_slot`) USING BTREE,
   INDEX `idx_provider_id`(`provider_id`) USING BTREE,
@@ -1440,10 +1474,11 @@ CREATE TABLE `workflow_run`  (
   `fingerprint` varchar(64) CHARACTER SET utf8mb4 COLLATE utf8mb4_general_ci NULL DEFAULT NULL COMMENT '发布时的依赖指纹',
   `trace_id` varchar(64) CHARACTER SET utf8mb4 COLLATE utf8mb4_general_ci NULL DEFAULT NULL COMMENT '预留：一 run 一 trace（本刀画布高亮，不写 obs）',
   `status` varchar(32) CHARACTER SET utf8mb4 COLLATE utf8mb4_general_ci NOT NULL DEFAULT 'CREATED' COMMENT 'CREATED/RUNNING/PAUSED_HUMAN/SUCCESS/FAILED/CANCELLED',
-  `trigger_type` varchar(32) CHARACTER SET utf8mb4 COLLATE utf8mb4_general_ci NOT NULL DEFAULT 'TRIAL' COMMENT 'TRIAL/API/MANUAL；本刀只产出 TRIAL',
+  `trigger_type` varchar(32) CHARACTER SET utf8mb4 COLLATE utf8mb4_general_ci NOT NULL DEFAULT 'TRIAL' COMMENT 'TRIAL/APP/API/MANUAL/WORKBENCH；WORKBENCH=工作台默认接待命中',
   `triggered_by` bigint(20) NULL DEFAULT NULL COMMENT '发起人',
   `app_id` bigint(20) NULL DEFAULT NULL COMMENT 'sys_app.id；应用触发时写入，试跑为空',
   `client_request_id` varchar(64) CHARACTER SET utf8mb4 COLLATE utf8mb4_general_ci NULL DEFAULT NULL COMMENT '调用方幂等键；同 app 下唯一',
+  `workbench_session_id` bigint(20) NULL DEFAULT NULL COMMENT '工作台会话 agent_run_session.id；试跑 / 应用触发为 NULL',
   `input_json` json NULL COMMENT '试跑输入样例（ctx.input）',
   `output_json` json NULL COMMENT 'END 节点汇总输出',
   `error_summary` varchar(512) CHARACTER SET utf8mb4 COLLATE utf8mb4_general_ci NULL DEFAULT NULL COMMENT '失败 / 取消中文摘要',
@@ -1457,7 +1492,8 @@ CREATE TABLE `workflow_run`  (
   PRIMARY KEY (`id`) USING BTREE,
   UNIQUE INDEX `uk_app_request`(`app_id`, `client_request_id`) USING BTREE,
   INDEX `idx_tenant_wf`(`tenant_id`, `workflow_id`, `id`) USING BTREE,
-  INDEX `idx_status`(`status`) USING BTREE
+  INDEX `idx_status`(`status`) USING BTREE,
+  INDEX `idx_workflow_run_workbench_session`(`workbench_session_id`, `workflow_id`, `status`) USING BTREE
 ) ENGINE = InnoDB AUTO_INCREMENT = 1 CHARACTER SET = utf8mb4 COLLATE = utf8mb4_general_ci COMMENT = '工作流运行实例' ROW_FORMAT = Dynamic;
 
 SET FOREIGN_KEY_CHECKS = 1;

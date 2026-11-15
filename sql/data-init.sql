@@ -1,3 +1,35 @@
+-- =============================================================================
+-- AgentHub · sys / 平台基础数据初始化
+-- 文件：sql/data-init.sql
+--
+-- 【定位】
+--   新库三份正式初始化脚本的第 2 份：sql/agenthub.sql → 本文件 → sql/data-init-agent.sql
+--   本文件只放 **sys 与平台基础**：
+--     sys_dept / sys_user / sys_role / sys_user_role / sys_menu / sys_role_menu
+--     tool_source（BUILTIN）、tool_item（7 个内置工具）
+--     prompt_global_constraint（L1 平台约束）
+--     prompt_template（CHAT / ROUTER / REWRITE / SUMMARY / MEMORY 五条模板头，不含段落）
+--
+-- 【不放什么】
+--   * 提示词 L2 段落、接待助手、入口方案与候选、工作台权限码：在 sql/data-init-agent.sql
+--   * 示例专家 / Skill / 示例工作流：在 sql/data-init-test-tmp.sql（测试用，新库不必跑）
+--   * 模型供应商 / 凭证 / 实例：Key 只能界面加密保存，任何 SQL 都不写
+--   * 知识库 / 文档：建库要建向量集合并锁维度，只能在界面做
+--
+-- 【执行口径】
+--   ⚠ 本文件**不是幂等脚本**：固定主键直插，已初始化的库重跑会主键冲突或产生重复行。
+--   只在新库跑一次。存量库补数据请对照当前 sql/agenthub.sql 的表结构与 sql/data-init-agent.sql 的种子口径
+--   人工补齐缺项；本文件同样不能在旧库重跑。数据增量脚本以后单独出，未出之前只做人工对照。
+--
+-- 【菜单种子口径（2026-11-15 清理）】
+--   * 只保留「产品里还有页面 / 还有接口权限校验」的菜单；
+--   * 不再收录历史上已删掉的行（原 87 / 123 / 124 / 125，deleted=1 的僵尸菜单），
+--     也不收录已被合并的两个隐藏父菜单（原 100 / 104，子权限行早已挂到「提示词模板库」109 下）；
+--     原 127「多智能体查询」随废弃权限码 agent:route:view 一并去掉（后端零引用）；
+--   * **不重排任何主键 id**：删掉的号段留空，新库执行后 id 仍是 1..133 的子集，
+--     已有库用 sql/temp/data-fix-menu-drop-stale-2026-11-15.sql 按需清理（不算新库必跑）。
+-- =============================================================================
+
 use agenthub;
 
 -- sys_dept
@@ -99,7 +131,6 @@ INSERT INTO sys_menu (id, parent_id, type, name, path, component, redirect, perm
 INSERT INTO sys_menu (id, parent_id, type, name, path, component, redirect, permission, icon, sort, visible, status, open_type, deleted, created_by, create_time, updated_by, update_time) VALUES (84, 79, 3, '启停记忆', NULL, NULL, NULL, 'memory:item:enable', NULL, 5, 1, 1, 0, 0, NULL, '2026-10-27 10:41:01', NULL, '2026-10-27 10:41:01');
 INSERT INTO sys_menu (id, parent_id, type, name, path, component, redirect, permission, icon, sort, visible, status, open_type, deleted, created_by, create_time, updated_by, update_time) VALUES (85, 79, 3, '策略查询', NULL, NULL, NULL, 'memory:policy:list', NULL, 6, 1, 1, 0, 0, NULL, '2026-10-27 10:41:01', NULL, '2026-10-27 10:41:01');
 INSERT INTO sys_menu (id, parent_id, type, name, path, component, redirect, permission, icon, sort, visible, status, open_type, deleted, created_by, create_time, updated_by, update_time) VALUES (86, 79, 3, '编辑策略', NULL, NULL, NULL, 'memory:policy:edit', NULL, 7, 1, 1, 0, 0, NULL, '2026-10-27 10:41:01', NULL, '2026-10-27 10:41:01');
-INSERT INTO sys_menu (id, parent_id, type, name, path, component, redirect, permission, icon, sort, visible, status, open_type, deleted, created_by, create_time, updated_by, update_time) VALUES (87, 0, 1, 'Agent', '/agent', NULL, NULL, NULL, 'Cpu', 50, 1, 1, 0, 1, NULL, '2026-10-28 22:01:32', NULL, '2026-10-29 03:35:35');
 INSERT INTO sys_menu (id, parent_id, type, name, path, component, redirect, permission, icon, sort, visible, status, open_type, deleted, created_by, create_time, updated_by, update_time) VALUES (88, 27, 2, '知识库', '/access/kb', 'rag/kb/index', NULL, 'rag:kb:list', 'Collection', 40, 1, 1, 0, 0, NULL, '2026-10-30 04:25:35', NULL, '2026-10-30 04:25:35');
 INSERT INTO sys_menu (id, parent_id, type, name, path, component, redirect, permission, icon, sort, visible, status, open_type, deleted, created_by, create_time, updated_by, update_time) VALUES (89, 88, 3, '知识库查询', NULL, NULL, NULL, 'rag:kb:list', NULL, 1, 1, 1, 0, 0, NULL, '2026-10-30 04:25:35', NULL, '2026-10-30 04:25:35');
 INSERT INTO sys_menu (id, parent_id, type, name, path, component, redirect, permission, icon, sort, visible, status, open_type, deleted, created_by, create_time, updated_by, update_time) VALUES (90, 88, 3, '新建知识库', NULL, NULL, NULL, 'rag:kb:add', NULL, 2, 1, 1, 0, 0, NULL, '2026-10-30 04:25:35', NULL, '2026-10-30 04:25:35');
@@ -112,11 +143,9 @@ INSERT INTO sys_menu (id, parent_id, type, name, path, component, redirect, perm
 INSERT INTO sys_menu (id, parent_id, type, name, path, component, redirect, permission, icon, sort, visible, status, open_type, deleted, created_by, create_time, updated_by, update_time) VALUES (97, 88, 3, '删除文档', NULL, NULL, NULL, 'rag:doc:remove', NULL, 9, 1, 1, 0, 0, NULL, '2026-10-30 06:04:10', NULL, '2026-10-30 06:04:10');
 INSERT INTO sys_menu (id, parent_id, type, name, path, component, redirect, permission, icon, sort, visible, status, open_type, deleted, created_by, create_time, updated_by, update_time) VALUES (98, 88, 3, '查看切片', NULL, NULL, NULL, 'rag:doc:chunk', NULL, 10, 1, 1, 0, 0, NULL, '2026-10-31 00:28:43', NULL, '2026-10-31 00:28:43');
 INSERT INTO sys_menu (id, parent_id, type, name, path, component, redirect, permission, icon, sort, visible, status, open_type, deleted, created_by, create_time, updated_by, update_time) VALUES (99, 88, 3, '重新切片', NULL, NULL, NULL, 'rag:doc:rechunk', NULL, 11, 1, 1, 0, 0, NULL, '2026-10-31 00:28:43', NULL, '2026-10-31 00:28:43');
-INSERT INTO sys_menu (id, parent_id, type, name, path, component, redirect, permission, icon, sort, visible, status, open_type, deleted, created_by, create_time, updated_by, update_time) VALUES (100, 27, 2, '平台约束', '/access/prompt-constraint', 'prompt/constraint', NULL, 'prompt:l1:list', 'Warning', 55, 0, 1, 0, 0, NULL, '2026-10-31 02:45:05', NULL, '2026-10-31 03:33:39');
 INSERT INTO sys_menu (id, parent_id, type, name, path, component, redirect, permission, icon, sort, visible, status, open_type, deleted, created_by, create_time, updated_by, update_time) VALUES (101, 109, 3, '约束查询', NULL, NULL, NULL, 'prompt:l1:list', NULL, 1, 1, 1, 0, 0, NULL, '2026-10-31 02:45:05', NULL, '2026-10-31 03:33:39');
 INSERT INTO sys_menu (id, parent_id, type, name, path, component, redirect, permission, icon, sort, visible, status, open_type, deleted, created_by, create_time, updated_by, update_time) VALUES (102, 109, 3, '编辑约束', NULL, NULL, NULL, 'prompt:l1:edit', NULL, 2, 1, 1, 0, 0, NULL, '2026-10-31 02:45:05', NULL, '2026-10-31 03:33:39');
 INSERT INTO sys_menu (id, parent_id, type, name, path, component, redirect, permission, icon, sort, visible, status, open_type, deleted, created_by, create_time, updated_by, update_time) VALUES (103, 109, 3, '发布约束', NULL, NULL, NULL, 'prompt:l1:publish', NULL, 3, 1, 1, 0, 0, NULL, '2026-10-31 02:45:05', NULL, '2026-10-31 03:33:39');
-INSERT INTO sys_menu (id, parent_id, type, name, path, component, redirect, permission, icon, sort, visible, status, open_type, deleted, created_by, create_time, updated_by, update_time) VALUES (104, 27, 2, '提示词模板', '/access/prompt-templates', 'prompt/template', NULL, 'prompt:template:list', 'Document', 56, 0, 1, 0, 0, NULL, '2026-10-31 02:45:05', NULL, '2026-10-31 03:33:39');
 INSERT INTO sys_menu (id, parent_id, type, name, path, component, redirect, permission, icon, sort, visible, status, open_type, deleted, created_by, create_time, updated_by, update_time) VALUES (105, 109, 3, '模板查询', NULL, NULL, NULL, 'prompt:template:list', NULL, 1, 1, 1, 0, 0, NULL, '2026-10-31 02:45:05', NULL, '2026-10-31 03:33:39');
 INSERT INTO sys_menu (id, parent_id, type, name, path, component, redirect, permission, icon, sort, visible, status, open_type, deleted, created_by, create_time, updated_by, update_time) VALUES (106, 109, 3, '新建模板', NULL, NULL, NULL, 'prompt:template:add', NULL, 2, 1, 1, 0, 0, NULL, '2026-10-31 02:45:05', NULL, '2026-10-31 03:33:39');
 INSERT INTO sys_menu (id, parent_id, type, name, path, component, redirect, permission, icon, sort, visible, status, open_type, deleted, created_by, create_time, updated_by, update_time) VALUES (107, 109, 3, '编辑模板', NULL, NULL, NULL, 'prompt:template:edit', NULL, 3, 1, 1, 0, 0, NULL, '2026-10-31 02:45:05', NULL, '2026-10-31 03:33:39');
@@ -135,11 +164,7 @@ INSERT INTO sys_menu (id, parent_id, type, name, path, component, redirect, perm
 INSERT INTO sys_menu (id, parent_id, type, name, path, component, redirect, permission, icon, sort, visible, status, open_type, deleted, created_by, create_time, updated_by, update_time) VALUES (120, 117, 3, '发布版本', NULL, NULL, NULL, 'workflow:def:publish', NULL, 3, 1, 1, 0, 0, 1, '2026-11-04 00:29:44', 1, '2026-11-04 00:29:44');
 INSERT INTO sys_menu (id, parent_id, type, name, path, component, redirect, permission, icon, sort, visible, status, open_type, deleted, created_by, create_time, updated_by, update_time) VALUES (121, 117, 3, '试跑工作流', NULL, NULL, NULL, 'workflow:run:trial', NULL, 4, 1, 1, 0, 0, 1, '2026-11-04 01:11:14', 1, '2026-11-04 01:11:14');
 INSERT INTO sys_menu (id, parent_id, type, name, path, component, redirect, permission, icon, sort, visible, status, open_type, deleted, created_by, create_time, updated_by, update_time) VALUES (122, 117, 3, '处理人工待办', NULL, NULL, NULL, 'workflow:human:act', NULL, 5, 1, 1, 0, 0, 1, '2026-11-04 01:11:14', 1, '2026-11-04 01:11:14');
-INSERT INTO sys_menu (id, parent_id, type, name, path, component, redirect, permission, icon, sort, visible, status, open_type, deleted, created_by, create_time, updated_by, update_time) VALUES (123, 0, 1, '编排', '/orch', NULL, NULL, NULL, 'Share', 55, 1, 1, 0, 1, NULL, '2026-11-04 01:42:43', 1, '2026-11-04 09:10:19');
-INSERT INTO sys_menu (id, parent_id, type, name, path, component, redirect, permission, icon, sort, visible, status, open_type, deleted, created_by, create_time, updated_by, update_time) VALUES (124, 123, 2, '多智能体', '/orch/multi-agent', 'ma/list/index', NULL, 'agent:route:view', 'Connection', 20, 1, 1, 0, 1, NULL, '2026-11-04 01:42:43', 1, '2026-11-04 09:10:16');
-INSERT INTO sys_menu (id, parent_id, type, name, path, component, redirect, permission, icon, sort, visible, status, open_type, deleted, created_by, create_time, updated_by, update_time) VALUES (125, 124, 3, '多智能体列表查询', NULL, NULL, NULL, 'agent:route:view', NULL, 1, 1, 1, 0, 1, NULL, '2026-11-04 01:42:43', 1, '2026-11-04 09:10:08');
 INSERT INTO sys_menu (id, parent_id, type, name, path, component, redirect, permission, icon, sort, visible, status, open_type, deleted, created_by, create_time, updated_by, update_time) VALUES (126, 116, 2, '多智能体', '/orchestration/multi-agent', 'ma/list/index', NULL, 'ma:def:view', 'Management', 20, 1, 1, 0, 0, 1, '2026-11-04 01:55:24', 1, '2026-11-05 01:45:12');
-INSERT INTO sys_menu (id, parent_id, type, name, path, component, redirect, permission, icon, sort, visible, status, open_type, deleted, created_by, create_time, updated_by, update_time) VALUES (127, 126, 3, '多智能体查询', NULL, NULL, NULL, 'agent:route:view', NULL, 1, 1, 1, 0, 0, 1, '2026-11-04 01:55:24', 1, '2026-11-04 01:55:24');
 INSERT INTO sys_menu (id, parent_id, type, name, path, component, redirect, permission, icon, sort, visible, status, open_type, deleted, created_by, create_time, updated_by, update_time) VALUES (128, 117, 3, '应用触发（P1）', NULL, NULL, NULL, 'workflow:run:invoke', NULL, 6, 1, 1, 0, 0, 1, '2026-11-04 04:34:01', 1, '2026-11-04 04:34:01');
 INSERT INTO sys_menu (id, parent_id, type, name, path, component, redirect, permission, icon, sort, visible, status, open_type, deleted, created_by, create_time, updated_by, update_time) VALUES (129, 6, 3, '工作流授权', NULL, NULL, NULL, 'system:app:edit', NULL, 5, 1, 1, 0, 0, 1, '2026-11-04 04:34:01', 1, '2026-11-04 04:34:01');
 INSERT INTO sys_menu (id, parent_id, type, name, path, component, redirect, permission, icon, sort, visible, status, open_type, deleted, created_by, create_time, updated_by, update_time) VALUES (130, 6, 3, '应用触发说明', NULL, NULL, NULL, 'workflow:run:invoke', NULL, 6, 1, 1, 0, 0, 1, '2026-11-04 04:34:01', 1, '2026-11-04 04:34:01');
@@ -249,7 +274,6 @@ INSERT INTO sys_role_menu (role_id, menu_id) VALUES (1, 99);
 INSERT INTO sys_role_menu (role_id, menu_id) VALUES (1, 101);
 INSERT INTO sys_role_menu (role_id, menu_id) VALUES (1, 102);
 INSERT INTO sys_role_menu (role_id, menu_id) VALUES (1, 103);
-INSERT INTO sys_role_menu (role_id, menu_id) VALUES (1, 104);
 INSERT INTO sys_role_menu (role_id, menu_id) VALUES (1, 105);
 INSERT INTO sys_role_menu (role_id, menu_id) VALUES (1, 106);
 INSERT INTO sys_role_menu (role_id, menu_id) VALUES (1, 107);
@@ -269,7 +293,6 @@ INSERT INTO sys_role_menu (role_id, menu_id) VALUES (1, 120);
 INSERT INTO sys_role_menu (role_id, menu_id) VALUES (1, 121);
 INSERT INTO sys_role_menu (role_id, menu_id) VALUES (1, 122);
 INSERT INTO sys_role_menu (role_id, menu_id) VALUES (1, 126);
-INSERT INTO sys_role_menu (role_id, menu_id) VALUES (1, 127);
 INSERT INTO sys_role_menu (role_id, menu_id) VALUES (1, 128);
 INSERT INTO sys_role_menu (role_id, menu_id) VALUES (1, 130);
 INSERT INTO sys_role_menu (role_id, menu_id) VALUES (1, 131);
