@@ -97,6 +97,38 @@ public class TrialMemoryCoordinator {
     }
 
     /**
+     * 只读拼会话前文：摘要 → 最近对话 → 当前用户，不写窗口、不做摘要、不投递记忆任务。
+     *
+     * <p>用途：工作台方案会话（虚拟根）与断点续作。它们没有 Agent 级窗口策略，
+     * 但仍然需要「上一轮问了什么 / 用户刚选了什么」，否则入口判定与专家作答都只看得到一句话。
+     *
+     * <p>边界（与 {@link #prepareUser} 的分工）：
+     * <ul>
+     *   <li>不调 {@code windows.onUser} / {@code onAssistant}，方案会话的写窗口仍维持跳过；</li>
+     *   <li>不塞短期记忆（判定与专家先统一按「前文 + 本轮」口径，避免多一套注入面）；</li>
+     *   <li>Redis 不可用等异常降级为「只有当前用户段」的文本，保证占位标记仍在，
+     *       子查询替换与判路由都不会把历史拼丢或重复。</li>
+     * </ul>
+     *
+     * @param session  当前会话
+     * @param userText 本轮用户原文
+     * @return 含【会话摘要】/【最近对话】/【当前用户】的用户侧文本；失败时至少含【当前用户】
+     */
+    public String previewUser(RunSession session, String userText) {
+        String current = userText == null ? "" : userText.trim();
+        try {
+            WindowState state = windows.previewWindow(session.getId());
+            return windows.renderUser(state, current, List.of());
+        } catch (RuntimeException ex) {
+            // 只读预览失败不能挡住本轮：降级为只有当前用户段，标记与 renderUser 保持一致
+            log.warn("只读预览会话前文失败，已降级为仅当前用户 sessionId={} type={} cause={}",
+                    session == null ? null : session.getId(),
+                    ex.getClass().getSimpleName(), CauseDigest.of(ex));
+            return "【当前用户】\n" + current;
+        }
+    }
+
+    /**
      * 取本轮要注入的长期记忆：工作记忆 →【长期记忆说明】→ 用户偏好（本轮召回条目）。
      * <p>
      * <b>不再自己拼到系统提示尾部</b>：记忆在提示词里的位置是「业务段收口之后、Skill 与工具目录之前」，

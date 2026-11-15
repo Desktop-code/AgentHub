@@ -44,23 +44,23 @@ public class AgentRuntimeConfig {
     public static final String TEMPLATE_ENTRY_ROUTER = "ENTRY_ROUTER";
 
     /**
-     * 入口行固定展示名：列表 / 详情 / 抽屉标题统一显示「Router」。
+     * 入口行默认展示名：新建 / 迁移入口时的初始名称，也是历史空名兜底。
      *
-     * <p>为什么不是库里的中文名：入口是全平台唯一的一条网关，展示口径必须唯一且稳定，
-     * 不能随着谁改了一个名字就变成别的叫法；因此名称、编码、说明这三项身份字段一并锁定，
-     * 页面只读、后端同样拒绝改（见 {@code MaDefPolicy.assertEntryIdentity}）。
+     * <p>名称已开放编辑（本刀）：改名后库内名称优先，列表 / 详情 / 消息流入口块同源生效；
+     * 这个常量只在名称为空时兜底，不再作为强制展示值。
+     * 编码与说明仍属身份字段，页面只读、后端同样拒绝改（见 {@code MaDefPolicy.assertEntryIdentity}）。
      */
     public static final String ENTRY_ROUTER_NAME = "Router";
 
     /**
      * 入口行固定说明（备注）：写清它是什么、负责什么、哪些动作被禁止。
      *
-     * <p>与 {@link #ENTRY_ROUTER_NAME} 一样属于入口身份字段：页面只读，保存时不允许被改写；
+     * <p>与名称不同，备注仍属于入口身份字段：页面只读，保存时不允许被改写；
      * 长度控制在 512 以内，与 {@code ma_def.description} 列宽一致。
      */
     public static final String ENTRY_ROUTER_DESCRIPTION =
             "对话入口：负责规划、选择专家或普通方案并决定是否收尾；"
-                    + "不可删除、不可改名称/类型、不可加入路由池、不可作为子专家。";
+                    + "不可删除、不可改类型、不可加入路由池、不可作为子专家。";
 
     /**
      * 固定串行模板：跳过判路由，按 sort_order 依次执行全部启用候选 S1→S2→…→Sn，再汇总。

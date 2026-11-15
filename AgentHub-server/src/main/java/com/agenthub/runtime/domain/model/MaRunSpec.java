@@ -187,7 +187,7 @@ public record MaRunSpec(Long maId, String code, String name, String description,
                                AgentRuntimeConfig runtime, Map<Long, MaRunSpec> maTargets,
                                Map<Long, WorkflowRunSpec> workflowTargets) {
         boolean reception = def.getIsReceptionDefault() != null && def.getIsReceptionDefault() == 1;
-        // 名称 / 说明走 displayName / displayDescription：入口在提示词与会话标题里也统一叫「Router」
+        // 名称 / 说明走 displayName / displayDescription：入口名称可编辑，提示词与会话标题读同一份配置名
         return new MaRunSpec(def.getId(), def.getCode(), def.displayName(), def.displayDescription(),
                 def.getTemplate(),
                 runtime, candidates == null ? List.of() : List.copyOf(candidates),

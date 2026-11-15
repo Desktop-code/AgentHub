@@ -49,6 +49,15 @@ public class MaTrialSpecLoader {
 
     private static final Logger log = LoggerFactory.getLogger(MaTrialSpecLoader.class);
 
+    /**
+     * 历史迁移生成的方案编码前缀（与 `sql/temp/data-migrate-ma-def-from-router.sql` 一致）。
+     * 用于识别「旧 ROUTER 包装出来的自己」，避免同一轮跑两份同名综合台。
+     */
+    private static final String MIGRATED_MA_CODE_PREFIX = "ma_from_agent_";
+
+    /** 迁移脚本给方案名加的后缀 */
+    private static final String MIGRATED_MA_NAME_SUFFIX = "（迁移）";
+
     private final MaDefRepository mas;
     private final MaTenantProvider tenantProvider;
     private final ModelInstanceRepository instances;
@@ -224,6 +233,16 @@ public class MaTrialSpecLoader {
                 if (target == null || target.getTenantId() == null || target.getTenantId() != tenant()) {
                     continue;
                 }
+                /*
+                 * 迁移副本不装载：`ma_from_agent_{id}` 是旧 ROUTER 的包装方案，
+                 * 名称与当前方案同名。把它当路由目标会让同一轮出现两条同名综合台，
+                 * 且内层只是一个空壳包装（用户看到的「CONCAT 无调用」正是它）。
+                 */
+                if (isMigratedWrapperOf(def, target)) {
+                    log.warn("方案候选里出现自己的迁移副本，已跳过 maId={} targetCode={}",
+                            def.getId(), target.getCode());
+                    continue;
+                }
                 if (target.getEnabled() == null || target.getEnabled() != 1) {
                     continue;
                 }
@@ -344,5 +363,46 @@ public class MaTrialSpecLoader {
             return def.getCode().trim();
         }
         return "#" + def.getId();
+    }
+
+    /**
+     * 目标方案是否只是「当前方案自己」的迁移包装副本。
+     *
+     * <p>历史迁移把旧 ROUTER Agent 迁成 `ma_from_agent_{agentId}`，名称写成「原名（迁移）」。
+     * 若它被当作当前方案的路由目标，同一轮就会跑两份同名综合台：外层手工方案 + 内层空壳迁移副本。
+     *
+     * <p>判定只用已有事实：编码前缀为 {@code ma_from_agent_}，且去掉「（迁移）」后缀后的名称
+     * 与当前方案同名。
+     *
+     * @param current 当前正在装载的方案
+     * @param target  候选指向的目标方案
+     * @return true 表示是当前方案自己的迁移副本，不应装载
+     */
+    private static boolean isMigratedWrapperOf(MaDef current, MaDef target) {
+        if (current == null || target == null) {
+            return false;
+        }
+        if (current.getId() != null && current.getId().equals(target.getId())) {
+            return true;
+        }
+        String code = target.getCode() == null ? "" : target.getCode().trim();
+        if (!code.startsWith(MIGRATED_MA_CODE_PREFIX)) {
+            return false;
+        }
+        String a = strippedName(current.getName());
+        String b = strippedName(target.getName());
+        return !a.isEmpty() && a.equals(b);
+    }
+
+    /**
+     * @param name 方案名
+     * @return 去掉迁移后缀与首尾空白；空名为空串
+     */
+    private static String strippedName(String name) {
+        String text = name == null ? "" : name.trim();
+        if (text.endsWith(MIGRATED_MA_NAME_SUFFIX)) {
+            text = text.substring(0, text.length() - MIGRATED_MA_NAME_SUFFIX.length()).trim();
+        }
+        return text;
     }
 }

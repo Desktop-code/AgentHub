@@ -34,16 +34,27 @@ import {
   pageWorkbenchSessions,
   rejectWorkbenchPlan,
   renameWorkbenchSession,
+  streamWorkbenchChoice,
   streamWorkbenchMessage,
-  switchWorkbenchRoute
+  switchWorkbenchRoute,
+  cancelWorkbenchRoute
 } from '@/api/workbench'
-import { newTrialIdempotencyKey, type TrialChildPlanPendingChunk } from '@/api/runtime'
+import {
+  newTrialIdempotencyKey,
+  type TrialChildPlanPendingChunk,
+  type TrialStreamHandlers
+} from '@/api/runtime'
 import {
   advancePlanState,
+  appendChoice,
   appendFile,
+  appendParticipantBegin,
   appendRoute,
   appendText,
   appendTool,
+  appendToolStart,
+  appendWorkflow,
+  completeTool,
   appendVision,
   assistantTurn,
   formatRelativeTime,
@@ -57,6 +68,7 @@ import {
   upsertPlan,
   upsertStep
 } from '@/components/runtime/trialMessages'
+import { mergeTurnsAfterRun } from '@/components/runtime/trialMerge'
 import { forgetTrialSession, recallTrialSession, rememberTrialSession } from '@/components/runtime/trialResume'
 import {
   beginLive,
@@ -74,6 +86,7 @@ import {
 import { groupSessionsForWorkbench, parseSessionTime } from '@/components/runtime/trial/sessionGroup'
 import { rowShowsSpinner, sessionStillRunning, shouldResumeTurn } from '@/components/runtime/sessionProgress'
 import { friendlyWorkbenchError } from '@/utils/workbenchFriendlyError'
+import { workbenchRouteBadge } from '@/utils/workbenchRouteBadge'
 import type { SessionGroup } from '@/components/runtime/trial/sessionGroup'
 import type { ChatTurn, TrialEvent, TrialPlanView, TrialSession } from '@/types/runtime'
 import type { WorkbenchConfig, WorkbenchRouteOption, WorkbenchRouteOptions } from '@/types/workbench'
@@ -149,6 +162,12 @@ export function useWorkbenchChat() {
   let resumingId: number | undefined
   /** 上一拍已渲染的事件签名（条数 + 末尾 seq + 末尾正文长度）。 */
   let resumeSignature = ''
+  /**
+   * 本轮序号。每发一次（发送 / 续作）自增，用于识别「这一轮的收尾已被新一轮接管」：
+   * 输入框在 done 就已放开（P0-C2），用户可能在上一轮的历史对齐还没跑完时又发一句，
+   * 此时旧收尾绝不能再回写 turns、也不能把自己那轮的流式状态当成新一轮的清掉。
+   */
+  let runSeq = 0
 
   /** 就绪：只有 ready=true 才允许新建与发送。 */
   const ready = computed(() => config.value?.ready === true)
@@ -242,10 +261,17 @@ export function useWorkbenchChat() {
 
   /**
    * @ 面板候选：已落库会话用 routes；草稿用默认接待配置里的启用项（同范围，不扩全平台）。
+   *
+   * <p>为什么不能在「切到已落库会话」的瞬间直接读 routes：`loadRoutes` 是异步的，
+   * 刚建会话 / 刚点开历史的那一刻 `routes.value` 可能还是 undefined。若这时返回空数组，
+   * 消息流拿到的候选池会从「有」突变成「空」，本轮已画出的块会被重新分类、
+   * 表现就是「发送瞬间先闪一下、再闪一下重新出现」。因此 routes 还没到时回落配置候选，
+   * 保证候选池在这段时间里不抖。
    */
   const atRouteCandidates = computed<WorkbenchRouteOption[]>(() => {
-    if (session.value && !isTempSession(session.value)) {
-      return routeCandidates.value
+    const fromRoutes = routeCandidates.value
+    if (fromRoutes.length) {
+      return fromRoutes
     }
     return (config.value?.candidates ?? [])
       .filter((item) => !!(item.routeKey && item.routeKey.trim()))
@@ -290,21 +316,16 @@ export function useWorkbenchChat() {
   const currentRouteKey = computed(() => (routes.value?.currentRouteKey || '').trim())
 
   /**
-   * 底部徽标：已 @ / 已有 sticky 时不要假装「未指定的自动匹配」。
+   * 底部徽标：**只反映用户本次 @ 了谁**。
+   *
+   * <p>为什么不能再按「当前沿用线路（sticky）」写「已指定××」：点选续作或普通问答之后，
+   * 会话里会一直留着上一位专家，于是这行一直显示「已指定后端技术专家」，
+   * 用户以为下一句被钉死、不再走入口。实际上下一条新问题本来就走入口判定，
+   * 只有 @ 才是真的强制指定。取消 @ 后这行立刻回到「自动匹配专家」。
    */
-  const gatewayBadgeText = computed(() => {
-    if (pendingForceRoute.value?.agentName?.trim()) {
-      return `已指定${pendingForceRoute.value.agentName.trim()}`
-    }
-    if (routeInvalid.value) {
-      return '线路已失效'
-    }
-    const name = (routes.value?.currentRouteName || '').trim()
-    if (name) {
-      return `已指定${name}`
-    }
-    return '自动匹配专家'
-  })
+  const gatewayBadgeText = computed(() =>
+    workbenchRouteBadge(pendingForceRoute.value?.agentName, routeInvalid.value)
+  )
 
   /** 是否允许打开 @ 面板：就绪、不在发送中、有候选 */
   const canPickRoute = computed(
@@ -444,9 +465,28 @@ export function useWorkbenchChat() {
     }
   }
 
-  /** 清除 @ 提及片（发送成功后 / 用户手动关掉） */
-  function clearPendingRoute() {
+  /**
+   * 清除 @ 提及片（发送成功后 / 用户手动关掉）。
+   *
+   * <p>手动取消时还要撤销服务端那把「下一轮强制走这条线」的一次性标记：
+   * 选定 @ 的瞬间已经 PUT 过并登记了标记，只清前端的话下一句新问题仍会被钉给那位专家。
+   * 这里**不动**沿用线路（sticky），也不改任何消息与事件——取消只是让下一句回到入口判定。
+   *
+   * <p>撤销失败只静默忽略、不回滚片：本地已经取消，服务端标记会在下一轮被消费掉（最多影响一句），
+   * 不该因为一次撤销失败把取消这件事本身做成「没生效」。
+   */
+  async function clearPendingRoute() {
+    const hadPick = !!pendingForceRoute.value
     pendingForceRoute.value = null
+    const current = session.value
+    if (!hadPick || !current || isTempSession(current)) {
+      return
+    }
+    try {
+      await cancelWorkbenchRoute(current.id)
+    } catch {
+      // 撤销失败不打断用户：标记至多作用一轮，且下一句仍按入口判定展示
+    }
   }
 
   /** 读就绪状态；失败时保持未就绪（宁可不给发，也不假装可用）。 */
@@ -653,9 +693,11 @@ export function useWorkbenchChat() {
    *
    * <p>三种来源按优先级：本页仍在消费的流 → 刷新前快照 → 已落库事件。
    *
-   * @param id 会话主键；{@link TEMP_SESSION_ID} 表示草稿
+   * @param id        会话主键；{@link TEMP_SESSION_ID} 表示草稿
+   * @param mergeKeys 收尾对齐时是否沿用本地轮次 key / 块 id（本轮流式刚结束时传 true，
+   *                  避免终答落地后整行卸载重建；点历史会话时传 false）
    */
-  async function openHistory(id: number) {
+  async function openHistory(id: number, mergeKeys = false) {
     pageError.value = ''
     pendingForceRoute.value = null
     if (id === TEMP_SESSION_ID) {
@@ -667,6 +709,12 @@ export function useWorkbenchChat() {
     stopResume()
     draftReady.value = false
     const token = ++openToken
+    /*
+     * 进来时的轮次序号。收尾对齐是异步的（读事件 + 补元数据），
+     * 期间输入框可能已经放开、用户又发了下一句；那一句的轮次不在这次回放里，
+     * 一旦继续回写就会把新气泡冲掉。序号变了就放弃这次对齐，交给新一轮自己收尾。
+     */
+    const runAtEntry = runSeq
     const live = liveOf(id)
     const found =
       history.value.find((item) => item.id === id) ??
@@ -711,6 +759,10 @@ export function useWorkbenchChat() {
           return
         }
       }
+      // 期间用户已发下一句：这次回放不含那一轮，任何回写都会冲掉新气泡，直接放弃
+      if (runAtEntry !== runSeq) {
+        return
+      }
       syncSessionFromEvents(events)
       // 有内存增量 = 本轮确实在跑且能看到过程：直接进续订。
       // 会话已被收成终态时不再续：重启后的取消行要能看到已有消息，不能一直「正在作答」
@@ -722,7 +774,13 @@ export function useWorkbenchChat() {
         beginResume(id, events, !!snapshot, fetched.live)
         return
       }
-      turns.value = turnsFromEvents(events)
+      /*
+       * 收尾对齐：本轮刚跑完时沿用本地轮次 key 与块 id（P0-C1）。
+       * 整表替换会让每行的 v-for key 从 `wb-a-*` 变成 `e-*`，Vue 只能卸载整行重建，
+       * 表现就是终答落地后「整块闪一下」。点历史会话时不合并（那是另一份时间线）。
+       */
+      const fresh = turnsFromEvents(events)
+      turns.value = mergeKeys ? mergeTurnsAfterRun(turns.value, fresh) : fresh
       clearSnapshot(id)
       dropLive(id)
       await restorePendingPlan(id, token)
@@ -743,6 +801,7 @@ export function useWorkbenchChat() {
     if (sending.value || !canSend.value) {
       return
     }
+    const runId = ++runSeq
     sending.value = true
     pageError.value = ''
     // 一次点击生成一次幂等键：网络重试 / 浏览器重放同一请求只真正跑一轮
@@ -757,7 +816,6 @@ export function useWorkbenchChat() {
     turns.value = [...turns.value, assistantTurn(`wb-a-${Date.now()}`, 'streaming')]
     const live = turns.value[turns.value.length - 1]
     const controller = new AbortController()
-    let persisted = false
     let sessionId: number | undefined
     const touchSnapshot = () => {
       if (sessionId != null) {
@@ -831,101 +889,23 @@ export function useWorkbenchChat() {
       pendingForceRoute.value = null
       // 登记到模块级：切走再回来能接上同一份时间线
       beginLive(sessionId, turns.value)
+      const stream = createRunHandlers(live, touchSnapshot)
       await streamWorkbenchMessage(
         sessionId,
         content,
-        {
-          onPhase: (phase) => {
-            live.phase = phase
-          },
-          onRoute: (summary) => {
-            // 路由判定进思考时间线；改派/换线后的 chip 在整轮收尾时由 loadRoutes 对齐
-            appendRoute(live, summary)
-            touchSnapshot()
-          },
-          onReasoning: (text) => {
-            appendText(live, 'reasoning', text)
-            touchSnapshot()
-          },
-          onVision: (text) => {
-            live.phase = 'vision'
-            appendVision(live, text)
-            touchSnapshot()
-          },
-          onTool: (tool) => {
-            live.phase = 'tool'
-            appendTool(live, tool.line, tool.result)
-            touchSnapshot()
-          },
-          onPlan: (plan) => {
-            upsertPlan(live, {
-              planId: plan.planId,
-              state: plan.state,
-              summary: plan.summary,
-              steps: (plan.steps || []).map((step) => ({
-                seq: step.seq,
-                title: step.title,
-                detail: step.detail || ''
-              }))
-            })
-            touchSnapshot()
-          },
-          onStep: (step) => {
-            live.phase = 'tool'
-            upsertStep(live, {
-              seq: step.seq,
-              title: step.title,
-              state: step.state,
-              text: step.text || '',
-              line: step.line
-            })
-            touchSnapshot()
-          },
-          onChildPlanPending: (pending) => {
-            // 子专家计划待批准：后端单批准槽保证同时只有一条
-            childPending.value = pending
-          },
-          onFileGenerated: (file) => {
-            appendFile(live, {
-              fileName: file.fileName,
-              size: file.size,
-              downloadUrl: file.downloadUrl
-            })
-            touchSnapshot()
-          },
-          onAssistant: (text) => {
-            if (live.phase !== 'done') {
-              live.phase = 'answering'
-            }
-            appendText(live, 'assistant', text)
-            touchSnapshot()
-          },
-          onDone: (payload) => {
-            persisted = true
-            live.status = payload.status === 'FAILED' ? 'error' : 'done'
-            live.phase = payload.status === 'FAILED' ? 'error' : 'done'
-            if (payload.planPending) {
-              live.planPending = true
-              live.status = 'done'
-              live.phase = 'done'
-            }
-            // 根本轮已出终答（或整轮失败）：子计划不可能还在待批
-            childPending.value = null
-          },
-          onError: (message) => {
-            live.status = 'error'
-            live.phase = 'error'
-            // SSE 硬核不可用也走友好映射，避免红条打出「没有可用的对话模型」原文
-            pageError.value = friendlyWorkbenchError(message || '')
-            childPending.value = null
-          }
-        },
+        stream.handlers,
         controller.signal,
         images,
         idempotencyKey
       )
+      const persisted = stream.state.persisted
+      /*
+       * 收尾已被新一轮接管（用户在上一条刚 done 时又发了一句）：
+       * 不能再回写 turns / 不能 finishLive（会误伤新一轮的流式登记），收尾交给新一轮。
+       */
+      const superseded = runId !== runSeq
       // 落库后再用事件覆盖，避免把未入库的失败卡片刷掉
-      if (persisted && session.value && session.value.id === sessionId) {
+      if (!superseded && persisted && session.value && session.value.id === sessionId) {
         const asked = session.value.messageCount ?? 0
         session.value = {
           ...session.value,
@@ -933,10 +913,13 @@ export function useWorkbenchChat() {
           lastMsgPreview: (session.value.lastMsgPreview || '').trim() || content
         }
       }
-      if (persisted) {
+      if (superseded) {
+        // 什么都不做：新一轮会自己对齐历史
+      } else if (persisted) {
         finishLive(sessionId)
         if (session.value?.id === sessionId) {
-          await openHistory(sessionId)
+          // mergeKeys=true：沿用本轮 key / 块 id，终答落地时整行不重建
+          await openHistory(sessionId, true)
         } else {
           dropLive(sessionId)
         }
@@ -952,17 +935,259 @@ export function useWorkbenchChat() {
           pageError.value = '连接已结束'
         }
       }
-      await refreshHistoryHead()
+      if (!superseded) {
+        await refreshHistoryHead()
+      }
     } catch (error) {
       live.status = 'error'
       live.phase = 'error'
       pageError.value = messageOf(error, '发送失败')
     } finally {
-      if (sessionId != null) {
-        finishLive(sessionId)
+      // 已被新一轮接管时不能收尾：finishLive / sending 都是新一轮正在用的状态
+      if (runId === runSeq) {
+        if (sessionId != null) {
+          finishLive(sessionId)
+        }
+        sending.value = false
       }
-      sending.value = false
     }
+  }
+
+  /**
+   * 点选项 → 断点续作：同一个 Agent 接着干，**不重走入口判词**。
+   *
+   * <p>为什么不能当普通消息再发一遍：那样会重新过一遍入口分流，选项可能被分给别的专家，
+   * 这一轮就断了。续作端点在后端直接派回会话沿用的那位 Agent，前端只把 optionId 带上；
+   * 用户气泡里写选项文案，让记录看起来就是「我说了这句话」。
+   *
+   * <p>前置条件与发送一致（就绪、会话未取消、不在发送中）；草稿没有可续作的上下文，直接忽略。
+   *
+   * @param optionId 被点选项的短标识（后端对照最后一条助手消息上的选项块校验）
+   * @param label    选项展示文案，用作本轮用户气泡的文字
+   */
+  async function chooseOption(optionId: string, label: string) {
+    const current = session.value
+    const text = (label || '').trim()
+    if (
+      sending.value ||
+      !canSend.value ||
+      !current ||
+      isTempSession(current) ||
+      !(optionId || '').trim() ||
+      !text
+    ) {
+      return
+    }
+    const sessionId = current.id
+    const runId = ++runSeq
+    sending.value = true
+    pageError.value = ''
+    childPending.value = null
+    // 手动续作接管展示：停轮询，这一轮改由 SSE 驱动
+    stopPolling()
+    turns.value = [
+      ...turns.value,
+      { key: `wb-u-${Date.now()}`, role: 'user', text, blocks: [], phase: 'done', status: 'done', startTime: 0 }
+    ]
+    /*
+     * 续作轮打标记：投影层据此**不去等入口报身份**（这一轮本来就没有入口判定），
+     * 专家的思考直接出在自己块上，既不会被抢到入口，也不会因为等身份而晚出块。
+     */
+    turns.value = [...turns.value, { ...assistantTurn(`wb-a-${Date.now()}`, 'streaming'), continuation: true }]
+    const live = turns.value[turns.value.length - 1]
+    const controller = new AbortController()
+    const touchSnapshot = () => saveSnapshot(sessionId)
+    beginLive(sessionId, turns.value)
+    const stream = createRunHandlers(live, touchSnapshot)
+    try {
+      await streamWorkbenchChoice(sessionId, optionId.trim(), stream.handlers, controller.signal)
+      // 与发送同口径：收尾已被新一轮接管就不再回写（避免冲掉新气泡）
+      const superseded = runId !== runSeq
+      if (superseded) {
+        // 交给新一轮收尾
+      } else if (stream.state.persisted) {
+        finishLive(sessionId)
+        if (session.value?.id === sessionId) {
+          await openHistory(sessionId, true)
+        } else {
+          dropLive(sessionId)
+        }
+      } else if (live.status === 'streaming') {
+        live.status = 'error'
+        live.phase = 'error'
+        if (!pageError.value) {
+          pageError.value = '连接已结束'
+        }
+      }
+      if (!superseded) {
+        await refreshHistoryHead()
+      }
+    } catch (error) {
+      live.status = 'error'
+      live.phase = 'error'
+      pageError.value = messageOf(error, '续作失败')
+    } finally {
+      if (runId === runSeq) {
+        finishLive(sessionId)
+        sending.value = false
+      }
+    }
+  }
+
+  /**
+   * 一轮 SSE 的增量处理器（发送与续作共用）。
+   *
+   * <p>为什么抽出来：两条路径只差「请求打哪个端点」，帧协议与时间线写法必须完全一致；
+   * 各写一份迟早分叉（选项续作出块与普通发送不一样，用户会以为点错了人）。
+   *
+   * <p>身份帧的当前归属：participant 帧先于该步的思考 / 工具到达，后续增量带上 id + 名字，
+   * 时间线按身份归块，不再靠「最后一条 route 文案」猜说话人。
+   *
+   * @param live          本轮助手消息（自增量的落点）
+   * @param touchSnapshot 一拍落一次快照，刷新后可恢复
+   * @return handlers 与可读的运行态 `state`（是否已收到落库终帧）
+   */
+  function createRunHandlers(live: ChatTurn, touchSnapshot: () => void) {
+    const state = { activeParticipantId: '', activeParticipantName: '', persisted: false }
+    const handlers: TrialStreamHandlers = {
+      onPhase: (phase) => {
+        live.phase = phase
+      },
+      onParticipant: (participant) => {
+        // begin=true：这一步真正开始，先补块（前端立刻出块，不等思考 / 工具）
+        if (participant.begin) {
+          appendParticipantBegin(live, participant)
+        }
+        // 入口身份落到轮上：入口判定的推理按 id 认领，避免被决策行 / 说明行挡在后面时丢掉
+        if (participant.kind === 'gateway' && participant.id) {
+          live.entryParticipantId = participant.id.trim()
+        }
+        state.activeParticipantId = (participant.id || '').trim()
+        state.activeParticipantName = (participant.name || '').trim()
+        touchSnapshot()
+      },
+      onRoute: (summary) => {
+        // 路由判定进思考时间线；改派/换线后的 chip 在整轮收尾时由 loadRoutes 对齐
+        appendRoute(live, summary, state.activeParticipantId, state.activeParticipantName)
+        touchSnapshot()
+      },
+      onReasoning: (text) => {
+        appendText(live, 'reasoning', text, state.activeParticipantId, state.activeParticipantName)
+        touchSnapshot()
+      },
+      onVision: (text) => {
+        live.phase = 'vision'
+        appendVision(live, text)
+        touchSnapshot()
+      },
+      onTool: (tool) => {
+        live.phase = 'tool'
+        /*
+         * 先尝试把结果补到前面那条「正在调用」胶囊上；补不到（历史流 / 后端没发开始事件）
+         * 再退化成追加一条结果块，保证工具结果永远不会丢。
+         */
+        const merged = completeTool(live, tool.name || '', tool.line, tool.result, tool.success !== false)
+        if (!merged) {
+          appendTool(live, tool.line, tool.result, state.activeParticipantId, state.activeParticipantName)
+        }
+        touchSnapshot()
+      },
+      onToolStart: (name) => {
+        live.phase = 'tool'
+        appendToolStart(live, name, state.activeParticipantId, state.activeParticipantName)
+        touchSnapshot()
+      },
+      onPlan: (plan) => {
+        upsertPlan(live, {
+          planId: plan.planId,
+          state: plan.state,
+          summary: plan.summary,
+          steps: (plan.steps || []).map((step) => ({
+            seq: step.seq,
+            title: step.title,
+            detail: step.detail || ''
+          }))
+        })
+        touchSnapshot()
+      },
+      onStep: (step) => {
+        live.phase = 'tool'
+        upsertStep(live, {
+          seq: step.seq,
+          title: step.title,
+          state: step.state,
+          text: step.text || '',
+          line: step.line
+        })
+        touchSnapshot()
+      },
+      onChildPlanPending: (pending) => {
+        // 子专家计划待批准：后端单批准槽保证同时只有一条
+        childPending.value = pending
+      },
+      onFileGenerated: (file) => {
+        appendFile(live, {
+          fileName: file.fileName,
+          size: file.size,
+          downloadUrl: file.downloadUrl
+        })
+        touchSnapshot()
+      },
+      onChoice: (choice) => {
+        /*
+         * 结构化选项总是晚于本轮正文到达：补一条选项块，带着当前参与者身份，
+         * 投影层据此把 chips 挂到同一位专家的气泡下方（实现层不再从正文猜列表）。
+         */
+        appendChoice(
+          live,
+          { question: choice.question || '', options: choice.options || [] },
+          state.activeParticipantId,
+          state.activeParticipantName
+        )
+        touchSnapshot()
+      },
+      onWorkflow: (view) => {
+        /*
+         * 工作流执行卡片：整份状态快照，原位覆盖同一块。
+         * 工作流没有 token 输出，这张卡片就是它在消息流里的唯一可见载体；
+         * 漏掉这条会让整张卡片只在刷新后的落库回放里出现。
+         */
+        appendWorkflow(live, view)
+        touchSnapshot()
+      },
+      onAssistant: (text) => {
+        if (live.phase !== 'done') {
+          live.phase = 'answering'
+        }
+        appendText(live, 'assistant', text, state.activeParticipantId, state.activeParticipantName)
+        touchSnapshot()
+      },
+      onDone: (payload) => {
+        state.persisted = true
+        live.status = payload.status === 'FAILED' ? 'error' : 'done'
+        live.phase = payload.status === 'FAILED' ? 'error' : 'done'
+        if (payload.planPending) {
+          live.planPending = true
+          live.status = 'done'
+          live.phase = 'done'
+        }
+        // 根本轮已出终答（或整轮失败）：子计划不可能还在待批
+        childPending.value = null
+        /*
+         * 输入立刻放开（P0-C2）：收尾的历史对齐还要几个请求，不能让它挡着「问下一句」。
+         * 上一轮的收尾若与新一句撞车，由 runSeq 判定为「已被接管」，不会再回写 turns。
+         */
+        sending.value = false
+      },
+      onError: (message) => {
+        live.status = 'error'
+        live.phase = 'error'
+        // SSE 硬核不可用也走友好映射，避免红条打出「没有可用的对话模型」原文
+        pageError.value = friendlyWorkbenchError(message || '')
+        childPending.value = null
+      }
+    }
+    return { handlers, state }
   }
 
   /** 清空当前会话事件，保留会话与标题。 */
@@ -1762,6 +1987,7 @@ export function useWorkbenchChat() {
     openHistory,
     loadMoreHistory,
     send,
+    chooseOption,
     switchRoute,
     pickRoute,
     clearPendingRoute,

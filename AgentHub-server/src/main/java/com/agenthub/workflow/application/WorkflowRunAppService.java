@@ -23,6 +23,7 @@ import com.agenthub.workflow.domain.repository.WorkflowHumanTaskRepository;
 import com.agenthub.workflow.domain.repository.WorkflowNodeRunRepository;
 import com.agenthub.workflow.domain.repository.WorkflowReleaseRepository;
 import com.agenthub.workflow.domain.repository.WorkflowRunRepository;
+import com.agenthub.workflow.domain.service.WorkflowRunListener;
 import com.agenthub.workflow.domain.service.WorkflowTenantProvider;
 import com.agenthub.workflow.domain.service.WorkflowTraceWriter;
 import com.agenthub.workflow.infra.WorkflowProperties;
@@ -200,6 +201,25 @@ public class WorkflowRunAppService {
      * @throws BizException 定义不存在 / 未发布 / 无默认发布 / 图不可执行 / 入参非法
      */
     public WorkflowWorkbenchOutcome runFromWorkbench(Long workflowId, String query, long sessionId, long userId) {
+        return runFromWorkbench(workflowId, query, sessionId, userId, null);
+    }
+
+    /**
+     * 工作台触发工作流（带节点观察者）。
+     *
+     * <p>观察者只用于「工作台消息流里的执行卡片」：复用未结束 run 时也要先把已有节点状态
+     * 报一次，否则卡片会是一张没有步骤的空壳；新建 run 时交给引擎在调度开始后回调。
+     *
+     * @param workflowId 工作流定义 id
+     * @param query      本轮用户消息；会作为 {@code input.query}
+     * @param sessionId  工作台会话 id
+     * @param userId     平台用户（工作台会话归属人）
+     * @param listener   节点状态观察者；可空
+     * @return 新 run 或复用的未结束 run
+     * @throws BizException 定义不存在 / 未发布 / 无默认发布 / 图不可执行 / 入参非法
+     */
+    public WorkflowWorkbenchOutcome runFromWorkbench(Long workflowId, String query, long sessionId, long userId,
+                                                     WorkflowRunListener listener) {
         if (query == null || query.isBlank()) {
             throw new BizException(ErrorCode.BAD_REQUEST, "工作流入参不能为空");
         }
@@ -216,6 +236,8 @@ public class WorkflowRunAppService {
                 humanTaskService.resolveExpired(existing);
                 existing = runs.findById(existing.getId()).orElse(existing);
             }
+            // 复用没有经过引擎：把库里已有的节点状态先报一次，卡片才不会是一张没有步骤的空壳
+            publishExisting(existing, listener);
             return new WorkflowWorkbenchOutcome(existing, true);
         }
 
@@ -253,9 +275,31 @@ public class WorkflowRunAppService {
         operLogWriter.write("workflow", "run_workbench", "workflow_run", String.valueOf(runId),
                 "工作台运行工作流 code=" + def.getCode() + " release=" + release.getId()
                         + " session=" + sessionId);
-        executeSafely(run, userId);
+        executeSafely(run, userId, listener);
         WorkflowRun fresh = runs.findById(runId).orElse(run);
         return new WorkflowWorkbenchOutcome(fresh, false);
+    }
+
+    /**
+     * 把已存在 run 的节点状态报给观察者（复用分支专用）。
+     *
+     * <p>图或节点行读不出来时只跳过：这是一张展示用卡片，不能因为不可视化就拒绝一次防重命中。
+     *
+     * @param run     已存在的 run
+     * @param listener 观察者；可空
+     */
+    private void publishExisting(WorkflowRun run, WorkflowRunListener listener) {
+        if (listener == null || run == null || run.getId() == null) {
+            return;
+        }
+        try {
+            WorkflowGraph graph = codec.parse(run.getGraphJson());
+            WorkflowRuntimeGraph runtime = WorkflowRuntimeGraph.of(graph);
+            listener.runStarted(runtime.nodes(), nodeRuns.listByRunId(run.getId()));
+        } catch (RuntimeException ex) {
+            log.warn("复用工作流 run 时读取节点状态失败 runId={} type={}",
+                    run.getId(), ex.getClass().getSimpleName());
+        }
     }
 
     /**
@@ -268,8 +312,19 @@ public class WorkflowRunAppService {
      * @param userId     操作人（会话归属人）
      */
     private void executeSafely(WorkflowRun run, long userId) {
+        executeSafely(run, userId, null);
+    }
+
+    /**
+     * 工作台入口的引擎调用（带节点观察者）。
+     *
+     * @param run      已落库的 run
+     * @param userId   操作人（会话归属人）
+     * @param listener 节点状态观察者；可空
+     */
+    private void executeSafely(WorkflowRun run, long userId, WorkflowRunListener listener) {
         try {
-            engine.execute(run, userId);
+            engine.execute(run, userId, listener);
         } catch (RuntimeException ex) {
             log.warn("工作台工作流执行异常 runId={} type={}", run.getId(), ex.getClass().getSimpleName(), ex);
             WorkflowRunStatus current = WorkflowRunStatus.parse(run.getStatus());

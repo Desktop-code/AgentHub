@@ -170,7 +170,7 @@
     <!-- 编辑抽屉：方案 + 配置 + 候选一次提交；不复制执行器逻辑 -->
     <el-drawer
       v-model="drawerVisible"
-      :title="isEntryScheme ? MA_ENTRY_ROUTER_NAME : (form.id ? (canEdit ? '编辑方案' : '查看方案') : '新建方案')"
+      :title="isEntryScheme ? (form.name.trim() || MA_ENTRY_ROUTER_NAME) : (form.id ? (canEdit ? '编辑方案' : '查看方案') : '新建方案')"
       size="920px"
       destroy-on-close
       class="ma-drawer"
@@ -178,7 +178,7 @@
       <el-form ref="formRef" :model="form" :rules="formRules" :disabled="!canEdit" label-width="132px" class="ma-form">
         <!--
           统一编辑壳：对话路由（对话入口）与普通方案共用这四个 Tab，不按类型分两套页面。
-          差别只在字段可写性：入口的名称 / 编码 / 备注 / 类型只读、不出现绑根；
+          差别只在字段可写性：入口的编码 / 备注 / 类型只读、名称可改、不出现绑根；
           运行配置里与总分流无关的项只读。模型与路由池两边完全一致。
         -->
         <el-tabs :key="form.id ?? 'new'" v-model="drawerTab" class="ma-tabs">
@@ -190,8 +190,8 @@
           show-icon
           :closable="false"
           class="block-alert"
-          title="这是对话入口：身份不可改"
-          description="名称、编码、备注、类型由平台锁定；不可删除、不可加入其它路由池，也不能作为其它方案的子专家。能改的是「模型配置」里的判路由模型与 ROUTER 提示词，以及「路由池」里的候选。"
+          title="这是对话入口：名称可改，编码与类型不可改"
+          description="名称改完保存后，列表、详情与对话里的入口块同步生效；编码、备注、类型由平台锁定。不可删除、不可加入其它路由池，也不能作为其它方案的子专家。能改的还有「模型配置」里的判路由模型与 ROUTER 提示词，以及「路由池」里的候选。"
         />
         <section class="form-block form-block--first">
           <h3 class="form-block__title">基本信息</h3>
@@ -226,7 +226,6 @@
                 <el-input
                   v-model="form.name"
                   maxlength="128"
-                  :disabled="isEntryScheme"
                   placeholder="给运营看的中文名"
                 />
               </el-form-item>
@@ -606,7 +605,7 @@ const canEdit = computed(() => user.hasPerm('ma:def:edit'))
 const canTrial = computed(() => user.hasPerm('runtime:trial:run') || user.hasPerm('runtime:trial:list'))
 /** 当前模板是否支持投票选优（与服务端 AgentRuntimeConfig.supportsVote 同口径） */
 const supportsVote = computed(() => supportsVoteTemplate(form.template))
-/** 当前方案是否为对话入口（对话路由）：模板 / 绑根 / 编码 / 名称 / 备注锁定，模型与 ROUTER 提示词仍可配 */
+/** 当前方案是否为对话入口（对话路由）：模板 / 绑根 / 编码 / 备注锁定；名称可改，模型与 ROUTER 提示词仍可配 */
 const isEntryScheme = computed(() => isEntryRouterTemplate(form.template))
 /** 路由后串行：上下文锁定为继承前置结果，执行顺序可编 */
 const isSerialMode = computed(

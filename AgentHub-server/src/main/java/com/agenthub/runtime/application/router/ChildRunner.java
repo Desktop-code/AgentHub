@@ -14,14 +14,17 @@ import com.agenthub.runtime.application.ChildPlanApprovalRegistry;
 import com.agenthub.runtime.application.PlanTrialExecutor;
 import com.agenthub.runtime.application.TrialBindingLoader;
 import com.agenthub.runtime.application.TrialMemoryCoordinator;
+import com.agenthub.runtime.domain.model.AgentChoice;
 import com.agenthub.runtime.domain.model.ChildPlanPendingView;
 import com.agenthub.runtime.domain.model.GeneratedFile;
+import com.agenthub.runtime.domain.model.ParticipantView;
 import com.agenthub.runtime.domain.model.PendingPlan;
 import com.agenthub.runtime.domain.model.PlanState;
 import com.agenthub.runtime.domain.model.RunSession;
 import com.agenthub.runtime.domain.model.ScratchBoard;
 import com.agenthub.runtime.domain.model.TrialPlan;
 import com.agenthub.runtime.domain.model.TrialTurn;
+import com.agenthub.runtime.domain.model.WorkflowRunView;
 import com.agenthub.runtime.domain.service.CauseDigest;
 import com.agenthub.runtime.domain.service.ChildSubQueryInput;
 import com.agenthub.runtime.domain.service.FixedSequenceContext;
@@ -42,9 +45,13 @@ import java.util.Map;
 import java.util.concurrent.CancellationException;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ExecutionException;
+import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Future;
+import java.util.concurrent.Executors;
+import java.util.concurrent.ThreadFactory;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.TimeoutException;
+import java.util.concurrent.atomic.AtomicInteger;
 
 /**
  * 子 Agent 执行：并行扇出 / 串行推进 / P&E 子计划与批准冒泡。所属域：runtime。
@@ -85,6 +92,15 @@ public class ChildRunner {
 
     /** 并行子执行池；容器所有，禁止 shutdown */
     private final ThreadPoolTaskExecutor routerTaskExecutor;
+
+    /**
+     * 嵌套方案（目标方案）内并行子执行的最大并发。
+     *
+     * <p>为什么单独一个常量：这一层不能回到 {@link #routerTaskExecutor}（会与父线程抢池、
+     * 形成自等待），但也不能串行（那会把「路由并行」悄悄改成串行）。用本层专属的小池兜住
+     * 一层方案的常见子数即可；超出的按 {@code min(子数, 本值)} 分波推进，仍是并发而非串行。
+     */
+    private static final int INLINE_PARALLELISM = 4;
 
     /** 目标方案执行委托（刀5）；普通子 Agent 不走这里 */
     private final MaTargetRunner maTargets;
@@ -154,10 +170,30 @@ public class ChildRunner {
                                           String userText, long userId, long sessionId, long deadlineNanos,
                                           TrialProgress progress, ObsTraceScope trace, Long childParent,
                                           boolean isolateChild) {
+        return runChildren(parent, intents, modelUser, userText, userId, sessionId, deadlineNanos, progress, trace,
+                childParent, isolateChild, false);
+    }
+
+    /**
+     * 同 {@link #runChildren(AgentDef, List, String, String, long, long, long, TrialProgress, ObsTraceScope,
+     * Long, boolean)}；多一个「本轮是否允许该叶子输出可点选项块」。
+     *
+     * <p>为什么只有单意图才可能开：选项块会让用户停下来拍板，多意图并行时每个子都抛一组选项，
+     * 用户无从选择；串行交接同样整链不开。该开关只影响系统提示里是否追一段平台锁定说明，
+     * 不改变分派、顺序、静音与汇总口径。
+     *
+     * @param leafChoice true 表示调用方（工作台）允许本轮唯一叶子输出选项块
+     * @return 与 intents 同序的子结果
+     */
+    public List<ChildOutcome> runChildren(AgentDef parent, List<RoutedIntent> intents, String modelUser,
+                                          String userText, long userId, long sessionId, long deadlineNanos,
+                                          TrialProgress progress, ObsTraceScope trace, Long childParent,
+                                          boolean isolateChild, boolean leafChoice) {
         if (intents.size() == 1) {
             // 单意图内联执行，不经过线程池；submitter 传当前线程即可（清理分支本就不会走到）
             return List.of(runOneChild(parent, intents.get(0), modelUser, userText, userId, sessionId,
-                    deadlineNanos, progress, trace, childParent, false, isolateChild, Thread.currentThread(), null));
+                    deadlineNanos, progress, trace, childParent, false, isolateChild, Thread.currentThread(), null,
+                    null, leafChoice));
         }
         // 嵌套编排（命中 MA 候选后的那一层）不抢同一个池：按序内联推进，
         // 避免「池线程等子任务、子任务排队等线程」的自等待；结果与顺序与并行一致
@@ -216,27 +252,95 @@ public class ChildRunner {
     }
 
     /**
-     * 嵌套编排下的多子执行：当前线程按 intents 顺序逐个跑，失败压成失败段。
+     * 嵌套编排下的多子执行：<b>并行</b>跑，但不用 {@code routerTaskExecutor}。
      *
-     * <p>与 {@link #runChildren} 的唯一差别是<b>不提交线程池</b>：
-     * 目标方案已经运行在外层子线程上，再向同一池提交会在高并发时形成自等待。
-     * 每个子开跑前仍检查外层墙钟，超时按统一口径抛出。
+     * <p>为什么曾经是串行：目标方案已经运行在外层子线程上，再向同一个池提交会在高并发时
+     * 形成「池线程等子任务、子任务排队等线程」的自等待。当时的处置是「当前线程按序逐个跑」，
+     * 结果把 <b>ROUTER_PARALLEL</b>（含固定并行）语义悄悄改成了串行 ——
+     * 用户看到角标写着「路由并行」，泳道上却是「制度专家跑完报告专家才起步」。
      *
-     * @param parent       编排根
-     * @param intents      已排序的参与者
-     * @param modelUser    已注入记忆的用户侧文本
-     * @param userText     用户原文
+     * <p>现在改为：<b>在独立的小并发里并行推进</b>，既不回到外层池（不自等待），
+     * 也不牺牲并行语义。并发度取 {@link #INLINE_PARALLELISM}（默认 4，够覆盖一层方案的常见子数），
+     * 每轮都用完即关，不共享、不驻留。
+     *
+     * @param parent        编排根
+     * @param intents       已排序的参与者
+     * @param modelUser     已注入记忆的用户侧文本
+     * @param userText      用户原文
      * @param deadlineNanos 父墙钟截止
-     * @param progress     可空
-     * @param trace        可空
-     * @param childParent  子 AGENT 的 parent_id
-     * @param isolateChild 多意图时 true：子仅吃 sub_query
+     * @param progress      可空
+     * @param trace         可空
+     * @param childParent   子 AGENT 的 parent_id
+     * @param isolateChild  多意图时 true：子仅吃 sub_query
      * @return 与 intents 同序的子结果
      */
     private List<ChildOutcome> runChildrenInline(AgentDef parent, List<RoutedIntent> intents, String modelUser,
                                                  String userText, long userId, long sessionId, long deadlineNanos,
                                                  TrialProgress progress, ObsTraceScope trace, Long childParent,
                                                  boolean isolateChild) {
+        /*
+         * 只并行、不换道：目标方案的子必须真正并发（否则「路由并行」名不副实）。
+         * 用独立线程池而不是外层 routerTaskExecutor，避免父线程占池 + 子任务排队 = 自等待。
+         * 单子时不必开池，直接当前线程跑。
+         */
+        if (intents.size() <= 1) {
+            return runSequentialInline(parent, intents, modelUser, userText, userId, sessionId, deadlineNanos,
+                    progress, trace, childParent, isolateChild);
+        }
+        ExecutorService lane = Executors.newFixedThreadPool(
+                Math.min(intents.size(), INLINE_PARALLELISM), inlineWorkerFactory());
+        try {
+            List<Future<ChildOutcome>> futures = new ArrayList<>(intents.size());
+            ScratchBoard scratch = ScratchContext.board();
+            Thread submitter = Thread.currentThread();
+            for (RoutedIntent intent : intents) {
+                futures.add(lane.submit(() -> ScratchContext.callAs(scratch, scratchOwner(intent), () ->
+                        runOneChild(parent, intent, modelUser, userText, userId, sessionId, deadlineNanos,
+                                progress, trace, childParent, true, isolateChild, submitter, null))));
+            }
+            List<ChildOutcome> outcomes = new ArrayList<>(intents.size());
+            for (int i = 0; i < futures.size(); i++) {
+                RouterClock.assertBefore(deadlineNanos);
+                try {
+                    long remainMs = Math.max(1L, (deadlineNanos - System.nanoTime()) / 1_000_000L);
+                    outcomes.add(futures.get(i).get(remainMs, TimeUnit.MILLISECONDS));
+                } catch (InterruptedException ex) {
+                    Thread.currentThread().interrupt();
+                    cancelPending(futures);
+                    outcomes.add(ChildOutcome.failed(intents.get(i), "子 Agent 执行被中断"));
+                } catch (Exception ex) {
+                    Throwable cause = ex instanceof ExecutionException && ex.getCause() != null ? ex.getCause() : ex;
+                    log.warn("嵌套并行子执行失败 sessionId={} index={} type={} cause={}",
+                            sessionId, i, cause.getClass().getSimpleName(), CauseDigest.of(cause), cause);
+                    outcomes.add(ChildOutcome.failed(intents.get(i),
+                            UserFacingText.safeMessage(cause, "子 Agent 执行失败")));
+                }
+            }
+            return outcomes;
+        } finally {
+            // 本层专属池：用完即关，不残留线程；已在跑的任务允许跑完（不打断正常收尾）
+            lane.shutdown();
+        }
+    }
+
+    /**
+     * 嵌套编排下的串行执行（单子或显式串行链）：当前线程按 intents 顺序逐个跑。
+     *
+     * @param parent        编排根
+     * @param intents       已排序的参与者
+     * @param modelUser     已注入记忆的用户侧文本
+     * @param userText      用户原文
+     * @param deadlineNanos 父墙钟截止
+     * @param progress      可空
+     * @param trace         可空
+     * @param childParent   子 AGENT 的 parent_id
+     * @param isolateChild  多意图时 true：子仅吃 sub_query
+     * @return 与 intents 同序的子结果
+     */
+    private List<ChildOutcome> runSequentialInline(AgentDef parent, List<RoutedIntent> intents, String modelUser,
+                                                   String userText, long userId, long sessionId, long deadlineNanos,
+                                                   TrialProgress progress, ObsTraceScope trace, Long childParent,
+                                                   boolean isolateChild) {
         List<ChildOutcome> outcomes = new ArrayList<>(intents.size());
         for (RoutedIntent intent : intents) {
             RouterClock.assertBefore(deadlineNanos);
@@ -346,6 +450,24 @@ public class ChildRunner {
                                     ObsTraceScope trace, Long childParent, boolean parallelWorker,
                                     boolean isolateChild, Thread submitter, String modelTextOverride,
                                     Map<String, Object> extraSpanAttrs) {
+        return runOneChild(parent, intent, modelUser, userText, userId, sessionId, deadlineNanos, progress,
+                trace, childParent, parallelWorker, isolateChild, submitter, modelTextOverride, extraSpanAttrs, false);
+    }
+
+    /**
+     * 同 {@link #runOneChild(AgentDef, RoutedIntent, String, String, long, long, long, TrialProgress,
+     * ObsTraceScope, Long, boolean, boolean, Thread, String, Map)}；额外决定本叶子是否允许输出可点选项块。
+     *
+     * <p>选项块只对「单专家 / 入口直分叶子」开放：多意图并行、串行交接、P&E 子与嵌套方案内层
+     * 都不传 true（它们的提示词与旧口径逐字一致）。
+     *
+     * @param leafChoice true 表示系统提示追一段平台内置的选项块说明
+     */
+    public ChildOutcome runOneChild(AgentDef parent, RoutedIntent intent, String modelUser, String userText,
+                                    long userId, long sessionId, long deadlineNanos, TrialProgress progress,
+                                    ObsTraceScope trace, Long childParent, boolean parallelWorker,
+                                    boolean isolateChild, Thread submitter, String modelTextOverride,
+                                    Map<String, Object> extraSpanAttrs, boolean leafChoice) {
         if (trace != null && parallelWorker) {
             // 并行子线程各自 bind trace，并拿到独立 stack（ThreadLocal.withInitial）
             ObsTraceHolder.bind(trace);
@@ -363,18 +485,38 @@ public class ChildRunner {
                     : ChildSubQueryInput.resolve(modelUser, userText, intent.subQuery(), isolateChild);
             // 串行交接已经把「子问 + 前置结论」拼进 modelTextOverride。
             // 方案 / 工作流目标不走 ReAct 的 modelText，必须把这份文本当成它们的用户问题，否则下一位方案仍只看见原问。
+            // 多意图 / 一条消息多问时（isolateChild=true）每个目标只吃自己的子问：
+            // 把整条消息交给方案或工作流，会让它们把别的问题也一并处理（等于第二问串味）。
             String handedUser = modelTextOverride != null && !modelTextOverride.isBlank()
-                    ? modelTextOverride : userText;
+                    ? modelTextOverride
+                    : (isolateChild ? childInput.modelText() : userText);
             String handedModel = modelTextOverride != null && !modelTextOverride.isBlank()
-                    ? modelTextOverride : modelUser;
-            // 多意图：子开跑推「路由到」，并以 lane 包装后续增量，并行交错时仍能切回本子块
+                    ? modelTextOverride
+                    : (isolateChild ? childInput.modelText() : modelUser);
+            // 每一位参与者**开跑就先出块**：先推 begin（先于本步任何思考 / 工具），
+            // 后续增量再带归属标记；不再在每个增量前重推同一句「路由到」。
             String childRouteLine = intent.routeLine() != null ? intent.routeLine()
                     : RouterTexts.routeSummary(hit, intent.reason());
             TrialProgress childProgress = progress;
-            if (progress != null && (parallelWorker || MaNestedContext.inside())) {
-                // 并行交错 / 目标方案内顺序推进：开跑前先推「路由到」，时间线才能按块切回本子
-                progress.route(childRouteLine);
-                childProgress = laneBound(progress, childRouteLine);
+            if (progress != null) {
+                ParticipantView self = participantOf(intent, hit);
+                if (hit.isMaTarget()) {
+                    /*
+                     * 方案目标：外层静音只挡本层 token，内层方案的子结论与「方案结论」必须能写出去，
+                     * 所以绑在 conclusionChannel 上；begin 在进入内层之前推出，方案块因此立刻出现。
+                     */
+                    TrialProgress schemeBase = progress.conclusionChannel();
+                    childProgress = schemeBase == null ? null
+                            : participantBound(schemeBase, self, childRouteLine);
+                    // 路由行只推一次：它是「分给谁 + 依据」的可见文案，不是每个增量的泳道分隔符
+                    progress.route(childRouteLine);
+                } else {
+                    childProgress = participantBound(progress, self, childRouteLine);
+                    if (parallelWorker || MaNestedContext.inside()) {
+                        // 并行交错 / 嵌套推进：开跑前把本子那条路由文案推一次，供前端展示依据
+                        progress.route(childRouteLine);
+                    }
+                }
             }
             // 每子显式带 childParent（判路由 LLM）；并行发 N.1/N.2；禁写成根/null、禁靠共享 ThreadLocal
             agentSpan = trace == null ? null
@@ -389,16 +531,28 @@ public class ChildRunner {
             List<String> notices;
             // 目标方案内部的下一层跳：只有 MA 目标会填，其它分支保持空表
             List<NestedRoute> nested = List.of();
+            // 方案自己的分流判定推理：随段一起落库，刷新后方案块的思考框仍在
+            String schemeReasoning = null;
+            // 目标方案自己的汇总结论（「方案结论：X」标记 + 汇总推理）：不带上就会「结束时汇总那条消失」
+            String schemeConclusion = null;
+            String schemeConclusionReasoning = null;
+            // 工作流目标的执行卡片终态：随本子返回给上层落库（实时帧不依赖它）
+            WorkflowRunView workflowView = null;
             if (hit.isMaTarget()) {
                 // 刀5：目标是另一套编排方案 → 委托回模板执行器，在<b>同一条会话</b>里再跑一层编排。
                 // 不写提示词侧的记忆段：目标方案自己的子 Agent 各自按既有纪律召回。
-                // 用 conclusionChannel：外层静音只挡住本层 token，内层方案的子结论和「方案结论」必须能写出去
-                TrialProgress schemeProgress = progress == null ? null : progress.conclusionChannel();
+                /*
+                 * childProgress 已在外层绑好「方案」身份（begin + 归属）：方案自己的分流判定推理
+                 * 会挂到它这块上，内层子专家再各自 begin 自己的块。
+                 */
                 MaTargetRunner.MaTargetResult result = maTargets.run(intent, hit.maTarget(), handedUser, handedModel,
-                        userId, sessionId, deadlineNanos, schemeProgress);
+                        userId, sessionId, deadlineNanos, childProgress);
                 turn = result.turn();
                 notices = result.notices() == null ? List.of() : new ArrayList<>(result.notices());
                 nested = result.children();
+                schemeReasoning = result.reasoning();
+                schemeConclusion = result.conclusionName();
+                schemeConclusionReasoning = result.conclusionReasoning();
             } else if (hit.isWorkflowTarget()) {
                 // 刀5B：目标是已发布工作流 → 交给工作流域的现网运行入口，引擎不并进对话栈。
                 // 记忆段同样不写：工作流各节点的 Agent 节点自己按既有纪律召回。
@@ -410,6 +564,8 @@ public class ChildRunner {
                         hit.workflowTarget(), handedUser, userId, sessionId, deadlineNanos, childProgress);
                 turn = result.turn();
                 notices = result.notices() == null ? List.of() : new ArrayList<>(result.notices());
+                // 卡片终态随本子返回：落库后刷新仍能重建时间轴，而不是只剩一段正文
+                workflowView = result.view();
             } else if (AgentRunMode.PLAN_AND_EXECUTE.name().equals(hit.agent().getRunMode())) {
                 PlanChildResult planned = runPlanChild(parent, hit, intent, childInput, userId, sessionId,
                         deadlineNanos, childProgress);
@@ -419,7 +575,13 @@ public class ChildRunner {
                 // 记忆段在装配时进链（工具目录之前）；召回用本子查询文本，失败自动回落 MySQL
                 TrialMemoryCoordinator.Augmented recalled = memory.recallDurable(
                         memorySession(rootId(parent), userId, sessionId), childInput.displaySubQuery());
-                TrialPlan plan = loader.loadReact(hit.agent(), childInput.displaySubQuery(), recalled.memoryBlock());
+                /*
+                 * 只有真正允许出选项块时才走四参重载：多意图 / 串行交接 / 嵌套内层保持原三参调用，
+                 * 提示词与既有行为逐字一致（也让既有单测的装配桩继续命中，不必为这条开关改测）。
+                 */
+                TrialPlan plan = leafChoice
+                        ? loader.loadReact(hit.agent(), childInput.displaySubQuery(), recalled.memoryBlock(), true)
+                        : loader.loadReact(hit.agent(), childInput.displaySubQuery(), recalled.memoryBlock());
                 plan.setToolArgsFacts(recalled.injectedFacts());
                 memory.publishInjection(plan);
                 long remainingMs = Math.max(1000L, (deadlineNanos - System.nanoTime()) / 1_000_000L);
@@ -442,7 +604,16 @@ public class ChildRunner {
             if (!(hit.isMaTarget() && !nested.isEmpty())) {
                 deliverConclusion(progress, childRouteLine, turn);
             }
-            return ChildOutcome.ok(intent, notices, turn, nested);
+            // 工作流目标：卡片终态随结果交给上层落库；其它分支 workflowView 保持 null
+            if (workflowView != null) {
+                return ChildOutcome.okWorkflow(intent, notices, turn, workflowView);
+            }
+            // 目标方案真汇总过：结论名与汇总推理一起交出去，落库后回放才画得出汇总那条
+            if (schemeConclusion != null) {
+                return ChildOutcome.okScheme(intent, notices, turn, nested, schemeReasoning,
+                        schemeConclusion, schemeConclusionReasoning);
+            }
+            return ChildOutcome.ok(intent, notices, turn, nested, schemeReasoning);
         } catch (RuntimeException ex) {
             // 子 Agent 失败：并行时被压成失败段（用户可见文案走清洗），但栈必须留在日志里
             log.warn("子 Agent 执行失败 agentId={} parallel={} type={} cause={}",
@@ -671,6 +842,23 @@ public class ChildRunner {
     }
 
     /**
+     * 嵌套并行用的线程工厂：守护线程 + 可读线程名。
+     *
+     * <p>用守护线程：这是本层临时池，停机时不应因某个子还在等模型响应而拖住 JVM 退出；
+     * 线程名带 {@code ma-inline-} 前缀，排障时能与 {@code router-task-} 区分开。
+     *
+     * @return 线程工厂
+     */
+    private static ThreadFactory inlineWorkerFactory() {
+        AtomicInteger seq = new AtomicInteger();
+        return runnable -> {
+            Thread thread = new Thread(runnable, "ma-inline-" + seq.incrementAndGet());
+            thread.setDaemon(true);
+            return thread;
+        };
+    }
+
+    /**
      * 参与者结束后交出成文结论。
      *
      * <p>流式路径的默认实现是空操作（正文已经按 token 出去了）。
@@ -692,18 +880,30 @@ public class ChildRunner {
     }
 
     /**
-     * 子增量前重推本子「路由到」，供前端在并行交错时切回对应分块；连续相同路由由前端去重。
+     * 把一位参与者的增量绑上身份：开跑时先推 begin，之后每次转发前声明归属。
      *
-     * @param progress  下游推送
-     * @param routeLine 本子标题
-     * @return 包装后的推送
+     * <p>为什么不再像旧实现那样在每个增量前重推「路由到」：那条是用户可见文案，
+     * 每帧重推会让方案自己的思考与子专家的事件互相打断（页面表现为串块）。
+     * 现在身份走独立的 participant 帧（不产生可见文字），文案只推一次。
+     *
+     * @param progress    下游推送
+     * @param participant 本参与者身份
+     * @param routeLine   本子路由行；仅用于归属前的可见依据（由调用方单独推一次）
+     * @return 包装后的推送；progress 为空时返回 null
      */
-    private TrialProgress laneBound(TrialProgress progress, String routeLine) {
+    private TrialProgress participantBound(TrialProgress progress, ParticipantView participant, String routeLine) {
         if (progress == null) {
             return null;
         }
-        String line = routeLine == null ? "" : routeLine;
+        // 先声明「这一步开始」：前端据此立刻出块，先于任何思考 / 工具
+        progress.beginParticipant(participant);
+        String id = participant.id();
         return new TrialProgress() {
+            /** 转发前声明归属：同一位连续增量由实现去重，不会退化成每帧一发。 */
+            private void mark() {
+                progress.attributeParticipant(id);
+            }
+
             @Override
             public void phase(String phase) {
                 progress.phase(phase);
@@ -711,50 +911,127 @@ public class ChildRunner {
 
             @Override
             public void route(String summary) {
+                mark();
                 progress.route(summary);
             }
 
             @Override
             public void reasoning(String delta) {
-                if (!line.isBlank()) {
-                    progress.route(line);
-                }
+                mark();
                 progress.reasoning(delta);
+            }
+
+            /** 汇总这类「先推标记再推思考」的增量同样要带归属，但不再重推泳道文案。 */
+            @Override
+            public void reasoningPinned(String delta) {
+                mark();
+                progress.reasoningPinned(delta);
+            }
+
+            /** 更深一层的参与者（方案内部子专家）开始：必须原样透传，否则内层块出不来。 */
+            @Override
+            public void beginParticipant(ParticipantView nested) {
+                progress.beginParticipant(nested);
+            }
+
+            /** 更深一层的归属切换：原样透传，重叠的 id 由下游实现去重。 */
+            @Override
+            public void attributeParticipant(String participantId) {
+                progress.attributeParticipant(participantId);
+            }
+
+            @Override
+            public void toolStart(String name) {
+                mark();
+                progress.toolStart(name);
             }
 
             @Override
             public void tool(String name, String arguments, String result, boolean success) {
-                if (!line.isBlank()) {
-                    progress.route(line);
-                }
+                mark();
                 progress.tool(name, arguments, result, success);
             }
 
             @Override
             public void assistant(String delta) {
+                mark();
                 progress.assistant(delta);
             }
 
-            /**
-             * 产物不受分块包装影响：文件名与体积是全局事实，
-             * 重推「路由到」对下载卡片没有意义，直接透传即可。
-             */
+            /** 参与者整段结论：先切回本子，正文才会挂到这个名字下。 */
+            @Override
+            public void deliverParticipantConclusion(String conclusionLine, String text) {
+                mark();
+                progress.deliverParticipantConclusion(conclusionLine, text);
+            }
+
+            /** 内层方案的收口通道不绕过归属控制：外层自己会在需要时再包一层。 */
+            @Override
+            public TrialProgress conclusionChannel() {
+                return progress;
+            }
+
             @Override
             public void file(GeneratedFile file) {
+                mark();
                 progress.file(file);
             }
 
             /**
-             * 子计划待批要先把「路由到」补上，再透传待批：并行交错时前端仍能切回本子泳道。
+             * 结构化选项：与文件同一套归属纪律——先切回本子再透传，
+             * chips 才会挂到这一位专家的气泡下面，而不是上位块。
              */
             @Override
+            public void choice(AgentChoice choice) {
+                mark();
+                progress.choice(choice);
+            }
+
+            /**
+             * 工作流执行卡片：先切回本子再透传，卡片才会挂在这一位工作流名下。
+             *
+             * <p>工作流没有 token，卡片是它在消息流里的**唯一可见载体**；
+             * 漏掉这个覆写会让整张卡片在实时流里凭空消失（落库回放却有）。
+             */
+            @Override
+            public void workflow(WorkflowRunView view) {
+                mark();
+                progress.workflow(view);
+            }
+
+            /** 子计划待批也是本子的事件：先切回本子再透传。 */
+            @Override
             public void childPlanPending(ChildPlanPendingView pending) {
-                if (!line.isBlank()) {
-                    progress.route(line);
-                }
+                mark();
                 progress.childPlanPending(pending);
             }
         };
+    }
+
+    /**
+     * 取一次子调用的参与者身份。
+     *
+     * <p>类型决定前端角标与分块：方案（MA）单列一块、工作流只报状态、其余按专家。
+     * id 用 route_key 优先，保证同一轮内唯一且可复现。
+     *
+     * @param intent 子意图（含 route_key）
+     * @param hit    命中的候选
+     * @return 参与者身份
+     */
+    private static ParticipantView participantOf(RoutedIntent intent, Candidate hit) {
+        String key = intent.candidate().route().getRouteKey();
+        String id = key != null && !key.isBlank()
+                ? "p-" + key.trim()
+                : "p-" + hit.agent().getId();
+        String name = RouterTexts.childLabel(hit.agent());
+        int depth = MaNestedContext.depth();
+        if (hit.isMaTarget()) {
+            return ParticipantView.scheme(id, name, key, depth);
+        }
+        if (hit.isWorkflowTarget()) {
+            return new ParticipantView(id, name, ParticipantView.KIND_WORKFLOW, key, depth);
+        }
+        return ParticipantView.agent(id, name, key, depth);
     }
 
     /**

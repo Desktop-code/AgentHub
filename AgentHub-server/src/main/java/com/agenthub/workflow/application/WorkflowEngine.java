@@ -23,6 +23,7 @@ import com.agenthub.workflow.domain.service.WorkflowAgentInvoker;
 import com.agenthub.workflow.domain.service.WorkflowAssigneeRule;
 import com.agenthub.workflow.domain.service.WorkflowNodeConfig;
 import com.agenthub.workflow.domain.service.WorkflowNodeInputs;
+import com.agenthub.workflow.domain.service.WorkflowRunListener;
 import com.agenthub.workflow.domain.service.WorkflowStateMachine;
 import com.agenthub.workflow.domain.service.WorkflowToolInvoker;
 import com.agenthub.workflow.domain.service.WorkflowTraceWriter;
@@ -72,6 +73,18 @@ public class WorkflowEngine {
     private final WorkflowTraceWriter traces;
 
     /**
+     * 当前执行线程上的节点观察者。
+     *
+     * <p>为什么用 ThreadLocal 而不是把参数一路传到底：一次 {@code execute} 会穿过
+     * {@code pickNext / executeNode / succeed / handleFailure} 等十来个私有方法，
+     * 逐个加参数只会把「谁在观察」这件事摊进调度代码；而引擎本来就是**同步顺序执行**
+     * （FORK 也不并发），一次调用内同线程唯一，ThreadLocal 与显式参数等价且改动最小。
+     *
+     * <p>清理放在 {@code execute} 的 finally：池线程复用不会把上一位的观察者带给下一位。
+     */
+    private final ThreadLocal<WorkflowRunListener> listenerHolder = new ThreadLocal<>();
+
+    /**
      * @param runs         run 仓储
      * @param nodeRuns     node_run 仓储
      * @param humanTasks   人工待办仓储
@@ -111,6 +124,40 @@ public class WorkflowEngine {
      * @throws BizException run 状态不允许调度 / 图不可执行
      */
     public void execute(WorkflowRun run, long operatorId) {
+        execute(run, operatorId, null);
+    }
+
+    /**
+     * 带节点观察者的调度：工作台据此画执行卡片，其它入口（编排页试跑 / 人工恢复）不传。
+     *
+     * <p>观察者是旁路：每次回调都包在 try/catch 里，实现抛异常只记日志，绝不改变 run 的结果。
+     * 回调时机一律在节点状态**落库之后**，保证「页面上看到的」与「库里查到的」是同一事实。
+     *
+     * @param run        已落库的 run
+     * @param operatorId 操作人
+     * @param listener   节点状态观察者；可空（等于不带观察者）
+     * @throws BizException run 状态不允许调度 / 图不可执行
+     */
+    public void execute(WorkflowRun run, long operatorId, WorkflowRunListener listener) {
+        if (listener == null) {
+            executeInternal(run, operatorId);
+            return;
+        }
+        listenerHolder.set(listener);
+        try {
+            executeInternal(run, operatorId);
+        } finally {
+            listenerHolder.remove();
+        }
+    }
+
+    /**
+     * 实际调度实现；观察者从 {@link #listenerHolder} 取。
+     *
+     * @param run        已落库的 run
+     * @param operatorId 操作人
+     */
+    private void executeInternal(WorkflowRun run, long operatorId) {
         WorkflowRunStatus current = WorkflowRunStatus.parse(run.getStatus());
         if (current == WorkflowRunStatus.CREATED) {
             // 首次调度：CREATED → RUNNING，并补开始时间
@@ -130,6 +177,8 @@ public class WorkflowEngine {
         for (WorkflowNodeRun row : rows) {
             rowByNode.put(row.getNodeId(), row);
         }
+        // 卡片先按图顺序铺出完整时间轴（全部未开始），后续节点状态再逐个点亮
+        publishStarted(runtime, rows);
         ObjectNode outputs = collectOutputs(runtime, rows);
         ObjectNode ctx = JsonLogicEvaluator.context(input, outputs, json.createObjectNode());
 
@@ -196,6 +245,44 @@ public class WorkflowEngine {
     }
 
     /**
+     * 通知观察者「本次调度的全部节点与当前状态」。
+     *
+     * @param runtime 图
+     * @param rows    与图顺序一致的运行态行
+     */
+    private void publishStarted(WorkflowRuntimeGraph runtime, List<WorkflowNodeRun> rows) {
+        WorkflowRunListener listener = listenerHolder.get();
+        if (listener == null) {
+            return;
+        }
+        try {
+            listener.runStarted(runtime.nodes(), rows);
+        } catch (RuntimeException ex) {
+            // 观察是旁路：画不出卡片不能把一次正常的 run 变成失败
+            log.warn("工作流节点观察失败 action=runStarted type={}", ex.getClass().getSimpleName(), ex);
+        }
+    }
+
+    /**
+     * 通知观察者某节点状态已迁移（在落库之后调用）。
+     *
+     * @param node 节点定义
+     * @param row  已更新的运行态
+     */
+    private void publishNode(WorkflowNode node, WorkflowNodeRun row) {
+        WorkflowRunListener listener = listenerHolder.get();
+        if (listener == null || node == null || row == null) {
+            return;
+        }
+        try {
+            listener.nodeChanged(node, row);
+        } catch (RuntimeException ex) {
+            log.warn("工作流节点观察失败 action=nodeChanged nodeCode={} type={}",
+                    node.getCode(), ex.getClass().getSimpleName(), ex);
+        }
+    }
+
+    /**
      * 挑下一个可运行节点：入边全部判定且至少一条被选中。
      * <p>入边全部判定但都没选中 → 该节点 SKIPPED，继续扫描；扫描后重新来一轮，
      * 让下游节点在同一拍内获得「上游已跳过」的信息。
@@ -216,7 +303,7 @@ public class WorkflowEngine {
                     continue;
                 }
                 if (!anySelected(incoming, rowByNode)) {
-                    markSkipped(row);
+                    markSkipped(node, row);
                     skippedAny = true;
                     continue;
                 }
@@ -252,11 +339,18 @@ public class WorkflowEngine {
         return false;
     }
 
-    private void markSkipped(WorkflowNodeRun row) {
+    /**
+     * 分支未被选中：节点收成 SKIPPED，并通知观察者（时间轴上仍保留该行，不静默消失）。
+     *
+     * @param node 节点定义
+     * @param row  运行态行
+     */
+    private void markSkipped(WorkflowNode node, WorkflowNodeRun row) {
         WorkflowNodeRunStatus from = WorkflowNodeRunStatus.parse(row.getStatus());
         row.setStatus(WorkflowStateMachine.requireNode(from, WorkflowNodeRunStatus.SKIPPED).name());
         row.setEndTime(LocalDateTime.now());
         nodeRuns.update(row);
+        publishNode(node, row);
     }
 
     /**
@@ -272,6 +366,8 @@ public class WorkflowEngine {
         row.setStatus(WorkflowStateMachine.requireNode(from, WorkflowNodeRunStatus.RUNNING).name());
         row.setStartTime(LocalDateTime.now());
         nodeRuns.update(row);
+        // 落库之后再报「正在跑」：卡片上的蓝点与库里的 RUNNING 是同一时刻的事实
+        publishNode(node, row);
 
         WorkflowNodeType type = runtime.type(node.getId());
         // 埋点：节点步在这里开，收口统一放 finally（成功 / 失败 / 取消都落终态）
@@ -423,6 +519,8 @@ public class WorkflowEngine {
         WorkflowNodeRunStatus from = WorkflowNodeRunStatus.parse(row.getStatus());
         row.setStatus(WorkflowStateMachine.requireNode(from, WorkflowNodeRunStatus.WAITING_HUMAN).name());
         nodeRuns.update(row);
+        // 人工卡点也要点亮：卡片上显示「等待人工处理」，用户才知道卡在哪一步
+        publishNode(node, row);
 
         HumanTimeoutPolicy policy = HumanTimeoutPolicy.parse(
                 WorkflowNodeConfig.textValue(node.getConfig(), "timeoutPolicy"));
@@ -470,6 +568,7 @@ public class WorkflowEngine {
         row.setEndTime(LocalDateTime.now());
         row.setSelectedEdges(joinIds(errorEdges));
         nodeRuns.update(row);
+        publishNode(node, row);
         if (cause != null) {
             log.warn("工作流节点失败 runId={} nodeCode={} reason={} root={}",
                     run.getId(), node.getCode(), message,
@@ -550,6 +649,7 @@ public class WorkflowEngine {
         row.setEndTime(LocalDateTime.now());
         row.setSelectedEdges(joinIds(selected));
         nodeRuns.update(row);
+        publishNode(node, row);
         if (code == null || code.isBlank() || produced == null) {
             return;
         }

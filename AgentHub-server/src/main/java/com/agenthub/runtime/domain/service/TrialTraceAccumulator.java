@@ -88,7 +88,7 @@ public final class TrialTraceAccumulator {
      * @param toolCallId 调用 id
      * @param name       工具名
      * @param success    引擎状态为成功时为 true
-     * @return 刚落上的工具步骤，参数已脱敏
+     * @return 刚落上的工具步骤（参数已脱敏）；平台内部工具被静音时返回 null
      */
     public TrialTrace onToolResultEnd(String toolCallId, String name, boolean success) {
         flushThinking();
@@ -164,6 +164,11 @@ public final class TrialTraceAccumulator {
     }
 
     private TrialTrace addTool(ToolBuf buf, boolean success) {
+        // 平台内部工具（如 agenthub_choice）不进用户时间线：参数就是机器 JSON，
+        // 展示出来等于把「隐藏机器细节」又漏回给用户
+        if (InternalToolNames.isQuiet(buf.name)) {
+            return null;
+        }
         TrialTrace trace = new TrialTrace();
         trace.setType(EventType.TOOL);
         trace.setName(buf.name);

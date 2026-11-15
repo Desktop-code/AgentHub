@@ -2,7 +2,8 @@
  * 工作台「思考过程与路由轨迹」时间线模型。所属域：runtime（前端）。
  *
  * <p>只做纯投影：把现网 SSE 已经给出的 route / reasoning / tool 块整理成两步时间线
- * （智能网关 → 目标专家），不发请求、不新增事件类型、不改提示词。
+ * （入口块 → 目标专家），不发请求、不新增事件类型、不改提示词。
+ * 入口块展示名读配置（{@link ThinkTimelineInput.entryName}），不写死对外别名。
  * 没有真实思考内容时只给中性状态句，禁止编造推理（CoT）。
  *
  * <p>网关的「为什么选它」只取判路由模型随同一次判定产出的【依据】（后端 route 摘要里的
@@ -14,6 +15,7 @@
  * 这里只负责「合成工作台那套两步视图 + 对外脱敏」。
  */
 import type { ProcessLane, ProcessStep } from '@/components/runtime/trialMessages'
+import type { TrialWorkflowView } from '@/types/runtime'
 import type { AgentRobotShape } from '@/constants/agentRobotShapes'
 import { looksLikeRouteDecisionPayload, looksLikeRouteMachineJson, stripWorkbenchInternalKeys } from './workbenchMessageMeta.ts'
 
@@ -22,8 +24,32 @@ export const THINK_TITLE_STREAMING = '正在深度思考...'
 /** 结束后的折叠条标题：此时默认收起，点开可回看整条轨迹 */
 export const THINK_TITLE_DONE = '查看思考与路由轨迹'
 
-/** 步骤一（网关）的固定展示名 */
+/**
+ * 步骤一（入口）的**兜底**展示名。
+ *
+ * <p>只在调用方没注入配置名时使用（历史会话 / 单测）。页面必须把默认接待方案的
+ * 配置名（现网 {@code ma_def} 名称，如 Router）经 {@link ThinkTimelineInput.entryName}
+ * 传进来，前端不得再维护一套对外别名。
+ */
 export const GATEWAY_STEP_NAME = '智能网关'
+
+/**
+ * 工作流块的角标文案。
+ *
+ * <p>为什么写在这里而不是展示层各写一份：角标与「这块是不是工作流」是同一件事，
+ * 时间线给出的 roleLabel / 展示层的 `actorRoleBadge` 都读这一份，避免两处文案对不上。
+ */
+export const WORKFLOW_ROLE_LABEL = '工作流 WF'
+
+/**
+ * 入口块的展示名：配置名优先，缺失时才退回内置兜底。
+ *
+ * @param entryName 配置里的入口方案名（可空）
+ * @return 展示名；不会返回空串
+ */
+export function entryTitleOf(entryName?: string): string {
+  return (entryName || '').trim() || GATEWAY_STEP_NAME
+}
 
 /**
  * 路由判定来源。决定步骤一写哪种事实描述：
@@ -45,6 +71,15 @@ export interface ParsedRoute {
   reason: string
   /** decision 模式下的意图条数 */
   count: number
+  /** decision 模式下的目标展示名（按判定顺序）；没有名字时为空数组 */
+  names?: string[]
+  /**
+   * decision 模式下的块是否来自「一条消息里的多个问题」（句式为「已拆成 N 个问题」）。
+   *
+   * <p>为什么单独标：只有这种轮次的块序必须严格等于**提问顺序**——两问分头并行，
+   * 谁先出 token 都不能换位；普通多意图（同一问题的多位专家协同）保持到达顺序。
+   */
+  questionSplit?: boolean
 }
 
 /** 专家形象（由调用方用 resolveAgentAvatar 解析后传入，组件不做解析） */
@@ -67,18 +102,34 @@ export interface ExpertLookView {
 export interface ThinkTimelineStep {
   /** 1 = 网关；2 = 专家 / 方案 / 方案内子专家（各自独立成块） */
   kind: 'gateway' | 'expert'
-  /** 步骤标题：网关恒为「智能网关」，专家 / 方案为展示名 */
+  /** 步骤标题：入口块读配置名（{@link ThinkTimelineInput.entryName}），专家 / 方案为展示名 */
   title: string
-  /** 角色标记：网关「判定」、方案「方案」；普通专家不标（避免把参与者当成流水线工位） */
+  /**
+   * 角色标记：方案「方案」、工作流「工作流 WF」；普通专家不标（避免把参与者当成流水线工位）。
+   *
+   * <p>入口块的「对话入口」角标不写在这里：它在展示层按 kind=gateway 统一给出，
+   * 避免同一件事在模型与视图里各存一份。
+   */
   roleLabel?: string
   /** 中性说明行（网关的判定句 / 方案的分流句 / 子专家的依据与状态句） */
   lines: string[]
-  /** 专家的思考与工具步骤；工作流 / 方案目标为空 */
+  /**
+   * 该步自己的思考与工具步：入口只有判定推理，方案分流只有分流推理，
+   * 专家是自己的推理 + 工具，汇总只有汇总模型自己的推理 + 工具。
+   * 任何一步都不承接其它步骤的事件。
+   */
   steps: ProcessStep[]
   /** 该步是否仍在进行（决定圆点是否闪动） */
   pending: boolean
   /** 专家形象；网关步骤为空 */
   look?: ExpertLookView
+  /**
+   * 工作流执行卡片视图（只有工作流步骤会带）。
+   *
+   * <p>带它＝这一块画「自动化执行流」卡片（节点时间轴 + 产物区），而不是内容框；
+   * 不带＝沿用原来「已交由…执行」的一句话块。
+   */
+  workflow?: TrialWorkflowView
 }
 
 /** 投影入参 */
@@ -91,16 +142,22 @@ export interface ThinkTimelineInput {
   targetTypeOf?: (name: string) => 'AGENT' | 'MA' | 'WORKFLOW' | undefined
   /** 是否仍在生成 */
   streaming: boolean
+  /**
+   * 入口块展示名：读默认接待方案的配置名（现网 ma_def 名称，如 Router）。
+   *
+   * <p>页面必须传；不传时退回 {@link GATEWAY_STEP_NAME}，只为兼容历史调用与单测。
+   */
+  entryName?: string
   /** 无车道、无路由名时的兜底展示名 */
   fallbackName: string
   /** 按名称解析专家形象 */
   lookOf?: (name: string) => ExpertLookView
-/**
- * 按名称取该候选的简介 / 意图说明（现网 `WorkbenchRouteOption.intentDesc`）。
- *
- * <p>只用于「专家」步骤的说明，不再用于在网关步骤拼「为什么选它」：
- * 那是判路由模型的结论，前端不得用简介编造。
- */
+  /**
+   * 按名称取该候选的简介 / 意图说明（现网 `WorkbenchRouteOption.intentDesc`）。
+   *
+   * <p>只用于「专家」步骤的说明，不再用于在网关步骤拼「为什么选它」：
+   * 那是判路由模型的结论，前端不得用简介编造。
+   */
   descriptionOf?: (name: string) => string | undefined
   /**
    * 该名字是否为「入口直接分发」的候选（本会话候选池里能对上）。
@@ -109,6 +166,63 @@ export interface ThinkTimelineInput {
    * 不传时全部按入口处理，行为与引入多级展示前一致。
    */
   isTopLevelOf?: (name: string) => boolean
+  /**
+   * 入口判定是否**仍在进行中**（本轮还没有任何 route / 正文 / 工具 / 产物）。
+   *
+   * <p>此时入口块只挂判路由模型真实推出的思考，不写任何预设判定句——
+   * 判定句要等模型真给出路线再写，避免「先弹块、过一会字自己变了」。
+   * 由调用方按原始块判定（`buildParticipantFeed`）；不传时按旧口径（照旧写判定句）。
+   */
+  entryJudging?: boolean
+  /**
+   * 入口参与者的身份 id（前端从 SSE `participant` 帧 kind=gateway 记下）。
+   *
+   * <p>用来按身份把入口判定的推理认回入口块：并行 / 嵌套时它可能被决策行、
+   * 说明行挡在中间，只靠「首条 route 之前的匿名泳道」会漏掉。不传时按旧位置口径。
+   */
+  entryParticipantId?: string
+  /**
+   * 这一轮是否**期待走入口判定**（新问题＝true；断点续作＝false）。
+   *
+   * <p>只有在它为 true 且入口还没报身份时，投影才会「先不出块」等身份，
+   * 避免把入口判定模型的思考先画成某位专家、再改成入口。
+   * 不传时按旧口径（不拦截）：历史回放没有这个标记，不能因为新增规则少画块。
+   */
+  expectEntry?: boolean
+  /**
+   * 本轮工作流执行卡片的实时快照（来自 `workflow` 块）；可空。
+   *
+   * <p>工作流没有 token 输出，只有这张卡片能说明「跑到哪一步了」。没有快照时
+   * 不硬造卡片：仍按历史口径只给入口块一句「已交由…执行」。
+   */
+  workflow?: TrialWorkflowView
+}
+
+/**
+ * 过滤对终端用户可见的**正文**：内部键与机器块，但保留 Markdown 的段落结构。
+ *
+ * <p>为什么不能复用 {@link sanitizeThinkText}：那个函数会把空行一起滤掉，
+ * 于是「### 一、组合」与它下面的表格、列表全被粘成一段——正文里的表格直接渲染不出来。
+ * 思考可以压成连续行，**正文不行**：Markdown 的段落、表格、列表都靠空行分隔。
+ *
+ * <p>因此这里只丢弃「这一行本身就是机器路由 JSON / 决策对象 / 提示词泄露」的行，
+ * 空行原样保留，只在首尾去掉多余空白。
+ *
+ * @param raw 正文原文（助手回答）
+ * @return 可展示的 Markdown；全部被过滤时为空串
+ */
+export function sanitizeAnswerText(raw: string): string {
+  const source = raw || ''
+  if (!source.trim()) {
+    return ''
+  }
+  const kept = source
+    .split('\n')
+    .filter((line) => !looksLikeRouteMachineJson(line)
+      && !looksLikeRouteDecisionPayload(line)
+      && !looksLikePromptLeak(line))
+    .map((line) => (line.trim() ? stripWorkbenchInternalKeys(line) : ''))
+  return kept.join('\n').replace(/^\n+/, '').replace(/\n+$/, '')
 }
 
 /**
@@ -229,13 +343,19 @@ export function parseRouteText(raw: string): ParsedRoute {
   if (workflow) {
     return { mode: 'workflow', name: (workflow[1] || '').trim(), reason: '', count: 0 }
   }
-  // 多意图决策块：只给条数与顺序。新数据是人话（「已判定 N 个意图，按序分给「甲」「乙」」），
-  // 历史数据是 [{"route_key":…,"sub_query":…}]；两种都只提取条数，正文一律不外泄。
+  // 多意图决策块：只给条数与顺序。新数据是人话（「已判定 N 个意图，按序分给「甲」「乙」」
+  // 或一条消息多问时的「已拆成 N 个问题，按序交给「甲」「乙」」），
+  // 历史数据是 [{"route_key":…,"sub_query":…}]；两种都只提取条数与目标名，正文一律不外泄。
   if (text.startsWith('路由决策')) {
     const body = text.slice('路由决策'.length)
     const fields = (body.match(/"sub_query"/g) || []).length || (body.match(/"subQuery"/g) || []).length
-    const names = countBracketNames(body)
-    return { mode: 'decision', name: '', reason: '', count: Math.max(1, fields || names) }
+    const names = bracketNames(body)
+    // 「已拆成 N 个问题」是条数的权威口径：多问拆分时正文里的引号可能只包目标名
+    const splitCount = /已拆成\s*(\d+)\s*个问题/.exec(body)
+    const count = splitCount
+      ? Math.max(1, Number(splitCount[1]))
+      : Math.max(1, fields || names.length)
+    return { mode: 'decision', name: '', reason: '', count, names, questionSplit: !!splitCount }
   }
   // 形如「路由到 X（key），依据：…」：先把依据切出去，再从展示名尾部剥掉括号里的 route_key
   const hit = /^路由到\s*([\s\S]+)$/.exec(text)
@@ -285,7 +405,16 @@ export function gatewayLineOf(route: ParsedRoute, name: string, description?: st
     return target ? `命中关键词，分发给「${target}」` : '命中关键词，已分发'
   }
   if (route.mode === 'decision') {
-    return `判定为多个意图，分发 ${route.count} 位专家`
+    // 多问拆分：一次列清每个问题交给谁；只有条数时退回中性说法，不编造名字
+    const names = route.names || []
+    if (names.length) {
+      const head = names.length >= route.count
+        ? `已拆成 ${route.count} 个问题，分别交给`
+        : `已拆成 ${route.count} 个问题，交给`
+      return `${head}${names.map((item) => `「${item}」`).join('')}`
+    }
+    // 历史数据只有条数：保留「多个意图」的原口径，不把已知事实说丢
+    return `判定为多个意图，分发 ${route.count} 路`
   }
   if (route.mode === 'workflow') {
     return target ? `已交由「${target}」执行` : '已交由工作流执行'
@@ -309,17 +438,24 @@ export function gatewayLineOf(route: ParsedRoute, name: string, description?: st
 const GATEWAY_REASON_MAX = 120
 
 /**
- * 数一段文本里成对的中文引号名字数（「甲」「乙」）。
+ * 取一段文本里成对的中文引号名字（「甲」「乙」）。
  *
- * <p>人话决策块用它还原意图条数：后端已不再往正文里写 JSON，
- * 但「判定出几个意图」这层事实仍要能展示。
+ * <p>人话决策块用它还原「按序分给谁」：后端不写 route_key，只写展示名；
+ * 这里顺带把名字抽出来，入口块才能一次列清每个问题交给谁。
  *
  * @param text 决策块正文
- * @return 名字个数；没有引号对时为 0
+ * @return 名字数组（按出现顺序、去重）；没有引号对时为空数组
  */
-function countBracketNames(text: string): number {
-  const matched = (text || '').match(/「[^」]{1,40}」/g)
-  return matched ? matched.length : 0
+function bracketNames(text: string): string[] {
+  const matched = (text || '').match(/「[^」]{1,40}」/g) || []
+  const names: string[] = []
+  for (const item of matched) {
+    const name = item.slice(1, -1).trim()
+    if (name && !names.includes(name)) {
+      names.push(name)
+    }
+  }
+  return names
 }
 
 /**
@@ -355,43 +491,100 @@ export function expertStatusLine(name: string, pending: boolean): string {
  *
  * <p>工作流目标不出专家思考步；方案（MA）块只写自己的分流结论，不把子专家的思考挂到它名下。
  *
+ * <p><b>每步三拍</b>：先思考（本步推理）→ 再工具（本步自己调用的）→ 最后结果。
+ * 投影只做归属，不搬运事件：A 步的思考 / 工具绝不挂到 B 步；
+ * 入口与方案分流这一步不调工具，因此它们的 steps 只可能来自该次判定模型的推理。
+ *
  * @param input 投影入参
  * @return 时间线；无任何可展示内容时为空数组（调用方不渲染折叠条）
  */
 export function buildThinkTimeline(input: ThinkTimelineInput): ThinkTimelineStep[] {
-  const lanes = input.lanes.filter((lane) => lane.kind === 'agent')
+  const agentLanes = input.lanes.filter((lane) => lane.kind === 'agent')
+  const entryTitle = entryTitleOf(input.entryName)
+  /*
+   * 首条 route 之前的过程事件属于**入口判定**：`processLanes` 会把它们落进一条匿名「执行」块
+   * （标题没有「路由到」）。判定模型的真实思考就是从这里来的，取出来挂到入口块上，
+   * 否则它会被当成一位叫「执行」的参与者或被展示层当无名块丢掉。
+   *
+   * 只在「本轮真的走判路由 / 真的有入口判定」时做这件事：断点续作与历史纯单 Agent 轮次
+   * 既没有 route、也没有入口参与者身份，那条泳道就是专家自己的思考，不能抢到入口块里。
+   *
+   * 入口块本身也按同一判据出现：有入口参与者身份（实时流 begin 帧）、有 ROUTE 事件，
+   * 或判定正在进行。断点续作轮由同一位专家直接接着跑，后端既不推入口参与者、
+   * 也不写 ROUTE 事件——这里再补一块「已接收问题，交由「X」处理」就是凭空造了一次入口判定，
+   * 页面上看起来像重新分流了一遍。
+   */
+  const entryRouted =
+    input.entryJudging === true || input.routeTexts.length > 0 || !!input.entryParticipantId
+  const split = entryRouted
+    ? splitEntrySteps(input.lanes, input.entryParticipantId)
+    : { entrySteps: [] as ProcessStep[], lanes: agentLanes }
+  const lanes = split.lanes
   const parsedRoutes = input.routeTexts.map(parseRouteText).filter((item) => item.mode !== 'direct')
   // 网关只认「入口直接分发」的那条：方案内部各跳不能被当成入口判定，否则会写成「分发给子专家」
   const topRoutes = topRoutesOf(parsedRoutes, input.isTopLevelOf)
-  const parsed = topRoutes.length ? topRoutes[topRoutes.length - 1] : parseRouteText('')
-  // 工作流：只报「已交由…执行」，不生成任何专家思考步（没有 CoT 就不能假装有）
+  /*
+   * 取**第一条**入口路线：入口判定一旦发生就固定下来。
+   * 并行多子时后端先推一条决策块、随后每个子开跑前再重推自己的「路由到」；
+   * 若取最后一条，入口块会被最后一位子专家覆盖，页面上就是「判定句过一会自己变了」。
+   */
+  const parsed = topRoutes.length ? topRoutes[0] : parseRouteText('')
+  // 工作流：入口块只报「已交由…执行」；工作流自己单独成一块（执行卡片），不生成专家思考步
   if (parsed.mode === 'workflow') {
-    return [
-      {
-        kind: 'gateway',
-        title: GATEWAY_STEP_NAME,
-        roleLabel: '判定',
-        lines: [gatewayLineOf(parsed, parsed.name, input.descriptionOf?.(parsed.name))],
-        steps: [],
-        pending: input.streaming
-      }
-    ]
-  }
-  const laneNames = lanes.map((lane) => routeAgentNameOf(lane.title))
-  const expertNames = laneNames.filter((name) => !!name)
-  const primaryName = expertNames[0] || parsed.name || input.fallbackName
-  const steps: ThinkTimelineStep[] = [
-    {
+    const gateway: ThinkTimelineStep = {
       kind: 'gateway',
-      title: GATEWAY_STEP_NAME,
+      title: entryTitle,
       roleLabel: '判定',
-      // 判路由命中时现网 reason 只是内部标签，真实依据改用该专家自己的简介
-      lines: [gatewayLineOf(parsed, primaryName, input.descriptionOf?.(primaryName))],
-      steps: [],
+      lines: [gatewayLineOf(parsed, parsed.name, input.descriptionOf?.(parsed.name))],
+      steps: split.entrySteps,
       pending: input.streaming
     }
-  ]
-  if (!lanes.length) {
+    const workflowStep = workflowStepOf(parsed.name, input)
+    return workflowStep ? [gateway, workflowStep] : [gateway]
+  }
+  /*
+   * 一条消息多个问题：块位钉死——入口之后先是工作流卡（固定黑盒整卡），再是方案与其子专家。
+   *
+   * <p>两问并行开跑，泳道按「谁先推路由文案」产生；回放又按落库分段序（方案在前）重画。
+   * 这里按入口判定给出的块位排一次，实时与回放共用同一口径，中途不换位。
+   */
+  const orderedLanes = orderLanesByQuestions(lanes, parsed, input)
+  const laneNames = orderedLanes.map((lane) => routeAgentNameOf(lane.title))
+  const expertNames = laneNames.filter((name) => !!name)
+  const primaryName = expertNames[0] || parsed.name || input.fallbackName
+  // 入口判定进行中：先只出入口块（挂这一步的真实思考），专家块等真实 route 到了再出
+  const judging = input.entryJudging === true && split.entrySteps.length > 0
+  /*
+   * 入口判定块只在本轮**真的有过入口判定**时出现（有路线，或判定正在进行）。
+   *
+   * <p>断点续作的这一轮由同一位专家直接接着跑：后端不判路由、不写 ROUTE 事件，
+   * 这里再补一块「已接收问题，交由「X」处理」就等于凭空造了一次入口判定，
+   * 页面上看起来像重新分流了一遍（正是要去掉的假象）。
+   */
+  const steps: ThinkTimelineStep[] = entryRouted
+    ? [
+        {
+          kind: 'gateway',
+          title: entryTitle,
+          roleLabel: '判定',
+          /*
+           * 判定还在跑：入口块只挂真实思考，**不写**预设判定句。
+           * 此时写一句「已接收问题，交由 X 处理」就是在判定出来之前先把结果摆上去，
+           * 等真正的路线到达还要在同一块里改字——正是要去掉的「先弹块再改字」。
+           */
+          lines: judging
+            ? []
+            : [gatewayLineOf(parsed, primaryName, input.descriptionOf?.(primaryName))],
+          steps: split.entrySteps,
+          pending: input.streaming
+        }
+      ]
+    : []
+  if (judging) {
+    // 入口判定进行中：先只出入口块（挂真实思考），专家块等真实 route 到了再出
+    return steps
+  }
+  if (!orderedLanes.length) {
     // 没有泳道：仍给一条专家步，只放中性状态，不凭空造推理
     steps.push({
       kind: 'expert',
@@ -406,23 +599,73 @@ export function buildThinkTimeline(input: ThinkTimelineInput): ThinkTimelineStep
   // 方案 → 它分下去的子专家：名字不在入口候选池、且前面最近一块是方案的，归到该方案
   const grouping = groupSchemeChildren(laneNames, input)
   const schemeChildren = grouping.children
-  for (let index = 0; index < lanes.length; index += 1) {
-    const lane = lanes[index]
+  for (let index = 0; index < orderedLanes.length; index += 1) {
+    const lane = orderedLanes[index]
     const name = laneNames[index] || primaryName || '专家'
     const targetType = input.targetTypeOf?.(name)
     // 工作流候选可能以「路由到」形式出现：只报一句执行状态，不展开
     if (targetType === 'WORKFLOW') {
-      steps[0].lines = [gatewayLineOf({ ...parsed, mode: 'workflow', name }, name, input.descriptionOf?.(name))]
+      const line = gatewayLineOf({ ...parsed, mode: 'workflow', name }, name, input.descriptionOf?.(name))
+      const gateway = steps.find((step) => step.kind === 'gateway')
+      if (gateway) {
+        /*
+         * 入口块只在一问一路时才收成「已交由 X 执行」。
+         * 多问拆分时入口块要保留「每个问题交给谁」的清单，不能被最后一条工作流线路覆盖掉，
+         * 否则用户只看见工作流，误以为第一问没跑。
+         */
+        if (parsed.mode !== 'decision') {
+          gateway.lines = [line]
+        }
+      } else {
+        // 没有入口判定却有工作流目标（历史半截事件）：仍需一块「已交由…执行」
+        steps.unshift({
+          kind: 'gateway',
+          title: entryTitle,
+          roleLabel: '判定',
+          lines: [line],
+          steps: split.entrySteps,
+          pending: input.streaming
+        })
+      }
+      // 工作流自己那一块：卡片在它名下，不把内部专家拆成普通 Agent 块
+      const workflowStep = workflowStepOf(name, input)
+      if (workflowStep && !steps.some((step) => step.workflow && step.title === workflowStep.title)) {
+        steps.push(workflowStep)
+      } else if (!workflowStep && !steps.some((step) => step.roleLabel === WORKFLOW_ROLE_LABEL && step.title === name)) {
+        /*
+         * 块位已占、卡片还没到：先留一个只有名字的节点。
+         *
+         * <p>为什么必须留：工作流起 run 要建 run / 读发布，第一帧卡片快照比「路由到」晚几十毫秒；
+         * 若这段空窗期先画方案，等卡片到了就得把方案挤下去——已经出现的块换位了。
+         * 先占位，卡片随后原地补进来，位置从头到尾不动。
+         */
+        steps.push({
+          kind: 'expert',
+          title: name,
+          roleLabel: WORKFLOW_ROLE_LABEL,
+          lines: [],
+          steps: [],
+          pending: input.streaming,
+          look: input.lookOf?.(name)
+        })
+      }
       continue
     }
     const children = schemeChildren.get(index) || []
     const isScheme = targetType === 'MA'
-    // 方案目标：只展示这一层，内部再下一层的 reasoning 不并进来（它们各自成块）
-    const visibleSteps = isScheme
-      ? []
-      : lane.steps
-          .map((step) => ({ ...step, text: sanitizeThinkText(step.text) }))
-          .filter((step) => step.type !== 'reasoning' || !!step.text)
+    /*
+     * 方案块只挂**它自己这一步**的思考（分流判定模型的推理），子专家的思考各自成块：
+     * 每个子开跑前都会重推自己的「路由到」，泳道在那里就切走了，不会混进方案块。
+     * 原先这里直接给空数组，于是方案分流阶段的真实推理被整块丢掉，页面上就没有思考框。
+     *
+     * 真分了子专家时只留推理：这一块的结果是分流句，它自己从不调工具。
+     * 子专家调的工具必须留在子专家块上（工具胶囊只属于真正调它的那一步），
+     * 即便上游交错把工具事件写进了方案泳道，也不能在这里画出来。
+     * 方案没有子专家时它自己在作答，工具就是它自己的，照常保留。
+     */
+    const visibleSteps = isScheme && children.length
+      ? reasoningStepsOf(lane)
+      : visibleStepsOf(lane)
     steps.push({
       kind: 'expert',
       title: name,
@@ -435,6 +678,133 @@ export function buildThinkTimeline(input: ThinkTimelineInput): ThinkTimelineStep
     })
   }
   return steps
+}
+
+/**
+ * 工作流自己那一块（执行卡片）。
+ *
+ * <p>三条纪律：
+ * <ul>
+ *   <li>标题用工作流自己的配置名，角标固定「工作流 WF」——这是「这一块是谁」的事实；</li>
+ *   <li>内容框留空（`lines` / `steps` 都是空表）：工作流没有 CoT、也没有一句本步结果，
+ *       它要画的是卡片本身，不是一段话；</li>
+ *   <li>没有卡片快照时**不产出这一块**：宁可回到「已交由…执行」的一句话，
+ *       也不画一张没有节点的空卡片。</li>
+ * </ul>
+ *
+ * @param name  工作流展示名（来自路由 / 候选，不写死）
+ * @param input 投影入参（提供形象与实时快照）
+ * @return 工作流步骤；没有卡片快照时为 undefined
+ */
+function workflowStepOf(name: string, input: ThinkTimelineInput): ThinkTimelineStep | undefined {
+  const workflow = input.workflow
+  if (!workflow) {
+    return undefined
+  }
+  const title = (name || workflow.name || workflow.code || '').trim()
+  if (!title) {
+    return undefined
+  }
+  return {
+    kind: 'expert',
+    title,
+    roleLabel: WORKFLOW_ROLE_LABEL,
+    lines: [],
+    steps: [],
+    pending: input.streaming,
+    look: input.lookOf?.(title),
+    workflow
+  }
+}
+
+/**
+ * 一条泳道里可展示的思考 / 工具步。
+ *
+ * <p>推理按展示口径脱敏（内部键、机器路由 JSON、指令口吻都会被滤掉），
+ * 脱敏后为空的推理不产出步骤——没有内容就不画这一步。
+ *
+ * <p>历史半截事件（泳道缺 `steps`）按既有口径处理：交给调用方兜底（整轮退化成逐块渲染），
+ * 这里不静默补一个空数组，否则会画出「有块没内容」的假参与者。
+ *
+ * @param lane 泳道
+ * @return 可展示步骤（保持发生顺序）
+ */
+function visibleStepsOf(lane: ProcessLane): ProcessStep[] {
+  return lane.steps
+    .map((step) => ({ ...step, text: sanitizeThinkText(step.text) }))
+    .filter((step) => step.type !== 'reasoning' || !!step.text)
+}
+
+/**
+ * 一条泳道里该步**自己**的推理步（不含工具）。
+ *
+ * <p>入口判定与方案分流都只做一件事：让模型想一次、给一句话结论。它们不挂工具，
+ * 因此这两块的思考区只允许出现该次调用的推理。哪怕上游把别的步骤的工具塞进了同一条泳道
+ * （并行交错、历史半截事件），也不会被画成「这一步调了工具」——工具胶囊只留给真正调工具的步骤。
+ *
+ * @param lane 泳道
+ * @return 推理步（保持发生顺序）
+ */
+function reasoningStepsOf(lane: ProcessLane): ProcessStep[] {
+  return visibleStepsOf(lane).filter((step) => step.type === 'reasoning')
+}
+
+/**
+ * 把「首条 route 之前」的泳道拆出来，作为入口判定的思考。
+ *
+ * <p>判定没有任何泳道可归：`processLanes` 只能把它们落进匿名「执行」块。
+ * 这里只吃**最前面连续**的匿名泳道（标题里没有「路由到」），
+ * 一旦遇到第一位真实参与者就停——后面的都是各专家自己的思考，绝不能挂到入口块上。
+ *
+ * <p>遇到决策块 / 说明行（`kind !== 'agent'`，如「路由决策 …」「运行工作流「X」…」
+ * 「方案结论：X」）同样停：它们已经把入口那一层收束完毕，之后落进匿名泳道的过程事件
+ * 属于别的步骤（例如工作流节点），不能算入口的思考。
+ *
+ * <p>只取推理：入口这一步的结果是判定句，它自己从不调工具；
+ * 匿名泳道里若混进工具步，那是别的步骤抢先推的事件，不能算入口的。
+ *
+ * <p>两条口径叠加，宁多认领不漏：
+ * <ol>
+ *   <li><b>位置</b>：最前面连续、标题里没有「路由到」的匿名泳道（历史回放没有身份）；</li>
+ *   <li><b>身份</b>：`lane.participantId` 等于入口 id 的泳道（实时流有身份帧）。
+ *       入口推理此前只在第一条 route 之前成立；一旦前面出现决策行 / 说明行，
+ *       位置口径立刻停住，真实推理就整段丢掉了。按身份认领可把它找回来。</li>
+ * </ol>
+ *
+ * @param lanes 全部泳道（含决策 / 说明行，用来判断入口层的边界）
+ * @param entryParticipantId 入口身份 id；可空（历史数据）
+ * @return 入口思考步 + 剩余 agent 泳道
+ */
+function splitEntrySteps(lanes: ProcessLane[], entryParticipantId?: string): {
+  entrySteps: ProcessStep[]
+  lanes: ProcessLane[]
+} {
+  const entryId = (entryParticipantId || '').trim()
+  const entrySteps: ProcessStep[] = []
+  let cursor = 0
+  while (cursor < lanes.length) {
+    const lane = lanes[cursor]
+    if (!lane || lane.kind !== 'agent' || routeAgentNameOf(lane.title)) {
+      break
+    }
+    // 有身份且明确不是入口：这位是别人（例如汇总），不能抢进入口块
+    if (entryId && lane.participantId && lane.participantId !== entryId) {
+      break
+    }
+    entrySteps.push(...reasoningStepsOf(lane))
+    cursor += 1
+  }
+  // 身份兜底：入口推理被决策 / 说明行挡在后面时，按 id 认回来（同一泳道不会重复计入）
+  const rest: ProcessLane[] = []
+  for (const lane of lanes.slice(cursor)) {
+    if (entryId && lane.kind === 'agent' && (lane.participantId || '').trim() === entryId) {
+      entrySteps.push(...reasoningStepsOf(lane))
+      continue
+    }
+    rest.push(lane)
+  }
+  // 后续分组只看真实参与者泳道；决策 / 说明行不参与分块
+  return { entrySteps, lanes: rest.filter((lane) => lane.kind === 'agent') }
 }
 
 /**
@@ -466,7 +836,15 @@ function linesOfStep(
   nested: boolean
 ): string[] {
   if (scheme) {
-    return children.length ? [schemeChildrenLineOf(children)] : [expertStatusLine(name, streaming)]
+    if (children.length) {
+      return [schemeChildrenLineOf(children)]
+    }
+    /*
+     * 分流判定还在思考（有真实思考、本轮仍在跑）：只出思考框，先不写状态句占着结果位，
+     * 否则就是「先弹块写一句、过一会再改成真的分流句」。
+     * 已经结束还没有子专家，说明这一轮它自己在作答，退中性状态句。
+     */
+    return stepCount > 0 && streaming ? [] : [expertStatusLine(name, streaming)]
   }
   const lines: string[] = []
   // 只有方案内部的子专家才写自己那条依据：入口那层已在网关块写过同一句，重复会显得像两次判定
@@ -540,6 +918,112 @@ function topRoutesOf(routes: ParsedRoute[], isTopLevel?: (name: string) => boole
   }
   const top = routes.filter((route) => !route.name || isTopLevel(route.name))
   return top.length ? top : routes
+}
+
+/**
+ * 一条消息多个问题时的**块位**：入口那一层按「工作流卡先、方案与专家按提问序」排。
+ *
+ * <p>为什么需要：两问并行，泳道由「谁先推路由文案」产生，顺序本来就不稳定；
+ * 回放又按落库分段序（方案在前、工作流在后）重画，同一块于是前后换位。
+ *
+ * <p>排序口径（已拍板）：
+ * <ol>
+ *   <li>工作流是固定黑盒整卡，固定排在入口之后、方案与专家之前；</li>
+ *   <li>其余块按提问顺序，方案内部子专家跟着自己的方案走（整组移动、组内次序不动）。</li>
+ * </ol>
+ *
+ * <p>只对「已拆成 N 个问题」的决策块生效；普通多意图并行、单问、断点续作一律原样返回。
+ *
+ * @param lanes  已剔除入口思考的 agent 泳道（到达顺序）
+ * @param parsed 入口路线（decision 且 questionSplit 时才有提问顺序）
+ * @param input  投影入参（用 isTopLevelOf / targetTypeOf 区分入口那一层、方案与工作流）
+ * @return 按块位排好的泳道；不满足条件时返回原数组
+ */
+function orderLanesByQuestions(
+  lanes: ProcessLane[],
+  parsed: ParsedRoute,
+  input: ThinkTimelineInput
+): ProcessLane[] {
+  const names = parsed.mode === 'decision' && parsed.questionSplit ? parsed.names || [] : []
+  const gate = input.isTopLevelOf
+  /*
+   * 块位清单：工作流目标先，其余按提问顺序。
+   *
+   * <p>不用「泳道到达顺序」，也不用「问序里工作流恰好排第几」：
+   * 工作流卡片是整块黑盒，位置固定在最前；否则它会被方案挤到下面，跑完再被回放挪回来。
+   */
+  const workflowNames = names.filter((name) => input.targetTypeOf?.(name) === 'WORKFLOW')
+  /*
+   * 没有顺序清单 / 没有入口候选池：无从判断哪块是「入口那一层」，保持到达顺序。
+   *
+   * <p>只有一条泳道时也要往下走——只要本轮宣告过工作流目标：先占位才有意义，
+   * 否则方案会先占住第一位，等卡片到了再被挤下去（这正是要修掉的换位）。
+   */
+  if (names.length < 2 || !gate || (lanes.length < 2 && !workflowNames.length)) {
+    return lanes
+  }
+  const displayOrder = [
+    ...workflowNames,
+    ...names.filter((name) => !workflowNames.includes(name))
+  ]
+  /** 块位序号；不在清单里的块排在所有已知位置之后 */
+  const rankOf = (name: string): number => {
+    const text = (name || '').trim()
+    const index = text ? displayOrder.indexOf(text) : -1
+    return index < 0 ? displayOrder.length : index
+  }
+  /*
+   * 先归组：入口那一层的每一块自成一组，方案内部子专家挂到**最近一个方案组**。
+   *
+   * <p>为什么不能「挂到上一个组」：工作流块固定在最前，方案的子专家泳道可能落在它之后——
+   * 若按相邻位置归组，子专家会跟到工作流那块名下，方案那一块反而成了「没有子专家、自己在作答」。
+   */
+  const groups: ProcessLane[][] = []
+  /** 最近一个方案组的下标；子专家归它，不跟上一个组走 */
+  let lastSchemeGroup = -1
+  const present = new Set<string>()
+  for (const lane of lanes) {
+    const name = routeAgentNameOf(lane.title)
+    const topLevel = !name || gate(name)
+    if (topLevel) {
+      if (name) {
+        present.add(name)
+      }
+      if (input.targetTypeOf?.(name) === 'MA') {
+        lastSchemeGroup = groups.length
+      }
+      groups.push([lane])
+      continue
+    }
+    if (lastSchemeGroup < 0) {
+      groups.push([lane])
+      continue
+    }
+    groups[lastSchemeGroup].push(lane)
+  }
+  /*
+   * 已宣告、但还没推「路由到」的工作流：先给它占位。
+   *
+   * <p>占位而不是等它到：工作流起 run 比推一条路由文案慢，若这段空窗期先画方案，
+   * 等卡片到了就得把方案挤下去——已经出现的块换位了。占位后卡片原地补进来，位置不动。
+   * 这里只加不改：不删任何已有泳道。
+   */
+  for (const name of workflowNames) {
+    if (present.has(name)) {
+      continue
+    }
+    groups.push([{ kind: 'agent', title: `路由到 ${name}`, steps: [] }])
+  }
+  // 稳定排序：只有块位不同才换位，同块位（含都不在清单里）保持原相对次序
+  const ranked = groups.map((group, index) => ({
+    group,
+    index,
+    rank: rankOf(routeAgentNameOf(group[0]?.title || ''))
+  }))
+  ranked.sort((left, right) => (left.rank === right.rank ? left.index - right.index : left.rank - right.rank))
+  const ordered = ranked.flatMap((item) => item.group)
+  // 兜底：只允许加占位块、不允许丢块；万一少了就退回原序（宁可不排，也不能丢块）
+  return ordered.length >= lanes.length ? ordered : lanes
 }
 
 /**

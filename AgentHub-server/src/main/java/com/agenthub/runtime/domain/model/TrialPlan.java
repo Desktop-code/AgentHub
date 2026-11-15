@@ -42,4 +42,13 @@ public class TrialPlan {
      * 为空表示本轮没有任何长期记忆依据；未注入的记忆不得放进来。
      */
     private List<MemoryFact> toolArgsFacts = new ArrayList<>();
+
+    /**
+     * 本轮是否允许用户拍板（工作台单专家 / 入口直分叶子 / 断点续作）。
+     *
+     * <p>只能由编排侧决定：为 true 时 {@code ReActTrialExecutor} 才安装
+     * {@code agenthub_choice} 工具，整轮结束后才允许走「后端整理」兜底。
+     * 调试轮、多意图并行、串行交接、嵌套内层与计划执行保持 false，行为与旧版逐字一致。
+     */
+    private boolean choiceEnabled;
 }

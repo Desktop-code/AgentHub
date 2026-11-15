@@ -27,15 +27,16 @@ export const MA_LIST_TEMPLATE_COMPETE = 'COMPETE'
  *
  * <p>平台只有一条，由增量 SQL 从默认接待那一行迁过来；<b>不在</b> {@link MA_LIST_TEMPLATES} 里，
  * 因此「新建方案」下拉选不到它（新建只能选两种协作模式）。
- * 列表<b>照常展示</b>这一条，名称固定为「Router」（见 {@link MA_ENTRY_ROUTER_NAME}），
- * 借类型标签与普通 Router 方案区分；身份字段（编码 / 名称 / 备注）在页面只读、后端同样拒绝修改。
+ * 列表<b>照常展示</b>这一条，名称默认是「Router」（见 {@link MA_ENTRY_ROUTER_NAME}），
+ * 借用类型标签与普通 Router 方案区分；名称可在详情里改，编码 / 备注 / 类型仍只读，
+ * 后端同样只拒绝编码与备注的改动。
  */
 export const MA_LIST_TEMPLATE_ENTRY_ROUTER = 'ENTRY_ROUTER'
 
 /**
- * 入口行的固定展示名（与服务端 {@code AgentRuntimeConfig.ENTRY_ROUTER_NAME} 同口径）。
+ * 入口行的默认展示名（与服务端 {@code AgentRuntimeConfig.ENTRY_ROUTER_NAME} 同口径）。
  *
- * <p>名称由平台锁定：列表、详情、抽屉标题都叫「Router」，不给运营改成别的叫法。
+ * <p>只是初始名 / 空名兜底：详情里改名并保存后，列表、详情与消息流入口块都读新名称。
  */
 export const MA_ENTRY_ROUTER_NAME = 'Router'
 
@@ -45,7 +46,7 @@ export const MA_ENTRY_ROUTER_NAME = 'Router'
  * <p>写清它是什么、负责什么、哪些动作被禁止；页面只读展示，保存时原样回传。
  */
 export const MA_ENTRY_ROUTER_DESCRIPTION =
-  '对话入口：负责规划、选择专家或普通方案并决定是否收尾；不可删除、不可改名称/类型、不可加入路由池、不可作为子专家。'
+  '对话入口：负责规划、选择专家或普通方案并决定是否收尾；不可删除、不可改类型、不可加入路由池、不可作为子专家。'
 
 
 /** 新建 / 编辑普通方案只能选这两个；入口类型刻意不在其中 */
@@ -83,7 +84,7 @@ export const MA_TEMPLATE_LABELS: Record<string, string> = {
 
 /** 模板对应的说明，作为鼠标悬浮提示，减少用户为选模板回详情页对照 */
 export const MA_TEMPLATE_HINTS: Record<string, string> = {
-  [MA_LIST_TEMPLATE_ENTRY_ROUTER]: '平台对话入口（固定名 Router）：先判意图，再分发给路由池里的专家 / 方案 / 工作流',
+  [MA_LIST_TEMPLATE_ENTRY_ROUTER]: '平台对话入口（名称可改，默认 Router）：先判意图，再分发给路由池里的专家 / 方案 / 工作流',
   [MA_LIST_TEMPLATE_ROUTER_PARALLEL]: '按候选简介选出一个或多个，并行执行，彼此不传结论',
   [MA_LIST_TEMPLATE_ROUTER_THEN_SEQUENCE]:
     '先按简介选出多个，再按执行顺序接力；下一步能看到前面节点的成文结论'
@@ -133,11 +134,11 @@ export function maTemplateLabel(raw?: string | null): string {
 /**
  * 是否工作台入口类型（与后端 AgentRuntimeConfig.isEntryRouterTemplate 同口径）。
  *
- * <p>页面据此锁定模板 / 编码 / 名称 / 备注、隐藏删除按钮，
+ * <p>页面据此锁定模板 / 编码 / 备注、隐藏删除按钮，名称可改；
  * 并在候选里拒绝把它当成子专家（服务端同样会拦）。
  *
  * @param raw 模板码；可空
- * @return true 表示这是平台对话入口（固定名 Router）
+ * @return true 表示这是平台对话入口（名称可改，默认 Router）
  */
 export function isEntryRouterTemplate(raw?: string | null): boolean {
   return String(raw ?? '') === MA_LIST_TEMPLATE_ENTRY_ROUTER

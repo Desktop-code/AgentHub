@@ -35,11 +35,21 @@
               <el-form label-width="96px">
                 <!-- 名称 / 编码各占一半；下方表单项整行排列，保证 Label 严格左对齐 -->
                 <div class="name-code-row">
+                  <!-- 名称可改：平台默认助手同样允许改名，列表与消息流都读库里这一行 -->
                   <el-form-item label="名称" required>
                     <el-input v-model="form.name" maxlength="64" :disabled="!canEdit" />
                   </el-form-item>
+                  <!--
+                    编码只读：平台默认助手的锁定、识别都靠 reception_assistant，
+                    改掉即可绕过停用 / 删除闸门，因此这里置灰（后端同样拒绝改码）。
+                  -->
                   <el-form-item label="编码" required>
-                    <el-input v-model="form.code" maxlength="64" :disabled="!canEdit" />
+                    <el-input
+                      v-model="form.code"
+                      maxlength="64"
+                      :disabled="!canEdit || isDefaultAssistant"
+                      :title="isDefaultAssistant ? '平台默认智能助手编码不可修改' : undefined"
+                    />
                   </el-form-item>
                 </div>
                 <el-form-item required>
@@ -76,10 +86,12 @@
                   </el-radio-group>
                 </el-form-item>
                 <el-form-item label="状态">
+                  <!-- 平台默认智能助手是兜底接待：开关置灰并给原因，不允许在此停用 -->
                   <el-switch
                     :model-value="form.status === 1"
                     :loading="statusSaving"
-                    :disabled="!canEnable || statusSaving"
+                    :disabled="!canEnable || statusSaving || (isDefaultAssistant && form.status === 1)"
+                    :title="isDefaultAssistant && form.status === 1 ? '平台默认智能助手不可禁用' : undefined"
                     :before-change="beforeStatusChange"
                     @change="onStatusChanged"
                   />
@@ -520,6 +532,7 @@ import SkillBindDialog from '@/components/agent/SkillBindDialog.vue'
 import ToolBindDialog from '@/components/agent/ToolBindDialog.vue'
 import TablePager from '@/components/TablePager.vue'
 import { normalizeAgentAvatarConfig } from '@/constants/agentLooks'
+import { isPlatformDefaultAssistant } from '@/constants/platformAgents'
 import { useUserStore } from '@/stores/user'
 import { pageInstances } from '@/api/model'
 import type {
@@ -977,6 +990,11 @@ const canEdit = computed(() => user.hasPerm('agent:edit'))
 /** 记忆策略单独权限码；无 edit 时 Tab 只读。 */
 const canEditMemory = computed(() => user.hasPerm('memory:policy:edit'))
 const canEnable = computed(() => user.hasPerm('agent:enable'))
+/**
+ * 当前详情是否为平台默认智能助手。
+ * 按编码识别（与后端锁定策略同口径）；未加载完成时按 false 处理，避免闪烁式禁用。
+ */
+const isDefaultAssistant = computed(() => isPlatformDefaultAssistant(form.value?.code))
 const canTrial = computed(() => user.hasPerm('runtime:trial:run') || user.hasPerm('runtime:trial:list'))
 const canBind = computed(() => user.hasPerm('agent:bind'))
 /** Router 父节点不配工具/技能/记忆；REACT 与计划执行都要配，切模式立刻藏/显 Tab，绑定数据不删。 */
@@ -1890,7 +1908,12 @@ async function beforeStatusChange() {
   if (!form.value || !canEnable.value || !active) {
     return false
   }
+  // 平台默认智能助手禁止停用；只拦「改成停用」，误停后仍允许从详情恢复启用
   const next = form.value.status === 1 ? 0 : 1
+  if (isDefaultAssistant.value && next === 0) {
+    ElMessage.warning('平台默认智能助手不可禁用')
+    return false
+  }
   statusSaving.value = true
   try {
     const { data } = await changeAgentStatus(props.agentId, next)

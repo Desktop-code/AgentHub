@@ -31,6 +31,7 @@ import com.agenthub.agent.domain.repository.AgentToolBindRepository;
 import com.agenthub.agent.domain.service.AgentCodePolicy;
 import com.agenthub.agent.domain.service.AgentCriticPolicy;
 import com.agenthub.agent.domain.service.AgentPromptTemplatePort;
+import com.agenthub.agent.domain.service.PlatformDefaultAssistantPolicy;
 import com.agenthub.agent.domain.service.PlatformPromptPrefix;
 import com.agenthub.audit.domain.OperLogWriter;
 import com.agenthub.common.api.PageResult;
@@ -183,6 +184,8 @@ public class AgentAppService {
         AgentDef agent = new AgentDef();
         agent.setName(AgentChecks.requiredText(req.getName(), 64, "名称"));
         agent.setCode(AgentChecks.requiredText(req.getCode(), 64, "编码"));
+        // 新建行不是默认助手本身：不允许占用保留编码，避免出现第二条「被锁的兜底」
+        PlatformDefaultAssistantPolicy.assertCodeNotReserved(agent.getCode(), false);
         codes.assertUnique(agent.getCode(), null);
         // fillProfile 返回不可变列表；后续默认绑定 / 旧正文并入会追加告警，这里复制成可变集合
         List<String> warnings = new java.util.ArrayList<>(fillProfile(agent, req.getDescription(),
@@ -208,16 +211,24 @@ public class AgentAppService {
      * 切到 REACT 只改定义，不删除已有子路由。界面隐藏这些行，再切回 ROUTER 时仍在。
      *
      * @param id  主键
-     * @param req 基本信息
+     * @param req 基本信息；名称 / 简介可改，平台默认助手的编码只读
      * @return 更新后的详情
+     * @throws BizException 平台默认助手提交了不同编码，或非默认行占用了保留编码时 BAD_REQUEST
      */
     @Transactional
     public AgentDetailResp update(Long id, AgentUpdateReq req) {
         AgentDef existing = lookup.require(id);
         String code = AgentChecks.requiredText(req.getCode(), 64, "编码");
-        codes.assertUnique(code, id);
+        // 平台默认助手的编码只读：识别、锁停用、锁删除都靠这个编码，改掉即可绕过整道闸
+        boolean defaultAssistant = PlatformDefaultAssistantPolicy.isDefaultAssistant(existing.getCode());
+        PlatformDefaultAssistantPolicy.assertCanChangeCode(existing.getCode(), code);
+        PlatformDefaultAssistantPolicy.assertCodeNotReserved(code, defaultAssistant);
+        if (!defaultAssistant) {
+            codes.assertUnique(code, id);
+            existing.setCode(code);
+        }
+        // 名称 / 简介不在锁定范围：默认助手也允许改名改简介，列表与消息流读同一行，自然跟上
         existing.setName(AgentChecks.requiredText(req.getName(), 64, "名称"));
-        existing.setCode(code);
         // fillProfile 返回不可变列表；默认绑定补钉会追加告警，这里复制成可变集合
         List<String> warnings = new java.util.ArrayList<>(fillProfile(existing, req.getDescription(), req.getRunMode(),
                 req.getSystemPrompt(), req.getRemark()));
@@ -334,11 +345,14 @@ public class AgentAppService {
      * @param id  主键
      * @param req 目标状态
      * @return 更新后的详情
+     * @throws BizException 目标为停用且该行是平台默认智能助手时 BAD_REQUEST
      */
     @Transactional
     public AgentDetailResp changeStatus(Long id, AgentStatusReq req) {
         AgentDef existing = lookup.require(id);
         int status = AgentChecks.exactStatus(req.getStatus());
+        // 平台默认智能助手是兜底接待：页面已隐藏「禁用」，这里再拦直调；启用仍放行便于误停后恢复
+        PlatformDefaultAssistantPolicy.assertCanChangeStatus(existing.getCode(), status);
         agents.updateStatus(id, status, operatorContext.requireUserId());
         String action = status == AgentStatus.ENABLED ? "enable" : "disable";
         operLogWriter.write("agent", action, "agent_def", String.valueOf(id), "更新 Agent 状态 " + existing.getName());
@@ -349,10 +363,13 @@ public class AgentAppService {
      * 逻辑删除定义，并在同一事务里逻辑删除它的三类绑定，以及它作为父或子出现的路由。
      *
      * @param id 主键
+     * @throws BizException 该行是平台默认智能助手时 BAD_REQUEST
      */
     @Transactional
     public void remove(Long id) {
         AgentDef existing = lookup.require(id);
+        // 平台默认智能助手不可删：必须在清绑定之前拦下，避免直调接口删掉默认入口
+        PlatformDefaultAssistantPolicy.assertCanRemove(existing.getCode());
         Long operatorId = operatorContext.requireUserId();
         modelBinds.logicalDeleteByAgentId(id, operatorId);
         toolBinds.logicalDeleteByAgentId(id, operatorId);

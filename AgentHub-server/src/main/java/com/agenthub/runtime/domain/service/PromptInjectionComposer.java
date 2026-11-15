@@ -97,10 +97,26 @@ public final class PromptInjectionComposer {
      */
     public static Outcome compose(Assembled assembled, String memory, List<SkillInput> skills,
                                   List<ToolInput> tools, Budgets budgets) {
+        return compose(assembled, memory, null, skills, tools, budgets);
+    }
+
+    /**
+     * 工作台叶子专家入口：多一个平台内置锁定段（选项块说明）。
+     *
+     * @param assembled    组装结果（正文 + head 长度 + 各段正文），可空
+     * @param memory       记忆段正文，可空
+     * @param platformNote 平台内置锁定文案（交付通道口径 + {@code ChoiceNote.text()}）；空表示不注入
+     * @param skills       已绑定且启用的 Skill
+     * @param tools        已绑定工具；callable=false 仅用于运行时明确不可调的项
+     * @param budgets      预算
+     * @return 提示词、允许注册的工具名、超预算未暴露名、注入统计
+     */
+    public static Outcome compose(Assembled assembled, String memory, String platformNote,
+                                  List<SkillInput> skills, List<ToolInput> tools, Budgets budgets) {
         String system = assembled == null ? "" : assembled.text();
         PromptLayout layout = assembled == null || assembled.layout() == null
                 ? PromptLayout.EMPTY : assembled.layout();
-        return compose(system, layout, memory, skills, tools, budgets);
+        return compose(system, layout, memory, platformNote, skills, tools, budgets);
     }
 
     /**
@@ -131,6 +147,26 @@ public final class PromptInjectionComposer {
      */
     public static Outcome compose(String system, PromptLayout layout, String memory,
                                   List<SkillInput> skills, List<ToolInput> tools, Budgets budgets) {
+        return compose(system, layout, memory, null, skills, tools, budgets);
+    }
+
+    /**
+     * 主实现（带平台内置锁定段）。
+     *
+     * <p>{@code platformNote} 固定排在记忆段之后、Skill 之前：它是平台能力说明，
+     * 不属于某个 Agent 的业务提示词，预算紧张时与记忆段同档让出。
+     *
+     * @param system       组装正文（受保护 head 在前，可截断 tail 在后）
+     * @param layout       结构描述；headChars 是裁剪下界，0 表示无结构信息
+     * @param memory       记忆段正文，可空
+     * @param platformNote 平台内置锁定文案，可空
+     * @param skills       绑定 Skill
+     * @param tools        绑定工具
+     * @param budgets      预算
+     * @return 拼接结果
+     */
+    public static Outcome compose(String system, PromptLayout layout, String memory, String platformNote,
+                                  List<SkillInput> skills, List<ToolInput> tools, Budgets budgets) {
         // ---- 一、工具 schema：独立专款，按绑定序贪心塞满，不吃 Skill/系统段的额度 ----
         SchemaPlan schema = planSchemas(tools, budgets.schemaMax());
 
@@ -160,6 +196,12 @@ public final class PromptInjectionComposer {
         if (!memoryText.isEmpty()) {
             sections.add(new PromptBudgetTrimmer.Section("memory", PromptBudgetTrimmer.Tier.MEMORY,
                     "\n\n" + memoryText, ""));
+        }
+        // 平台内置锁定段（工作台交付通道口径 + 选项块说明）：紧跟记忆段，不进 PromptPurpose、不可被页面覆盖
+        String noteText = platformNote == null ? "" : platformNote.trim();
+        if (!noteText.isEmpty()) {
+            sections.add(new PromptBudgetTrimmer.Section("choice-note", PromptBudgetTrimmer.Tier.MEMORY,
+                    "\n\n" + noteText, ""));
         }
         sections.addAll(hard.sections());
         sections.addAll(optional.sections());

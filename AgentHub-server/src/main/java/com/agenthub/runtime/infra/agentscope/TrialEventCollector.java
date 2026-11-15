@@ -3,6 +3,7 @@ package com.agenthub.runtime.infra.agentscope;
 import com.agenthub.runtime.domain.model.EventType;
 import com.agenthub.runtime.domain.model.TrialTrace;
 import com.agenthub.runtime.domain.model.TrialTurn;
+import com.agenthub.runtime.domain.service.InternalToolNames;
 import com.agenthub.runtime.domain.service.RunBudget;
 import com.agenthub.runtime.domain.service.TrialProgress;
 import com.agenthub.runtime.domain.service.TrialTraceAccumulator;
@@ -173,9 +174,22 @@ public final class TrialEventCollector {
     private void toolStart(AgentEvent event) {
         if (event instanceof ToolCallStartEvent start) {
             traces.onToolStart(start.getToolCallId(), start.getToolCallName());
+            /*
+             * 平台内部工具（选项提交）对用户不可见：连「正在调用」胶囊都不画，
+             * 前端只该看到正文与 chips。obs 也不开 span，避免 Trace 里出现一条无名机器调用。
+             */
+            if (InternalToolNames.isQuiet(start.getToolCallName())) {
+                return;
+            }
             obsSpans.onStart(start.getToolCallId(), start.getToolCallName());
             if (progress != null) {
                 progress.phase("tool");
+                /*
+                 * 同步推一条「工具开始」：前端据此先画「正在调用 xxx…」胶囊。
+                 * 只有这里（引擎真的开始执行工具）才是这条事件的正确时机；
+                 * 结果到达时 toolEnd 会用同一个工具名把胶囊补成成功 / 失败。
+                 */
+                progress.toolStart(start.getToolCallName());
             }
         }
     }
@@ -198,13 +212,47 @@ public final class TrialEventCollector {
         }
         boolean success = end.getState() == ToolResultState.SUCCESS;
         TrialTrace tool = traces.onToolResultEnd(end.getToolCallId(), end.getToolCallName(), success);
+        // 静音工具：onToolResultEnd 已返回 null，这里不再落进度 / 不再计数
+        if (InternalToolNames.isQuiet(end.getToolCallName())) {
+            return;
+        }
         obsSpans.onEnd(end.getToolCallId(), end.getToolCallName(), tool);
         emittedTools++;
         if (progress != null && tool != null) {
             progress.phase("tool");
             // 时间线与回灌同截，避免暗示模型看见了未回灌全文；obs span 仍用 traces 原文
-            progress.tool(tool.getName(), tool.getArguments(), displayToolResult(tool.getContent()), tool.isSuccess());
+            String body = displayToolResult(tool.getContent());
+            progress.tool(tool.getName(), tool.getArguments(), withFirstFailure(body, tool.isSuccess()),
+                    tool.isSuccess());
         }
+    }
+
+    /**
+     * 失败结果后面附上本轮首错，让「胶囊详情」与「完整链路」都能看到真正的第一次异常。
+     *
+     * <p>为什么必须附：熔断文案（{@code consecutive_fail_abort}）只说明次数，
+     * 后续每一路失败都只写这一句，首错就被盖掉了。这里把 {@link RunBudget#firstFailure()}
+     * 拼在失败结果末尾；成功结果不附，避免噪音。
+     *
+     * @param body    工具结果正文（已脱敏）
+     * @param success 是否成功
+     * @return 需要展示的结果正文
+     */
+    private String withFirstFailure(String body, boolean success) {
+        if (success || budget == null) {
+            return body;
+        }
+        RunBudget.FirstFailure first = budget.firstFailure();
+        if (first == null) {
+            return body;
+        }
+        String raw = body == null ? "" : body.trim();
+        // 首错本身已在正文里（第一次失败那条）就不重复拼
+        if (!first.detail().isBlank() && raw.contains(first.detail())) {
+            return raw;
+        }
+        String note = "首次失败原因（" + first.kind() + "）：" + first.detail();
+        return raw.isEmpty() ? note : raw + "\n\n" + note;
     }
 
     private void textDelta(AgentEvent event) {
@@ -235,7 +283,9 @@ public final class TrialEventCollector {
                 continue;
             }
             progress.phase("tool");
-            progress.tool(trace.getName(), trace.getArguments(), displayToolResult(trace.getContent()),
+            // 补推的这条也要带首错：熔断短路常从这条路进来，不带就只剩一句「撞限」
+            progress.tool(trace.getName(), trace.getArguments(),
+                    withFirstFailure(displayToolResult(trace.getContent()), trace.isSuccess()),
                     trace.isSuccess());
         }
         emittedTools = seen;

@@ -16,7 +16,9 @@ import com.agenthub.obs.domain.model.ObsStatus;
 import com.agenthub.obs.domain.model.SpanClose;
 import com.agenthub.obs.domain.model.SpanType;
 import com.agenthub.obs.domain.service.ObsAttrs;
+import com.agenthub.runtime.domain.model.AgentChoice;
 import com.agenthub.runtime.domain.model.ChildPlanPendingView;
+import com.agenthub.runtime.domain.model.ChoiceCapture;
 import com.agenthub.runtime.domain.model.EntryChannel;
 import com.agenthub.runtime.domain.model.EventType;
 import com.agenthub.runtime.domain.model.MaRunSpec;
@@ -36,6 +38,9 @@ import com.agenthub.runtime.domain.model.TrialTurn;
 import com.agenthub.runtime.domain.repository.RunEventRepository;
 import com.agenthub.runtime.domain.repository.RunSessionRepository;
 import com.agenthub.runtime.domain.service.CauseDigest;
+import com.agenthub.runtime.domain.service.ChoiceCaptureHolder;
+import com.agenthub.runtime.domain.service.ChoiceContinue;
+import com.agenthub.runtime.domain.service.LeafChoiceHolder;
 import com.agenthub.runtime.domain.service.PlanJson;
 import com.agenthub.runtime.domain.service.PromptInjectionHolder;
 import com.agenthub.runtime.domain.service.SessionTitleTexts;
@@ -46,6 +51,7 @@ import com.agenthub.runtime.domain.service.TrialTurnOutcome;
 import com.agenthub.runtime.domain.service.TrialProgress;
 import com.agenthub.runtime.domain.service.TrialTexts;
 import com.agenthub.runtime.domain.service.VisionOcrTexts;
+import com.agenthub.runtime.domain.service.WorkbenchChoiceJson;
 import com.agenthub.runtime.infra.agentscope.ReActTrialExecutor;
 import com.agenthub.runtime.infra.agentscope.VisionOcrExecutor;
 import org.slf4j.Logger;
@@ -280,6 +286,318 @@ public class TrialRunAppService {
             log.warn("试跑流失败 sessionId={} type={} cause={}",
                     sessionId, ex.getClass().getSimpleName(), CauseDigest.of(ex), ex);
             end.fail("试跑失败");
+        }
+    }
+
+    /**
+     * 点选上一轮回答里的可点选项：断点续作，<b>不</b>重走入口判路由。
+     *
+     * <p>与 {@link #send(Long, String)} 的分工：
+     * <ul>
+     *   <li>用户另起一句新问题 → 走 send，入口判定按前文 + 新问题重新选线路；</li>
+     *   <li>用户点了上一轮给的可点选项 → 走本方法，由<b>同一位</b>专家接着执行，线路不换也不清。</li>
+     * </ul>
+     *
+     * <p>安全边界：只认上一轮真实落库回答里的 {@code agenthub-choice} 块。
+     * 前端回传的 optionId 必须在该块内命中，展示文案以后端登记为准，
+     * 不采信客户端传来的 label，避免借选项接口往模型上下文里塞任意文本。
+     *
+     * @param sessionId 会话
+     * @param optionId  用户点中的选项标识（上一轮块内唯一）
+     * @return 本轮新事件与终答预览
+     * @throws BizException 会话不可发、上一轮没有可点选项、选项已处理，或当前线路不是单专家
+     */
+    public MessageResp choose(Long sessionId, String optionId) {
+        return continueChoice(sessionId, optionId, null);
+    }
+
+    /**
+     * 边跑边推的断点续作（点选项后由同一位专家继续）。
+     *
+     * <p>失败收口与 {@link #stream} 完全一致：不把堆栈推给页面，只在服务端留栈。
+     *
+     * @param sessionId 会话
+     * @param optionId  用户点中的选项标识
+     * @param progress  增量出口，不可空
+     * @param end       结束出口，不可空
+     */
+    public void chooseStream(Long sessionId, String optionId, TrialProgress progress, TrialStreamEnd end) {
+        try {
+            progress.phase("planning");
+            end.done(continueChoice(sessionId, optionId, progress));
+        } catch (BizException ex) {
+            end.fail(ex.getMessage());
+        } catch (TrialFailure ex) {
+            logTrialFailure("运行流续作失败（已映射）", sessionId, ex, ex.getMessage());
+            end.fail("运行失败");
+        } catch (RuntimeException ex) {
+            log.warn("运行流续作失败 sessionId={} type={} cause={}",
+                    sessionId, ex.getClass().getSimpleName(), CauseDigest.of(ex), ex);
+            end.fail("运行失败");
+        }
+    }
+
+    /**
+     * 断点续作的实际执行体：校验选项 → 落 USER 事件 → 由既有专家继续跑 → 收尾。
+     *
+     * <p>为什么不在 choose 分支里做：choose 是「选谁」的编排决策，而这里是「已选好，同一位继续」。
+     * 塞进 choose 会让入口判路由与续作共用一条分支，后续想再改任一方的语义都会互相牵扯。
+     *
+     * @param sessionId 会话
+     * @param optionId  选项标识
+     * @param progress  增量出口，可空（同步路径）
+     * @return 本轮结果
+     */
+    private MessageResp continueChoice(Long sessionId, String optionId, TrialProgress progress) {
+        RunSession session = access.require(sessionId);
+        // 先做只读校验再占单飞：选项不合法时不该在会话上留下任何痕迹
+        TrialSendGate.assertSendable(session);
+        ChoiceAnchor anchor = requireChoice(sessionId, optionId);
+        Long stickyAgentId = session.getStickyAgentId();
+        if (stickyAgentId == null) {
+            // 方案目标 / 工作流目标没有单专家：这类线路不支持按选项续作，明确拒绝而不是随便挑一位
+            throw new BizException(ErrorCode.BAD_REQUEST,
+                    "当前线路不是单个专家，无法按选项续作；请直接输入你的选择");
+        }
+        AgentDef agent = agents.findById(stickyAgentId)
+                .orElseThrow(() -> new BizException(ErrorCode.BAD_REQUEST, "上一位专家已不存在，请直接输入你的选择"));
+        if (agent.getStatus() == null || agent.getStatus() != AgentStatus.ENABLED) {
+            throw new BizException(ErrorCode.BAD_REQUEST, "上一位专家已停用，请直接输入你的选择");
+        }
+        if (!flight.tryStart(sessionId)) {
+            throw new BizException(ErrorCode.BAD_REQUEST, "该会话正在执行");
+        }
+        List<RunEvent> written = new ArrayList<>();
+        ObsTraceScope trace = null;
+        // 续作轮固定是「同一位专家接着干」：允许它再次让用户拍板（多步确认场景）
+        ChoiceCaptureHolder.begin();
+        // 与 runTurn 同一收尾纪律：只有没走到成功 / 业务失败就逃出时才收成取消
+        boolean settled = false;
+        // 用户气泡与 USER 事件都用选项文案（服务端登记的权威文案），而不是整段续作说明
+        String label = anchor.option().label();
+        try {
+            trace = obs.begin(session, label);
+            int seq = events.nextSeq(sessionId);
+            int userSeq = seq;
+            // 用户点选项就是这一轮的用户输入：落 USER 事件，后续「最近对话」才会把它当成用户话
+            written.add(writer.append(sessionId, userSeq, EventType.USER, label, null, null));
+            seq++;
+            TrialProgress mirrored = progress;
+            if (progress != null) {
+                live.begin(sessionId, userSeq, label, null);
+                mirrored = TrialLiveBuffer.tee(progress, live.recorder(sessionId));
+            }
+            TrialTurn turn = runChoice(session, agent, anchor, written, seq, mirrored);
+            obs.finishOk(trace);
+            MessageResp done = succeed(session, turn, written, label);
+            settled = true;
+            return done;
+        } catch (TrialFailure ex) {
+            logTrialFailure("续作失败", sessionId, ex, ex.getMessage());
+            obs.finishError(trace, ex.getMessage(), ex.getFinishReason(), ex.getCause());
+            MessageResp failed = fail(session, written, ex.getMessage(), label);
+            settled = true;
+            return failed;
+        } catch (RuntimeException ex) {
+            log.warn("续作失败 sessionId={} type={} cause={}",
+                    sessionId, ex.getClass().getSimpleName(), CauseDigest.of(ex), ex);
+            obs.finishError(trace, "运行失败", null, ex);
+            MessageResp failed = fail(session, written, "运行失败", label);
+            settled = true;
+            return failed;
+        } finally {
+            PromptInjectionHolder.clear();
+            ChoiceCaptureHolder.clear();
+            obs.clear();
+            live.clear(sessionId);
+            flight.finish(sessionId);
+            if (!settled) {
+                staleRuns.abandonIfIdle(sessionId);
+            }
+        }
+    }
+
+    /**
+     * 从已落库事件里找回「上一轮的可点选项」，并校验用户点的那一项确实存在。
+     *
+     * <p>数据来源有两档，优先结构化：
+     * <ol>
+     *   <li>本轮正文之后紧跟的 {@link EventType#CHOICE} 事件（正常路径）；</li>
+     *   <li>历史会话正文里的旧机器块（{@code ```agenthub-choice} 围栏），只做确定性解析。</li>
+     * </ol>
+     *
+     * <p>只认最后一轮：更早的选项已经失效（用户若想改选，应当直接输入）。
+     * 末尾若已经出现 USER 事件，说明这一份断点已经被续过，重复点会重复执行同一任务。
+     *
+     * <p>禁止对正文列表做启发式猜测：那套规则在不同模型的写法上一轮一轮对不上，
+     * 已经下线；认不出结构就明确拒绝，让用户直接输入。
+     *
+     * <p>同时带回<b>上一轮的问句与终答</b>：续作要把三者一起交给同一位专家，
+     * 否则模型只看到一句孤立的选项文案，只能回一句「已完成作答」。
+     *
+     * @param sessionId 会话
+     * @param optionId  选项标识
+     * @return 选项（权威展示文案）＋上一轮问句 / 终答
+     * @throws BizException 没有可续的选项块、选项不存在，或该断点已处理
+     */
+    private ChoiceAnchor requireChoice(Long sessionId, String optionId) {
+        List<RunEvent> rows = events.listBySessionId(sessionId);
+        // 第一步：从尾部找回「上一轮正文」的位置；中途撞到 USER 就说明断点已经被续过
+        int answerIndex = -1;
+        for (int i = rows.size() - 1; i >= 0; i--) {
+            RunEvent row = rows.get(i);
+            if (row == null || row.getEventType() == null) {
+                continue;
+            }
+            String type = row.getEventType();
+            // 末尾的 USER 事件＝上一份断点已经被续过：不允许同一份选项被点两次
+            if (EventType.USER.code().equalsIgnoreCase(type)) {
+                throw new BizException(ErrorCode.BAD_REQUEST, "该选项已处理，请直接输入你的选择");
+            }
+            if (EventType.ASSISTANT.code().equalsIgnoreCase(type) && row.getContentText() != null
+                    && !row.getContentText().isBlank()) {
+                answerIndex = i;
+                break;
+            }
+        }
+        if (answerIndex < 0) {
+            throw new BizException(ErrorCode.BAD_REQUEST, "上一轮没有可点选项，请直接输入你的选择");
+        }
+        String answer = rows.get(answerIndex).getContentText();
+        /*
+         * 第二步：结构化选项是权威来源——本轮正文之后紧跟一条 CHOICE 事件，正文里不再有机器块。
+         * 只在「这份正文之后」找，避免把更早一轮的选项当成本轮断点。
+         */
+        AgentChoice choice = null;
+        for (int i = answerIndex + 1; i < rows.size(); i++) {
+            RunEvent row = rows.get(i);
+            if (row == null || row.getEventType() == null) {
+                continue;
+            }
+            if (!EventType.CHOICE.code().equalsIgnoreCase(row.getEventType())) {
+                continue;
+            }
+            choice = WorkbenchChoiceJson.parseJson(row.getContentText()).orElse(null);
+            if (choice == null) {
+                throw new BizException(ErrorCode.BAD_REQUEST, "上一轮的可点选项已失效，请直接输入你的选择");
+            }
+        }
+        // 第三步：没有 CHOICE 事件时只认历史会话的旧机器块（确定性解析，不猜正文列表）
+        String body = answer;
+        if (choice == null) {
+            WorkbenchChoiceJson.Parsed parsed = WorkbenchChoiceJson.parse(answer).orElse(null);
+            if (parsed == null) {
+                throw new BizException(ErrorCode.BAD_REQUEST, "上一轮回答没有可点选项，请直接输入你的选择");
+            }
+            choice = parsed.choice();
+            body = parsed.text();
+        }
+        AgentChoice.Option option = choice.find(optionId)
+                .orElseThrow(() -> new BizException(ErrorCode.BAD_REQUEST,
+                        "该选项已失效，请直接输入你的选择"));
+        // 上一轮的用户问句：续作要把它一起交给专家，否则专家只看得到一句选项文案
+        return new ChoiceAnchor(previousQuestionOf(rows, answerIndex), WorkbenchChoiceJson.strip(body), option);
+    }
+
+    /**
+     * 找「上一轮正文之前的最后一条用户问句」。
+     *
+     * <p>续作必须把原问句带回给专家：用户点的那一下是「对上一问的回答」，
+     * 只把选项文案交给模型，它会当成一句孤立的话，只能回一句「已完成作答」。
+     *
+     * @param rows        会话事件（按序号升序）
+     * @param answerIndex 上一轮正文所在下标
+     * @return 原问句；找不到（历史数据缺失）时为空串
+     */
+    private static String previousQuestionOf(List<RunEvent> rows, int answerIndex) {
+        for (int i = answerIndex - 1; i >= 0; i--) {
+            RunEvent row = rows.get(i);
+            if (row == null || row.getEventType() == null) {
+                continue;
+            }
+            if (!EventType.USER.code().equalsIgnoreCase(row.getEventType())) {
+                continue;
+            }
+            String text = row.getContentText();
+            if (text != null && !text.isBlank()) {
+                return text.trim();
+            }
+        }
+        return "";
+    }
+
+    /**
+     * 由同一位专家接着执行（不判路由、不改线路）。
+     *
+     * <p><b>续作入参</b>：用户点选只是「对上一问的回答」，只把选项文案交给模型，
+     * 它会把这一句当成孤立发言，只能回「已完成作答」或又把问题问一遍。因此这里把
+     * <b>原问句 + 上一轮终答 + 所选选项</b> 一起拼成一条明确的续作说明交给同一位专家，
+     * 并附平台锁定的「接着做完、给完整方案」要求（见 {@code ChoiceContinue}）。
+     *
+     * <p>落库与页面气泡仍是选项文案：USER 事件、实时帧、记忆窗口都用 {@code label}，
+     * 用户看到的就是「我说了这句话」。方案会话（有 ma_def_id）仍不写记忆窗口，
+     * 与主链路 {@code schemeTurn} 的跳过口径一致。
+     *
+     * @param session  当前会话
+     * @param agent    上一轮作答的专家
+     * @param anchor   上一轮问句 / 终答 + 用户选中的选项（展示文案以服务端为准）
+     * @param written  本轮已写事件
+     * @param seq      下一条事件序号
+     * @param progress 增量出口，可空
+     * @return 本轮终答
+     */
+    private TrialTurn runChoice(RunSession session, AgentDef agent, ChoiceAnchor anchor, List<RunEvent> written,
+                                int seq, TrialProgress progress) {
+        long userId = session.getUserId();
+        String label = anchor.option().label();
+        // 只喂模型：问句 + 上一轮完整回答 + 选择 + 「接着做完」要求，专家据此给出完整方案
+        String modelUser = ChoiceContinue.text(anchor.question(), anchor.answer(), label);
+        // 记忆召回仍按本轮用户话（选项文案）做语义召回：它是当前真正要处理的那句话
+        TrialMemoryCoordinator.Augmented recalled = memory.recallDurable(session, label);
+        // choiceEnabled=true：续作轮仍允许该专家再次让用户拍板（多步确认场景）
+        TrialPlan plan = loader.loadReact(agent, label, recalled.memoryBlock(), true);
+        plan.setToolArgsFacts(recalled.injectedFacts());
+        memory.publishInjection(plan);
+        ObsTraceScope trace = ObsTraceHolder.current();
+        Long agentSpan = null;
+        if (trace != null) {
+            agentSpan = trace.open(SpanType.AGENT, agent.getName(), agent.getId(), null, null);
+            trace.bindParent(agentSpan);
+        }
+        try {
+            TrialTurn turn = react.execute(plan, modelUser, userId, session.getId(), progress);
+            if (trace != null) {
+                SpanClose agentOk = new SpanClose();
+                agentOk.setStatus(ObsStatus.OK);
+                agentOk.setOutputText("执行完成");
+                agentOk.setAttrsJson(ObsAttrs.withBrief(null, "执行 Agent"));
+                trace.close(agentSpan, agentOk);
+            }
+            int next = timeline.appendTraces(session.getId(), seq, turn, written);
+            written.add(timeline.assistant(session.getId(), next, turn));
+            // 续作轮同样可能再次需要拍板（多步确认），选项紧跟本轮正文落库
+            appendChoice(session.getId(), next + 1, written);
+            // 方案会话不给记忆开写窗口：它在主链路上也被跳过，续作不能悄悄补一次写
+            if (session.getMaDefId() == null) {
+                memory.afterAssistant(session, turn.getAssistantText());
+            }
+            return turn;
+        } catch (RuntimeException ex) {
+            log.warn("续作执行失败 agentId={} type={} cause={}",
+                    agent.getId(), ex.getClass().getSimpleName(), CauseDigest.of(ex), ex);
+            if (trace != null) {
+                SpanClose agentErr = new SpanClose();
+                agentErr.setStatus(ObsStatus.ERROR);
+                agentErr.setErrorSummary(ex.getMessage());
+                agentErr.setOutputText(ex.getMessage());
+                agentErr.setAttrsJson(ObsAttrs.withCause(ObsAttrs.withBrief(null, "Agent 失败"), CauseDigest.of(ex)));
+                trace.close(agentSpan, agentErr);
+            }
+            throw ex;
+        } finally {
+            if (trace != null) {
+                trace.bindParent(null);
+            }
         }
     }
 
@@ -546,6 +864,10 @@ public class TrialRunAppService {
         }
         List<RunEvent> written = new ArrayList<>();
         ObsTraceScope trace = null;
+        // 结构化选项：只有工作台会话才允许本轮出 chips；调试 / 试跑的口径与接线保持不变
+        if (EntryChannel.isWorkbench(session.getEntryChannel())) {
+            ChoiceCaptureHolder.begin();
+        }
         // 正常成功 / 业务失败都算收尾；只有没走到那两支就逃出才把会话收成取消
         boolean settled = false;
         try {
@@ -627,6 +949,8 @@ public class TrialRunAppService {
             return failed;
         } finally {
             PromptInjectionHolder.clear();
+            // 采集槽必须清：池线程复用会把上一轮的槽带到下一轮，可能凭空多出一次整理出站
+            ChoiceCaptureHolder.clear();
             obs.clear();
             // 整轮结束（无论成败）：内存快照完成使命，权威数据是刚落库的事件
             live.clear(sessionId);
@@ -670,10 +994,18 @@ public class TrialRunAppService {
     private TrialTurn run(AgentDef agent, MaRunSpec spec, String content, String ocrText, RunSession session,
                           List<RunEvent> written, int seq, TrialProgress progress) {
         long userId = session.getUserId();
-        // 方案会话（spec 非空）以方案自己为根：没有 Agent 记忆策略，直接用原文，
-        // 避免把方案会话写进某个 Agent 的窗口；历史绑根会话即便还带 agentId 也按此口径。
+        // 方案会话（spec 非空）以方案自己为根：没有 Agent 记忆策略，不给它开写窗口
+        // （afterAssistant 仍跳过）；但本轮仍要拼会话前文，否则「上一轮问了技术栈、这轮答 1」
+        // 会让入口判定与专家都只看得到一句孤立的「1」。只读预览不写 Redis、不做摘要。
+        // 历史绑根会话即便还带 agentId 也按此口径。
         boolean schemeTurn = spec != null;
-        String modelUser = schemeTurn || agent == null ? content : memory.prepareUser(session, content);
+        String modelUser = schemeTurn || agent == null
+                ? memory.previewUser(session, content)
+                : memory.prepareUser(session, content);
+        // 兜底：预览拿不到内容时退回本轮原文。宁可少一段前文，也不能把空值送给入口判定与专家
+        if (modelUser == null || modelUser.isBlank()) {
+            modelUser = content;
+        }
         // 多模态：识别结果只拼到「送给模型的那一版」，用户事件与标题仍保持原文
         String query = VisionOcrTexts.composeQuery(ocrText, content);
         modelUser = VisionOcrTexts.applyToModelUser(modelUser, ocrText, content);
@@ -690,15 +1022,25 @@ public class TrialRunAppService {
             // 方案就是根：不再合成 AgentDef 壳，执行器直接以方案（spec）为根跑；
             // 只有旧 Agent 试跑路径（spec 为空）才把真实 Agent 传进去。
             AgentDef root = schemeTurn ? null : agent;
-            // 路由判定也要看得到图片里的文字，否则「这张发票什么时候到期」会判不出意图
-            RouterTrialExecutor.RoutedTurn routed = router.execute(root, spec, query, modelUser, userId,
-                    session.getId(), progress, workbenchHint(session));
+            // 路由判定也要看得到图片里的文字，否则「这张发票什么时候到期」会判不出意图。
+            // 可点选项开关只对工作台开：调试 / 试跑轮的提示词与旧口径逐字一致，不注入选项块说明。
+            // 走线程上下文而不是加 execute 参数：那是三处入口共用的公开签名。
+            LeafChoiceHolder.set(EntryChannel.isWorkbench(session.getEntryChannel()));
+            RouterTrialExecutor.RoutedTurn routed;
+            try {
+                routed = router.execute(root, spec, query, modelUser, userId,
+                        session.getId(), progress, workbenchHint(session, modelUser));
+            } finally {
+                LeafChoiceHolder.clear();
+            }
             // 刀3：单意图成功轮写回沿用线路，多意图轮清空；失败 / 取消走不到这里，不改旧值
             applyStickyRoute(session, routed);
             // 按子分段落库：决策块 + 每子「路由到」+ 该子 traces，禁止拼成单条时间线
             seq = timeline.appendRouterSegments(session.getId(), seq, routed, written);
             seq = appendNotices(session.getId(), seq, routed.notices(), written);
             written.add(timeline.assistant(session.getId(), seq, routed.turn()));
+            // 选项（若本轮收口出了结构）紧跟助手正文落库：chips 在气泡下方，刷新后也按同一顺序回放
+            appendChoice(session.getId(), seq + 1, written);
             if (!schemeTurn && agent != null) {
                 memory.afterAssistant(session, routed.turn().getAssistantText());
             }
@@ -791,19 +1133,21 @@ public class TrialRunAppService {
      *   <li>没有强制标记但有沿用线路时，只把「优先沿用」注入判路由提示词。</li>
      * </ul>
      *
-     * @param session 当前会话
+     * @param session   当前会话
+     * @param judgeInput 判路由模型实际读到的用户侧文本（含会话前文）；与专家作答同一份
      * @return 线路提示；无提示时为空
      */
-    private RouteHint workbenchHint(RunSession session) {
+    private RouteHint workbenchHint(RunSession session, String judgeInput) {
         if (!EntryChannel.isWorkbench(session.getEntryChannel())) {
             return null;
         }
         String sticky = session.getStickyRouteKey();
         String forced = routeForce.take(session.getId()).orElse(null);
+        // 没有沿用线路也没有强制标记：仍把前文交给判定，否则「1」会被判成诉求不清
         if (forced == null) {
-            return sticky == null ? null : RouteHint.sticky(sticky);
+            return RouteHint.sticky(sticky, judgeInput);
         }
-        return RouteHint.forced(sticky, forced);
+        return RouteHint.forced(sticky, forced, judgeInput);
     }
 
     /**
@@ -842,6 +1186,36 @@ public class TrialRunAppService {
         }
         return seq;
     }
+
+    /**
+     * 把本轮收口的结构化选项写成 {@link EventType#CHOICE} 事件。
+     *
+     * <p>为什么要单独落一条事件（而不是塞进助手正文）：正文是给人读的 Markdown，
+     * 机器结构一旦混进去就会在页面上露出裸 JSON；事件化之后前端只按它渲染 chips，
+     * 刷新与断点续作也都能拿到同一份服务端权威选项。
+     *
+     * <p>边界：本轮没有装配选项能力（调试 / 多专家 / 方案汇总 / 工作流目标）或模型与后端整理
+     * 都没给出合法结构时，什么都不写——宁可不显示 chip 栏，也不编造一组按钮。
+     *
+     * @param sessionId 会话主键
+     * @param seq       事件序号（紧跟本轮 ASSISTANT 之后）
+     * @param written   本轮已写事件收集器
+     */
+    private void appendChoice(Long sessionId, int seq, List<RunEvent> written) {
+        ChoiceCapture capture = ChoiceCaptureHolder.current();
+        if (capture == null || !capture.isEligible()) {
+            return;
+        }
+        AgentChoice choice = capture.choice();
+        if (choice == null) {
+            return;
+        }
+        RunEvent event = timeline.choice(sessionId, seq, choice);
+        if (event != null) {
+            written.add(event);
+        }
+    }
+
 
     /**
      * 计划执行模式的一轮：规划 →（可选）停住等批准 → 串行执行 → 汇总终答。
@@ -943,10 +1317,11 @@ public class TrialRunAppService {
         if (!titled) {
             maybeGenerateTitle(session, userText, turn);
         }
-        // 待批准：本轮没有助手正文，预览给一句可读说明，不把空串写进左栏
+        // 待批准：本轮没有助手正文，预览给一句可读说明，不把空串写进左栏。
+        // 可点选项的机器块不能进左栏预览：列表里出现一段 ```agenthub-choice 只会让人以为是乱码
         String preview = turn.isAssistantSuppressed()
                 ? TrialTexts.preview("已生成计划，等待批准后执行")
-                : TrialTexts.preview(turn.getAssistantText());
+                : TrialTexts.preview(WorkbenchChoiceJson.strip(turn.getAssistantText()));
         MessageResp resp = response(session, preview, written);
         resp.setStatus(RunStatus.SUCCESS.name());
         resp.setPlanPending(turn.isAssistantSuppressed());
@@ -1095,5 +1470,19 @@ public class TrialRunAppService {
 
     private int safeCount(RunSession session) {
         return session.getMessageCount() == null ? 0 : session.getMessageCount();
+    }
+
+    /**
+     * 一次断点续作的全部依据。所属域：runtime 的 application（仅本类内部使用）。
+     *
+     * <p>为什么把三样东西绑在一起：用户点了选项这件事，只有在「上一轮问了什么、
+     * 上一轮答了什么」的上下文里才是一次回答。缺了前两样，专家收到的就只是一句孤立的
+     * 选项文案，只能回一句「已完成作答」或把问题再问一遍。
+     *
+     * @param question 上一轮的用户问句；历史数据缺失时为空串（不会为 null）
+     * @param answer   上一轮的助手终答（旧机器块已摘掉）；保证非空
+     * @param option   用户选中的选项，label 以服务端登记为准
+     */
+    private record ChoiceAnchor(String question, String answer, AgentChoice.Option option) {
     }
 }

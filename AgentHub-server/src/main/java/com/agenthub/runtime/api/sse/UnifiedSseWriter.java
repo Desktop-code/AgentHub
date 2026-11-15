@@ -33,6 +33,12 @@ import java.util.function.LongSupplier;
  * 按「时间窗 + 单帧字节上限」合并成一帧再写，降低帧频率但<b>不改事件名、字段与文本顺序</b>。
  * 控制帧（phase / route / tool / plan / step / file / vision / done / error）写出前一律先 flush，
  * 收尾与取消路径也强制 flush，因此尾字不会丢、卡片不会插进半句话。
+ *
+ * <p>定时 flush（流畅度刀 P0-B1）：合批的时间窗原本是「到达驱动」的——模型一停顿，
+ * 已攒的半句话就要等下一段才出去。这里在缓冲由空转非空时登记一个 {@link TextFlushPump} 任务，
+ * 窗口到点无条件把缓冲发出去，尾包不再被「下一段」扣住。
+ * 定时任务同样在 {@code synchronized} 内写出，与请求线程共用一把锁，帧不会交叉；
+ * 已收尾（doneSent）或连接已断时任务直接放弃，不会写出迟到帧。
  */
 public final class UnifiedSseWriter {
 
@@ -62,6 +68,18 @@ public final class UnifiedSseWriter {
      */
     private final SseTextBatcher textBatcher;
 
+    /** 合批参数：定时 flush 要读时间窗 */
+    private final SseBatchOptions batchOptions;
+
+    /** 定时 flush 泵：窗口到点把缓冲发出去（单测用手动泵，由用例显式触发） */
+    private final TextFlushPump flushPump;
+
+    /**
+     * 是否已登记一次「窗口到点」的 flush。
+     * 同一段缓冲只登记一次：模型高速输出时每来一个 chunk 都登记会让调度队列膨胀。
+     */
+    private boolean textFlushScheduled;
+
     /**
      * @param sink 帧写出目标
      * @param json 序列化器，复用容器配置
@@ -71,16 +89,18 @@ public final class UnifiedSseWriter {
     }
 
     /**
+     * 生产构造：带真实的定时 flush 泵。
+     *
      * @param sink  帧写出目标
      * @param json  序列化器，复用容器配置
      * @param batch 正文合批参数（时间窗 + 单帧字节上限）
      */
     public UnifiedSseWriter(SseFrameSink sink, ObjectMapper json, SseBatchOptions batch) {
-        this(sink, json, batch, System::nanoTime);
+        this(sink, json, batch, System::nanoTime, TextFlushPump.shared());
     }
 
     /**
-     * 全参构造，供单测注入可控时钟。生产一律走上面两个构造。
+     * 单测构造：可控时钟 + 手动泵（定时 flush 由用例显式驱动，不在断言之间抢跑）。
      *
      * @param sink      帧写出目标
      * @param json      序列化器
@@ -88,8 +108,24 @@ public final class UnifiedSseWriter {
      * @param nanoClock 纳秒时钟
      */
     UnifiedSseWriter(SseFrameSink sink, ObjectMapper json, SseBatchOptions batch, LongSupplier nanoClock) {
+        this(sink, json, batch, nanoClock, new TextFlushPump.Manual());
+    }
+
+    /**
+     * 全参构造，供单测注入可控时钟与手动泵。
+     *
+     * @param sink      帧写出目标
+     * @param json      序列化器
+     * @param batch     合批参数
+     * @param nanoClock 纳秒时钟
+     * @param pump      定时 flush 泵
+     */
+    UnifiedSseWriter(SseFrameSink sink, ObjectMapper json, SseBatchOptions batch, LongSupplier nanoClock,
+                     TextFlushPump pump) {
         this.sink = sink;
         this.json = json;
+        this.batchOptions = batch;
+        this.flushPump = pump;
         // 合批写出走本对象的 write，队列里的文本先拼成一帧；两个帧（新名 + 旧名）在此一次性发出
         this.textBatcher = new SseTextBatcher(batch, nanoClock, this::writeBatchedText);
     }
@@ -471,7 +507,47 @@ public final class UnifiedSseWriter {
             return false;
         }
         textBatcher.accept(kind, text);
+        // 缓冲里有东西就登记一次「窗口到点」的 flush：模型停顿 / 收尾前的半句话不再等下一段
+        if (textBatcher.hasPending()) {
+            scheduleTextFlush();
+        }
         return true;
+    }
+
+    /**
+     * 登记一次定时 flush（窗口到点无条件把缓冲发出去）。
+     *
+     * <p>同一段缓冲只登记一次：模型高速输出时每个 chunk 都登记会让调度队列膨胀，
+     * 而窗口是固定的，重复登记没有收益。
+     */
+    private void scheduleTextFlush() {
+        if (textFlushScheduled || doneSent.get()) {
+            return;
+        }
+        textFlushScheduled = true;
+        try {
+            flushPump.schedule(batchOptions.windowMillis(), this::flushTextOnWindow);
+        } catch (RuntimeException ex) {
+            // 登记失败（容器停机中调度器已关）：放开标记，后续增量还能再试，
+            // 尾包仍由控制帧 / 收尾路径的 flush 兜住
+            textFlushScheduled = false;
+        }
+    }
+
+    /**
+     * 定时泵到点：把缓冲里的正文发出去。
+     *
+     * <p>在写入器的锁内执行，与请求线程的控制帧 / 收尾路径互斥，不会写出半帧；
+     * 已收尾或连接已断时直接放弃（迟到帧会污染下一轮或让前端重复收尾）。
+     */
+    private void flushTextOnWindow() {
+        synchronized (this) {
+            textFlushScheduled = false;
+            if (doneSent.get() || sink.isBroken()) {
+                return;
+            }
+            textBatcher.flush();
+        }
     }
 
     /**

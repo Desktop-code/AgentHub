@@ -11,6 +11,7 @@ import com.agenthub.runtime.api.dto.PlanResp;
 import com.agenthub.runtime.api.dto.SessionResp;
 import com.agenthub.runtime.api.dto.SessionTitleReq;
 import com.agenthub.runtime.api.dto.ChildPlanPendingResp;
+import com.agenthub.runtime.api.dto.WorkbenchChoiceReq;
 import com.agenthub.runtime.api.dto.WorkbenchConfigResp;
 import com.agenthub.runtime.api.dto.WorkbenchRouteOptionsResp;
 import com.agenthub.runtime.api.dto.WorkbenchRouteReq;
@@ -151,6 +152,23 @@ public class WorkbenchController {
     }
 
     /**
+     * 取消本次 @ 指定：只丢弃「下一轮强制走这条线」的一次性标记。
+     *
+     * <p>为什么需要独立接口：选定时会登记强制标记，用户若在提及片上点 ×，
+     * 不撤销就会让下一句新问题仍被钉给那位专家，与「取消后走入口」相悖。
+     * 不动沿用线路（sticky），也不改任何消息与事件。
+     *
+     * @param id 会话主键
+     * @return 空结果
+     */
+    @SaCheckPermission(RuntimePermissions.CHAT)
+    @DeleteMapping("/sessions/{id:\\d+}/route")
+    public Result<Void> cancelRoute(@PathVariable Long id) {
+        chats.clearRouteForce(id);
+        return Result.ok(null);
+    }
+
+    /**
      * @param id 会话主键
      * @return 已落库事件
      */
@@ -211,6 +229,47 @@ public class WorkbenchController {
             runs.stream(checked, req.getContent().trim(), req.getImages(), writer, writer, idempotencyKey);
         } finally {
             // 与试跑接口同一收尾纪律：任何路径都要补一帧结束，内部 CAS 保证只发一次
+            writer.ensureFinished();
+        }
+    }
+
+    /**
+     * 点选上一轮回答里的可点选项：断点续作，由同一位专家接着执行。
+     *
+     * <p>为什么单独一条：这是「已选好，继续」而不是新的问题。走 {@code /messages} 会重新判路由，
+     * 把用户的回答当成孤立新问题（典型症状：「1」被判定为诉求不清）。
+     *
+     * @param id  会话主键
+     * @param req 选中的选项标识
+     * @return 本轮助手预览和事件
+     */
+    @SaCheckPermission(RuntimePermissions.CHAT)
+    @PostMapping("/sessions/{id:\\d+}/choice")
+    public Result<MessageResp> choose(@PathVariable Long id, @Valid @RequestBody WorkbenchChoiceReq req) {
+        Long checked = chats.requireSession(id);
+        return Result.ok(runs.choose(checked, req.getOptionId().trim()));
+    }
+
+    /**
+     * 点选可点选项的边跑边推版本（与 {@code /choice} 同一套续作语义）。
+     *
+     * @param id       会话主键
+     * @param req      选中的选项标识
+     * @param response 直接写 SSE
+     */
+    @SaCheckPermission(RuntimePermissions.CHAT)
+    @PostMapping(value = "/sessions/{id:\\d+}/choice/stream",
+            produces = MediaType.TEXT_EVENT_STREAM_VALUE)
+    public void chooseStream(@PathVariable Long id, @Valid @RequestBody WorkbenchChoiceReq req,
+                             HttpServletResponse response) throws IOException {
+        Long checked = chats.requireSession(id);
+        ServletSseFrameSink.prepare(response);
+        TrialChunkWriter writer = new TrialChunkWriter(response, json, sseBatch);
+        writer.bindSession(checked);
+        try {
+            runs.chooseStream(checked, req.getOptionId().trim(), writer, writer);
+        } finally {
+            // 与发消息同一收尾纪律：任何路径都补一帧结束，内部 CAS 保证只发一次
             writer.ensureFinished();
         }
     }

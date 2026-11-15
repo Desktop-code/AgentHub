@@ -45,6 +45,22 @@ public class TrialProperties {
     private int toolResultOffloadPreviewChars = 600;
 
     /**
+     * 模型没有给出结构化选项时，是否允许后端再用一次小模型把终答整理成选项。
+     * <p>
+     * 默认开：这是「用户拍板」能力的最后一道兜底，关掉以后只有主动调用
+     * {@code agenthub_choice} 的轮次才会出现 chips。任何整理失败都只是「本轮没有 chips」，
+     * 不影响已经完成的回答。
+     */
+    private boolean choiceStructEnabled = true;
+
+    /**
+     * 选项整理的出站墙钟（毫秒）。它发生在用户等待收尾的路径上，必须明显短于记忆摘要的 60 秒。
+     * <p>
+     * 超时按失败处理（本轮不出 chips），不重试、不阻塞后续对话。
+     */
+    private int choiceStructTimeoutMs = 15000;
+
+    /**
      * 落盘阈值：只有超过该长度的成功结果才会被写成文件。
      *
      * @return 字符阈值；≤0 表示关闭句柄化
@@ -52,11 +68,19 @@ public class TrialProperties {
     public int offloadChars() {
         return toolResultOffloadChars;
     }
-
     /**
      * @return 回灌摘要保留的头部字符数，至少 0
      */
     public int offloadPreviewChars() {
         return Math.max(toolResultOffloadPreviewChars, 0);
+    }
+
+    /**
+     * 选项整理出站墙钟，带下限保护：配置成 0 / 负数会把每次收尾都判成超时。
+     *
+     * @return 毫秒，至少 1000
+     */
+    public int choiceStructTimeoutMs() {
+        return Math.max(choiceStructTimeoutMs, 1000);
     }
 }

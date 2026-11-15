@@ -16,7 +16,7 @@ export interface MaDefRow {
   /** 方案说明：被当作路由目标时的意图说明；可空 */
   description?: string
   /** 六值模板：ROUTER_PARALLEL | FIXED_SEQUENCE | FIXED_PARALLEL | CRITIC_LOOP | ROUTER_THEN_SEQUENCE | COMPETE
-   *  <p>库内还可能出现入口类型 ENTRY_ROUTER（平台唯一 Router），页面据此锁定身份字段 */
+   *  <p>库内还可能出现入口类型 ENTRY_ROUTER（平台唯一入口，名称可改、默认 Router），页面据此锁定编码 / 备注 / 类型 */
   template: string
   /** 1 启用 / 0 停用 */
   enabled: number

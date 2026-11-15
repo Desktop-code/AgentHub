@@ -120,6 +120,8 @@ export interface TrialToolChunk {
   line: string
   result?: string
   success?: boolean
+  /** 工具名：前端据此把「正在调用」胶囊与结果配对 */
+  name?: string
 }
 
 export interface TrialDoneChunk {
@@ -178,13 +180,85 @@ export interface TrialFileChunk {
   downloadUrl: string
 }
 
+/**
+ * 结构化选项 SSE 帧（事件名 `choice`）。
+ *
+ * <p>与落库 CHOICE 事件正文、后端选项工具参数同形；前端只按它渲染 chips，
+ * 正文里不再出现机器块，也不再对自然语言列表做启发式猜测。
+ */
+export interface TrialChoiceChunk {
+  /** 一句话问题；可能为空串 */
+  question: string
+  /** 2~6 个选项，顺序即展示顺序 */
+  options: { id: string; label: string }[]
+}
+
+/**
+ * 参与者身份帧（SSE 事件名 `participant`）。
+ *
+ * <p>与后端 `ParticipantJson` 字段一一对应；`begin` 为 true 表示这一步真正开始。
+ */
+export interface TrialParticipantChunk {
+  /** 参与者标识（同轮唯一，可复现） */
+  id: string
+  /** 展示名（读配置，不由前端拼） */
+  name: string
+  /** gateway / scheme / agent / workflow / conclusion */
+  kind: string
+  /** 该参与者在候选池里的 route_key；可空 */
+  routeKey?: string
+  /** 嵌套层级；入口为 0 */
+  depth?: number
+  /** true＝该步开始（建块）；false＝仅切换归属 */
+  begin: boolean
+}
+
+/**
+ * 工作流执行卡片 SSE 帧（事件名 `workflow`）。
+ *
+ * <p>与落库 `WORKFLOW` 事件正文、内存快照同形：字段是前后端契约，前端只渲染不改写。
+ * 这一帧是**整份状态快照**（不是增量），同一轮重复到达时原位覆盖。
+ */
+export interface TrialWorkflowChunk {
+  /** 工作流展示名（配置名） */
+  name?: string
+  /** 工作流编码 */
+  code?: string
+  /** CREATED / RUNNING / PAUSED_HUMAN / SUCCESS / FAILED / CANCELLED */
+  status?: string
+  /** 终答文本；运行中为空 */
+  answer?: string
+  /** 真实节点（已剔除 START / END） */
+  nodes?: {
+    code?: string
+    name?: string
+    type?: string
+    status?: string
+    note?: string
+  }[]
+}
+
 /** SSE 回调。正文按事件追加，不在这里编造思考。 */
 export interface TrialStreamHandlers {
   onPhase?: (phase: string) => void
   /** Router 判定摘要；进思考过程时间线 */
   onRoute?: (summary: string) => void
+  /**
+   * 参与者身份帧（`participant`）。
+   *
+   * <p>`begin=true` 表示该步真正开始——前端据此立刻建块，**先于**该步任何思考 / 工具；
+   * `begin=false` 只切换「后续增量属于谁」，不新建块。
+   */
+  onParticipant?: (participant: TrialParticipantChunk) => void
   onReasoning?: (text: string) => void
   onTool?: (tool: TrialToolChunk) => void
+  /**
+   * 工具**开始**执行（结果还没回来）。
+   *
+   * <p>用于把「正在调用 xxx…」显示成蓝色胶囊；随后到达的 {@link #onTool} 会把同一条补成
+   * 成功 / 失败态。后端可能不发这条（历史流 / 不支持进度的实现），此时前端不画 running 胶囊。
+   */
+  onToolStart?: (name: string) => void
   onAssistant?: (text: string) => void
   /** 图片文字提取结果，整段下发一次；进时间线的「图片文字」块 */
   onVision?: (text: string) => void
@@ -196,6 +270,20 @@ export interface TrialStreamHandlers {
   onChildPlanPending?: (pending: TrialChildPlanPendingChunk) => void
   /** Agent 在工作区生成了文件，可下载 */
   onFileGenerated?: (file: TrialFileChunk) => void
+  /**
+   * 本轮需要用户拍板的结构化选项。
+   *
+   * <p>它总是晚于助手正文到达（模型先说完、后端再收口），因此前端只需在收到时
+   * 给当前轮补一条选项块；没有这条帧就说明本轮不出 chips，不猜、不补空栏。
+   */
+  onChoice?: (choice: TrialChoiceChunk) => void
+  /**
+   * 工作流执行卡片状态（`workflow`）。
+   *
+   * <p>整份快照下发：运行中推「按图铺好的时间轴」，完成后推终态（含终答）。
+   * 前端把它当成工作流那一块的唯一可见载体——工作流本身没有 token 输出。
+   */
+  onWorkflow?: (workflow: TrialWorkflowChunk) => void
   onDone?: (payload: TrialDoneChunk) => void
   onError?: (message: string) => void
 }
@@ -243,9 +331,61 @@ export async function streamSessionMessage(
   images?: string[],
   idempotencyKey?: string
 ) {
+  return streamSessionEndpoint(
+    `${prefix}/sessions/${id}/messages/stream`,
+    // images 不传时不带这个键：后端据此完全不走 OCR 分支
+    images && images.length ? { content, images } : { content },
+    handlers,
+    signal,
+    idempotencyKey
+  )
+}
+
+/**
+ * 点选项后的**断点续作**（SSE）。所属域：runtime（前端）。
+ *
+ * <p>为什么不复用 {@link streamSessionMessage} 发一条普通消息：那样会重新进入口判词，
+ * 选项可能被分流到别的 Agent 身上，续作就断线了。这个端点由后端直接派回同一位 Agent，
+ * 前端只负责把 optionId 原样带上、帧协议照旧解析。
+ *
+ * @param prefix  接口前缀，如 `/api/runtime/workbench`
+ * @param id      会话主键
+ * @param optionId 被点选项的短标识（后端会对照最后一条助手消息上的选项块校验）
+ * @param handlers 增量回调，与普通发送完全一致
+ * @param signal   中止信号，可空
+ */
+export async function streamSessionChoice(
+  prefix: string,
+  id: number,
+  optionId: string,
+  handlers: TrialStreamHandlers,
+  signal?: AbortSignal
+) {
+  return streamSessionEndpoint(`${prefix}/sessions/${id}/choice/stream`, { optionId }, handlers, signal)
+}
+
+/**
+ * 会话类 SSE 端点的通用实现：POST 一个 JSON 体，按帧回调增量。
+ *
+ * <p>抽成一份的原因：发送消息与断点续作只是路径与请求体不同，帧协议、正文合批、
+ * 鉴权与 401 处理必须完全一致；两套解析器一旦分叉，选项续作就会出现「字对不上」的行为差异。
+ *
+ * @param path           以 `/` 开头的接口路径（不含 API base）
+ * @param payload        请求体
+ * @param handlers       增量回调
+ * @param signal         中止信号，可空
+ * @param idempotencyKey 业务幂等键，可空；只有发送消息会带
+ */
+async function streamSessionEndpoint(
+  path: string,
+  payload: unknown,
+  handlers: TrialStreamHandlers,
+  signal?: AbortSignal,
+  idempotencyKey?: string
+) {
   const token = localStorage.getItem(TOKEN_KEY)
   const base = import.meta.env.VITE_API_BASE || ''
-  const response = await fetch(`${base}${prefix}/sessions/${id}/messages/stream`, {
+  const response = await fetch(`${base}${path}`, {
     method: 'POST',
     headers: {
       'Content-Type': 'application/json',
@@ -253,8 +393,7 @@ export async function streamSessionMessage(
       ...(idempotencyKey ? { 'Idempotency-Key': idempotencyKey } : {}),
       ...(token ? { Authorization: `Bearer ${token}` } : {})
     },
-    // images 不传时不带这个键：后端据此完全不走 OCR 分支
-    body: JSON.stringify(images && images.length ? { content, images } : { content }),
+    body: JSON.stringify(payload),
     signal
   })
   if (response.status === 401) {
@@ -441,6 +580,9 @@ function dispatchFrame(frame: string, handlers: TrialStreamHandlers, batcher?: T
     handlers.onPhase?.(data)
   } else if (event === 'route' && typeof data === 'string') {
     handlers.onRoute?.(data)
+  } else if (event === 'participant' && data && typeof data === 'object') {
+    // 身份帧：先于该步的思考 / 工具到达，前端据此立刻建块并记住后续增量归属
+    handlers.onParticipant?.(data as TrialParticipantChunk)
   } else if (event === 'reasoning' && typeof data === 'string') {
     // 没有合批器时（理论上只有直连测试）保持原样：立即交付
     handlers.onReasoning?.(data)
@@ -452,6 +594,9 @@ function dispatchFrame(frame: string, handlers: TrialStreamHandlers, batcher?: T
   } else if (event === 'tool' && data && typeof data === 'object') {
     const row = data as TrialToolChunk
     handlers.onTool?.(row)
+  } else if (event === 'tool_start' && typeof data === 'string') {
+    // 工具开始执行：只带工具名，前端先画「正在调用」胶囊，等 tool 帧补全
+    handlers.onToolStart?.(data)
   } else if (event === 'plan' && data && typeof data === 'object') {
     handlers.onPlan?.(data as TrialPlanChunk)
   } else if (event === 'step' && data && typeof data === 'object') {
@@ -462,6 +607,12 @@ function dispatchFrame(frame: string, handlers: TrialStreamHandlers, batcher?: T
   } else if (event === 'file_generated' && data && typeof data === 'object') {
     // 产物卡片：fileName / size / downloadUrl 都由后端给齐，前端不再拼地址
     handlers.onFileGenerated?.(data as TrialFileChunk)
+  } else if (event === 'choice' && data && typeof data === 'object') {
+    // 结构化选项：整份一次下发（不是增量），前端只渲染，不解析自然语言
+    handlers.onChoice?.(data as TrialChoiceChunk)
+  } else if (event === 'workflow' && data && typeof data === 'object') {
+    // 工作流卡片：整份状态快照，前端按 name/code 原位覆盖同一块
+    handlers.onWorkflow?.(data as TrialWorkflowChunk)
   } else if (event === 'done' && data && typeof data === 'object') {
     handlers.onDone?.(data as TrialDoneChunk)
   } else if (event === 'error') {
@@ -525,6 +676,13 @@ export function cancelTrialSession(id: number) {
  * `window.open` 与新开标签的导航都不会带这个头，必然被拦成 401。
  * 因此这里用 fetch 带上 Bearer，取回 blob 后再用临时 `<a download>` 触发保存。
  *
+ * <p><b>为什么不能带 `credentials: 'include'`</b>：后端 `CorsConfig` 是
+ * `allowCredentials(false)`（与 axios 的 `withCredentials` 默认 false 一致），
+ * 响应里只回 `Access-Control-Allow-Origin`，不会回 `Access-Control-Allow-Credentials`。
+ * 一旦这里声明携带凭据，浏览器会判定「凭据请求没拿到 ACAC」而**阻断整个响应**，
+ * fetch 直接抛 `TypeError: Failed to fetch`——页面上的表现就是「下载报 Failed to fetch」。
+ * 登录态只靠请求头里的 Bearer，不存在任何需要携带的 Cookie。
+ *
  * <p>文件名优先用服务端 Content-Disposition 里给出的，取不到时退回调用方传入的名字，
  * 保证中文文件名不会退化成一段百分号编码。
  *
@@ -533,16 +691,33 @@ export function cancelTrialSession(id: number) {
  * @throws Error 未登录、无权限、文件不存在或网络异常
  */
 export async function downloadWorkspaceFile(downloadUrl: string, fallbackName?: string) {
+  const path = (downloadUrl || '').trim()
+  if (!path) {
+    throw new Error('该文件没有可用的下载地址')
+  }
   const token = localStorage.getItem(TOKEN_KEY)
   const base = import.meta.env.VITE_API_BASE || ''
   // 后端给的是以 /api 开头的绝对路径，拼上 baseURL 才能命中 Vite 代理或生产网关
-  const url = /^https?:\/\//i.test(downloadUrl) ? downloadUrl : `${base}${downloadUrl}`
-  const response = await fetch(url, {
-    method: 'GET',
-    headers: token ? { Authorization: `Bearer ${token}` } : {},
-    // 下载可能跨域代理，带上凭据与后端 CORS 白名单保持一致
-    credentials: 'include'
-  })
+  const url = /^https?:\/\//i.test(path) ? path : `${base}${path}`
+  let response: Response
+  try {
+    response = await fetch(url, {
+      method: 'GET',
+      headers: token ? { Authorization: `Bearer ${token}` } : {}
+    })
+  } catch (error) {
+    /*
+     * fetch 只在「请求根本没拿到可读响应」时抛异常：跨域被拦、服务未启动、
+     * 页面是 https 而接口是 http（混合内容）都属于这一类。原文案是英文的
+     * `Failed to fetch`，对用户毫无指向性，这里换成可执行的提示。
+     */
+    const raw = error instanceof Error ? error.message : ''
+    throw new Error(
+      /failed to fetch|networkerror|load failed/i.test(raw)
+        ? '下载请求未能到达服务：请确认后端已启动、地址端口一致，且页面与接口同为 http 或同为 https'
+        : '下载失败，请稍后重试'
+    )
+  }
   if (response.status === 401) {
     localStorage.removeItem(TOKEN_KEY)
     if (!location.pathname.endsWith('/login')) {

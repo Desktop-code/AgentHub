@@ -474,6 +474,12 @@ public class PlanTrialExecutor {
             }
 
             @Override
+            public void toolStart(String name) {
+                // 工具开始：同样转发，让页面先看到「正在调用」胶囊
+                progress.toolStart(name);
+            }
+
+            @Override
             public void tool(String name, String arguments, String result, boolean success) {
                 progress.tool(name, arguments, result, success);
             }
