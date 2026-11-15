@@ -30,16 +30,24 @@
         <div class="glass-card">
           <h2 class="card-title">欢迎回来</h2>
           <p class="card-desc">请输入账号密码</p>
-          <el-form class="login-form" :model="form" @submit.prevent="onSubmit">
-            <el-form-item>
+          <el-form
+            ref="formRef"
+            class="login-form"
+            :model="form"
+            :rules="rules"
+            @submit.prevent="onSubmit"
+          >
+            <el-form-item prop="username">
               <el-input
+                ref="usernameRef"
                 v-model="form.username"
                 placeholder="用户名"
                 :prefix-icon="User"
               />
             </el-form-item>
-            <el-form-item>
+            <el-form-item prop="password">
               <el-input
+                ref="passwordRef"
                 v-model="form.password"
                 placeholder="密码"
                 type="password"
@@ -51,7 +59,6 @@
               class="submit"
               :loading="loading"
               native-type="submit"
-              @click="onSubmit"
             >
               登录
             </el-button>
@@ -65,34 +72,93 @@
 <script setup lang="ts">
 /**
  * 登录页（暗色全屏 + 左右分栏 + 玻璃拟态卡片）。
- * 所属域：前端 auth / 壳。成功后写入 token 并拉取 /me，再进入工作台。
+ * 所属域：前端 auth / 壳。成功后写入 token 并拉取 /me，再进入目标页。
+ * 用户名默认留空，不在构建产物里预置任何账号名。
  * 宽度小于 1024px 时隐藏左侧品牌区。
  */
 import { reactive, ref } from 'vue'
-import { useRouter } from 'vue-router'
+import { useRoute, useRouter } from 'vue-router'
+import { type FormInstance, type FormRules, type InputInstance } from 'element-plus'
 import { Lock, User } from '@element-plus/icons-vue'
 import AppLogo from '@/components/AppLogo.vue'
 import { login } from '@/api/auth'
 import { useUserStore } from '@/stores/user'
 
+const route = useRoute()
 const router = useRouter()
 const user = useUserStore()
 const loading = ref(false)
-const form = reactive({ username: 'admin', password: '' })
+const formRef = ref<FormInstance>()
+const usernameRef = ref<InputInstance>()
+const passwordRef = ref<InputInstance>()
+// 用户名默认空串：预填 admin 等于向所有访问者公开默认管理员账号名
+const form = reactive({ username: '', password: '' })
 
 /**
- * 提交登录：校验非空 → 换 token → loadMe → 跳转工作台。
+ * 必填校验。用 transform 先 trim 再判空，纯空格与空值同等处理，
+ * 避免把 "   " 这类输入发到后端再报错。
+ */
+const rules: FormRules = {
+  username: [{ required: true, message: '请输入用户名', transform: (v: string) => (v ?? '').trim() }],
+  password: [{ required: true, message: '请输入密码' }]
+}
+
+/**
+ * 校验登录后的回跳地址：只接受站内单斜杠路径。
+ * 排除 `//evil.com`（协议相对外链）与 `/\evil.com`（部分浏览器会归一成 `//`），
+ * 防开放重定向；非法值返回 null，由调用方回落到工作台。
+ */
+function safeRedirect(raw: unknown): string | null {
+  const value = Array.isArray(raw) ? raw[0] : raw
+  if (typeof value !== 'string' || value === '') {
+    return null
+  }
+  if (!value.startsWith('/') || value.startsWith('//') || value.startsWith('/\\')) {
+    return null
+  }
+  return value
+}
+
+/**
+ * 提交登录：trim + 校验 → 换 token → loadMe → 跳转目标页。
+ * 失败时错误提示由 request 拦截器统一弹窗，这里只做状态收口。
  */
 async function onSubmit() {
-  if (!form.username || !form.password) {
+  // 双击/回车连打时直接挡回：loading 期间不再发第二次登录请求
+  if (loading.value) {
+    return
+  }
+  // trim 放在校验前，空白用户名按空值处理
+  form.username = form.username.trim()
+  try {
+    await formRef.value?.validate()
+  } catch {
+    // 校验失败：按「先用户名后密码」定位首个空项，避免用户不知道点没点上
+    if (!form.username) {
+      usernameRef.value?.focus()
+    } else {
+      passwordRef.value?.focus()
+    }
     return
   }
   loading.value = true
   try {
-    const { data } = await login(form.username.trim(), form.password)
+    const { data } = await login(form.username, form.password)
     user.setToken(data.data.token)
-    await user.loadMe()
-    await router.replace('/workspace')
+    /*
+     * /me 失败说明刚拿到的 token 不可用：立即清掉本地登录态，
+     * 不留「有 token、没用户信息」的半截态；用户面提示由拦截器给出，避免二次弹窗。
+     */
+    try {
+      await user.loadMe()
+    } catch {
+      await user.logout()
+      return
+    }
+    // 优先回原深链，没有合法 redirect 再进工作台
+    await router.replace(safeRedirect(route.query.redirect) ?? '/workspace')
+  } catch {
+    // 登录失败（含上面的 loadMe 失败）已在各分支处理，这里只收口未处理的 rejection
   } finally {
     loading.value = false
   }

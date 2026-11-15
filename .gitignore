@@ -41,6 +41,8 @@ logs/
 
 # Python 本地环境与字节码（scripts/openjudge-sidecar 等）
 **/.venv/
+# 启动脚本重建 venv 前会把损坏环境改名保留（.venv.broken-<时间戳>），不随仓库分发
+**/.venv.broken-*/
 **/__pycache__/
 .pytest_cache/
 *.py[cod]

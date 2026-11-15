@@ -4,6 +4,8 @@
 
 # Python 虚拟环境（体积大、平台相关，绝不入库）
 .venv/
+# 启动脚本把损坏的 .venv 改名留作排查（.venv.broken-<时间戳>），同样不入库
+.venv.broken-*/
 venv/
 env/
 
