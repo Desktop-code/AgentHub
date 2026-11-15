@@ -51,7 +51,9 @@ request.interceptors.response.use(
     if (status === 401) {
       localStorage.removeItem(TOKEN_KEY)
       if (!location.pathname.endsWith('/login')) {
-        location.href = '/login'
+        // 带当前地址去登录页，重登后由登录页校验并回跳该深链
+        const redirect = encodeURIComponent(location.pathname + location.search + location.hash)
+        location.href = `/login?redirect=${redirect}`
       }
     }
     if (!error.config?.silent) {
