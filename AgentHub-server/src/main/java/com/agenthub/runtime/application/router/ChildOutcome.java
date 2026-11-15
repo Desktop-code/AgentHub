@@ -2,6 +2,7 @@ package com.agenthub.runtime.application.router;
 
 import com.agenthub.agent.domain.model.AgentDef;
 import com.agenthub.runtime.domain.model.TrialTurn;
+import com.agenthub.runtime.domain.model.WorkflowRunView;
 
 import java.util.ArrayList;
 import java.util.List;
@@ -18,9 +19,14 @@ import java.util.List;
  * @param error   失败或跳过说明；成功为 null
  * @param skipped true＝因超出并行上限未执行；false＝真跑过
  * @param children 目标方案内部的下一层跳（只有 MA 目标可能非空）；其余为空表
+ * @param reasoning 该子自己的判定推理（只有方案分流会有）；落库后方案块的思考框仍在
+ * @param workflow 工作流目标的执行卡片终态（只有 WORKFLOW 目标会非空）；落库后刷新仍能看卡片
+ * @param conclusionName 目标方案自己的汇总结论名（只有 MA 目标、且真汇总开始过才非空）
+ * @param conclusionReasoning 目标方案汇总模型的推理；随「方案结论：X」一起落库
  */
 public record ChildOutcome(RoutedIntent intent, List<String> notices, TrialTurn turn, String error,
-                           boolean skipped, List<NestedRoute> children) {
+                           boolean skipped, List<NestedRoute> children, String reasoning,
+                           WorkflowRunView workflow, String conclusionName, String conclusionReasoning) {
 
     /**
      * 兼容构造：普通子 Agent / 工作流目标没有下一层可展开。
@@ -33,12 +39,49 @@ public record ChildOutcome(RoutedIntent intent, List<String> notices, TrialTurn 
      */
     public ChildOutcome(RoutedIntent intent, List<String> notices, TrialTurn turn, String error,
                         boolean skipped) {
-        this(intent, notices, turn, error, skipped, List.of());
+        this(intent, notices, turn, error, skipped, List.of(), null, null, null, null);
+    }
+
+    /**
+     * 兼容构造：有下一层跳、没有自己的判定推理（工作流 / 旧路径）。
+     *
+     * @param intent   执行意图
+     * @param notices  装配说明
+     * @param turn     子终答
+     * @param error    失败说明
+     * @param skipped  true＝未执行
+     * @param children 下一层跳
+     */
+    public ChildOutcome(RoutedIntent intent, List<String> notices, TrialTurn turn, String error,
+                        boolean skipped, List<NestedRoute> children) {
+        this(intent, notices, turn, error, skipped, children, null, null, null, null);
+    }
+
+    /**
+     * 兼容构造：有下一层跳与判定推理、没有汇总结论（目标方案汇总没跑 / 降级拼接）。
+     *
+     * @param intent    执行意图
+     * @param notices   装配说明
+     * @param turn      子终答
+     * @param error     失败说明
+     * @param skipped   true＝未执行
+     * @param children  下一层跳
+     * @param reasoning 该子自己的判定推理
+     * @param workflow  工作流卡片终态
+     */
+    public ChildOutcome(RoutedIntent intent, List<String> notices, TrialTurn turn, String error,
+                        boolean skipped, List<NestedRoute> children, String reasoning,
+                        WorkflowRunView workflow) {
+        this(intent, notices, turn, error, skipped, children, reasoning, workflow, null, null);
     }
 
     /** 下一层跳防御性归一：null → 空表，调用方不必逐处判空。 */
     public ChildOutcome {
         children = children == null ? List.of() : List.copyOf(children);
+        reasoning = reasoning == null || reasoning.isBlank() ? null : reasoning;
+        conclusionName = conclusionName == null || conclusionName.isBlank() ? null : conclusionName;
+        conclusionReasoning =
+                conclusionReasoning == null || conclusionReasoning.isBlank() ? null : conclusionReasoning;
     }
 
     /**
@@ -54,6 +97,57 @@ public record ChildOutcome(RoutedIntent intent, List<String> notices, TrialTurn 
     }
 
     /**
+     * 成功结果（目标方案）：额外带上方案内部每一跳、方案自己的判定推理与真汇总结论，
+     * 供时间线逐块展示且刷新后汇总那条不丢。
+     *
+     * @param intent              执行意图
+     * @param notices             装配说明；可空
+     * @param turn                目标方案终答
+     * @param children            方案内部每一跳；可空
+     * @param reasoning           方案自己的分流判定推理；可空
+     * @param conclusionName      方案自己的汇总结论名；没有真汇总时为 null
+     * @param conclusionReasoning 汇总模型的推理；可空
+     * @return 成功结果
+     */
+    public static ChildOutcome okScheme(RoutedIntent intent, List<String> notices, TrialTurn turn,
+                                        List<NestedRoute> children, String reasoning,
+                                        String conclusionName, String conclusionReasoning) {
+        return new ChildOutcome(intent, notices == null ? List.of() : new ArrayList<>(notices), turn, null,
+                false, children, reasoning, null, conclusionName, conclusionReasoning);
+    }
+
+    /**
+     * 成功结果（目标方案）：额外带上方案内部每一跳与方案自己的判定推理，供时间线逐块展示。
+     *
+     * @param intent    执行意图
+     * @param notices   装配说明；可空
+     * @param turn      目标方案终答
+     * @param children  方案内部每一跳；可空
+     * @param reasoning 方案自己的分流判定推理；可空
+     * @return 成功结果
+     */
+    public static ChildOutcome ok(RoutedIntent intent, List<String> notices, TrialTurn turn,
+                                  List<NestedRoute> children, String reasoning) {
+        return new ChildOutcome(intent, notices == null ? List.of() : new ArrayList<>(notices), turn, null,
+                false, children, reasoning, null, null, null);
+    }
+
+    /**
+     * 成功结果（工作流目标）：额外带上执行卡片的终态视图，刷新后卡片仍能重建。
+     *
+     * @param intent   执行意图
+     * @param notices  装配说明；可空
+     * @param turn     工作流投影正文
+     * @param workflow 卡片终态；可空（空则前端只出正文，不出卡片）
+     * @return 成功结果
+     */
+    public static ChildOutcome okWorkflow(RoutedIntent intent, List<String> notices, TrialTurn turn,
+                                          WorkflowRunView workflow) {
+        return new ChildOutcome(intent, notices == null ? List.of() : new ArrayList<>(notices), turn, null,
+                false, List.of(), null, workflow);
+    }
+
+    /**
      * 成功结果（目标方案）：额外带上方案内部每一跳，供时间线逐块展示。
      *
      * @param intent   执行意图
@@ -65,7 +159,7 @@ public record ChildOutcome(RoutedIntent intent, List<String> notices, TrialTurn 
     public static ChildOutcome ok(RoutedIntent intent, List<String> notices, TrialTurn turn,
                                   List<NestedRoute> children) {
         return new ChildOutcome(intent, notices == null ? List.of() : new ArrayList<>(notices), turn, null,
-                false, children);
+                false, children, null, null);
     }
 
     /**

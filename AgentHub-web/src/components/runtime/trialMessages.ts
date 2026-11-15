@@ -5,10 +5,13 @@
 import type {
   AssistantBlock,
   ChatTurn,
+  TrialChoiceView,
   TrialEvent,
   TrialFileView,
   TrialPlanView,
-  TrialStepView
+  TrialStepView,
+  TrialWorkflowNodeView,
+  TrialWorkflowView
 } from '@/types/runtime'
 import { renderSimpleMarkdown } from '@/utils/simpleMarkdown'
 import { nextBlockId } from '@/components/runtime/trialTimeline'
@@ -206,16 +209,72 @@ export function assistantTurn(key: string, status: ChatTurn['status']): ChatTurn
 }
 
 /** 连续的思考或回答拼进同一块，避免每个 token 一块。 */
-export function appendText(turn: ChatTurn, kind: 'reasoning' | 'assistant', text: string) {
+export function appendText(
+  turn: ChatTurn,
+  kind: 'reasoning' | 'assistant',
+  text: string,
+  participantId?: string,
+  participantName?: string
+) {
   if (!text) {
     return
   }
   const last = turn.blocks[turn.blocks.length - 1]
-  if (last && last.kind === kind) {
+  /*
+   * 同类型且同一位参与者才合并：并行 / 交错时两位参与者的 token 会相邻到达，
+   * 只按类型合并会把 B 的话接进 A 的块里（串块）。身份不同就另起一块。
+   */
+  if (last && last.kind === kind && (last.participantId || '') === (participantId || '')) {
     last.text += text
     return
   }
-  turn.blocks.push({ id: nextBlockId(turn), kind, text })
+  turn.blocks.push({ id: nextBlockId(turn), kind, text, participantId, participantName })
+}
+
+/**
+ * 参与者「开始」帧：该步一开始就补一条占位路由块，块随 begin 立刻出现，不等思考 / 工具。
+ *
+ * <p>为什么入口与汇总不在这里建块：入口块由判定推理 / 判定句建立，汇总由「方案结论：X」
+ * 建立；给它们补占位路由行反而会多出一位不存在的专家。
+ *
+ * <p>真实路由行随后到达时由 {@link appendRoute} 原位补全这条块（补上「依据」），
+ * 因此页面上不会出现同一参与者的两块。
+ *
+ * @param turn  目标助手轮
+ * @param chunk 身份帧（只处理 begin=true）
+ */
+export function appendParticipantBegin(
+  turn: ChatTurn,
+  chunk: { id?: string; name?: string; kind?: string; routeKey?: string; begin?: boolean }
+) {
+  if (!chunk || chunk.begin !== true) {
+    return
+  }
+  const id = (chunk.id || '').trim()
+  const name = (chunk.name || '').trim()
+  const kind = (chunk.kind || '').trim()
+  if (!id || !name || kind === 'gateway' || kind === 'conclusion') {
+    return
+  }
+  // 同一位参与者重复 begin（重连 / 回放）：保留第一块，不重复出块
+  const existing = turn.blocks.find(
+    (block) => block.kind === 'route' && (block.participantId === id || routeNameOf(block.text) === name)
+  )
+  if (existing) {
+    // 该参与者的路由行已经先到（单意图会在开跑前先推一条）：只补身份，不再造占位块
+    existing.participantId = existing.participantId || id
+    existing.participantName = existing.participantName || name
+    return
+  }
+  const key = (chunk.routeKey || '').trim()
+  turn.blocks.push({
+    id: nextBlockId(turn),
+    kind: 'route',
+    text: key ? `路由到 ${name}（${key}）` : `路由到 ${name}`,
+    participantId: id,
+    participantName: name,
+    begin: true
+  })
 }
 
 /**
@@ -238,7 +297,13 @@ export function appendVision(turn: ChatTurn, text: string) {
 }
 
 /** 工具按一次调用一块。参数行和结果分开。 */
-export function appendTool(turn: ChatTurn, line: string, result?: string) {
+export function appendTool(
+  turn: ChatTurn,
+  line: string,
+  result?: string,
+  participantId?: string,
+  participantName?: string
+) {
   const text = (line || '').trim()
   const detail = (result || '').trim()
   if (!text && !detail) {
@@ -248,8 +313,79 @@ export function appendTool(turn: ChatTurn, line: string, result?: string) {
     id: nextBlockId(turn),
     kind: 'tool',
     text: text || detail,
-    detail: detail && detail !== text ? detail : undefined
+    detail: detail && detail !== text ? detail : undefined,
+    participantId,
+    participantName
   })
+}
+
+/**
+ * 工具**开始**执行：追加一条占位块，等结果到达时原位补全。
+ *
+ * @param turn 目标助手轮
+ * @param name 工具名
+ * @param participantId   该工具属于哪一位参与者（可空：历史流）
+ * @param participantName 参与者展示名（可空）
+ */
+export function appendToolStart(
+  turn: ChatTurn,
+  name: string,
+  participantId?: string,
+  participantName?: string
+) {
+  const tool = (name || '').trim()
+  if (!tool) {
+    return
+  }
+  turn.blocks.push({
+    id: nextBlockId(turn),
+    kind: 'tool',
+    text: '',
+    toolName: tool,
+    toolState: 'running',
+    participantId,
+    participantName
+  })
+}
+
+/**
+ * 工具执行结束：把最近一条同名「正在调用」块补成成功 / 失败。
+ *
+ * <p>为什么按名字找最近一条 running：同一轮里同名工具可能被连续调用多次，
+ * 用「最后一条还在跑的」才对应得上引擎的完成顺序；找不到就退回追加一条普通结果块。
+ *
+ * @param turn     目标助手轮
+ * @param name     工具名
+ * @param line     展示行（含参数）
+ * @param result   结果正文；可空
+ * @param success  是否成功
+ * @return true 表示已就地补全
+ */
+export function completeTool(
+  turn: ChatTurn,
+  name: string,
+  line: string,
+  result: string | undefined,
+  success: boolean
+): boolean {
+  const tool = (name || '').trim()
+  const text = (line || '').trim()
+  const detail = (result || '').trim()
+  for (let i = turn.blocks.length - 1; i >= 0; i -= 1) {
+    const block = turn.blocks[i]
+    if (block.kind !== 'tool' || block.toolState !== 'running') {
+      continue
+    }
+    if (tool && (block.toolName || '').trim() !== tool) {
+      continue
+    }
+    block.toolState = success ? 'done' : 'error'
+    block.text = text || block.text || tool
+    block.detail = detail && detail !== text ? detail : undefined
+    block.toolArgsText = block.toolArgsText || text
+    return true
+  }
+  return false
 }
 
 /**
@@ -277,6 +413,147 @@ export function appendFile(turn: ChatTurn, file: TrialFileView) {
     return
   }
   turn.blocks.push({ id: nextBlockId(turn), kind: 'file', text: fileNameOf(name), file: next })
+}
+
+/**
+ * 结构化选项块：本轮需要用户拍板时补一条，chips 由它渲染。
+ *
+ * <p>为什么单独成块而不是塞回正文：正文里不能出现裸 JSON；而且它必须在刷新 / 回放
+ * 时有确定位置（紧跟助手正文之后），投影层据此把 chips 挂到同一位参与者的气泡下方。
+ *
+ * <p>同一轮只保留一条：后端最多推一次，重连 / 重复回放时原位覆盖即可，不叠加空栏。
+ *
+ * @param turn        目标助手轮
+ * @param choice      结构化选项（question + 2~6 项）
+ * @param participantId   该选项属于哪一位参与者（可空：续作轮没有身份帧）
+ * @param participantName 参与者展示名（可空）
+ */
+export function appendChoice(
+  turn: ChatTurn,
+  choice: TrialChoiceView,
+  participantId?: string,
+  participantName?: string
+) {
+  const options = Array.isArray(choice?.options) ? choice.options.filter((one) => !!one?.id && !!one?.label) : []
+  // 少于两项不成选项：宁可不出 chips，也不给一组看不懂的按钮
+  if (options.length < 2) {
+    return
+  }
+  const text = (choice.question || '').trim()
+  const existing = turn.blocks.find((block) => block.kind === 'choice')
+  if (existing) {
+    existing.text = text
+    existing.choice = { question: text, options }
+    return
+  }
+  turn.blocks.push({
+    id: nextBlockId(turn),
+    kind: 'choice',
+    text,
+    choice: { question: text, options },
+    participantId,
+    participantName
+  })
+}
+
+/**
+ * 工作流执行卡片：把一份状态快照收成 `workflow` 块。
+ *
+ * <p>为什么原位覆盖而不是追加：卡片是**状态快照**（同一份时间轴从「运行中」变成
+ * 「已完成」），追加会让页面上出现两遍同样的流程，刷新回放更是一串互相矛盾的旧状态。
+ *
+ * <p>识别同一个工作流按「编码优先、名字兜底」：同一轮里同名同编码只会有一条。
+ *
+ * @param turn 目标助手轮
+ * @param raw  SSE 帧 / 落库正文解析出的快照；结构不完整时整块丢弃（不画空卡片）
+ */
+export function appendWorkflow(turn: ChatTurn, raw: WorkflowSnapshotInput | undefined) {
+  const workflow = normalizeWorkflow(raw)
+  if (!workflow) {
+    return
+  }
+  const existing = turn.blocks.find((block) => block.kind === 'workflow' && sameWorkflow(block.workflow, workflow))
+  if (existing) {
+    existing.workflow = workflow
+    existing.participantName = existing.participantName || workflow.name
+    return
+  }
+  turn.blocks.push({
+    id: nextBlockId(turn),
+    kind: 'workflow',
+    text: workflow.name || workflow.code,
+    workflow,
+    participantName: workflow.name || workflow.code
+  })
+}
+
+/**
+ * 两个卡片快照是否指向同一次工作流运行。
+ *
+ * @param left  已有块上的视图
+ * @param right 新到的视图
+ * @return true 表示同一块，应原位覆盖
+ */
+function sameWorkflow(left: TrialWorkflowView | undefined, right: TrialWorkflowView) {
+  const code = (right.code || '').trim()
+  if (code) {
+    return (left?.code || '').trim() === code
+  }
+  return (left?.name || '').trim() === (right.name || '').trim()
+}
+
+/**
+ * 卡片快照的**输入**形状：SSE 帧 / 落库 JSON / 内存快照回放都可能只带部分字段，
+ * 因此这里按 unknown 收、逐字段校验，不信任任何上游。
+ */
+export interface WorkflowSnapshotInput {
+  name?: unknown
+  code?: unknown
+  status?: unknown
+  answer?: unknown
+  nodes?: unknown
+  /** 节点上的可选字段（归一化时逐个校验） */
+  type?: unknown
+  note?: unknown
+}
+
+/**
+ * 归一化卡片快照：只接受真实字段，状态一律大写，节点按图顺序。
+ *
+ * <p>边界：名字与编码都为空时整块丢弃——一张没有名字的卡片无法归属到任何工作流。
+ *
+ * @param raw 原始快照（SSE 帧 / 落库 JSON / 快照回放）
+ * @return 归一化视图；不可用时为 undefined
+ */
+export function normalizeWorkflow(raw: WorkflowSnapshotInput | undefined): TrialWorkflowView | undefined {
+  if (!raw || typeof raw !== 'object') {
+    return undefined
+  }
+  const name = typeof raw.name === 'string' ? raw.name.trim() : ''
+  const code = typeof raw.code === 'string' ? raw.code.trim() : ''
+  if (!name && !code) {
+    return undefined
+  }
+  const rawNodes = Array.isArray(raw.nodes) ? raw.nodes : []
+  const nodes: TrialWorkflowNodeView[] = rawNodes
+    .filter((node) => !!node && typeof node === 'object')
+    .map((node) => {
+      const one = node as WorkflowSnapshotInput
+      return {
+        code: typeof one.code === 'string' ? one.code.trim() : '',
+        name: typeof one.name === 'string' ? one.name.trim() : '',
+        type: typeof one.type === 'string' ? one.type.trim().toUpperCase() : '',
+        status: typeof one.status === 'string' && one.status.trim() ? one.status.trim().toUpperCase() : 'PENDING',
+        note: typeof one.note === 'string' ? one.note.trim() : ''
+      }
+    })
+  return {
+    name,
+    code,
+    status: typeof raw.status === 'string' && raw.status.trim() ? raw.status.trim().toUpperCase() : 'RUNNING',
+    answer: typeof raw.answer === 'string' ? raw.answer : '',
+    nodes
+  }
 }
 
 /**
@@ -324,6 +601,12 @@ export type ProcessStep = {
   type: 'route' | 'reasoning' | 'tool_call' | 'tool_result'
   title: string
   text: string
+  /**
+   * 工具块状态（仅 tool_call）：`running` 表示引擎已开始、结果还没回来。
+   *
+   * <p>缺省＝已完成。前端据此把「正在调用」画成蓝色胶囊，而不是等结果才出现。
+   */
+  state?: 'running' | 'done' | 'error'
 }
 
 /**
@@ -335,6 +618,8 @@ export type ProcessLane = {
   /** 块标题。agent 为「路由到 {显示名}」 */
   title: string
   routeKey?: string
+  /** 该泳道对应的参与者身份（begin 帧给的 id）；历史数据为空 */
+  participantId?: string
   /** 决策 JSON / 依据 / 其它路由说明 */
   body?: string
   steps: ProcessStep[]
@@ -371,15 +656,33 @@ export function processSteps(blocks: AssistantBlock[]): ProcessStep[] {
 export function processLanes(blocks: AssistantBlock[]): ProcessLane[] {
   const lanes: ProcessLane[] = []
   let current: ProcessLane | undefined
+  /*
+   * 身份 → 泳道。有 begin 帧的轮次里，思考 / 工具块自带参与者 id：
+   * 直接归到该参与者的泳道，不再靠「最后一条 route 文案」猜当前说话人。
+   * 历史数据没有 id，仍走原来的 current 口径，行为不变。
+   */
+  const byParticipant = new Map<string, ProcessLane>()
+  /*
+   * 是否处于「汇总」阶段：`方案结论：X` 之后的过程事件属于汇总那条独立记录，
+   * 不能再按上一位子专家的身份回填（否则汇总的思考会串进最后一位专家块）。
+   */
+  let conclusionPhase = false
 
   for (const block of processBlocks(blocks)) {
     if (block.kind === 'route') {
       for (const piece of splitRoutePieces(block.text)) {
+        // 汇总标记不是参与者：从这里起，后续过程事件不再归属上一位
+        if (piece.startsWith('方案结论：')) {
+          conclusionPhase = true
+          current = undefined
+          continue
+        }
         const lane = routeLane(piece)
         if (!lane) {
           continue
         }
         if (lane.kind === 'agent') {
+          conclusionPhase = false
           // 同名同 key 复用块（流式先决策后子开跑会再推一次「路由到」）
           const existing = lanes.find(
             (item) =>
@@ -391,19 +694,50 @@ export function processLanes(blocks: AssistantBlock[]): ProcessLane[] {
             if (!existing.body && lane.body) {
               existing.body = lane.body
             }
+            // 占位块与真实路由行落在同一泳道时，把身份也记到泳道上
+            if (block.participantId) {
+              existing.participantId = block.participantId
+              byParticipant.set(block.participantId, existing)
+            }
             current = existing
             continue
           }
         }
+        if (block.participantId && lane.kind === 'agent') {
+          lane.participantId = block.participantId
+        }
         lanes.push(lane)
+        if (block.participantId && lane.kind === 'agent') {
+          byParticipant.set(block.participantId, lane)
+        }
         current = lane.kind === 'agent' ? lane : undefined
       }
       continue
     }
+    /*
+     * 有身份的块：落到它自己的泳道。
+     * - id 不在映射里（入口网关的判定推理 / 未能建块的参与者）：落匿名执行块，
+     *   不能退回「当前泳道」，否则会把入口的思考挂到第一位专家名下；
+     * - 汇总阶段：一律落匿名执行块，汇总内容由投影层单独收进结论记录。
+     */
+    const pinned = !conclusionPhase && block.participantId ? byParticipant.get(block.participantId) : undefined
+    if (pinned) {
+      current = pinned
+    } else if (block.participantId || conclusionPhase) {
+      current = undefined
+    }
     if (!current || current.kind !== 'agent') {
-      // 尚无子块时落进匿名执行块，避免丢推理/工具
-      current = { kind: 'agent', title: '执行', steps: [] }
+      // 尚无子块时落进匿名执行块，避免丢推理/工具；带上身份，投影层才能把入口推理认回来
+      current = { kind: 'agent', title: '执行', participantId: block.participantId, steps: [] }
       lanes.push(current)
+      /*
+       * 同一身份的后续增量继续落这一块。
+       * 不登记的话，每个带身份的块都会另起一条「执行」泳道：入口判定推理被拆成多条，
+       * 投影层只能靠位置拼，一旦中间夹进决策行就整段丢掉。
+       */
+      if (block.participantId) {
+        byParticipant.set(block.participantId, current)
+      }
     }
     if (block.kind === 'reasoning') {
       // 同 lane 内连续推理合并为一步（防 laneBound 重推路由把流式拆成一词一步；回放错步亦重建）
@@ -412,11 +746,23 @@ export function processLanes(blocks: AssistantBlock[]): ProcessLane[] {
     }
     const line = block.text.trim()
     const result = (block.detail || '').trim()
+    /*
+     * 工具开始（还没有结果）：只记一条 running 的 tool_call，用于画「正在调用」胶囊。
+     * block.text 此时是空串，工具名在 block.toolName 里。
+     */
+    if (block.toolState === 'running' && !line) {
+      const name = (block.toolName || '').trim()
+      if (name) {
+        current.steps.push({ type: 'tool_call', title: `调用工具 ${name}`, text: '', state: 'running' })
+      }
+      continue
+    }
     if (line) {
       current.steps.push({
         type: 'tool_call',
         title: toolCallTitle(line),
-        text: toolCallBody(line)
+        text: toolCallBody(line),
+        state: block.toolState === 'error' ? 'error' : 'done'
       })
     }
     if (result) {
@@ -502,20 +848,85 @@ function routeLane(raw: string): ProcessLane | undefined {
 
 /**
  * 流式收到路由事件时追加一块；多意图可连续多条「路由到…」。
- * 并行子 laneBound 会在每个 reasoning/tool 增量前重推本子路由：
- * 只要「最近一条路由」已是同文案（中间可夹推理/工具），就跳过，避免打断 appendText 合并。
- * 切到另一子时最近路由文案不同，仍会插入，保证分块切换。
+ *
+ * <p>若该参与者在 begin 时已补过占位路由行（只有名字与 route_key），这里**原位补全**
+ * 这条块（补上「依据」），不另起一条——同一个参与者只会出一块。
+ *
+ * <p>并行子重推本子路由：只要「最近一条路由」已是同文案（中间可夹推理/工具），就跳过，
+ * 避免打断 appendText 合并。
+ *
+ * @param turn    目标助手轮
+ * @param summary 路由摘要原文
+ * @param participantId   当前归属身份（可空：历史流 / 决策块）
+ * @param participantName 当前归属展示名（可空）
  */
-export function appendRoute(turn: ChatTurn, summary: string) {
+export function appendRoute(
+  turn: ChatTurn,
+  summary: string,
+  participantId?: string,
+  participantName?: string
+) {
   const text = (summary || '').trim()
   if (!text) {
+    return
+  }
+  // 先找同一位参与者的 begin 占位块：真实路由行到达时原位补全
+  const placeholder = text.startsWith('路由到')
+    ? [...turn.blocks].reverse().find((block) => block.kind === 'route' && block.begin === true
+      && sameRouteTarget(block.text, text))
+    : undefined
+  if (placeholder) {
+    placeholder.text = text
+    placeholder.begin = false
+    if (!placeholder.participantId && participantId) {
+      placeholder.participantId = participantId
+    }
+    if (!placeholder.participantName && participantName) {
+      placeholder.participantName = participantName
+    }
     return
   }
   const active = latestRouteText(turn.blocks)
   if (active === text) {
     return
   }
-  turn.blocks.push({ id: nextBlockId(turn), kind: 'route', text })
+  // 身份只在「这条路由确实是这位参与者」时写入，避免把上一位的 id 贴到新路由块上
+  const sameOwner = routeNameOf(text) !== '' && routeNameOf(text) === (participantName || '').trim()
+  turn.blocks.push({
+    id: nextBlockId(turn),
+    kind: 'route',
+    text,
+    participantId: sameOwner ? participantId : undefined,
+    participantName: sameOwner ? participantName : undefined
+  })
+}
+
+/**
+ * 两条路由行是否指向同一位参与者（名字相同；双方都有 key 时 key 也必须相同）。
+ *
+ * @param left  已有路由行
+ * @param right 新到的路由行
+ * @return true 表示可以原位补全
+ */
+function sameRouteTarget(left: string, right: string): boolean {
+  const a = parseRouteParticipant(left)
+  const b = parseRouteParticipant(right)
+  if (!a?.name || !b?.name || a.name !== b.name) {
+    return false
+  }
+  const leftKey = (a.key || '').trim()
+  const rightKey = (b.key || '').trim()
+  return !leftKey || !rightKey || leftKey === rightKey
+}
+
+/**
+ * 路由行里的展示名；解析不出时为空串（决策块 / 说明行不算参与者）。
+ *
+ * @param raw 路由行
+ * @return 展示名
+ */
+function routeNameOf(raw: string): string {
+  return (parseRouteParticipant(raw)?.name || '').trim()
 }
 
 /**
@@ -762,8 +1173,21 @@ export function simpleProcessSteps(blocks: AssistantBlock[]): ProcessStep[] {
     }
     const line = block.text.trim()
     const result = (block.detail || '').trim()
+    // 工具开始（无结果）：只画「正在调用」胶囊
+    if (block.toolState === 'running' && !line) {
+      const name = (block.toolName || '').trim()
+      if (name) {
+        steps.push({ type: 'tool_call', title: `调用工具 ${name}`, text: '', state: 'running' })
+      }
+      continue
+    }
     if (line) {
-      steps.push({ type: 'tool_call', title: toolCallTitle(line), text: toolCallBody(line) })
+      steps.push({
+        type: 'tool_call',
+        title: toolCallTitle(line),
+        text: toolCallBody(line),
+        state: block.toolState === 'error' ? 'error' : 'done'
+      })
     }
     if (result) {
       steps.push({ type: 'tool_result', title: '工具结果', text: result })
@@ -895,6 +1319,16 @@ function pushBlock(turn: ChatTurn, block: AssistantBlock) {
     appendFile(turn, block.file)
     return
   }
+  // 选项也走去重：同一轮只保留一条 chips，重复回放原位覆盖
+  if (block.kind === 'choice' && block.choice) {
+    appendChoice(turn, block.choice, block.participantId, block.participantName)
+    return
+  }
+  // 工作流卡片同理：同一轮同一工作流只保留最新一份快照
+  if (block.kind === 'workflow' && block.workflow) {
+    appendWorkflow(turn, block.workflow)
+    return
+  }
   // 其余块（vision / system / error / ROUTER_TRACE）直接入列：补齐稳定 id 再 push，
   // 否则模板只能退回下标 key，插入视觉块时会整表重挂
   turn.blocks.push({ ...block, id: block.id || nextBlockId(turn) })
@@ -963,11 +1397,75 @@ function blockFromEvent(item: TrialEvent): AssistantBlock | undefined {
     }
     return { kind: 'file', text: fileNameOf(file.fileName), file }
   }
+  if (item.eventType === 'choice') {
+    /*
+     * 结构化选项：正文是 {"question","options"}（与 SSE 帧同形），摘要是问题句。
+     * 解析不出合法结构时整块丢弃——回放也不能凭空造一组按钮。
+     */
+    const choice = parseChoiceEvent(item.contentText)
+    return choice ? { kind: 'choice', text: choice.question, choice } : undefined
+  }
+  if (item.eventType === 'workflow') {
+    /*
+     * 工作流执行卡片：正文是 {name,code,status,answer,nodes} 的 JSON（与 SSE 帧同形）。
+     * 解析失败时整块丢弃：宁可刷新后只剩正文，也不能画一张字段错位的假卡片。
+     */
+    const workflow = parseWorkflowEvent(item.contentText)
+    return workflow ? { kind: 'workflow', text: workflow.name || workflow.code, workflow } : undefined
+  }
   if (item.eventType === 'error') {
     const text = displayText(item)
     return text ? { kind: 'error', text } : undefined
   }
+  /*
+   * 参与者身份帧（后端只记 begin）：刷新时读的是进行中一轮的内存快照，
+   * 此刻该步可能还没产出任何思考 / 工具。补一条占位路由块，页面才能与实时一致地先出块。
+   * begin=false 的归属切换不建块（那是给实时增量定向用的，回放不需要）。
+   */
+  if (item.eventType === 'participant') {
+    return participantBeginBlock(item)
+  }
   return undefined
+}
+
+/**
+ * 身份帧 → 占位路由块。所属域：runtime（前端）。
+ *
+ * <p>只认 begin=true 且 id / 名字齐全的帧；入口与汇总是「块由内容建立」的两位，
+ * 它们不吃占位（补了会多出一位不存在的参与者）。与 {@link appendParticipantBegin} 同口径。
+ *
+ * @param item 落库 / 快照里的 participant 事件
+ * @return 占位路由块；不入列时返回 undefined
+ */
+function participantBeginBlock(item: TrialEvent): AssistantBlock | undefined {
+  const raw = (item.contentText || '').trim()
+  if (!raw || raw[0] !== '{') {
+    return undefined
+  }
+  let chunk: { id?: string; name?: string; kind?: string; routeKey?: string; begin?: boolean }
+  try {
+    chunk = JSON.parse(raw)
+  } catch {
+    // 半截 JSON（快照写入时被截断）：宁可不出块，也不抛进渲染树
+    return undefined
+  }
+  if (!chunk || chunk.begin !== true) {
+    return undefined
+  }
+  const id = (chunk.id || '').trim()
+  const name = (chunk.name || '').trim()
+  const kind = (chunk.kind || '').trim()
+  if (!id || !name || kind === 'gateway' || kind === 'conclusion') {
+    return undefined
+  }
+  const key = (chunk.routeKey || '').trim()
+  return {
+    kind: 'route',
+    text: key ? `路由到 ${name}（${key}）` : `路由到 ${name}`,
+    participantId: id,
+    participantName: name,
+    begin: true
+  }
 }
 
 /** 展示优先用正文，旧数据没有 contentText 时退回短摘要。 */
@@ -977,6 +1475,74 @@ function displayText(item: TrialEvent): string {
     return full
   }
   return (item.summary || '').trim()
+}
+
+/**
+ * 解析落库的工作流卡片事件正文（{@code {"name","code","status","answer","nodes"}}）。
+ *
+ * <p>与 SSE 帧同形，因此直接复用 {@link normalizeWorkflow}：两条来源一套口径，
+ * 不会出现「实时看得到、刷新后字段对不上」。
+ *
+ * @param raw 事件正文 JSON，可空
+ * @return 归一化视图；空正文 / 半截 JSON / 缺名字与编码时为 undefined
+ */
+export function parseWorkflowEvent(raw: string | undefined): TrialWorkflowView | undefined {
+  const text = (raw || '').trim()
+  if (!text) {
+    return undefined
+  }
+  try {
+    return normalizeWorkflow(JSON.parse(text) as WorkflowSnapshotInput)
+  } catch {
+    // 半截 JSON（列宽截断）：不出卡片，本轮仍能看正文
+    return undefined
+  }
+}
+
+/**
+ * 解析 CHOICE 事件正文（与 SSE `choice` 帧同一形状）。
+ *
+ * <p>边界与后端一致：`options` 必须是 2~6 项、每项 id / label 非空且 id 不重复，
+ * 任何一条不合格就整份作废——宁可这一轮没有 chips，也不渲染一组点了会对错人的按钮。
+ *
+ * @param raw 事件正文 JSON，可空
+ * @return 结构化选项；解析失败或越界时为 undefined
+ */
+export function parseChoiceEvent(raw: string | undefined): TrialChoiceView | undefined {
+  const text = (raw || '').trim()
+  if (!text) {
+    return undefined
+  }
+  let data: { question?: unknown; options?: unknown }
+  try {
+    data = JSON.parse(text) as { question?: unknown; options?: unknown }
+  } catch {
+    // 半截 JSON（快照写入时被截断）：不出块，正文照常展示
+    return undefined
+  }
+  if (!data || !Array.isArray(data.options)) {
+    return undefined
+  }
+  const options: { id: string; label: string }[] = []
+  for (const item of data.options) {
+    if (!item || typeof item !== 'object') {
+      return undefined
+    }
+    const one = item as { id?: unknown; label?: unknown }
+    const id = typeof one.id === 'string' ? one.id.trim() : ''
+    const label = typeof one.label === 'string' ? one.label.trim() : ''
+    if (!id || !label) {
+      return undefined
+    }
+    if (options.some((row) => row.id.toLowerCase() === id.toLowerCase())) {
+      return undefined
+    }
+    options.push({ id, label })
+  }
+  if (options.length < 2 || options.length > 6) {
+    return undefined
+  }
+  return { question: typeof data.question === 'string' ? data.question.trim() : '', options }
 }
 
 /**

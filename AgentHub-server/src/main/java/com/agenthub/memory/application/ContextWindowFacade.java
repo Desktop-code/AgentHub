@@ -115,6 +115,45 @@ public class ContextWindowFacade {
     }
 
     /**
+     * 只读预览一个会话的窗口：读 Redis 热窗口，miss 时从会话事件回放。
+     *
+     * <p>与 {@link #load(MemoryPolicy, long, long, long, String)} 的关键差别：
+     * <b>不</b>推进滚动摘要、<b>不</b>写回 Redis、<b>不</b>刷新 TTL。
+     * 工作台方案会话（虚拟根）本轮只用它拼「会话摘要 / 最近对话 / 当前用户」，
+     * 但不给这条链路开写窗口——它没有 Agent 级窗口策略，写进去会把摘要与阈值算到别的域头上。
+     *
+     * <p>事件表是真源：Redis miss 时按事件回放出的近轮足以回答「上一轮问了什么」，
+     * 回放本身不落库，因此重复调用是幂等的。
+     *
+     * @param sessionId 会话主键
+     * @return 窗口快照（摘要 + 近轮，含已落库的当前用户轮）；永不为 null
+     * @throws BizException Redis 读失败（调用方按降级处理，可退回原文）
+     */
+    public WindowState previewWindow(long sessionId) {
+        try {
+            var hit = store.readTurns(sessionId);
+            if (hit.isPresent()) {
+                WindowState state = new WindowState();
+                state.setTurns(new ArrayList<>(hit.get()));
+                state.setSummary(store.readSummary(sessionId));
+                return state;
+            }
+        } catch (RuntimeException ex) {
+            throw window(ex, "Redis 不可用，上下文窗口读取失败");
+        }
+        // 热窗口缺失：只从事件回放，不触发摘要、不保存；摘要槽仍是同一份 Redis 值（可能为空）
+        WindowState replayed = new WindowState();
+        replayed.setTurns(new ArrayList<>(events.replay(sessionId)));
+        try {
+            replayed.setSummary(store.readSummary(sessionId));
+        } catch (RuntimeException ex) {
+            // 摘要槽读失败不阻断预览：近轮仍可回答「上一轮说了什么」
+            replayed.setSummary("");
+        }
+        return replayed;
+    }
+
+    /**
      * 清空或删除会话时丢掉热数据，下次从事件重放。
      *
      * @param sessionId 会话

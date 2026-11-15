@@ -23,6 +23,14 @@ public enum EventType {
     /** Router 选中了哪个子 Agent */
     ROUTE("route"),
     /**
+     * 参与者开始（入口 / 方案 / 专家 / 汇总）。正文是身份的 JSON：
+     * id + name + kind + routeKey + depth。
+     *
+     * <p>为什么要落库：刷新后要按同一套身份把块还原出来，不能再靠 route 文案反推归属。
+     * 进程内的内存快照也用它标记「这一步已经开始」，前端据此立刻出块。
+     */
+    PARTICIPANT("participant"),
+    /**
      * 计划执行模式的结构化计划。正文是 PlanView 的 JSON：
      * planId + state + steps[{seq,title,detail}]；状态变更事件不再重复 steps。
      */
@@ -32,6 +40,15 @@ public enum EventType {
      * seq + title + state + text（该步结果，仅结束时非空）。
      */
     STEP("step"),
+    /**
+     * 需要用户拍板的结构化选项。正文是 AgentChoice 的 JSON：
+     * question + options[{id,label}]。
+     *
+     * <p>为什么不塞进 ASSISTANT 正文：选项是机器数据，不该出现在聊天文本里；
+     * 独立成事件后，前端只按它渲染 chips，刷新回放也走同一份结构化数据，
+     * 不再靠正则从正文里猜列表。
+     */
+    CHOICE("choice"),
     /** 装配说明，例如源不可用、超预算未暴露或被截断的 Skill */
     SYSTEM("system"),
     /**
@@ -40,6 +57,15 @@ public enum EventType {
      * 且刷新后回放也必须有，而 TOOL 正文会被截断。
      */
     FILE("file"),
+    /**
+     * 工作流目标的执行卡片快照。正文是 {@code WorkflowRunView} 的 JSON：
+     * name + code + status + answer + nodes[{code,name,type,status,note}]。
+     *
+     * <p>为什么单独成类型：工作流不是一位「专家」，它有自己的执行卡片（节点时间轴 + 产物区）。
+     * 只靠一条「运行工作流「X」…」的状态句，刷新后就只剩入口判定，卡片整个消失。
+     * 独立事件让实时帧、内存快照与落库回放共用同一份结构，也避免把节点进度塞进聊天正文。
+     */
+    WORKFLOW("workflow"),
     /** 失败说明，已脱敏 */
     ERROR("error");
 

@@ -115,7 +115,7 @@ public class ReceptionConfigAppService {
         }
         resp.setSchemeId(def.getId());
         resp.setSchemeCode(def.getCode());
-        // 入口统一显示「Router」；普通方案仍用库里的名称
+        // 入口名称读配置（已可编辑）；普通方案仍用库里的名称
         resp.setSchemeName(def.displayName());
         resp.setTemplate(def.getTemplate());
         resp.setEnabled(def.getEnabled());

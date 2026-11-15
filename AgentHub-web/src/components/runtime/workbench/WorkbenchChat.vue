@@ -106,6 +106,7 @@
           skin="workbench"
           :gateway-badge="gatewayBadgeText"
           :route-hint="routeName"
+          :entry-name="schemeName"
           :route-candidates="atRouteCandidates"
           :selected-route="pendingForceRoute"
           :can-pick-route="canPickRoute"
@@ -126,6 +127,7 @@
           @reject="rejectPlan"
           @pick-route="onPickRoute"
           @clear-route="clearPendingRoute"
+          @choice-selected="chooseOption"
         />
       </ChatRenderBoundary>
     </section>
@@ -185,6 +187,8 @@ const {
   ready,
   configLoading,
   reason,
+  /** 默认接待方案名（现网 Router）：入口块标题直接读它，不在前端写别名 */
+  schemeName,
   session,
   turns,
   sending,
@@ -211,6 +215,7 @@ const {
   openHistory,
   loadMoreHistory,
   send,
+  chooseOption,
   pickRoute,
   clearPendingRoute,
   clearCurrent,

@@ -121,23 +121,24 @@ public final class MaDefPolicy {
     }
 
     /**
-     * 入口行的身份字段锁定：编码、名称、备注（方案说明）三项只读。
+     * 入口行的身份字段锁定：编码、备注（方案说明）两项只读，名称已开放编辑。
      *
-     * <p>为什么连名称也要锁：入口在全平台只有这一条，展示名固定为「Router」，
-     * 备注写的是「唯一入口 + 哪些动作禁止」；这两项一旦可改，运营就分不清哪条是入口、
-     * 也看不清它为什么不能被删除 / 入池，属于身份漂移。模型槽与 ROUTER 提示词不在此列，
-     * 那两项仍可正常配置（打开同一套方案编辑页即可）。
+     * <p>为什么编码 / 备注仍要锁：编码是租户内唯一业务键，改了等于换了一条方案；
+     * 备注写的是「唯一入口 + 哪些动作禁止」，属于平台口径。名称只影响展示，
+     * 页面改名后列表、详情与消息流入口块同步生效，不再属于身份漂移。
+     * 模型槽与 ROUTER 提示词也不在此列，仍可正常配置。
      *
      * <p>放行口径：字段为 {@code null}（请求未携带，如只改模型）视为「不改」；
      * 有值但与锁定值不一致时直接拒绝，而不是静默丢弃，避免前端以为改成功了。
+     * 名称不走这里：空名由 {@code MaDefAppService#requiredText} 统一拦，重名沿用现网口径
+     * （方案只对编码做唯一约束，名称本来就允许重复）。
      *
      * @param existing    库内方案，必须已确认是入口类型
      * @param code        请求里的编码；可空
-     * @param name        请求里的名称；可空
      * @param description 请求里的备注；可空
-     * @throws BizException 试图改动入口的编码 / 名称 / 备注
+     * @throws BizException 试图改动入口的编码 / 备注
      */
-    public static void assertEntryIdentity(MaDef existing, String code, String name, String description) {
+    public static void assertEntryIdentity(MaDef existing, String code, String description) {
         if (existing == null || !AgentRuntimeConfig.isEntryRouterTemplate(existing.getTemplate())) {
             return;
         }
@@ -145,10 +146,6 @@ public final class MaDefPolicy {
         if (code != null && !code.trim().equals(safeTrim(existing.getCode()))) {
             throw new BizException(ErrorCode.BAD_REQUEST,
                     "对话入口的编码固定为「" + existing.getCode() + "」，不允许修改");
-        }
-        if (name != null && !name.trim().equals(AgentRuntimeConfig.ENTRY_ROUTER_NAME)) {
-            throw new BizException(ErrorCode.BAD_REQUEST,
-                    "对话入口的名称固定为「" + AgentRuntimeConfig.ENTRY_ROUTER_NAME + "」，不允许修改");
         }
         if (description != null && !description.trim().equals(AgentRuntimeConfig.ENTRY_ROUTER_DESCRIPTION)) {
             throw new BizException(ErrorCode.BAD_REQUEST,
@@ -564,12 +561,8 @@ public final class MaDefPolicy {
         return agent.getId() == null ? "该 Agent" : "#" + agent.getId();
     }
 
-    /** 错误文案里的方案 / 工作流称呼：名称 → 编码 → 主键。入口统一叫「Router」。 */
+    /** 错误文案里的方案 / 工作流称呼：名称 → 编码 → 主键。入口同样用可编辑后的名称。 */
     private static String displayName(MaDef def) {
-        if (AgentRuntimeConfig.isEntryRouterTemplate(def.getTemplate())) {
-            // 入口的展示名是平台锁定的，不用库里的历史中文名，保证错误文案与列表一致
-            return AgentRuntimeConfig.ENTRY_ROUTER_NAME;
-        }
         if (def.getName() != null && !def.getName().isBlank()) {
             return def.getName().trim();
         }

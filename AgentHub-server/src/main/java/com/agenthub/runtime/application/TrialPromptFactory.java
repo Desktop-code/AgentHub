@@ -12,7 +12,9 @@ import com.agenthub.runtime.domain.model.McpToolSpec;
 import com.agenthub.runtime.domain.model.PromptInjectionStats;
 import com.agenthub.runtime.domain.model.ToolSourceView;
 import com.agenthub.runtime.domain.service.AgentDictionaryReader;
+import com.agenthub.runtime.domain.service.AnswerChannelNote;
 import com.agenthub.runtime.domain.service.BuiltinSchemaSource;
+import com.agenthub.runtime.domain.service.ChoiceNote;
 import com.agenthub.runtime.domain.service.PromptInjectionComposer;
 import com.agenthub.runtime.domain.service.ToolEnablement;
 import com.agenthub.skill.domain.model.SkillDef;
@@ -108,6 +110,24 @@ public class TrialPromptFactory {
      * @return 系统提示、结构描述、可注册内置/MCP 工具、装配说明和注入统计
      */
     public Built build(AgentDef agent, String userQuery, String memory) {
+        return build(agent, userQuery, memory, false);
+    }
+
+    /**
+     * 工作台叶子专家装配：在记忆段之后追平台内置的「交付通道口径 + 选项块说明」。
+     *
+     * <p>为什么按参数开关而不是按入口自动判断：是否允许让用户拍板是本轮的编排口径
+     * （只有单专家 / 入口直分的叶子能续作），由执行侧显式传入，提示词工厂不猜入口。
+     * 两段锁定文案同进同出：选项规则会教模型「调用工具后一句话收尾」，
+     * 没有通道口径兜在前面，这句话会被误用到点选续作轮，把整份方案挤进思考通道。
+     *
+     * @param agent         已启用的定义
+     * @param userQuery     本轮用户原文；命中 Skill 触发词即强制注入该 Skill 正文
+     * @param memory        记忆段正文，可空
+     * @param choiceEnabled true 表示本轮允许输出可点选项块
+     * @return 系统提示、结构描述、可注册内置/MCP 工具、装配说明和注入统计
+     */
+    public Built build(AgentDef agent, String userQuery, String memory, boolean choiceEnabled) {
         List<String> notices = new ArrayList<>();
         List<PromptInjectionComposer.SkillInput> skillInputs = skillsOf(agent.getId(), userQuery);
         PreparedTools prepared = toolsOf(agent.getId(), notices);
@@ -115,6 +135,11 @@ public class TrialPromptFactory {
         PromptInjectionComposer.Outcome outcome = PromptInjectionComposer.compose(
                 new PromptInjectionComposer.Assembled(assembled.text(), assembled.layout()),
                 memory,
+                // 叶子专家的平台内置锁定段：交付通道口径 → 选项块说明。
+                // 通道口径必须排在选项规则前面：先定「什么算正文」，再谈「什么时候可以只收一句」，
+                // 否则「一句话收尾」的选项规则会被模型套到点选续作轮，把整份方案写进思考通道。
+                // 其余入口与「摘要触顶顺带抽」等链路保持无此段
+                choiceEnabled ? AnswerChannelNote.text() + "\n\n" + ChoiceNote.text() : null,
                 skillInputs,
                 prepared.inputs(),
                 new PromptInjectionComposer.Budgets(

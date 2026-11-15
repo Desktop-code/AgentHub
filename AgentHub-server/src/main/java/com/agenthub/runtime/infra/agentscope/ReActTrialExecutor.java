@@ -2,11 +2,14 @@ package com.agenthub.runtime.infra.agentscope;
 
 import com.agenthub.rag.application.RagToolContext;
 import com.agenthub.runtime.domain.model.EffectiveLimits;
+import com.agenthub.runtime.domain.model.AgentChoice;
+import com.agenthub.runtime.domain.model.ChoiceCapture;
 import com.agenthub.runtime.domain.model.MemoryFact;
 import com.agenthub.runtime.domain.model.MeterScope;
 import com.agenthub.runtime.domain.model.TrialPlan;
 import com.agenthub.runtime.domain.model.TrialTurn;
 import com.agenthub.runtime.domain.service.CauseDigest;
+import com.agenthub.runtime.domain.service.ChoiceCaptureHolder;
 import com.agenthub.runtime.domain.service.FactKeyCanonicalizer;
 import com.agenthub.runtime.domain.service.LimitHitReasons;
 import com.agenthub.runtime.domain.service.ModelCallErrors;
@@ -17,6 +20,7 @@ import com.agenthub.runtime.domain.service.ScratchContext;
 import com.agenthub.runtime.domain.service.TextToolCallGuard;
 import com.agenthub.runtime.domain.service.TrialFailure;
 import com.agenthub.runtime.domain.service.TrialProgress;
+import com.agenthub.runtime.domain.service.WorkbenchChoiceCollector;
 import com.agenthub.runtime.infra.agentscope.builtin.MaScratchTool;
 import io.agentscope.core.ReActAgent;
 import io.agentscope.core.agent.RuntimeContext;
@@ -64,6 +68,8 @@ public class ReActTrialExecutor {
     private final ToolResultOffloadStore offload;
     /** 落盘阈值与摘要长度来自 trial 配置 */
     private final TrialProperties trialProperties;
+    /** 结构化选项的后端兜底：模型没调 {@code agenthub_choice} 时把终答再收一次 */
+    private final WorkbenchChoiceCollector choiceCollector;
 
     /**
      * @param models         打开模型并按轮记账
@@ -76,12 +82,14 @@ public class ReActTrialExecutor {
      * @param requiredArgs   必填参数闸门开关与实体字段口径
      * @param offload        超长工具结果落盘（阈值见 {@link TrialProperties}）
      * @param trialProperties 试跑参数（句柄化阈值与摘要长度）
+     * @param choiceCollector 结构化选项兜底整理（失败只降级成「没有 chips」）
      */
     public ReActTrialExecutor(MeteredModelOpener models, InMemoryAgentStateStore states,
                               BuiltinToolkitAssembler tools, McpToolkitAssembler mcpTools,
                               AssembledPromptGuard prompts, RuntimeLimitResolver limitResolver,
                               FactKeyCanonicalizer factKeys, RequiredArgProperties requiredArgs,
-                              ToolResultOffloadStore offload, TrialProperties trialProperties) {
+                              ToolResultOffloadStore offload, TrialProperties trialProperties,
+                              WorkbenchChoiceCollector choiceCollector) {
         this.models = models;
         this.states = states;
         this.tools = tools;
@@ -92,6 +100,7 @@ public class ReActTrialExecutor {
         this.requiredArgProperties = requiredArgs;
         this.offload = offload;
         this.trialProperties = trialProperties;
+        this.choiceCollector = choiceCollector;
     }
 
     /**
@@ -189,6 +198,17 @@ public class ReActTrialExecutor {
                 plan.getInjection());
         // 最外层重绑 RagToolContext：ToolExecutor 在 boundedElastic 上跑工具，主线程 ThreadLocal 不可见
         toolkit = ToolkitRagContext.wrap(toolkit, plan.getAgentId());
+        /*
+         * 可点选项：只有编排侧显式开启、且请求线程已放采集槽时才安装。
+         *
+         * <p>必须放在所有工具包装**之后**：这是平台内部的控制面工具，不是用户配置的业务工具，
+         * 不该占「工具调用次数」配额、不该进连续失败熔断（模型一次参数写错就整轮停摆），
+         * 也不该被产物标记 / 参数闸门二次加工。工具实例持有同一个采集槽，
+         * 因此它跑在 boundedElastic 上也能写回本轮结果。
+         */
+        if (plan.isChoiceEnabled()) {
+            toolkit = ChoiceAgentTool.install(toolkit, ChoiceCaptureHolder.current());
+        }
         Model model = new LimitingModel(
                 models.open(MeterScope.console(plan.getAgentId(), plan.getModelInstanceId(), sessionId, userId)),
                 budget);
@@ -241,6 +261,8 @@ public class ReActTrialExecutor {
             if (turn.getAssistantText() == null || turn.getAssistantText().isBlank()) {
                 throw new TrialFailure("模型没有返回文本");
             }
+            // 选项收口：模型没调工具时由后端把终答整理成同一份结构，并推到本块（见方法注释）
+            settleChoice(plan, turn, userId, sessionId, progress);
             return turn;
         } catch (TrialFailure ex) {
             // 已映射的失败：只有挂了 cause 才有排障价值（视觉/工具出站被包成人话），
@@ -271,7 +293,54 @@ public class ReActTrialExecutor {
     }
 
     /**
+     * 本轮选项收口：优先用模型通过 {@code agenthub_choice} 给出的结构；
+     * 没有就由后端把终答整理成同一份标准选项，再推给本块。
+     *
+     * <p>为什么收口放在执行器里而不是 AppService：
+     * <ul>
+     *   <li>只有这里同时拿到「本轮装配槽 / 叶子模型实例 / 叶子终答 / 已绑定参与者身份的 progress」；</li>
+     *   <li>选项必须挂在<b>这一位专家</b>的块上（chips 在它的气泡下方），
+     *       到了一轮汇总的 AppService 层已经分不清是哪一位；</li>
+     *   <li>整理失败只在执行器内降级为「本轮没有 chips」，既不抛给上层，也不改这一轮成败。</li>
+     * </ul>
+     *
+     * <p>线程边界：采集槽是请求线程放的，叶子单意图内联执行时同一线程可见；
+     * 多意图 / 嵌套 / 计划执行根本没装选项工具（也不会被标记 eligible），取不到槽时直接跳过。
+     *
+     * @param plan      本轮装配计划（取叶子 Agent 与对话模型实例）
+     * @param turn      本轮终答（整理以助手正文为输入）
+     * @param userId    平台用户（整理出站的计量归属）
+     * @param sessionId 会话主键
+     * @param progress  参与者已绑定的出口；空表示本轮没有实时出口，只把结果留在采集槽供上层落库
+     */
+    private void settleChoice(TrialPlan plan, TrialTurn turn, long userId, long sessionId,
+                              TrialProgress progress) {
+        ChoiceCapture capture = ChoiceCaptureHolder.current();
+        // 没装过选项工具（调试 / 多专家 / 方案汇总 / 计划执行）时不做任何事
+        if (capture == null || !capture.isEligible() || !plan.isChoiceEnabled()) {
+            return;
+        }
+        AgentChoice choice = capture.choice();
+        // 模型已经调过工具就以工具结果为准：不要再花一次出站去「改」它已经给出的选项
+        if (choice == null && trialProperties.isChoiceStructEnabled()) {
+            choice = choiceCollector.collect(turn.getAssistantText(), plan.getAgentId(),
+                    plan.getModelInstanceId(), userId, sessionId);
+            if (choice != null) {
+                // 写回采集槽：上层据此落 CHOICE 事件，刷新后仍能重建 chips
+                capture.accept(choice);
+            }
+        }
+        // 只推一次：结构不合法的结果一律不出 chip 栏，绝不编造半组按钮
+        if (choice != null && progress != null) {
+            progress.choice(choice);
+        }
+    }
+
+    /**
      * 父 Router 只问一次该选哪些 route_key（可多意图 JSON）。不挂工具，也不写入会话状态。
+     *
+     * <p>不需要思考出口的调用方（调试 / 单测）走这条：与带 {@code progress} 的重载同源，
+     * 只是没人接收推理。
      *
      * @param scope    父 Agent、父模型和当前会话。判定本身也是一轮模型调用
      * @param prompt   候选列表，不含密钥
@@ -280,7 +349,32 @@ public class ReActTrialExecutor {
      * @return 模型原文；超时或失败时抛 TrialFailure
      */
     public String judge(MeterScope scope, String prompt, String userText, EffectiveLimits limits) {
-        return oneShot(scope, "trial-router", prompt, userText, limits, "父模型判定超时", "路由判定失败", null);
+        return judge(scope, prompt, userText, limits, null);
+    }
+
+    /**
+     * 判路由（带思考出口）：判定模型的真实推理经 {@code progress} 推出，与子专家同一条 reasoning 协议。
+     *
+     * <p>为什么不再用「只出最终一句」的黑盒调用：入口块与方案分流块也要「先真思考、再出结果」。
+     * 判定结果本身是给解析器读的机器 JSON，**不能**当助手正文推给页面，
+     * 因此这里只放行思考增量（见 {@link #thinkingOnly}），正文仍由返回值交给调用方解析。
+     *
+     * <p>能流式就流式（{@link #oneShotStreamed}）：模型边想边推，页面框内跟滚；
+     * 若模型只把思考整段挂在最终消息的 ThinkingBlock 上，收尾时也会作为一段 reasoning 推出。
+     * 模型确实没有思考块时什么都不推——前端因此不画思考框，不补假文案。
+     *
+     * @param scope    父 Agent、父模型和当前会话。判定本身也是一轮模型调用
+     * @param prompt   候选列表，不含密钥
+     * @param userText 用户原文
+     * @param limits   父 Agent 生效限制；可空则用平台默认
+     * @param progress 可空的思考出口；空则与三参版本行为一致
+     * @return 模型原文；超时或失败时抛 TrialFailure
+     */
+    public String judge(MeterScope scope, String prompt, String userText, EffectiveLimits limits,
+                        TrialProgress progress) {
+        StreamedAnswer answer = oneShotStreamed(scope, "trial-router", prompt, userText, limits,
+                "父模型判定超时", "路由判定失败", thinkingOnly(progress));
+        return answer.text();
     }
 
     /**
@@ -471,6 +565,56 @@ public class ReActTrialExecutor {
         public static StreamedAnswer empty() {
             return new StreamedAnswer("", false);
         }
+    }
+
+    /**
+     * 只放行「思考」的进度出口。
+     *
+     * <p>判定 / 选优这类单轮调用的正文是给解析器读的机器 JSON 或内部判定串，不是给用户看的回答；
+     * 但它们的**推理**属于这一步的思考，必须进时间线。包一层后：phase / reasoning 透传，
+     * assistant 与 route 丢掉（否则页面会把判定 JSON 当正文、或凭空多一位参与者），
+     * 工具也丢掉（这些调用本来就不挂工具）。
+     *
+     * <p>推理走的是与子专家完全相同的一条 reasoning 事件：前端按所在泳道归属，
+     * 入口判定落在首条 route 之前，方案判定落在该方案的分流块里。
+     *
+     * @param progress 下游出口；可空
+     * @return 只放行思考的出口；入参为空时返回 null
+     */
+    private static TrialProgress thinkingOnly(TrialProgress progress) {
+        if (progress == null) {
+            return null;
+        }
+        return new TrialProgress() {
+            @Override
+            public void phase(String phase) {
+                // 只转发「思考中」：collector 收尾还会推 answering，那是正文阶段的措辞，
+                // 判定调用的正文不会进消息流，转发出去会让状态条提前显示「作答中」
+                if ("reasoning".equals(phase)) {
+                    progress.phase(phase);
+                }
+            }
+
+            @Override
+            public void route(String summary) {
+                // 判定调用不产生新的参与者：路由行只能由真正分发的那一步推
+            }
+
+            @Override
+            public void reasoning(String delta) {
+                progress.reasoning(delta);
+            }
+
+            @Override
+            public void tool(String name, String arguments, String result, boolean success) {
+                // 单轮判定不挂工具，真出现也不该进页面
+            }
+
+            @Override
+            public void assistant(String delta) {
+                // 判定正文是机器 JSON，进正文会污染消息流
+            }
+        };
     }
 
     /**

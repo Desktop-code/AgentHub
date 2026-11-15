@@ -76,6 +76,27 @@ public class AnswerAggregator {
     }
 
     /**
+     * 一条消息里的多个问题：各自出正文，不做跨问汇总。所属域：runtime。
+     *
+     * <p>为什么不能走 {@link #finishAnswer}：SUMMARIZE / VOTE 会把两问合成一段，
+     * 用户要的是「第 1 问的答案 + 第 2 问的答案」，合起来反而是假汇总；
+     * 子正文此时已经在各自参与者块上流式展示过，这里只负责把计量与落库正文收好。
+     *
+     * @param outcomes 各问的目标执行结果（含失败 / 跳过占位）
+     * @return 终答（按问顺序的可读拼接）+ 空说明；不推任何新正文
+     */
+    public AggregateOutcome separateAnswers(List<ChildOutcome> outcomes) {
+        if (outcomes == null || outcomes.isEmpty()) {
+            TrialTurn empty = new TrialTurn();
+            empty.setAssistantText("");
+            return new AggregateOutcome(empty, List.of(), null, -1);
+        }
+        // 复用 CONCAT 的可读分段（### 作者 + 正文）：刷新回放时前端能按作者把正文归回各自块
+        String text = concatAnswers(outcomes);
+        return new AggregateOutcome(mergeTurns(outcomes, text), List.of(), null, -1);
+    }
+
+    /**
      * 按汇总策略产出终答。CONCAT 按序拼接；SUMMARIZE 用父模型一轮汇总；
      * VOTE 把成功子终答当票池选 1 路原文。等齐后再出终答（不做「先完成先推段」）。
      *
@@ -133,17 +154,20 @@ public class AnswerAggregator {
             // 汇总模型与判路由同源：方案里配了就用方案的，否则回落 Agent 的 ROUTER/CHAT 槽
             Optional<Long> parentModel = resolveRouterModel(parent, spec);
             if (parentModel.isPresent()) {
-                // 有出口就走流式投递：汇总常是整轮最后一步，一次性出全文会让人以为卡住
-                AssistantRelay relay = progress == null ? null : new AssistantRelay(progress);
+                /*
+                 * 汇总标记（「方案结论：X」）必须**先于**汇总模型的思考推出：
+                 * 前端靠它另起一条汇总记录，汇总的推理才落进那一块，而不会续到最后一位子专家名下。
+                 *
+                 * <p>推出的时机是「这一步真的开始」（见 {@link AssistantRelay}）：模型一给思考 / 正文就成立。
+                 * 整轮一个事件都没有（模型没配 / 调用即失败降级成 CONCAT）时，标记一个字都不推，
+                 * 页面上不会多出一条内容其实是子专家拼接稿的「汇总」。
+                 */
+                String conclusionMark = spec != null
+                        ? "方案结论：" + rootName(parent, spec)
+                        : "终答汇总中…";
+                AssistantRelay relay = progress == null ? null : new AssistantRelay(progress, conclusionMark);
                 try {
                     RouterClock.assertBefore(deadlineNanos);
-                    if (progress != null) {
-                        // 方案有自己的汇总结论时用「方案结论」标记，消息流据此在子专家之后再出一块，
-                        // 而不是把汇总正文塞进前面的分流块。旧 Agent 路径仍用原来的汇总提示。
-                        progress.route(spec != null
-                                ? "方案结论：" + rootName(parent, spec)
-                                : "终答汇总中…");
-                    }
                     if (trace != null) {
                         // 汇总 LLM 挂在 ROUTE 下，与判路由 LLM 同级兄弟
                         trace.bindParent(routeSpan);
@@ -167,12 +191,31 @@ public class AnswerAggregator {
                     }
                     if (summary != null && !summary.isBlank()) {
                         TrialTurn turn = mergeTurns(outcomes, summary.trim());
-                        // 正文已经边收边推过，这里再推就是重影；没推过（relay 为空 / 流里没正文）才补
-                        if (progress != null && !answerDelivered) {
-                            progress.assistant(turn.getAssistantText());
-                            answerDelivered = true;
+                        if (progress != null) {
+                            /*
+                             * 兜底：流里没推过正文的路径（模型只给整段结果）也要先把汇总记录占好，
+                             * 再把整段正文作为结论推出。重复调用无副作用。
+                             */
+                            if (relay != null) {
+                                relay.begin();
+                            } else {
+                                progress.route(conclusionMark);
+                            }
+                            // 正文已经边收边推过，这里再推就是重影；没推过（流里没正文）才补
+                            if (!answerDelivered) {
+                                progress.assistant(turn.getAssistantText());
+                                answerDelivered = true;
+                            }
                         }
-                        return new AggregateOutcome(turn, notices, aggregateLine, -1);
+                        /*
+                         * 只有「方案链路 + 汇总记录真的开始过」才落「方案结论：X」标记：
+                         * 旧 Agent 路由没有方案块，落了也无处归属；降级拼接更不能冒充汇总。
+                         * 推理随标记一起交出去，刷新后汇总思考框仍在。
+                         */
+                        String concluded = spec != null && relay != null && relay.began()
+                                ? rootName(parent, spec) : null;
+                        String summaryReasoning = relay == null ? null : relay.reasoning();
+                        return new AggregateOutcome(turn, notices, aggregateLine, -1, concluded, summaryReasoning);
                     }
                     if (progress != null) {
                         progress.route("汇总无正文，已降级为拼接");
@@ -559,28 +602,45 @@ public class AnswerAggregator {
     }
 
     /**
-     * 汇总正文中转站。所属域：runtime（应用层）。
+     * 汇总过程的中转站。所属域：runtime（应用层）。
      *
-     * <p>职责：把汇总模型的增量原样转发给页面，同时记下「正文是否已经推过」。
-     * 为什么要记：汇总成功时调用方不能再整段补推（会重影）；
-     * 但汇总在推正文之前就失败降级时，末尾仍要补推拼接正文，否则页面空白。
+     * <p>职责三件：
+     * <ol>
+     *   <li>把汇总模型的增量原样转发给页面；</li>
+     *   <li>记下「正文是否已经推过」——成功时调用方不能再整段补推（会重影），
+     *       但推正文之前就失败降级时，末尾仍要补推拼接正文，否则页面空白；</li>
+     *   <li>按「先思考、后结论」的次序放行：汇总标记先推（前端据此另起一条），
+     *       随后的推理落在这一条上；标记的推出时机是**这一步真的开始**——
+     *       模型一给出思考或正文就成立，一个事件都没有（未配模型 / 调用即失败）则一条都不推。</li>
+     * </ol>
      *
      * <p>只转发判路由 / 汇总用得上的五类回调。汇总调用不挂工具、不产计划 / 产物 / 子计划，
      * 其余默认空实现直接继承 {@link TrialProgress}，不必逐个补齐。
-     */
+    */
     private static final class AssistantRelay implements TrialProgress {
 
         /** 真正的页面出口 */
         private final TrialProgress delegate;
 
+        /** 汇总记录的标记行（「方案结论：X」）；在这一步真正开始时推出 */
+        private final String conclusionMark;
+
         /** 是否已经推过非空正文；用 volatile 是因为增量来自模型响应线程 */
         private volatile boolean delivered;
 
+        /** 汇总标记是否已经推出（幂等闸） */
+        private volatile boolean began;
+
+        /** 汇总模型自己的推理抄本：随「方案结论：X」一起落库，刷新后思考框仍在 */
+        private final StringBuilder reasoning = new StringBuilder();
+
         /**
-         * @param delegate 页面出口；非空
+         * @param delegate       页面出口；非空
+         * @param conclusionMark 汇总记录的标记行；非空
          */
-        private AssistantRelay(TrialProgress delegate) {
+        private AssistantRelay(TrialProgress delegate, String conclusionMark) {
             this.delegate = delegate;
+            this.conclusionMark = conclusionMark;
         }
 
         /**
@@ -588,6 +648,40 @@ public class AnswerAggregator {
          */
         boolean delivered() {
             return delivered;
+        }
+
+        /**
+         * @return 汇总记录是否真的开始过（标记已推）。没开始就不该落「方案结论」标记，
+         *         否则刷新后平白多出一条内容其实是拼接稿的汇总
+         */
+        boolean began() {
+            return began;
+        }
+
+        /**
+         * @return 汇总模型的推理原文；没有推理时为空串
+         */
+        String reasoning() {
+            return reasoning.toString();
+        }
+
+        /**
+         * 开始这一条汇总记录：先推标记（前端据此另起一条），再放行随后的过程增量。
+         *
+         * <p>幂等：多次调用只生效一次。触发点是「这一步真的开始」：模型的第一个
+         * 思考增量，或第一段正文；两者都没有（未配模型 / 调用即失败降级）时不会触发。
+         */
+        void begin() {
+            if (began) {
+                return;
+            }
+            synchronized (this) {
+                if (began) {
+                    return;
+                }
+                delegate.route(conclusionMark);
+                began = true;
+            }
         }
 
         /** {@inheritDoc} */
@@ -602,10 +696,28 @@ public class AnswerAggregator {
             delegate.route(summary);
         }
 
-        /** {@inheritDoc} */
+        /**
+         * 汇总模型的思考：这一步真的开始的第一手证据。
+         *
+         * <p>先成立记录、再把增量钉在这条记录上（{@code reasoningPinned}）：
+         * 不钉的话增量会被算到最后一位子专家名下——那就是「最后那位被放大成整轮结论」。
+         * 只有整段推理、没有细粒度增量时，这段同样作为一段真实思考推出。
+         */
         @Override
         public void reasoning(String delta) {
-            delegate.reasoning(delta);
+            if (delta == null || delta.isEmpty()) {
+                return;
+            }
+            // 抄一份再下发：落库用的是同一段真实推理，不额外调用、不改写
+            reasoning.append(delta);
+            begin();
+            delegate.reasoningPinned(delta);
+        }
+
+        /** {@inheritDoc} */
+        @Override
+        public void toolStart(String name) {
+            delegate.toolStart(name);
         }
 
         /** {@inheritDoc} */
@@ -614,12 +726,19 @@ public class AnswerAggregator {
             delegate.tool(name, arguments, result, success);
         }
 
-        /** {@inheritDoc} */
+        /**
+         * 正文增量：先确保汇总记录成立（思考先行时早已成立），再转发正文。
+         *
+         * <p>正文到达即标记「已投递」，调用方不再整段补推；降级路径没有正文，
+         * 也不会因此凭空多出一条汇总记录。
+         */
         @Override
         public void assistant(String delta) {
-            if (delta != null && !delta.isEmpty()) {
-                delivered = true;
+            if (delta == null || delta.isEmpty()) {
+                return;
             }
+            delivered = true;
+            begin();
             delegate.assistant(delta);
         }
     }

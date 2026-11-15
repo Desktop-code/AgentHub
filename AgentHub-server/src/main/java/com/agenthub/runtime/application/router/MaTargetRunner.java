@@ -41,11 +41,15 @@ public interface MaTargetRunner {
     /**
      * 目标方案一轮的结果。
      *
-     * @param turn     目标方案的终答（token 已含其内部子 Agent 的消耗）
-     * @param notices  时间线说明（跳过的候选、降级等）；可空
-     * @param children 目标方案内部每一跳（子专家「路由到」行 + 该子自己的思考）；可空
+     * @param turn      目标方案的终答（token 已含其内部子 Agent 的消耗）
+     * @param notices   时间线说明（跳过的候选、降级等）；可空
+     * @param children  目标方案内部每一跳（子专家「路由到」行 + 该子自己的思考）；可空
+     * @param reasoning 目标方案自己的分流判定推理；它先于各子专家，落库后方案块的思考框仍在
+     * @param conclusionName      目标方案自己的汇总结论名（方案名）；没有真汇总时为 null
+     * @param conclusionReasoning 目标方案汇总模型的推理；随「方案结论：X」一起落库
      */
-    record MaTargetResult(TrialTurn turn, List<String> notices, List<NestedRoute> children) {
+    record MaTargetResult(TrialTurn turn, List<String> notices, List<NestedRoute> children, String reasoning,
+                          String conclusionName, String conclusionReasoning) {
 
         /**
          * 兼容构造：没有可展开的内部跳（窄测与「目标方案内部没有出新路线」的场景）。
@@ -54,12 +58,39 @@ public interface MaTargetRunner {
          * @param notices 时间线说明；可空
          */
         public MaTargetResult(TrialTurn turn, List<String> notices) {
-            this(turn, notices, List.of());
+            this(turn, notices, List.of(), null, null, null);
+        }
+
+        /**
+         * 兼容构造：有内部跳、没有方案自己的判定推理。
+         *
+         * @param turn     目标方案终答
+         * @param notices  说明
+         * @param children 内部跳
+         */
+        public MaTargetResult(TrialTurn turn, List<String> notices, List<NestedRoute> children) {
+            this(turn, notices, children, null, null, null);
+        }
+
+        /**
+         * 兼容构造：有内部跳与判定推理、没有汇总结论（汇总没跑 / 降级拼接）。
+         *
+         * @param turn      目标方案终答
+         * @param notices   说明
+         * @param children  内部跳
+         * @param reasoning 方案自己的分流判定推理
+         */
+        public MaTargetResult(TrialTurn turn, List<String> notices, List<NestedRoute> children, String reasoning) {
+            this(turn, notices, children, reasoning, null, null);
         }
 
         /** 目标表防御性归一：null → 空表，调用方不必逐处判空。 */
         public MaTargetResult {
             children = children == null ? List.of() : List.copyOf(children);
+            reasoning = reasoning == null || reasoning.isBlank() ? null : reasoning;
+            conclusionName = conclusionName == null || conclusionName.isBlank() ? null : conclusionName;
+            conclusionReasoning =
+                    conclusionReasoning == null || conclusionReasoning.isBlank() ? null : conclusionReasoning;
         }
     }
 }

@@ -2,6 +2,7 @@ package com.agenthub.runtime.application.router;
 
 import com.agenthub.runtime.domain.model.TrialTurn;
 import com.agenthub.runtime.domain.model.WorkflowRunSpec;
+import com.agenthub.runtime.domain.model.WorkflowRunView;
 import com.agenthub.runtime.domain.service.TrialProgress;
 
 import java.util.List;
@@ -43,7 +44,18 @@ public interface WorkflowTargetRunner {
      *
      * @param turn    投影正文（成功摘要 / 失败原因 / 人工等待提示）
      * @param notices 时间线说明（启动提示、防重提示等）；可空
+     * @param view    工作流卡片终态（节点时间轴 + 产物区）；可空，空则前端不出卡片
      */
-    record WorkflowTargetResult(TrialTurn turn, List<String> notices) {
+    record WorkflowTargetResult(TrialTurn turn, List<String> notices, WorkflowRunView view) {
+
+        /**
+         * 兼容老调用点：没有卡片视图时按「不出卡片」处理。
+         *
+         * @param turn    投影正文
+         * @param notices 时间线说明
+         */
+        public WorkflowTargetResult(TrialTurn turn, List<String> notices) {
+            this(turn, notices, null);
+        }
     }
 }

@@ -93,6 +93,37 @@ public final class RouterTexts {
     }
 
     /**
+     * 一条消息拆成多个问题时的决策块：按问题顺序列出各问交给谁。
+     *
+     * <p>与 {@link #decisionLine} 的区别只在措辞：这里的事实是「几个问题」，
+     * 不是「一个问题的几个意图」。目标名仍按出现顺序去重展示，不暴露 route_key。
+     *
+     * @param intents 已按问题顺序排好的意图；可空
+     * @return 形如「路由决策\n已拆成 2 个问题，按序交给「企业综合台」「制度要点与报告」」；空表返回空串
+     */
+    public static String questionDecisionLine(List<RoutedIntent> intents) {
+        if (intents == null || intents.isEmpty()) {
+            return "";
+        }
+        List<String> names = new ArrayList<>();
+        for (RoutedIntent intent : intents) {
+            if (intent == null || intent.candidate() == null) {
+                continue;
+            }
+            String label = childLabel(intent.candidate().agent());
+            if (!label.isBlank() && !names.contains(label)) {
+                names.add(label);
+            }
+        }
+        StringBuilder text = new StringBuilder("路由决策\n已拆成 ").append(intents.size())
+                .append(" 个问题，按序交给");
+        for (String name : names) {
+            text.append("「").append(name).append("」");
+        }
+        return text.toString();
+    }
+
+    /**
      * 子分段标题：优先展示路由意图描述，缺失时退回子 Agent 名。
      *
      * <p>方案（ma_def）候选不再把 {@code intent_desc} 搬进 route.intent（意图说明单一真源

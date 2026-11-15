@@ -108,7 +108,7 @@ public class WorkbenchChatAppService {
         }
         resp.setSchemeId(def.getId());
         resp.setSchemeCode(def.getCode());
-        // 入口统一显示「Router」（与编排列表 / 默认接待同口径）
+        // 入口名称读配置（已开放编辑）：消息流入口块与列表 / 详情同源
         resp.setSchemeName(def.displayName());
         resp.setTemplate(def.getTemplate());
         Map<Long, AgentDef> agentMap = loadAgents(snapshot.candidates());
@@ -543,6 +543,23 @@ public class WorkbenchChatAppService {
     public List<EventResp> liveEvents(Long sessionId) {
         access.requireWorkbench(sessionId);
         return sessions.liveEvents(sessionId);
+    }
+
+    /**
+     * 取消本次 @ 指定：丢弃尚未消费的一次性强制线路。
+     *
+     * <p>为什么必须有这一步：选定 @ 时会立刻 PUT 并登记「下一轮强制走这条线」。
+     * 若用户随后点了提及片上的 ×，前端只是把片去掉——那条强制标记还留在登记表里，
+     * 下一句新问题就会被悄悄钉给这位专家，与「取消后下一句走入口」相反。
+     * 这里只清未消费的标记，**不动**沿用线路（sticky）与其它会话状态。
+     *
+     * <p>边界：不校验线路是否仍存在——取消是纯撤销动作，目标失效时更该清掉。
+     *
+     * @param sessionId 会话主键
+     */
+    public void clearRouteForce(Long sessionId) {
+        access.requireWorkbench(sessionId);
+        routeForce.clear(sessionId);
     }
 
     /**

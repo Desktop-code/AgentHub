@@ -78,13 +78,30 @@ public class TrialBindingLoader {
      * @throws TrialFailure 未启用、不是 REACT，或没有对话模型
      */
     public TrialPlan loadReact(AgentDef agent, String userQuery, String memory) {
+        return loadReact(agent, userQuery, memory, false);
+    }
+
+    /**
+     * 带记忆段与「可点选项」开关的 REACT 装配。
+     *
+     * <p>{@code choiceEnabled} 只由编排侧决定（工作台单专家 / 入口直分叶子 / 断点续作），
+     * 装配本身不猜入口；关闭时提示词与旧口径逐字一致。
+     *
+     * @param agent         定义，调用方已确认存在
+     * @param userQuery     子节点的本轮用户输入
+     * @param memory        记忆段正文，可空
+     * @param choiceEnabled true 表示在系统提示里追平台内置的选项块说明
+     * @return 计划
+     * @throws TrialFailure 未启用、不是 REACT，或没有对话模型
+     */
+    public TrialPlan loadReact(AgentDef agent, String userQuery, String memory, boolean choiceEnabled) {
         if (agent.getStatus() == null || agent.getStatus() != AgentStatus.ENABLED) {
             throw new TrialFailure("Agent 未启用");
         }
         if (!AgentRunMode.REACT.name().equals(agent.getRunMode())) {
             throw new TrialFailure("子 Agent 必须是 REACT");
         }
-        return loadSingleAgent(agent, userQuery, memory);
+        return loadSingleAgent(agent, userQuery, memory, choiceEnabled);
     }
 
     /**
@@ -111,6 +128,20 @@ public class TrialBindingLoader {
      * @throws TrialFailure 未启用、不是 REACT / PLAN_AND_EXECUTE，或没有对话模型
      */
     public TrialPlan loadSingleAgent(AgentDef agent, String userQuery, String memory) {
+        return loadSingleAgent(agent, userQuery, memory, false);
+    }
+
+    /**
+     * 带记忆段与「可点选项」开关的单 Agent 装配（REACT / PLAN_AND_EXECUTE 共用）。
+     *
+     * @param agent         定义，调用方已确认存在
+     * @param userQuery     本轮用户输入
+     * @param memory        记忆段正文，可空
+     * @param choiceEnabled true 表示系统提示追加平台内置选项块说明
+     * @return 计划
+     * @throws TrialFailure 未启用、不是 REACT / PLAN_AND_EXECUTE，或没有对话模型
+     */
+    public TrialPlan loadSingleAgent(AgentDef agent, String userQuery, String memory, boolean choiceEnabled) {
         if (agent.getStatus() == null || agent.getStatus() != AgentStatus.ENABLED) {
             throw new TrialFailure("Agent 未启用");
         }
@@ -123,13 +154,15 @@ public class TrialBindingLoader {
         plan.setAgentName(agent.getName());
         plan.setRunMode(agent.getRunMode());
         plan.setModelInstanceId(modelId);
-        TrialPromptFactory.Built built = promptFactory.build(agent, userQuery, memory);
+        TrialPromptFactory.Built built = promptFactory.build(agent, userQuery, memory, choiceEnabled);
         plan.setSystemPrompt(built.prompt());
         plan.setLayout(built.layout());
         plan.setTools(built.tools());
         plan.setMcpTools(built.mcpTools());
         plan.setInjection(built.stats());
         plan.getNotices().addAll(built.notices());
+        // 只有显式开启的轮次才安装选项工具 / 允许后端整理；默认 false 保持其余入口原样
+        plan.setChoiceEnabled(choiceEnabled);
         EffectiveLimits limits = limitResolver.resolve(agent);
         plan.setLimits(limits);
         return plan;

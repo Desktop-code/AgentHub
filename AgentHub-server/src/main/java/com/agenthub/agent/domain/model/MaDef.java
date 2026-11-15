@@ -67,18 +67,21 @@ public class MaDef {
     private LocalDateTime updateTime;
 
     /**
-     * 对外展示名：入口行固定「Router」，其余用库里的名称。
+     * 对外展示名：列表、详情、会话头与消息流入口块统一读这一处。
      *
-     * <p>为什么不在各页面各写一次三元判断：列表、详情、默认接待状态行、工作台会话头都会回显方案名，
-     * 口径必须唯一。入口是平台唯一网关，历史库里可能还叫「默认接待」，这里统一收敛，
-     * 避免「同一条方案在四个地方四个叫法」。
+     * <p>入口的名称已开放编辑（本刀）：改名后四处同步生效，不再由展示层改写成固定的「Router」。
+     * 历史库里名称异常为空时退回平台默认名，保证入口块不会出现空标题；
+     * 编码 / 备注 / 类型仍属身份字段，由保存侧锁定。
      *
      * @return 展示名；普通方案原样返回
      */
     public String displayName() {
-        return AgentRuntimeConfig.isEntryRouterTemplate(template)
-                ? AgentRuntimeConfig.ENTRY_ROUTER_NAME
-                : name;
+        if (!AgentRuntimeConfig.isEntryRouterTemplate(template)) {
+            return name;
+        }
+        // 入口名可改：库内名称优先；空名只在历史脏数据上兜底，正常保存已拦空名
+        String stored = name == null ? "" : name.trim();
+        return stored.isEmpty() ? AgentRuntimeConfig.ENTRY_ROUTER_NAME : stored;
     }
 
     /**

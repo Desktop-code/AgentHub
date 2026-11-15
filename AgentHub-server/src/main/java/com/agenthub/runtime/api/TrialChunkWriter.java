@@ -5,14 +5,20 @@ import com.agenthub.runtime.api.sse.ServletSseFrameSink;
 import com.agenthub.runtime.api.sse.SseBatchOptions;
 import com.agenthub.runtime.api.sse.UnifiedSseWriter;
 import com.agenthub.runtime.application.TrialStreamEnd;
+import com.agenthub.runtime.domain.model.AgentChoice;
 import com.agenthub.runtime.domain.model.ChildPlanPendingView;
 import com.agenthub.runtime.domain.model.GeneratedFile;
+import com.agenthub.runtime.domain.model.ParticipantView;
 import com.agenthub.runtime.domain.model.PlanStep;
 import com.agenthub.runtime.domain.model.PlanView;
 import com.agenthub.runtime.domain.model.StepView;
+import com.agenthub.runtime.domain.model.WorkflowRunView;
 import com.agenthub.runtime.domain.service.GeneratedFileMarker;
+import com.agenthub.runtime.domain.service.WorkflowRunJson;
+import com.agenthub.runtime.domain.service.ParticipantJson;
 import com.agenthub.runtime.domain.service.TrialProgress;
 import com.agenthub.runtime.domain.service.TrialTexts;
+import com.agenthub.runtime.domain.service.WorkbenchChoiceJson;
 import com.agenthub.runtime.model.acl.UnifiedFinishReason;
 import com.agenthub.runtime.model.acl.UnifiedStreamEventType;
 import com.agenthub.runtime.model.acl.UnifiedToolCall;
@@ -26,6 +32,7 @@ import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.concurrent.ConcurrentHashMap;
 
 /**
  * 把试跑增量写成 SSE。所属域：runtime。
@@ -39,6 +46,23 @@ import java.util.Map;
 public final class TrialChunkWriter implements TrialProgress, TrialStreamEnd {
 
     private final UnifiedSseWriter writer;
+
+    /**
+     * 已下发过的参与者身份：id → 身份。
+     *
+     * <p>为什么要记：并行 / 嵌套时增量交错，「归属哪一位」只连续标记一次就够了；
+     * 若每个增量都重发完整身份，帧量会随 token 数膨胀。用并发 Map 是因为多个子线程
+     * 会同时推事件，而身份只在「第一次出现」时需要写。
+     */
+    private final Map<String, ParticipantView> participants = new ConcurrentHashMap<>();
+
+    /**
+     * 最近一次下发的归属 id。
+     *
+     * <p>由 {@link #emitAttribution(String)} 在同步块里读写：只有切换参与者时才发一帧，
+     * 同一参与者的连续思考 / 工具不再产生额外的身份帧。
+     */
+    private String lastParticipantId = "";
 
     /**
      * @param response 已设为 text/event-stream 的响应
@@ -116,6 +140,69 @@ public final class TrialChunkWriter implements TrialProgress, TrialStreamEnd {
         }
     }
 
+    /**
+     * 参与者真正开始：立刻下发一条完整身份帧，前端据此先把块画出来。
+     *
+     * <p>载荷带 {@code begin=true}：与「只是切换归属」的轻量帧区分开，前端只在 begin 时新建块。
+     * 同一 id 重复开始（并行子偶发）只发一次，避免出现两块同名参与者。
+     */
+    @Override
+    public void beginParticipant(ParticipantView participant) {
+        if (participant == null || participant.id().isBlank()) {
+            return;
+        }
+        ParticipantView previous = participants.putIfAbsent(participant.id(), participant);
+        // 已经登记过：说明这一步早已开始过，不重复发 begin 帧
+        if (previous != null) {
+            return;
+        }
+        emitParticipant(participant, true);
+    }
+
+    /** {@inheritDoc} */
+    @Override
+    public void attributeParticipant(String participantId) {
+        emitAttribution(participantId == null ? "" : participantId.trim());
+    }
+
+    /**
+     * 切换「后续增量归属哪一位」。只在与上一条不同时下发，避免每帧都发身份。
+     *
+     * <p>不在 {@link #participants} 里的 id 直接忽略：身份帧必须先于内容帧，
+     * 没有 begin 的归属标记无法建立块，发了也没有意义。
+     *
+     * @param participantId 参与者标识
+     */
+    private void emitAttribution(String participantId) {
+        if (participantId.isEmpty()) {
+            return;
+        }
+        ParticipantView known = participants.get(participantId);
+        if (known == null) {
+            return;
+        }
+        synchronized (this) {
+            if (participantId.equals(lastParticipantId)) {
+                return;
+            }
+            lastParticipantId = participantId;
+        }
+        emitParticipant(known, false);
+    }
+
+    /**
+     * 写一行 participant 帧。
+     *
+     * @param participant 身份
+     * @param begin       true＝该步开始（前端新建块）；false＝仅切换归属
+     */
+    private void emitParticipant(ParticipantView participant, boolean begin) {
+        String payload = ParticipantJson.payload(participant, begin);
+        if (payload != null) {
+            writer.emitLegacy("participant", payload);
+        }
+    }
+
     /** {@inheritDoc} */
     @Override
     public void reasoning(String delta) {
@@ -127,14 +214,33 @@ public final class TrialChunkWriter implements TrialProgress, TrialStreamEnd {
 
     /** {@inheritDoc} */
     @Override
+    public void toolStart(String name) {
+        String tool = name == null ? "" : name.trim();
+        if (tool.isEmpty()) {
+            return;
+        }
+        /*
+         * 只下发工具名：前端据此先把「正在调用 xxx…」画成蓝色胶囊，
+         * 随后到达的 tool 帧按名字把同一条补成成功 / 失败。
+         * data 用纯文本（不是对象）——这条事件只有名字，没有其它字段。
+         */
+        writer.emitLegacy("tool_start", TrialTexts.redact(tool));
+    }
+
+    /** {@inheritDoc} */
+    @Override
     public void tool(String name, String arguments, String result, boolean success) {
         Map<String, Object> payload = new LinkedHashMap<>();
         String line = TrialTexts.toolDisplay(name, arguments);
         payload.put("line", success ? line : line + " · 失败");
-        // 兜底清洗：正常路径上工具层已剔除标记，但 MCP 等外部实现不受我们控制。
+        // 兜底清洗：正常路径下工具层已剔除标记，但 MCP 等外部实现不受我们控制。
         // 这里再扫一遍，保证用户在聊天框里永远看不到 [FILE_GENERATED] 这串机械字符。
         payload.put("result", TrialTexts.redact(GeneratedFileMarker.strip(result)));
         payload.put("success", success);
+        // 工具名单独给一份：前端要把这条结果与前面那条「正在调用」胶囊配对
+        if (name != null && !name.isBlank()) {
+            payload.put("name", name.trim());
+        }
         // 工具执行结果没有 unified 等价事件（定稿里 tool_call.completed 是「模型要求调用」），
         // 故只走旧事件名，避免语义混淆
         writer.emitLegacy("tool", payload);
@@ -266,6 +372,33 @@ public final class TrialChunkWriter implements TrialProgress, TrialStreamEnd {
         Long id = writer.boundSession();
         String encoded = URLEncoder.encode(fileName, StandardCharsets.UTF_8);
         return "/api/runtime/workspace/download?sessionId=" + (id == null ? "" : id) + "&fileName=" + encoded;
+    }
+
+    /**
+     * 本轮需要用户拍板的结构化选项。走独立事件名 {@code choice}，载荷与落库 CHOICE 事件正文同形
+     * （question + options[{id,label}]）。前端只按它渲染 chips，正文里不出现裸 JSON。
+     */
+    @Override
+    public void choice(AgentChoice choice) {
+        String payload = WorkbenchChoiceJson.write(choice);
+        if (!payload.isEmpty()) {
+            writer.emitLegacy("choice", payload);
+        }
+    }
+
+    /**
+     * 工作流执行卡片：走独立事件名 {@code workflow}，载荷是整份视图（对象形态）。
+     *
+     * <p>为什么不用字符串载荷：出站层对字符串会再 JSON 编码一次，前端拿到的就是一段
+     * 需要二次解析的字符串；这里直接给 Map，帧就是前端可以直接读的对象。
+     */
+    @Override
+    public void workflow(WorkflowRunView view) {
+        Map<String, Object> payload = WorkflowRunJson.payload(view);
+        if (payload.isEmpty()) {
+            return;
+        }
+        writer.emitLegacy("workflow", payload);
     }
 
     /** {@inheritDoc} */

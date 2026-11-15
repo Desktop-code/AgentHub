@@ -8,6 +8,7 @@
  */
 import request from '@/utils/request'
 import {
+  streamSessionChoice,
   streamSessionMessage,
   type TrialChildPlanPendingChunk,
   type TrialStreamHandlers
@@ -90,6 +91,40 @@ export async function streamWorkbenchMessage(
   return streamSessionMessage(PREFIX, id, content, handlers, signal, images, idempotencyKey)
 }
 
+/**
+ * 点选项 → **断点续作**（边跑边收 SSE）。
+ *
+ * <p>走独立端点而不是「再发一条普通消息」：普通消息会重新进入口判词，
+ * 选项可能被分给别的 Agent；续作端点由服务端直接派回同一位 Agent，
+ * 入口线（sticky）既不改也不清。
+ *
+ * @param id       会话主键
+ * @param optionId 被点选项的短标识（服务端对照最后一条助手消息上的选项块校验）
+ * @param handlers 增量回调，与普通发送完全一致
+ * @param signal   中止信号，可空
+ */
+export async function streamWorkbenchChoice(
+  id: number,
+  optionId: string,
+  handlers: TrialStreamHandlers,
+  signal?: AbortSignal
+) {
+  return streamSessionChoice(PREFIX, id, optionId, handlers, signal)
+}
+
+/**
+ * 点选项 → 断点续作（非流式）。
+ *
+ * <p>仅给不支持 SSE 的调用方兜底；工作台页面统一用 {@link streamWorkbenchChoice}。
+ *
+ * @param id       会话主键
+ * @param optionId 被点选项的短标识
+ * @return 续作后的会话
+ */
+export function submitWorkbenchChoice(id: number, optionId: string) {
+  return request.post<Result<TrialSession>>(`${PREFIX}/sessions/${id}/choice`, { optionId })
+}
+
 /** 改左栏标题（写入后不再被自动生成覆盖）。 */
 export function renameWorkbenchSession(id: number, title: string) {
   return request.post<Result<TrialSession>>(`${PREFIX}/sessions/${id}/title`, { title })
@@ -162,4 +197,16 @@ export function getWorkbenchRoutes(id: number) {
  */
 export function switchWorkbenchRoute(id: number, routeKey: string) {
   return request.put<Result<TrialSession>>(`${PREFIX}/sessions/${id}/route`, { routeKey })
+}
+
+/**
+ * 取消本次 @ 指定：只撤销「下一轮强制走这条线」的一次性标记。
+ *
+ * <p>为什么服务端也要清：选定 @ 时会登记强制标记；用户点提及片上的 × 后若只清本地状态，
+ * 下一句新问题仍会被钉给那位专家。沿用线路（sticky）与消息事件都不受影响。
+ *
+ * @param id 会话主键
+ */
+export function cancelWorkbenchRoute(id: number) {
+  return request.delete<Result<void>>(`${PREFIX}/sessions/${id}/route`)
 }

@@ -113,7 +113,10 @@
               :key="row.id"
               class="card"
               :size="isCompact ? 'small' : 'normal'"
-              :class="{ 'is-flying': flyingId === row.id }"
+              :class="{
+                'is-flying': flyingId === row.id,
+                'is-platform-default': isPlatformDefaultAssistant(row.code)
+              }"
               :data-agent-id="row.id"
               tabindex="0"
               @click="handleGridCardClick(row, $event)"
@@ -155,13 +158,22 @@
                       <!-- 编辑：进现网详情（走路由，由 syncFromRoute 切主从态），不做飞卡动画 -->
                       <el-dropdown-item @click="editFromCard(row)">编辑</el-dropdown-item>
                       <el-dropdown-item v-if="user.hasPerm('agent:add')" @click="openCopy(row)">复制</el-dropdown-item>
-                      <!-- 启停互斥：按当前状态只出现一项，沿用现网 PUT /status -->
-                      <el-dropdown-item v-if="user.hasPerm('agent:enable')" @click="toggleCardStatus(row)">
+                      <!--
+                        启停互斥：按当前状态只出现一项，沿用现网 PUT /status。
+                        平台默认智能助手隐藏此项：它是兜底接待，不允许禁用（后端同样拦截直调）。
+                      -->
+                      <el-dropdown-item
+                        v-if="user.hasPerm('agent:enable') && !isPlatformDefaultAssistant(row.code)"
+                        @click="toggleCardStatus(row)"
+                      >
                         {{ row.status === 1 ? '禁用' : '启用' }}
                       </el-dropdown-item>
-                      <!-- 删除：标红 + 二次确认（与现网删除文案一致），不直接删 -->
+                      <!--
+                        删除：标红 + 二次确认（与现网删除文案一致），不直接删。
+                        平台默认智能助手同样隐藏，复制仍保留。
+                      -->
                       <el-dropdown-item
-                        v-if="user.hasPerm('agent:remove')"
+                        v-if="user.hasPerm('agent:remove') && !isPlatformDefaultAssistant(row.code)"
                         class="menu-danger"
                         divided
                         @click="confirmRemoveCard(row)"
@@ -261,7 +273,8 @@
                     class="rail-card"
                     :class="{
                       'is-current': row.id === activeId,
-                      'is-flying': flyingId === row.id
+                      'is-flying': flyingId === row.id,
+                      'is-platform-default': isPlatformDefaultAssistant(row.code)
                     }"
                     :data-agent-id="row.id"
                     :disabled="flipBusy || trialOpen"
@@ -378,6 +391,7 @@ import { useBrowseFlip } from '@/composables/useBrowseFlip'
 import { confirmLeaveDraft } from '@/composables/draftGuard'
 import { CARD_HEIGHT_NORMAL, lastPage, useGridPageSize } from '@/composables/gridPageSize'
 import { computeVirtualWindow, scrollTopForIndex } from '@/composables/virtualWindow'
+import { isPlatformDefaultAssistant } from '@/constants/platformAgents'
 import { useUserStore } from '@/stores/user'
 import { maTrialPathOrEmpty } from '@/utils/maTrial'
 import type { AgentCard, AgentCardPatch, AgentSave } from '@/types/agent'
@@ -1384,6 +1398,11 @@ async function toggleCardStatus(row: AgentCard) {
     return
   }
   const next = row.status === 1 ? 0 : 1
+  // 菜单已隐藏入口，这里再兜一道：只拦停用，误停后仍允许从列表恢复启用
+  if (isPlatformDefaultAssistant(row.code) && next === 0) {
+    ElMessage.warning('平台默认智能助手不可禁用')
+    return
+  }
   statusSavingId.value = row.id
   try {
     await changeAgentStatus(row.id, next)
@@ -1403,6 +1422,11 @@ async function toggleCardStatus(row: AgentCard) {
  */
 async function confirmRemoveCard(row: AgentCard) {
   if (removingId.value || flipBusy.value) {
+    return
+  }
+  // 平台默认智能助手是兜底接待，删除入口已隐藏；此处拦住任何误触发的删除确认
+  if (isPlatformDefaultAssistant(row.code)) {
+    ElMessage.warning('平台默认智能助手不可删除')
     return
   }
   try {
@@ -1664,6 +1688,14 @@ function onTrial(payload: { agentId: number; name: string; runMode: string }) {
   gap: 16px;
 }
 
+/*
+ * 平台默认智能助手卡片：很淡的透明蓝底，与普通专家白卡区分。
+ * 只叠背景色，不改高度 / 阴影 / hover；禁止做成实色块。
+ */
+.card.is-platform-default {
+  background-color: rgba(59, 130, 246, 0.06);
+}
+
 /* 外观由 ConfigCard 接管；此处仅保留飞卡选择器所需的 .card 与内部排版 */
 /* 身份区：40px 正圆头像 + 名称 / 编码，左右并排、垂直居中；右侧留出「…」的位置 */
 .card-id {
@@ -1912,6 +1944,11 @@ function onTrial(payload: { agentId: number; name: string; runMode: string }) {
 
 .rail-card:hover:not(:disabled) {
   border-color: #93c5fd;
+}
+
+/* 左栏同一身份：更淡的透明蓝底；写在 is-current 之前，选中态仍是实色高亮 */
+.rail-card.is-platform-default {
+  background-color: rgba(59, 130, 246, 0.05);
 }
 
 .rail-card.is-current {

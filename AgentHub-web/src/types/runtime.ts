@@ -87,6 +87,20 @@ export interface AssistantBlock {
     | 'vision'
     | 'file'
     /**
+     * 结构化选项块（后端 CHOICE 事件 / SSE `choice` 帧）。
+     *
+     * <p>它不参与正文拼接：正文里不出现任何 JSON，chips 只按这一块渲染。
+     * 老会话里模型写在正文中的 ```agenthub-choice 围栏仍按正文解析，作为历史兼容。
+     */
+    | 'choice'
+    /**
+     * 工作流执行卡片块（SSE `workflow` 帧 / 落库 WORKFLOW 事件）。
+     *
+     * <p>它不是正文：`text` 留空，结构化视图在 {@link AssistantBlock.workflow}。
+     * 消息流据此把工作流单独成一块（角标「工作流 WF」），不再拆成多个专家块。
+     */
+    | 'workflow'
+    /**
      * 前端态：Router 试跑的编排调度卡。
      * 只存在于本地时间线与刷新快照，禁止当业务消息落库、禁止从 agent_run_event 回放。
      */
@@ -94,12 +108,75 @@ export interface AssistantBlock {
   text: string
   /** 工具结果。和调用行相同或为空时不展示 */
   detail?: string
+  /**
+   * 工具块状态（仅 kind='tool' 使用）。
+   *
+   * <p>`running`：引擎已开始执行、结果还没回来 → 前端画成蓝色「正在调用」胶囊；
+   * `done` / `error`：结果已到 → 绿 / 红胶囊，点开看入参出参。
+   * 缺省（无此字段）表示历史数据：直接当已完成处理。
+   */
+  toolState?: 'running' | 'done' | 'error'
+  /** 工具名（仅 kind='tool'）：胶囊文案与匹配同一次调用用 */
+  toolName?: string
+  /** 工具入参展示行（仅 kind='tool'）：点开胶囊时的「入参」段 */
+  toolArgsText?: string
   /** plan 块的结构化视图；正文另外存一份 JSON 供回放 */
   plan?: TrialPlanView
   /** step 块的单步视图 */
   step?: TrialStepView
   /** file 块的产物视图；下载卡片据此渲染 */
   file?: TrialFileView
+  /**
+   * choice 块的结构化选项；`text` 是一句话问题。
+   *
+   * <p>与后端 CHOICE 事件正文、SSE `choice` 帧字段完全一致，前端只做渲染，
+   * 不再从自然语言里猜列表（猜法一轮一轮对不上，已经下线）。
+   */
+  choice?: TrialChoiceView
+  /**
+   * 工作流执行卡片的实时 / 终态视图（仅 kind='workflow'）。
+   *
+   * <p>同一轮收到多次帧时**原位覆盖**：卡片是状态快照不是增量，
+   * 追加会让刷新时看到一串互相矛盾的旧状态。
+   */
+  workflow?: TrialWorkflowView
+  /**
+   * 该块属于哪一位参与者（SSE `participant` 身份帧给的 id）。
+   *
+   * <p>为什么必须带上：并行 / 交错时「最后一条 route 文案」不能可靠代表当前说话人；
+   * 带着 id，时间线可以按身份归块，而不是靠文案猜归属。历史数据没有该字段，走旧口径。
+   */
+  participantId?: string
+  /** 该块的参与者展示名（与 participantId 同时写入，便于正文 / 文件 / 报错归属） */
+  participantName?: string
+  /**
+   * true＝这条 route 块只是「这一步开始」时补的占位行（只有名字与 route_key，没有依据）。
+   *
+   * <p>真实路由行随后到达时**原位补全**这条块，不另起一条，避免同一参与者出现两块。
+   */
+  begin?: boolean
+}
+
+/**
+ * 一个可点选项。id 由后端给出（工具参数 / 整理结果），label 是服务端权威展示文案。
+ */
+export interface TrialChoiceOption {
+  /** 稳定短标识：点击时回传后端定位（label 以服务端为准，不信客户端） */
+  id: string
+  /** 展示文案 */
+  label: string
+}
+
+/**
+ * 需要用户拍板的结构化选项。
+ *
+ * <p>三条来源同形（工具调用 / 后端整理 / SSE 与落库事件），前端只有一套渲染：
+ * 一句话问题 + 2~6 个选项，渲染成 chips，正文里不出现裸 JSON。
+ */
+export interface TrialChoiceView {
+  /** 一句话问题；模型没给时为空串（只出 chips，不硬凑问句） */
+  question: string
+  options: TrialChoiceOption[]
 }
 
 /**
@@ -112,6 +189,44 @@ export interface TrialFileView {
   size: number
   /** 下载地址。后端拼好，前端不再自己编码文件名 */
   downloadUrl: string
+}
+
+/**
+ * 工作流执行卡片里的一个真实节点。
+ *
+ * <p>START / END 在投影时已剔除：它们是边界标记，不是用户需要看到的「一步」。
+ * 字段与后端 `WorkflowRunView.Node` 一一对应，前端不补造状态。
+ */
+export interface TrialWorkflowNodeView {
+  /** 节点编码（业务唯一）；可能为空 */
+  code: string
+  /** 节点展示名（取配置名；后端已按编码兜底） */
+  name: string
+  /** AGENT / TOOL / CONDITION / HUMAN / PARALLEL_FORK / PARALLEL_JOIN */
+  type: string
+  /** PENDING / RUNNING / SUCCESS / FAILED / SKIPPED / WAITING_HUMAN / CANCELLED */
+  status: string
+  /** 一句状态说明（执行中 / 已完成 / 失败原因 / 等待前置节点）；后端已脱敏 */
+  note?: string
+}
+
+/**
+ * 工作流执行卡片视图。
+ *
+ * <p>来源只有现网真实运行事件（SSE `workflow` 帧 / 落库 WORKFLOW 事件），
+ * 前端**不推算进度**：没有事件就没有节点，卡片也不会自己往前走。
+ */
+export interface TrialWorkflowView {
+  /** 工作流展示名（配置名；可能为空，前端回落到编码） */
+  name: string
+  /** 工作流编码 */
+  code: string
+  /** CREATED / RUNNING / PAUSED_HUMAN / SUCCESS / FAILED / CANCELLED */
+  status: string
+  /** 终答文本；运行中为空。没有文件时产物区展示这段文本 */
+  answer?: string
+  /** 按图顺序的真实节点；可能为空表（事件还没到） */
+  nodes: TrialWorkflowNodeView[]
 }
 
 /** 计划中的一步。seq 即执行顺序。 */
@@ -155,6 +270,22 @@ export interface ChatTurn {
   planPending?: boolean
   /** 该轮对应计划的 planId；批准时用它定位要续跑的计划 */
   planId?: string
+  /**
+   * 入口参与者的身份 id（SSE `participant` 帧 kind=gateway 时给的 `gw-…`）。
+   *
+   * <p>为什么记在轮上：入口判定模型的推理是入口块（网关块）的思考，
+   * 并行 / 嵌套时它可能被决策行、说明行挡在中间。投影层按这个 id 把它找回来，
+   * 避免「入口只有判定句、没有思考框」。历史回放没有该字段，走位置口径。
+   */
+  entryParticipantId?: string
+  /**
+   * 本轮是「点选项续作」，由同一位专家直接接着跑，**不走入口判定**。
+   *
+   * <p>为什么记在轮上：投影层要据此决定「先不出块、等入口报身份」这条拦截是否适用。
+   * 续作轮本来就没有入口判定，若也去等身份，专家自己的思考会被误判成入口判定，
+   * 或者在等不到身份时整块不画。历史回放没有该字段，按新问题（期待入口）处理。
+   */
+  continuation?: boolean
   /**
    * 块 id 的自增序号（前端态）。每分配一块 +1，随快照持久化。
    *

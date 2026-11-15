@@ -82,6 +82,25 @@ public final class CauseDigest {
     }
 
     /**
+     * 把一段**文本**（不是异常）压成脱敏摘要。
+     *
+     * <p>为什么需要：引擎在工具失败时不抛异常，只把失败状态与一段错误正文塞进
+     * {@code ToolResultBlock}。那种情况下没有 Throwable，但错误正文就是真正的首错；
+     * 不落它，胶囊与完整链路只能写「未记录到首错」。
+     *
+     * <p>脱敏口径与 {@link #of(Throwable)} 完全一致：抹密钥、抹长 base64、复用试跑清洗链。
+     *
+     * @param raw 原始文本，可空
+     * @return 不超过 600 字的单段摘要；入参空或全空白时返回空串
+     */
+    public static String ofText(String raw) {
+        if (raw == null || raw.isBlank()) {
+            return "";
+        }
+        return clip(clean(raw), MAX_TOTAL);
+    }
+
+    /**
      * 截取本仓栈帧；若整条链都没有本仓帧则退回最外层的前几帧。
      *
      * @param error 原始异常

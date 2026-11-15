@@ -1,15 +1,21 @@
 package com.agenthub.runtime.application;
 
 import com.agenthub.runtime.api.dto.EventResp;
+import com.agenthub.runtime.domain.model.AgentChoice;
 import com.agenthub.runtime.domain.model.ChildPlanPendingView;
 import com.agenthub.runtime.domain.model.EventType;
 import com.agenthub.runtime.domain.model.GeneratedFile;
+import com.agenthub.runtime.domain.model.ParticipantView;
 import com.agenthub.runtime.domain.model.PlanView;
 import com.agenthub.runtime.domain.model.StepView;
+import com.agenthub.runtime.domain.model.WorkflowRunView;
 import com.agenthub.runtime.domain.service.GeneratedFileMarker;
+import com.agenthub.runtime.domain.service.ParticipantJson;
 import com.agenthub.runtime.domain.service.PlanJson;
 import com.agenthub.runtime.domain.service.TrialProgress;
 import com.agenthub.runtime.domain.service.TrialTexts;
+import com.agenthub.runtime.domain.service.WorkbenchChoiceJson;
+import com.agenthub.runtime.domain.service.WorkflowRunJson;
 import org.springframework.stereotype.Component;
 
 import java.time.LocalDateTime;
@@ -159,10 +165,49 @@ public class TrialLiveBuffer {
                 delegate.route(summary);
             }
 
+            /**
+             * 参与者开始：两边都要发。快照记一条身份事件（刷新后仍能按身份还原块），
+             * 出站帧让前端立刻出块。
+             */
+            @Override
+            public void beginParticipant(ParticipantView participant) {
+                recorder.beginParticipant(participant);
+                delegate.beginParticipant(participant);
+            }
+
+            /**
+             * 归属切换只走出站：快照里每条增量都已按顺序记录，回放时按 begin 事件归属，
+             * 不必为每次切换再写一条（否则快照会被翻转的标记撑大）。
+             */
+            @Override
+            public void attributeParticipant(String participantId) {
+                delegate.attributeParticipant(participantId);
+            }
+
+            /**
+             * 参与者整段结论：路由行 + 正文仍要写出站；快照侧由随后的 assistant 记录承接。
+             */
+            @Override
+            public void deliverParticipantConclusion(String routeLine, String text) {
+                delegate.deliverParticipantConclusion(routeLine, text);
+            }
+
+            /** 内层方案的收口通道要保持镜像，不能在这里把内存快照丢掉。 */
+            @Override
+            public TrialProgress conclusionChannel() {
+                return tee(delegate.conclusionChannel(), recorder);
+            }
+
             @Override
             public void reasoning(String delta) {
                 recorder.reasoning(delta);
                 delegate.reasoning(delta);
+            }
+
+            @Override
+            public void toolStart(String name) {
+                // 快照不记「正在调用」：刷新后那条胶囊没有对应的结果可配对，重放时不该出现
+                delegate.toolStart(name);
             }
 
             @Override
@@ -206,6 +251,25 @@ public class TrialLiveBuffer {
                 recorder.childPlanPending(pending);
                 delegate.childPlanPending(pending);
             }
+
+            /**
+             * 结构化选项：快照与出站都要。刷新时若整轮还没落库，快照是 chips 的唯一来源。
+             */
+            @Override
+            public void choice(AgentChoice choice) {
+                recorder.choice(choice);
+                delegate.choice(choice);
+            }
+
+            /**
+             * 工作流卡片同样两边都要：服务端快照记整份视图，出站帧让页面立刻更新节点状态。
+             * 漏掉这个覆写会让「刷新页面后卡片消失」，而实时那一轮看起来一切正常。
+             */
+            @Override
+            public void workflow(WorkflowRunView view) {
+                recorder.workflow(view);
+                delegate.workflow(view);
+            }
         };
     }
 
@@ -228,6 +292,25 @@ public class TrialLiveBuffer {
                 return;
             }
             append(type, TrialTexts.summary(text), text, fixedSeq);
+        }
+
+        /**
+         * 覆盖工作流卡片的快照：同一轮只保留最新一份。
+         *
+         * <p>为什么不像正文那样续写：卡片是**状态快照**，不是增量。追加会让刷新时
+         * 看到一串互相矛盾的旧状态（先是「运行中」再是「已完成」），看起来像卡了两遍。
+         *
+         * @param summary 人话摘要
+         * @param content 视图 JSON
+         */
+        private synchronized void replaceWorkflow(String summary, String content) {
+            for (int i = events.size() - 1; i >= 0; i -= 1) {
+                if (EventType.WORKFLOW.code().equals(events.get(i).getEventType())) {
+                    events.remove(i);
+                    break;
+                }
+            }
+            append(EventType.WORKFLOW, summary, content, null);
         }
 
         /**
@@ -304,6 +387,29 @@ public class TrialLiveBuffer {
             turn.append(EventType.ROUTE, TrialTexts.content(summary, LIVE_TEXT_LIMIT), null);
         }
 
+        /**
+         * 参与者开始：快照记一条身份事件，刷新后前端仍能按 id 建块。
+         *
+         * <p>只记 begin：归属切换不写快照（见 {@link #attributeParticipant(String)}）。
+         */
+        @Override
+        public void beginParticipant(ParticipantView participant) {
+            String payload = ParticipantJson.payload(participant, true);
+            if (payload == null) {
+                return;
+            }
+            turn.append(EventType.PARTICIPANT, TrialTexts.summary(participant.name()), payload, null);
+        }
+
+        /**
+         * 归属切换不落快照：身份事件已按 begin 顺序记录，逐次切换只会把快照撑大，
+         * 而快照只用于「刷新时仍在进行中的一轮」，完整归属以落库时间线为准。
+         */
+        @Override
+        public void attributeParticipant(String participantId) {
+            // 快照不记归属切换
+        }
+
         @Override
         public void reasoning(String delta) {
             turn.appendDelta(EventType.REASONING, delta);
@@ -367,6 +473,39 @@ public class TrialLiveBuffer {
             String summary = file.fileName() + "（" + file.humanSize() + "）";
             turn.append(EventType.FILE, TrialTexts.summary(summary),
                     GeneratedFileMarker.payload(file.fileName(), file.size()), null);
+        }
+
+        /**
+         * 结构化选项：正文是 JSON、摘要是问题句，故走「摘要与正文分开」的追加路径。
+         * 字段与 SSE {@code choice} 帧、落库 CHOICE 事件完全一致，前端一套解析即可。
+         */
+        @Override
+        public void choice(AgentChoice choice) {
+            String payload = WorkbenchChoiceJson.write(choice);
+            if (payload.isEmpty()) {
+                return;
+            }
+            String question = choice.question() == null ? "" : choice.question().trim();
+            String summary = question.isEmpty() ? "需要你选择" : question;
+            turn.append(EventType.CHOICE, TrialTexts.summary(summary),
+                    TrialTexts.content(payload, LIVE_TEXT_LIMIT), null);
+        }
+
+        /**
+         * 工作流执行卡片：快照里保留**最新一份**即可。
+         *
+         * <p>为什么要覆盖而不是追加：这是同一张卡片的快照（运行中 → 已完成），
+         * 追加会让刷新时看到一串互相矛盾的旧状态；覆盖后视觉与实时完全一致。
+         */
+        @Override
+        public void workflow(WorkflowRunView view) {
+            String payload = WorkflowRunJson.write(view);
+            if (payload.isEmpty()) {
+                return;
+            }
+            // 同一张卡片只留最新快照：先摘掉上一份，再按当前顺序追加
+            turn.replaceWorkflow(TrialTexts.summary(WorkflowRunJson.summary(view)),
+                    TrialTexts.content(payload, LIVE_TEXT_LIMIT));
         }
     }
 }

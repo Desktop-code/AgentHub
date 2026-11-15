@@ -127,7 +127,8 @@ public class MaDefAppService {
      *
      * <p>工作台入口（{@code ENTRY_ROUTER}）与普通方案出现在同一张列表里：它是平台唯一入口，
      * 但运营需要在编排列表里看得见、点得开去配模型与 ROUTER 提示词。
-     * 身份差异不靠「隐藏」表达，而靠固定的展示名「Router」+ 只读锁定（见 {@code MaDefPolicy}）。
+     * 身份差异不靠「隐藏」表达，而靠类型标签 + 编码 / 备注 / 类型锁定（见 {@code MaDefPolicy}）；
+     * 名称已开放编辑，列表与详情读库内名称。
      *
      * @param req 分页与筛选
      * @return 一页方案；绑定根名称与启用候选数已批量补齐
@@ -305,8 +306,9 @@ public class MaDefAppService {
         MaDefPolicy.assertEntryLocked(existing, template);
         boolean entry = AgentRuntimeConfig.isEntryRouterTemplate(existing.getTemplate());
         if (entry) {
-            // 身份字段（编码 / 名称 / 备注）同样锁定：有值且与固定值不一致就明确拒绝，不静默丢弃
-            MaDefPolicy.assertEntryIdentity(existing, code, req.getName(), req.getDescription());
+            // 编码 / 备注仍是入口身份字段：有值且与固定值不一致就明确拒绝，不静默丢弃；
+            // 名称已开放编辑（本刀），空名仍由下面的 requiredText 拦，重名沿用现网口径
+            MaDefPolicy.assertEntryIdentity(existing, code, req.getDescription());
             // 入口类型不在「页面可写」白名单里，assertTemplate 会拒；这里直接以库内值继续
             template = AgentRuntimeConfig.TEMPLATE_ENTRY_ROUTER;
         } else {
@@ -358,9 +360,9 @@ public class MaDefAppService {
         existing.setAvatarConfigJson(toAvatarJson(req.getAvatarConfig()));
         existing.setTemplate(template);
         if (entry) {
-            // 入口身份字段以平台锁定值为准：上面的比对已放行请求，这里落库归一，
-            // 保证历史库里叫「默认接待」/备注为空的老行保存一次后也收敛到「Router」+ 固定备注
-            existing.setName(AgentRuntimeConfig.ENTRY_ROUTER_NAME);
+            // 入口备注仍以平台锁定值为准：上面的比对已放行请求，这里落库归一，
+            // 保证历史库里备注为空的老行保存一次后收敛到固定备注；
+            // 名称不再改写，直接保留用户本次提交的名称（列表 / 详情 / 消息流同源）
             existing.setDescription(AgentRuntimeConfig.ENTRY_ROUTER_DESCRIPTION);
         }
         existing.setConfigJson(configJson);
@@ -742,7 +744,7 @@ public class MaDefAppService {
         MaDefRowResp row = new MaDefRowResp();
         row.setId(def.getId());
         row.setCode(def.getCode());
-        // 入口展示名 / 备注由平台锁定（见 MaDef.displayName / displayDescription），历史库里的老名称在这里归一
+        // 入口名称读库内值（已开放编辑），备注仍由平台锁定；两者都收敛到 displayName / displayDescription
         row.setName(def.displayName());
         row.setDescription(def.displayDescription());
         // 形象只读方案自己：未配置返回 null，前端按方案名走 8 套机器人兜底
@@ -762,7 +764,7 @@ public class MaDefAppService {
         MaDefDetailResp resp = new MaDefDetailResp();
         resp.setId(def.getId());
         resp.setCode(def.getCode());
-        // 与列表同口径：入口的名称 / 备注永远回显平台锁定值，页面据此只读展示
+        // 与列表同口径：入口名称读库内值（可编辑），备注仍回显平台锁定值
         resp.setName(def.displayName());
         resp.setDescription(def.displayDescription());
         String shown = displayTemplate(def.getTemplate());
