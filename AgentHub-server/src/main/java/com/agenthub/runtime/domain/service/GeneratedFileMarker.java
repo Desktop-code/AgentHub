@@ -76,9 +76,31 @@ public final class GeneratedFileMarker {
      * @return 紧凑 JSON 串
      */
     public static String payload(String fileName, long size) {
+        return payload(fileName, size, null, null);
+    }
+
+    /**
+     * 标记内的 JSON 正文，附上「谁写的」。SSE 帧与 FILE 落库行共用同一形状：
+     * 前端直播与刷新回放都按同一份身份挂卡，不再靠「最后一位参与者」猜作者。
+     *
+     * @param fileName        相对文件名
+     * @param size            字节数
+     * @param participantId   参与者 id；空则不写该字段（历史数据）
+     * @param participantName 参与者展示名；空则不写该字段
+     * @return 紧凑 JSON 串
+     */
+    public static String payload(String fileName, long size, String participantId, String participantName) {
         ObjectNode root = JSON.createObjectNode();
         root.put("fileName", fileName == null ? "" : fileName);
         root.put("size", size);
+        String id = participantId == null ? "" : participantId.trim();
+        if (!id.isEmpty()) {
+            root.put("participantId", id);
+            String name = participantName == null ? "" : participantName.trim();
+            if (!name.isEmpty()) {
+                root.put("participantName", name);
+            }
+        }
         return root.toString();
     }
 

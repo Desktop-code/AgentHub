@@ -97,6 +97,11 @@ final class ReasoningMemo implements TrialProgress {
     }
 
     @Override
+    public void endParticipant(ParticipantView participant, String state, String note) {
+        delegate.endParticipant(participant, state, note);
+    }
+
+    @Override
     public TrialProgress conclusionChannel() {
         return delegate.conclusionChannel();
     }

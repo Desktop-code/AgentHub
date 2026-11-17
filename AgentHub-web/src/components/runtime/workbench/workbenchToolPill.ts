@@ -188,6 +188,80 @@ export function aggregateToolPills(cardKey: string, steps: ToolStepLike[]): Tool
 }
 
 /**
+ * 正文里的英文调用名换成目录里的中文标题。
+ *
+ * <p>胶囊已经用 {@link toolFaceName}。模型仍会在正文里写出调用名，直播和回放都走这里，
+ * 不另做一套清洗。目录还没到、或名字对不上标题时原样留下，不写死某一组函数名。
+ * 只替换独立的标识符，避免把更长的名字截断。
+ *
+ * @param text   用户可见正文
+ * @param titles 调用名 → 工具项标题
+ * @return 替换后的正文
+ */
+export function maskToolCallNames(text: string, titles?: Readonly<Record<string, string>>): string {
+  const raw = text || ''
+  if (!raw || !titles) {
+    return raw
+  }
+  const entries = Object.entries(titles)
+    .filter(([name, title]) => {
+      const key = (name || '').trim()
+      const face = (title || '').trim()
+      // 只换驼峰或下划线调用名，避免目录里的普通英文单词误伤正文
+      return !!key && !!face && key !== face && !/[\u4e00-\u9fff]/.test(key)
+        && (/[a-z][A-Z]/.test(key) || key.includes('_'))
+    })
+    .sort((left, right) => right[0].length - left[0].length)
+  let out = raw
+  for (const [name, title] of entries) {
+    const escaped = name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+    out = out.replace(new RegExp(`(?<![A-Za-z0-9_])${escaped}(?![A-Za-z0-9_])`, 'g'), title)
+  }
+  return out
+}
+
+/**
+ * 工具详情里被序列化收成字面量的换行，还原成真正的换行。
+ *
+ * <p>只影响展示。工作区读文件的返回在落盘和工具协议里仍是原样，
+ * 这里不改写入内容，也不把已经是换行的文本再处理一遍。
+ *
+ * @param raw 胶囊详情
+ * @return 可放进 pre 的文本
+ */
+export function presentToolDetail(raw: string): string {
+  const text = raw || ''
+  if (!text.includes('\\')) {
+    return text
+  }
+  return text.replace(/\\r\\n/g, '\n').replace(/\\n/g, '\n').replace(/\\r/g, '\n').replace(/\\t/g, '\t')
+}
+
+/**
+ * 胶囊上显示的中文名。
+ *
+ * <p>调用名（`searchKnowledgeBase`）只做聚合键。给人看的是工具项上已有的 `title`。
+ * 这里不维护英文到中文的对照表：目录里没有标题、名字本身也不是中文时，退回「工具」，
+ * 不把函数名铺到胶囊上。
+ *
+ * @param name   调用名或节点上已有的展示名
+ * @param titles 调用名 → 工具项标题；没有目录时可不传
+ * @return 中文展示名
+ */
+export function toolFaceName(name: string, titles?: Readonly<Record<string, string>>): string {
+  const raw = (name || '').trim()
+  const titled = raw && titles ? (titles[raw] || '').trim() : ''
+  if (titled) {
+    return titled
+  }
+  // 工作流节点名、历史文案本身已是中文时直接用，不再套一层译名
+  if (raw && /[\u4e00-\u9fff]/.test(raw)) {
+    return raw
+  }
+  return '工具'
+}
+
+/**
  * 把一段失败正文压成一句短说明。
  *
  * @param raw 失败正文

@@ -110,6 +110,7 @@ import { Download } from '@element-plus/icons-vue'
 import type { ObsSpan } from '@/types/obs'
 import { compareSpanExecOrder } from '@/utils/executionOrder'
 import { traceTypePalette } from '@/utils/tracePalette'
+import { spanTypeLabel } from '@/utils/spanTypeLabel'
 import {
   groupSiblingSpans,
   resolveTraceLayoutContext,
@@ -854,7 +855,7 @@ function toDrawn(node: LayoutNode): DrawnNode {
     x: node.x,
     y: node.y,
     stepLabel,
-    typeLabel: typeLabel(span.spanType),
+    typeLabel: typeLabel(span),
     latency: span.latencyMs == null ? '' : `${span.latencyMs}ms`,
     name: name.length > 14 ? `${name.slice(0, 13)}…` : name,
     stroke: palette.border,
@@ -869,18 +870,17 @@ function toDrawn(node: LayoutNode): DrawnNode {
 function displayName(span: ObsSpan): string {
   if (span.spanType === 'LLM') return span.modelName || span.name || '模型'
   if (span.spanType === 'TOOL') return span.toolName || span.name || '工具'
-  return span.name || typeLabel(span.spanType)
+  return span.name || typeLabel(span)
 }
 
-function typeLabel(spanType: string | null | undefined): string {
-  if (spanType === 'LLM') return '模型'
-  if (spanType === 'TOOL') return '工具'
-  if (spanType === 'VISION') return '图片识别'
-  if (spanType === 'ROUTE') return '路由'
-  if (spanType === 'PLAN') return '规划'
-  if (spanType === 'RETRIEVE') return '检索'
-  if (spanType === 'AGENT') return 'Agent'
-  return spanType || '步骤'
+/**
+ * 拓扑角标比列表更短：模型 / 工具。外壳种类与列表同源，避免工作流在图上仍写成 Agent。
+ */
+function typeLabel(span: ObsSpan): string {
+  const full = spanTypeLabel(span.spanType, span.attrsJson)
+  if (full === '模型调用') return '模型'
+  if (full === '工具调用') return '工具'
+  return full
 }
 </script>
 

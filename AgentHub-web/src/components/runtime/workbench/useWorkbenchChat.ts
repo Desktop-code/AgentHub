@@ -49,6 +49,7 @@ import {
   appendChoice,
   appendFile,
   appendParticipantBegin,
+  appendParticipantEnd,
   appendRoute,
   appendText,
   appendTool,
@@ -923,7 +924,7 @@ export function useWorkbenchChat() {
         } else {
           dropLive(sessionId)
         }
-        // 首轮标题由后端在本次请求内同步写库：先单查补进左栏
+        // 首轮标题由后端异步生成：先单查一次，再按 [3s, 8s] 补拉；空标题保持「新对话」
         if ((session.value?.messageCount ?? 0) <= 1) {
           await refreshSessionTitle(sessionId)
           scheduleTitleRefresh(sessionId)
@@ -1048,7 +1049,13 @@ export function useWorkbenchChat() {
    * @return handlers 与可读的运行态 `state`（是否已收到落库终帧）
    */
   function createRunHandlers(live: ChatTurn, touchSnapshot: () => void) {
-    const state = { activeParticipantId: '', activeParticipantName: '', persisted: false }
+    const state = {
+      activeParticipantId: '',
+      activeParticipantName: '',
+      activeKind: '',
+      activeDepth: undefined as number | undefined,
+      persisted: false
+    }
     const handlers: TrialStreamHandlers = {
       onPhase: (phase) => {
         live.phase = phase
@@ -1058,17 +1065,42 @@ export function useWorkbenchChat() {
         if (participant.begin) {
           appendParticipantBegin(live, participant)
         }
+        /*
+         * 终态帧（begin=false + state）：把「这一步结束了」落到块上。
+         * 少了这一支，子专家跑完、甚至失败之后，卡上仍按整轮 streaming 显示「正在作答」，
+         * 一直转到汇总落屏才一起停下来。
+         */
+        if (participant.state) {
+          appendParticipantEnd(live, participant)
+        }
         // 入口身份落到轮上：入口判定的推理按 id 认领，避免被决策行 / 说明行挡在后面时丢掉
         if (participant.kind === 'gateway' && participant.id) {
           live.entryParticipantId = participant.id.trim()
         }
-        state.activeParticipantId = (participant.id || '').trim()
-        state.activeParticipantName = (participant.name || '').trim()
+        const nextId = (participant.id || '').trim()
+        const samePerson = !!nextId && nextId === state.activeParticipantId
+        state.activeParticipantId = nextId
+        state.activeParticipantName = (participant.name || '').trim() || (samePerson ? state.activeParticipantName : '')
+        // kind / depth 只在这一帧真带了才更新。归属切换帧经常不带 depth，不能把上一位的层级清掉后再贴错人
+        const nextKind = (participant.kind || '').trim()
+        if (nextKind) {
+          state.activeKind = nextKind
+        } else if (!samePerson) {
+          state.activeKind = ''
+        }
+        if (typeof participant.depth === 'number') {
+          state.activeDepth = participant.depth
+        } else if (!samePerson) {
+          state.activeDepth = undefined
+        }
         touchSnapshot()
       },
       onRoute: (summary) => {
-        // 路由判定进思考时间线；改派/换线后的 chip 在整轮收尾时由 loadRoutes 对齐
-        appendRoute(live, summary, state.activeParticipantId, state.activeParticipantName)
+        // 路由判定进思考时间线；kind / depth 只在路由名对得上当前参与者时写入
+        appendRoute(live, summary, state.activeParticipantId, state.activeParticipantName, undefined, {
+          participantKind: state.activeKind,
+          participantDepth: state.activeDepth
+        })
         touchSnapshot()
       },
       onReasoning: (text) => {
@@ -1126,11 +1158,22 @@ export function useWorkbenchChat() {
         childPending.value = pending
       },
       onFileGenerated: (file) => {
-        appendFile(live, {
-          fileName: file.fileName,
-          size: file.size,
-          downloadUrl: file.downloadUrl
-        })
+        /*
+         * 文件作者**只认产生处**：后端帧自带作者就用它，没带就留空（无主），
+         * 绝不用「当前归属」兜底——汇总结论阶段只推「方案结论：X」，当前归属常常是
+         * 工作流 / 汇总那条，别人的文件就会先挂到它们卡上、再改挂别人。
+         * 无主产物由投影层按真实作者卡归位，宁可晚一拍，也不猜错人。
+         */
+        appendFile(
+          live,
+          {
+            fileName: file.fileName,
+            size: file.size,
+            downloadUrl: file.downloadUrl
+          },
+          file.participantId,
+          file.participantName
+        )
         touchSnapshot()
       },
       onChoice: (choice) => {
@@ -1152,7 +1195,7 @@ export function useWorkbenchChat() {
          * 工作流没有 token 输出，这张卡片就是它在消息流里的唯一可见载体；
          * 漏掉这条会让整张卡片只在刷新后的落库回放里出现。
          */
-        appendWorkflow(live, view)
+        appendWorkflow(live, view, state.activeParticipantId, state.activeParticipantName)
         touchSnapshot()
       },
       onAssistant: (text) => {
@@ -1452,7 +1495,10 @@ export function useWorkbenchChat() {
     }
   }
 
-  /** 首轮后按两次延迟补拉列表标题；已有标题/已切换会话即停。 */
+  /**
+   * 首轮后按 [3s, 8s] 补拉列表标题；已有标题即停。
+   * 异步摘要未完成前左栏继续「新对话」，命中后替换；失败不另造展示规则。
+   */
   function scheduleTitleRefresh(id: number) {
     stopTitleRefresh()
     const row = history.value.find((item) => item.id === id)

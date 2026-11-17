@@ -8,7 +8,10 @@ import com.baomidou.mybatisplus.core.conditions.query.LambdaQueryWrapper;
 import org.springframework.stereotype.Repository;
 
 import java.time.LocalDateTime;
+import java.util.ArrayList;
+import java.util.Collection;
 import java.util.List;
+import java.util.Objects;
 
 /**
  * 试跑事件仓储实现。所属域：runtime。摘要在入库前已经截断，这里不再改写。
@@ -35,6 +38,28 @@ public class RunEventRepositoryImpl implements RunEventRepository {
                 .stream()
                 .map(this::toDomain)
                 .toList();
+    }
+
+    /**
+     * {@inheritDoc}
+     * 每批最多 200 个会话，避免 IN 列表过长。
+     */
+    @Override
+    public List<RunEvent> listClosureMarks(Collection<Long> sessionIds) {
+        if (sessionIds == null || sessionIds.isEmpty()) {
+            return List.of();
+        }
+        List<Long> ids = sessionIds.stream().filter(Objects::nonNull).distinct().toList();
+        if (ids.isEmpty()) {
+            return List.of();
+        }
+        List<RunEvent> marks = new ArrayList<>();
+        int batch = 200;
+        for (int from = 0; from < ids.size(); from += batch) {
+            List<Long> slice = ids.subList(from, Math.min(from + batch, ids.size()));
+            mapper.listClosureMarks(slice).stream().map(this::toDomain).forEach(marks::add);
+        }
+        return marks;
     }
 
     /** {@inheritDoc} */

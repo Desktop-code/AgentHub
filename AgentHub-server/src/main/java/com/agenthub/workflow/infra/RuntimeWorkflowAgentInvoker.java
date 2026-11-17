@@ -7,6 +7,7 @@ import com.agenthub.runtime.application.TrialBindingLoader;
 import com.agenthub.runtime.domain.model.TrialPlan;
 import com.agenthub.runtime.domain.model.TrialTurn;
 import com.agenthub.runtime.domain.service.TrialFailure;
+import com.agenthub.obs.domain.ObsTraceHolder;
 import com.agenthub.runtime.infra.agentscope.ReActTrialExecutor;
 import com.agenthub.workflow.domain.WorkflowNodeFailure;
 import com.agenthub.workflow.domain.service.WorkflowAgentInvoker;
@@ -52,17 +53,29 @@ public class RuntimeWorkflowAgentInvoker implements WorkflowAgentInvoker {
         if ("ROUTER".equalsIgnoreCase(agent.getRunMode())) {
             throw new WorkflowNodeFailure("AGENT 节点不允许绑定 ROUTER Agent，请改绑叶子 Agent 或用画布并行");
         }
+        // 对话 trace 已绑定时，先在外壳下记下这位子 Agent，模型步才不会直接挂在外壳上。
+        // 工作流页单独运行没有对话 trace，句柄为空，节点仍只在工作流自己的 trace 里。
+        WorkflowConsoleAgentSpan.Handle consoleAgent = WorkflowConsoleAgentSpan.open(
+                ObsTraceHolder.current(), agent.getName(), agent.getId(), message);
         try {
             TrialPlan plan = loader.loadReact(agent, message);
             TrialTurn turn = react.execute(plan, message, userId, runId);
             String text = turn == null ? null : turn.getAssistantText();
             if (text == null || text.isBlank()) {
+                consoleAgent.fail("Agent「" + agent.getName() + "」没有返回文本");
                 throw new WorkflowNodeFailure("Agent「" + agent.getName() + "」没有返回文本");
             }
+            consoleAgent.ok();
             return text;
         } catch (TrialFailure ex) {
             // TrialFailure 的文案已脱敏，可直接作为节点错误摘要
+            consoleAgent.fail(ex.getMessage());
             throw new WorkflowNodeFailure("Agent「" + agent.getName() + "」执行失败：" + ex.getMessage(), ex);
+        } catch (WorkflowNodeFailure ex) {
+            throw ex;
+        } catch (RuntimeException ex) {
+            consoleAgent.fail(ex.getMessage());
+            throw ex;
         }
     }
 }

@@ -44,6 +44,20 @@ export const LANE_AGGREGATE_VOTE = 'VOTE'
 /** 上下文策略：本轮子 Agent 共享键控草稿区（由 ROUTE attrs ma.context 识别） */
 export const LANE_CONTEXT_SHARED_SCRATCH = 'SHARED_SCRATCH'
 
+/**
+ * 外壳种类键，与后端 {@code RouterObs.OBS_ROLE} 同一个键。
+ * 值为 workflow 时这一位是工作流外壳，为 scheme 时是另一套方案的外壳；真专家不写该键。
+ */
+export const LANE_ATTR_ROLE = 'obs.role'
+/** {@link LANE_ATTR_ROLE}：工作流外壳 */
+export const LANE_ROLE_WORKFLOW = 'workflow'
+/** {@link LANE_ATTR_ROLE}：方案外壳 */
+export const LANE_ROLE_SCHEME = 'scheme'
+/** 方案根标记，与后端 {@code ma.root} 同键；值为 SCHEME 表示这是方案自己的编排根 */
+export const LANE_ATTR_MA_ROOT = 'ma.root'
+/** {@link LANE_ATTR_MA_ROOT}：方案编排根 */
+export const LANE_MA_ROOT_SCHEME = 'SCHEME'
+
 /** 泳道类型：总控判路由 / 子 Agent / 汇总 */
 export type LaneRowKind = 'judge' | 'child' | 'aggregate'
 /** 事件语气：普通 / 成功 / 提醒 / 失败 */
@@ -63,6 +77,16 @@ export interface OrchestrationLaneRow {
   running: boolean
   /** 任一失败 */
   failed: boolean
+  /**
+   * 层级：0 = 入口 ROUTE 的直接目标（子泳道单列）；>0 = 挂在外壳下的内层 Agent。
+   * <p>内层只在自己的外壳行下缩进展示，不单列、不计入 childCount。
+   */
+  depth: number
+  /**
+   * 内层 Agent（按 parent_id 归到本行）：方案外壳下的编排根、工作流外壳下的节点 Agent 等。
+   * <p>只用于缩进展示与事件；不参与「派发了几个目标」的计数，也不进中栏卡片。
+   */
+  nested: OrchestrationLaneRow[]
 }
 
 /** 一条中文事件；spanIds 供泳道联动高亮 */
@@ -101,11 +125,22 @@ export interface OrchestrationLaneModel {
   scratchKeyCount: number | null
   /** 共享草稿区被拒绝的同键写入次数；无则 null */
   scratchConflictCount: number | null
-  /** 行顺序固定：总控 → 各子（判路由顺序）→ 汇总 */
+  /** 行顺序固定：总控 → 各子（判路由顺序）→ 汇总；扁平口径，问答框内时间线与中栏卡片继续读它 */
   rows: OrchestrationLaneRow[]
+  /**
+   * 执行明细泳道专用：总控 → 入口直接目标（内层 Agent 收在 nested）→ 汇总。
+   *
+   * <p>为什么和 {@link rows} 并存：执行明细要分层（外壳 ⊃ 编排根 ⊃ 专家），
+   * 而问答框内的编排时间线与中栏协作卡是「一位 Agent 一张卡」的扁平口径。
+   * 两份数据同源同构，只是分组方式不同，互不改写。
+   */
+  laneRows: OrchestrationLaneRow[]
   /** 中文事件，时间升序 */
   events: OrchestrationLaneEvent[]
-  /** 参与执行的子 Agent 数 */
+  /**
+   * 参与执行的子 Agent 数：只数入口 ROUTE 的直接目标（方案 / 工作流 / 专家各算一个），
+   * 不再把同一条 trace 里所有层级的 AGENT 加在一起。
+   */
   childCount: number
   /** 汇总说明，直接展示 */
   aggregateNote: string
@@ -272,6 +307,7 @@ export function buildOrchestrationLane(
     scratchKeyCount: null,
     scratchConflictCount: null,
     rows,
+    laneRows: [],
     events,
     childCount: 0,
     aggregateNote: '',
@@ -315,10 +351,31 @@ export function buildOrchestrationLane(
 
   const routeKids = kids(route.id)
   const llmKids = routeKids.filter((span) => span.spanType === 'LLM')
-  const childSpans = ordered.filter((span) => span.spanType === 'AGENT')
+  // 整条 trace 的全部 AGENT：只用于「子全部结束时刻」这类时间基准，不再直接铺成同级行
+  const agentSpans = ordered.filter((span) => span.spanType === 'AGENT')
+  /*
+   * 分层口径：AGENT 的层级只由「最近的 AGENT 祖先」决定，不看它挂在哪条 LLM / ROUTE 下。
+   *
+   * 为什么按 AGENT 祖先而不是按 parent_id 直接判：子专家实际挂在判路由 LLM 上，
+   * 方案编排根挂在外壳上，工作流节点专家挂在工作流外壳上；只有「往上第一个 AGENT」
+   * 才能统一回答「这一位属于入口直接目标，还是属于某个外壳内部的专家」。
+   */
+  const agentAncestorOf = (span: ObsSpan): ObsSpan | null => {
+    let cursor = span.parentId != null ? byId.get(span.parentId) : undefined
+    // 防御脏数据成环：最多走到根
+    for (let guard = 0; cursor != null && guard < ordered.length; guard += 1) {
+      if (cursor.spanType === 'AGENT') {
+        return cursor
+      }
+      cursor = cursor.parentId != null ? byId.get(cursor.parentId) : undefined
+    }
+    return null
+  }
+  // 入口 ROUTE 的直接目标：往上没有任何 AGENT 祖先（外壳 / 工作流 / 专家各算一个）
+  const routeChildAgents = agentSpans.filter((span) => agentAncestorOf(span) == null)
   // 子全部结束的时刻：之后的 LLM 只可能是汇总，不可能是判路由
   let childEndMs: number | null = null
-  for (const child of childSpans) {
+  for (const child of agentSpans) {
     const end = msOf(child.endTime)
     if (end != null) {
       childEndMs = childEndMs == null ? end : Math.max(childEndMs, end)
@@ -361,31 +418,30 @@ export function buildOrchestrationLane(
   const competeDegraded = competeTemplate && attrs['ma.compete.degraded'] === 'true'
   const competeFailed = competeTemplate ? (nullableInt(attrs['ma.compete.fail']) ?? 0) : 0
 
-  // route_key：优先用 sub_query 与子 AGENT span 的 inputText 精确对齐；对齐不上再按判定顺序兜底
-  const keyBySub = new Map<string, string>()
-  for (const item of decision) {
-    if (item.subQuery && item.routeKey) {
-      keyBySub.set(item.subQuery, item.routeKey)
-    }
-  }
+  /*
+   * route_key 对齐：先看 sub_query 是否「唯一命中」，不唯一再按下标对齐。
+   *
+   * 为什么不能像以前那样用 Map 建 sub_query 索引：多问场景下两个子意图的 sub_query
+   * 可能完全相同（「同时也按工作流跑一次」会承接上一问全文），`Map.set` 后写覆盖前写，
+   * 于是所有 input_text 等于该句的 AGENT（方案外壳、工作流外壳）都被标成同一个 route_key。
+   * 现在同名 sub_query 一律视为「不唯一」，退回按执行序下标对齐——route_decision 本身就是
+   * 按判定序写的，下标对齐才是无损的；只有条数对不上（历史 trace / 候选被跳过）时，
+   * 才接受唯一文本命中，其余留空，不硬贴一个可能错的 key。
+   */
   const keyOf = (span: ObsSpan, index: number): string => {
-    // 固定模板的所有子吃同一份用户原问，按 sub_query 对齐会全部命中同一条，必须按序对齐；
-    // 竞争选优同理（同题竞争，sub_query 全等），也只能按候选顺序对齐
-    if (fixedTemplate || competeTemplate) {
-      return decision[index]?.routeKey || ''
+    const text = (span.inputText || '').trim()
+    const byText = text ? decision.filter((item) => item.subQuery === text) : []
+    if (byText.length === 1) {
+      return byText[0].routeKey
     }
-    const matched = keyBySub.get((span.inputText || '').trim())
-    if (matched) {
-      return matched
-    }
-    if (decision.length === childSpans.length) {
+    if (decision.length === routeChildAgents.length) {
       return decision[index]?.routeKey || ''
     }
     return ''
   }
 
   // 总控泳道：判路由并行 = ROUTE + 判路由 LLM；固定模板 = ROUTE 单条（无判路由 LLM）
-  rows.push({
+  const judgeRow: OrchestrationLaneRow = {
     key: 'judge',
     kind: 'judge',
     title: (route.agentName || '').trim() || '总控',
@@ -400,8 +456,11 @@ export function buildOrchestrationLane(
             : 'JUDGE · 判路由',
     spans: [route, ...judgeRows],
     running: [route, ...judgeRows].some(isRunning),
-    failed: [route, ...judgeRows].some(isFailed)
-  })
+    failed: [route, ...judgeRows].some(isFailed),
+    // 总控是泳道的一级行，从不参与外壳缩进
+    depth: 0,
+    nested: []
+  }
   events.push({
     key: `route-${route.id}`,
     atMs: msOf(route.startTime),
@@ -411,12 +470,12 @@ export function buildOrchestrationLane(
         ? `评审环：跳过判路由，执行者出稿 → 评审 ${criticRoundsUsed(route)} 轮（${criticDecisionOf(route)}）`
         : fixedTemplate
           ? `${fixedParallel ? '固定并行：跳过判路由，同时派给' : '固定串行：跳过判路由，按序执行'} ${
-            routeKeys.length ? routeKeys.join(fixedParallel ? '、' : ' → ') : `${childSpans.length} 个子`
+            routeKeys.length ? routeKeys.join(fixedParallel ? '、' : ' → ') : `${routeChildAgents.length} 个子`
           }`
           : routerThenSequence
-            ? `路由后串行：JUDGE 判定 → ${routeKeys.length ? routeKeys.join(' → ') : `${childSpans.length} 个子`}（按判定序串行）`
+            ? `路由后串行：JUDGE 判定 → ${routeKeys.length ? routeKeys.join(' → ') : `${routeChildAgents.length} 个子`}（按判定序串行）`
             : competeTemplate
-              ? `竞争选优：跳过判路由，${routeKeys.length || childSpans.length} 个候选同题并行（策略：${
+              ? `竞争选优：跳过判路由，${routeKeys.length || routeChildAgents.length} 个候选同题并行（策略：${
                 competeStrategy === 'FIRST_SUCCESS' ? '首个成功子' : '评选模型选优'
               }）`
               : `路由判定 → ${routeKeys.length ? routeKeys.join('、') : (shortText(route.outputText, 48) || '—')}`,
@@ -424,22 +483,50 @@ export function buildOrchestrationLane(
     spanIds: [route.id]
   })
 
-  // 子泳道：按步骤顺序一行一个；时间窗并排即可看出并行，不画成假串行瀑布
-  childSpans.forEach((span, index) => {
-    const attrs = parseAttrs(span.attrsJson)
-    const routeKey = keyOf(span, index)
-    const label = childLabel(span)
-    // 子运行模式来自 span attrs（P&E 子才会带）；缺省按刀3 前的 REACT 展示
-    const runMode = attrs['ma.child_run_mode'] === 'PLAN_AND_EXECUTE'
+  /*
+   * 子泳道分层：入口 ROUTE 的直接目标各占一行；外壳内部的 AGENT 收进该外壳行的 nested，
+   * 不再和外壳平铺成同级。
+   *
+   * 为什么必须分层：同一条 trace 里，「方案外壳」与「方案自己的编排根」都叫方案名，
+   * 「工作流外壳」与「工作流里每位节点专家」也都是 AGENT。全量平铺会让「几个子 Agent」
+   * 变成全 trace 的 AGENT 总数，用户看到两条同名「综合台」并排，却读不出谁在谁里面。
+   */
+  const innerAgentsOf = new Map<number, ObsSpan[]>()
+  for (const span of agentSpans) {
+    const owner = agentAncestorOf(span)
+    if (owner == null) {
+      continue
+    }
+    const list = innerAgentsOf.get(owner.id) ?? []
+    list.push(span)
+    innerAgentsOf.set(owner.id, list)
+  }
+
+  /**
+   * 造一条子泳道行。字段口径与分层前逐字一致（扁平口径，问答框时间线与中栏卡片读它）。
+   *
+   * @param span        该行对应的 AGENT 步骤
+   * @param routeKey    入口判路由给该目标的 route_key；内层 Agent 没有
+   * @param serialIndex 串行模板下的序号（1 基）；非串行传 0
+   * @param serialTotal 串行模板下的总数；非串行传 0
+   */
+  const childRowOf = (span: ObsSpan, routeKey: string, serialIndex: number,
+                      serialTotal: number): OrchestrationLaneRow => {
+    const rowAttrs = parseAttrs(span.attrsJson)
+    const baseLabel = childLabel(span)
+    // 子运行模式来自 span attrs（P&E 子才会带）；缺省按既有的 REACT 展示
+    const runMode = rowAttrs['ma.child_run_mode'] === 'PLAN_AND_EXECUTE'
       ? '计划执行'
       : 'REACT'
-    const paused = !!pausedRouteKey && !!routeKey && routeKey === pausedRouteKey
+    const paused = (!!pausedRouteKey && !!routeKey && routeKey === pausedRouteKey)
       // 评审环的子步骤没有 route_key（无判路由）：用 agentId 命中唯一待批槽
       || (criticTemplate && pausedAgentId != null && span.agentId === pausedAgentId)
     // 评审环：执行者 / 评审专家是串行兄弟，副标题直接写角色与轮次，避免被当成 route_key
-    const criticRole = criticTemplate ? criticRoleText(attrs) : ''
+    const criticRole = criticTemplate ? criticRoleText(rowAttrs) : ''
     // 路由后串行：把「判定序第几步」写进副标题，和并行模板的并排观感明确区分
-    const serialStepText = routerThenSequence ? ` · 串行第 ${index + 1}/${childSpans.length} 步` : ''
+    const serialStepText = routerThenSequence && serialTotal > 0
+      ? ` · 串行第 ${serialIndex}/${serialTotal} 步`
+      : ''
     // 竞争选优 / 投票选优：winner 加星标，一眼看出终答取自哪一位候选
     const winnerMark = routeKey && (
       (competeTemplate && !!competeWinner && routeKey === competeWinner)
@@ -453,22 +540,42 @@ export function buildOrchestrationLane(
         `${runMode}${serialStepText}`,
         paused ? '待批准' : ''
       ].filter(Boolean).join(' · ')
-    rows.push({
+    return {
       key: `child-${span.id}`,
       kind: 'child',
-      title: label,
+      title: baseLabel,
       subtitle,
       spans: [span],
       running: isRunning(span),
-      failed: isFailed(span)
-    })
+      failed: isFailed(span),
+      depth: 0,
+      nested: []
+    }
+  }
+
+  /*
+   * 子泳道事件：开始 / 结束；内层 Agent 用「内层」区分，不与入口目标混成同级。
+   *
+   * <p>事件只有一份（`events`），问答框与执行明细读到的都是同一批事实；
+   * 层级直接由「是否入口直接目标」判定，不依赖某一套分组，避免两套行各推一遍事件。
+   *
+   * @param row         该行（扁平口径：title 不带「· 编排」，两种视图文案一致）
+   * @param entryIndex  入口直接目标的 0 基下标；内层 Agent 传 -1
+   */
+  const pushChildEvents = (row: OrchestrationLaneRow, entryIndex: number) => {
+    const span = row.spans[0]
+    const label = row.title
+    const isEntry = entryIndex >= 0
+    const nestedTag = isEntry ? '子' : '内层'
+    // 入口目标的 route_key 按判定序取；内层 Agent 不参与入口判定
+    const routeKey = isEntry ? keyOf(span, entryIndex) : ''
     const sub = shortText(span.inputText)
     events.push({
       key: `child-start-${span.id}`,
       atMs: msOf(span.startTime),
-      text: `${routerThenSequence ? `串行第 ${index + 1} 步 · ` : ''}${
+      text: `${isEntry && routerThenSequence ? `串行第 ${entryIndex + 1} 步 · ` : ''}${
         routeKey ? `[${routeKey}] ` : ''
-      }子「${label}」开始${sub ? ` · ${sub}` : ''}`,
+      }${nestedTag}「${label}」开始${sub ? ` · ${sub}` : ''}`,
       tone: 'info',
       spanIds: [span.id]
     })
@@ -479,22 +586,105 @@ export function buildOrchestrationLane(
       events.push({
         key: `child-end-${span.id}`,
         atMs: msOf(span.endTime),
-        text: `子「${label}」失败：${shortText(span.errorSummary, 48) || '未知原因'}`,
+        text: `${nestedTag}「${label}」失败：${shortText(span.errorSummary, 48) || '未知原因'}`,
         tone: 'danger',
         spanIds: [span.id]
       })
       return
     }
     const latency = span.latencyMs == null ? '' : `（${span.latencyMs}ms）`
+    const star = row.subtitle.includes('★ 选中') ? ' · ★ 选中' : ''
     events.push({
       key: `child-end-${span.id}`,
       atMs: msOf(span.endTime),
-      text: `子「${label}」成功${latency}${winnerMark ? ` · ${winnerMark}` : ''}`,
+      text: `${nestedTag}「${label}」成功${latency}${star}`,
       tone: 'ok',
       spanIds: [span.id]
     })
+  }
+
+  /*
+   * 两套行都由 {childRowOf} 产出，区别只在「怎么摆」与「外壳标注」：
+   * - `rows`（扁平）：入口目标 + 全部内层 Agent 按执行序平铺，标题/副标题与分层前逐字一致，
+   *   问答框内的编排时间线与中栏协作卡继续读它，行数与文案都不变；
+   * - `laneRows`（分层）：入口直接目标单列，内层 Agent 收进所属外壳行的 `nested`，
+   *   外壳按 attrs 标「方案 / 工作流」，编排根标「· 编排」，执行明细泳道读它。
+   */
+  const flatChildren: OrchestrationLaneRow[] = agentSpans.map((span) => {
+    const index = routeChildAgents.indexOf(span)
+    // 入口直接目标才有 route_key 与串行序号；内层 Agent 不参与入口判定
+    const entry = index >= 0
+    return childRowOf(
+      span,
+      entry ? keyOf(span, index) : '',
+      entry ? index + 1 : 0,
+      entry ? routeChildAgents.length : 0
+    )
   })
 
+  /**
+   * 泳道行：在扁平行之上补「谁在谁里面」，并按 attrs 标注外壳种类。
+   *
+   * <p>只在执行明细这一侧改标题与副标题，扁平行（问答框用）保持原样。
+   *
+   * @param span  该行对应的 AGENT 步骤
+   * @param depth 层级：0 = 入口直接目标；>0 = 某个外壳内部
+   * @return 泳道行（含 nested 递归）
+   */
+  const laneRowOf = (span: ObsSpan, depth: number): OrchestrationLaneRow => {
+    const index = depth === 0 ? routeChildAgents.indexOf(span) : -1
+    const base = childRowOf(
+      span,
+      index >= 0 ? keyOf(span, index) : '',
+      index >= 0 ? index + 1 : 0,
+      index >= 0 ? routeChildAgents.length : 0
+    )
+    const rowAttrs = parseAttrs(span.attrsJson)
+    // 外壳种类与编排根标记都读后端既有 attrs，不新造字段，也不改 span 类型
+    const role = typeof rowAttrs[LANE_ATTR_ROLE] === 'string' ? (rowAttrs[LANE_ATTR_ROLE] as string) : ''
+    const schemeRoot = rowAttrs[LANE_ATTR_MA_ROOT] === LANE_MA_ROOT_SCHEME
+    // 同名两行靠这里分开：编排根补「· 编排」；外壳副标题写「方案 / 工作流」
+    const title = schemeRoot ? `${base.title} · 编排` : base.title
+    const subtitle = schemeRoot
+      // 编排根是容器步：只标「编排」，不写名义运行模式（REACT 会与真专家混淆）
+      ? '编排'
+      : role === LANE_ROLE_SCHEME && !base.subtitle.includes('方案')
+        ? ['方案', base.subtitle].filter(Boolean).join(' · ')
+        : role === LANE_ROLE_WORKFLOW && !base.subtitle.includes('工作流')
+          ? ['工作流', base.subtitle].filter(Boolean).join(' · ')
+          : base.subtitle
+    return {
+      ...base,
+      title,
+      subtitle,
+      depth,
+      nested: (innerAgentsOf.get(span.id) ?? []).map((inner) => laneRowOf(inner, depth + 1))
+    }
+  }
+  const entryRows = routeChildAgents.map((span) => laneRowOf(span, 0))
+
+  /*
+   * 事件按泳道行产出：内层 Agent 的显示名要用「· 编排」那一份，
+   * 否则时间线上仍会出现两条同名「综合台」，与分层后的泳道对不上。
+   * 扁平 `rows` 的标题保持原样（问答框不改），事件与泳道共用同一份标注。
+   */
+  const laneRowBySpanId = new Map<number, OrchestrationLaneRow>()
+  const indexLaneRows = (row: OrchestrationLaneRow) => {
+    laneRowBySpanId.set(row.spans[0].id, row)
+    row.nested.forEach(indexLaneRows)
+  }
+  entryRows.forEach(indexLaneRows)
+  // 按执行序产出事件（外壳先开、内层再开），与右栏树一致
+  const eventOrder = [...agentSpans]
+    .sort((a, b) => a.seq - b.seq || a.id - b.id)
+  eventOrder.forEach((span) => {
+    const row = laneRowBySpanId.get(span.id)
+    if (row) {
+      pushChildEvents(row, routeChildAgents.indexOf(span))
+    }
+  })
+  // 扁平视图同样按执行序排：问答框时间线与中栏卡片的阅读顺序不因分层改变
+  flatChildren.sort((a, b) => a.spans[0].seq - b.spans[0].seq || a.spans[0].id - b.spans[0].id)
   // 汇总泳道：CONCAT 无模型调用，只留灰字「拼接」；SUMMARIZE 有 LLM 才画块；
   // 评审环没有汇总步骤：终答＝最后一版执行稿，评审意见默认只进时间线
   const aggregateNote = criticTemplate
@@ -512,7 +702,7 @@ export function buildOrchestrationLane(
           : routerThenSequence
             ? '按判定顺序串行拼接，无模型调用'
             : '按顺序拼接，无模型调用'
-  rows.push({
+  const aggregateRow: OrchestrationLaneRow = {
     key: 'aggregate',
     kind: 'aggregate',
     title: criticTemplate
@@ -527,10 +717,17 @@ export function buildOrchestrationLane(
       : pick ? '选优' : vote ? (voteDegraded ? 'VOTE · 降级' : 'VOTE') : summarize ? 'AGGREGATE' : '拼接',
     spans: aggregateRows,
     running: aggregateRows.some(isRunning),
-    failed: aggregateRows.some(isFailed)
-  })
+    failed: aggregateRows.some(isFailed),
+    // 汇总行同属一级：不参与外壳缩进
+    depth: 0,
+    nested: []
+  }
   const lastAggregate = aggregateRows[aggregateRows.length - 1]
-  const lastChild = childSpans[childSpans.length - 1]
+  // 汇总事件的时间基准取「本轮最后一个结束的 AGENT」：内层专家往往晚于外壳收口，
+  // 只取入口直接目标会把汇总事件的时刻排到内层专家之前，与真实墙钟不符。
+  const lastChild = [...agentSpans]
+    .sort((a, b) => (msOf(a.endTime) ?? 0) - (msOf(b.endTime) ?? 0))
+    .at(-1)
   if (pick) {
     // 竞争选优：评选 LLM（JUDGE_PICK）挂在汇总行；FIRST_SUCCESS 没有调用，只留一行结论
     events.push({
@@ -610,6 +807,14 @@ export function buildOrchestrationLane(
     return a.index - b.index
   })
 
+  /*
+   * 两份分组同一批行对象，只在 return 时组装：
+   * - rows：扁平全集（总控 → 全部 AGENT 按执行序 → 汇总），问答框内时间线与中栏卡片读它；
+   * - laneRows：分层（总控 → 入口直接目标，内层收在 nested → 汇总），执行明细泳道读它。
+   */
+  const flatRows: OrchestrationLaneRow[] = [judgeRow, ...flatChildren, aggregateRow]
+  const laneRows: OrchestrationLaneRow[] = [judgeRow, ...entryRows, aggregateRow]
+
   return {
     hasRouterTrace: true,
     routeSpan: route,
@@ -623,9 +828,10 @@ export function buildOrchestrationLane(
     contextPolicy: typeof attrs['ma.context'] === 'string' ? (attrs['ma.context'] as string) : '',
     scratchKeyCount: nullableInt(attrs['ma.scratch.key_count']),
     scratchConflictCount: nullableInt(attrs['ma.scratch.conflict_count']),
-    rows,
+    rows: flatRows,
+    laneRows,
     events: indexed.map((entry) => entry.item),
-    childCount: childSpans.length,
+    childCount: routeChildAgents.length,
     aggregateNote,
     routeKeys
   }

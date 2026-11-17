@@ -27,13 +27,16 @@ import com.agenthub.runtime.domain.model.TitleSource;
 import com.agenthub.runtime.domain.repository.RunEventRepository;
 import com.agenthub.runtime.domain.repository.RunSessionRepository;
 import com.agenthub.runtime.domain.service.HistoryPageSize;
+import com.agenthub.runtime.domain.service.SessionCancelFace;
 import com.agenthub.runtime.domain.service.TrialTexts;
+import com.agenthub.runtime.domain.service.TurnStillOpen;
 import com.agenthub.runtime.infra.agentscope.ReActTrialExecutor;
 import com.agenthub.runtime.infra.agentscope.TrialProperties;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
 import java.time.LocalDateTime;
+import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.LinkedHashSet;
 import java.util.List;
@@ -196,8 +199,10 @@ public class TrialSessionAppService {
         Map<Long, MaDef> maCache = new HashMap<>();
         // Agent 名一次性批量预取：逐行 findById 在 100 条页上就是 100 次主键查询
         Map<Long, String> agentNames = prefetchAgentNames(page.getRecords());
+        // 取消行是否还有没写完的一轮：整页一次读，避免逐行把助手正文拉出来
+        Map<Long, Boolean> openTurns = openTurnsOf(page.getRecords());
         return PageResult.of(page.getTotal(), page.getCurrent(), page.getSize(),
-                page.getRecords().stream().map(item -> toResp(item, maCache, agentNames)).toList());
+                page.getRecords().stream().map(item -> toResp(item, maCache, agentNames, openTurns)).toList());
     }
 
     /**
@@ -339,8 +344,9 @@ public class TrialSessionAppService {
         PageResult<RunSession> page = sessions.page(query);
         Map<Long, MaDef> maCache = new HashMap<>();
         Map<Long, String> agentNames = prefetchAgentNames(page.getRecords());
+        Map<Long, Boolean> openTurns = openTurnsOf(page.getRecords());
         return PageResult.of(page.getTotal(), page.getCurrent(), page.getSize(),
-                page.getRecords().stream().map(item -> toResp(item, maCache, agentNames)).toList());
+                page.getRecords().stream().map(item -> toResp(item, maCache, agentNames, openTurns)).toList());
     }
 
     /**
@@ -462,8 +468,47 @@ public class TrialSessionAppService {
         operLogWriter.write("runtime", "remove", "agent_run_session", String.valueOf(id), "删除试跑会话 " + id);
     }
 
+    /**
+     * 取消行里哪些还有没写完的一轮。用户点取消的摘要已经能判定，不再读事件。
+     * 其它状态不用查：展示就用库里的 status。
+     *
+     * @param rows 本页或单条会话
+     * @return 会话 id → 最后一轮是否还没写完；读失败的行不在表里，按已写完展示
+     */
+    private Map<Long, Boolean> openTurnsOf(List<RunSession> rows) {
+        if (rows == null || rows.isEmpty()) {
+            return Map.of();
+        }
+        List<Long> ids = new ArrayList<>();
+        for (RunSession row : rows) {
+            if (row == null || row.getId() == null) {
+                continue;
+            }
+            if (!RunStatus.CANCELLED.name().equals(row.getStatus()) || SessionCancelFace.userCancelled(row)) {
+                continue;
+            }
+            ids.add(row.getId());
+        }
+        if (ids.isEmpty()) {
+            return Map.of();
+        }
+        Map<Long, List<RunEvent>> grouped = new HashMap<>();
+        for (RunEvent mark : events.listClosureMarks(ids)) {
+            if (mark == null || mark.getSessionId() == null) {
+                continue;
+            }
+            grouped.computeIfAbsent(mark.getSessionId(), key -> new ArrayList<>()).add(mark);
+        }
+        Map<Long, Boolean> open = new HashMap<>();
+        for (Long id : ids) {
+            open.put(id, TurnStillOpen.of(grouped.get(id)));
+        }
+        return open;
+    }
+
     private SessionResp toResp(RunSession session) {
-        return toResp(session, new HashMap<>(), new HashMap<>());
+        List<RunSession> one = session == null ? List.of() : List.of(session);
+        return toResp(session, new HashMap<>(), new HashMap<>(), openTurnsOf(one));
     }
 
     /**
@@ -503,9 +548,11 @@ public class TrialSessionAppService {
      * @param session    领域会话
      * @param maCache    本次请求内的方案缓存；避免整页 N 次主键查询
      * @param agentNames 本次请求内批量预取的 Agent 名；命中即用，未命中才回落单查
+     * @param openTurns  取消行里最后一轮是否还没写完；没有的 id 按已写完
      * @return 接口对象
      */
-    private SessionResp toResp(RunSession session, Map<Long, MaDef> maCache, Map<Long, String> agentNames) {
+    private SessionResp toResp(RunSession session, Map<Long, MaDef> maCache, Map<Long, String> agentNames,
+                               Map<Long, Boolean> openTurns) {
         SessionResp resp = new SessionResp();
         resp.setId(session.getId());
         resp.setAgentId(session.getAgentId());
@@ -527,7 +574,10 @@ public class TrialSessionAppService {
         resp.setAgentName(agentName.isBlank() && ma != null ? ma.getName() : agentName);
         resp.setRunMode(session.getRunMode());
         resp.setUserId(session.getUserId());
-        resp.setStatus(session.getStatus());
+        // 已经写完却被标成取消的历史行，展示回进行中。不改库列。
+        boolean turnOpen = session.getId() != null && openTurns != null
+                && Boolean.TRUE.equals(openTurns.get(session.getId()));
+        resp.setStatus(SessionCancelFace.statusForClient(session, turnOpen));
         resp.setStartTime(session.getStartTime());
         resp.setEndTime(session.getEndTime());
         resp.setMessageCount(session.getMessageCount());

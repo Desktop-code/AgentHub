@@ -17,12 +17,22 @@ import java.util.concurrent.atomic.AtomicBoolean;
  * {@code status / outputText / route_decision / brief / attrs}，原本这 10 段代码逐字重复。
  * 收进这里后，各模板只保留「自己差异的部分」：输出文案、决策 JSON、模板专属 attrs 键。
  *
+ * <p>父步骤：普通顶层单方案保持空。入口智能网关这一层由 {@link #judgeHangsOnRoot(boolean)}
+ * 打开后，judge 挂到网关根上。已经进入目标方案时同样挂当前方案根。
+ * 没有网关的单方案不要打开这个开关，否则 judge 会变成方案根的子节点。
+ *
  * <p><b>对外契约</b>：attrs 的组装方式（brief 在前、模板字段在后）与 {@code closed} 只生效一次
  * 的语义与拆分前完全一致；键名、键顺序、brief 文案由调用方传入，本类不得二次加工。
  *
  * <p>线程相关：本类非线程安全，一个实例只服务一次执行（在单条执行链内创建）。
  */
 public final class RouteSpan {
+
+    /**
+     * 仅入口智能网关：本层 ROUTE 挂到当前方案根。
+     * 普通单方案不设置。嵌套是否挂根另看 {@link MaNestedContext}，不靠这个开关。
+     */
+    private static final ThreadLocal<Boolean> JUDGE_ON_ROOT = new ThreadLocal<>();
 
     /** 本轮 trace；可空（未开追踪时所有方法都是空操作） */
     private final ObsTraceScope trace;
@@ -50,10 +60,42 @@ public final class RouteSpan {
         if (trace == null) {
             return new RouteSpan(null, null);
         }
-        Long span = trace.open(SpanType.ROUTE, name, agentId, null, null);
+        // 普通顶层单方案：父保持空。入口网关或已经进入目标方案时，栈父就是该挂的那条根。
+        Long parent = hangRouteOnCurrentRoot() ? trace.implicitParent() : null;
+        Long span = trace.open(SpanType.ROUTE, name, agentId, parent, null);
         // 先链后扇：ROUTE 之后的子 AGENT 默认挂到它下面，模板里不必再各自记住这一步
         trace.bindParent(span);
         return new RouteSpan(trace, span);
+    }
+
+    /**
+     * 入口智能网关这一层是否把 judge 挂到网关根上。
+     * 只在 {@code executeRun} 里按模板开关，退出时还原进入前的值，避免串到内层普通方案。
+     *
+     * @param on true 表示本层 ROUTE 使用当前栈父
+     */
+    public static void judgeHangsOnRoot(boolean on) {
+        if (on) {
+            JUDGE_ON_ROOT.set(Boolean.TRUE);
+            return;
+        }
+        JUDGE_ON_ROOT.remove();
+    }
+
+    /**
+     * @return 入口网关开关是否打开；未设置时为 false
+     */
+    public static boolean judgeHangsOnRoot() {
+        return Boolean.TRUE.equals(JUDGE_ON_ROOT.get());
+    }
+
+    /**
+     * 本层 ROUTE 是否应挂到当前栈父。嵌套方案与入口网关挂上，普通单方案不挂。
+     *
+     * @return true 时父取 {@link ObsTraceScope#implicitParent()}
+     */
+    private static boolean hangRouteOnCurrentRoot() {
+        return MaNestedContext.inside() || judgeHangsOnRoot();
     }
 
     /**

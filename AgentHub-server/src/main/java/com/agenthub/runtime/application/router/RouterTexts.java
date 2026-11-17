@@ -58,6 +58,32 @@ public final class RouterTexts {
     }
 
     /**
+     * 决策块里的去重展示名（按出现顺序）。
+     *
+     * <p>只用于拼人话与打点计数，不参与分流：条数按真实判定次数，名单按展示名去重，
+     * 避免同名专家出现两次。
+     *
+     * @param intents 已排好序的意图；可空
+     * @return 去重后的展示名；空表返回空列表
+     */
+    public static List<String> distinctLabels(List<RoutedIntent> intents) {
+        List<String> names = new ArrayList<>();
+        if (intents == null || intents.isEmpty()) {
+            return names;
+        }
+        for (RoutedIntent intent : intents) {
+            if (intent == null || intent.candidate() == null) {
+                continue;
+            }
+            String label = childLabel(intent.candidate().agent());
+            if (!label.isBlank() && !names.contains(label)) {
+                names.add(label);
+            }
+        }
+        return names;
+    }
+
+    /**
      * 多意图决策块的<b>人话</b>版：只写「判定出几个意图、按序分给谁」。
      *
      * <p>机器可读的 {@code [{"route_key","sub_query","reason"}]} 只用于分流与可观测，
@@ -72,16 +98,7 @@ public final class RouterTexts {
         if (intents == null || intents.isEmpty()) {
             return "";
         }
-        List<String> names = new ArrayList<>();
-        for (RoutedIntent intent : intents) {
-            if (intent == null || intent.candidate() == null) {
-                continue;
-            }
-            String label = childLabel(intent.candidate().agent());
-            if (!label.isBlank() && !names.contains(label)) {
-                names.add(label);
-            }
-        }
+        List<String> names = distinctLabels(intents);
         StringBuilder text = new StringBuilder("路由决策\n已判定 ").append(intents.size()).append(" 个意图");
         if (!names.isEmpty()) {
             text.append("，按序分给");
@@ -105,16 +122,7 @@ public final class RouterTexts {
         if (intents == null || intents.isEmpty()) {
             return "";
         }
-        List<String> names = new ArrayList<>();
-        for (RoutedIntent intent : intents) {
-            if (intent == null || intent.candidate() == null) {
-                continue;
-            }
-            String label = childLabel(intent.candidate().agent());
-            if (!label.isBlank() && !names.contains(label)) {
-                names.add(label);
-            }
-        }
+        List<String> names = distinctLabels(intents);
         StringBuilder text = new StringBuilder("路由决策\n已拆成 ").append(intents.size())
                 .append(" 个问题，按序交给");
         for (String name : names) {
@@ -140,6 +148,22 @@ public final class RouterTexts {
             return intent.trim();
         }
         return childLabel(hit.agent());
+    }
+
+    /**
+     * 落库拼接稿的章节名：与参与者卡、begin 身份用同一套展示名。
+     *
+     * <p>路由意图文案可以和专家名不一样。拼进用户可见的 {@code ###} 标题后，
+     * 回放按卡名对不上，正文就归不回这位专家。投票和汇总提示词仍用 {@link #sectionTitle}。
+     *
+     * @param outcome 子结果；缺候选时退回「子 Agent」
+     * @return 非空展示名
+     */
+    public static String concatHeading(ChildOutcome outcome) {
+        if (outcome == null || outcome.intent() == null || outcome.intent().candidate() == null) {
+            return "子 Agent";
+        }
+        return childLabel(outcome.intent().candidate().agent());
     }
 
     /**

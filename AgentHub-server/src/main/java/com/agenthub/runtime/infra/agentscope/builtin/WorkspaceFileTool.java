@@ -54,6 +54,13 @@ public class WorkspaceFileTool {
     private static final int MAX_LIST_ENTRIES = 200;
     /** 目录列表递归深度：允许子目录，但禁止深层嵌套 */
     private static final int MAX_LIST_DEPTH = 4;
+    /**
+     * 整文件读取的字符上限，供车间类内置工具（比对 / 汇总 / 扫描 / 填空）复用同一沙箱闸门。
+     * 上限只防「把整份大文件塞进上下文」，正常样例文件远小于此值。
+     */
+    public static final int MAX_WHOLE_CHARS = 200_000;
+    /** 整文件读取前先看字节数：字符上限的 4 倍足够覆盖 UTF-8 中文，超过即判定文件过大 */
+    private static final long MAX_WHOLE_BYTES = 4L * MAX_WHOLE_CHARS;
 
     /** 所有落盘与读取路径的唯一闸门 */
     private final WorkspaceSandbox sandbox;
@@ -305,6 +312,61 @@ public class WorkspaceFileTool {
         } catch (IOException e) {
             log.warn("[Agent][workspaceListFiles] 列目录失败 err={}", e.getMessage(), e);
             return "列出文件失败：工作区目录读取异常，请稍后重试。";
+        }
+    }
+
+    /**
+     * 供同目录下的车间类工具（比对 / 汇总 / 扫描 / 填空）复用沙箱闸门，<b>禁止</b>它们自己拼路径。
+     *
+     * <p>为什么开放这个方法：这些工具要读整份文件，而 {@link #readFile} 会加行号并分段截断，
+     * 不适合做结构化解析。开放解析器而不是开放沙箱实例，保证「绝对路径 / .. / 符号链接越界」
+     * 仍只有一份实现。
+     *
+     * @param runtimeContext 引擎注入的会话上下文
+     * @param fileName       相对 /workspace/ 的文件名
+     * @return 通过沙箱校验的绝对路径，调用方须自行确认它是普通文件
+     * @throws WorkspaceAccessException 会话缺失或路径越界
+     */
+    public Path resolveForTool(RuntimeContext runtimeContext, String fileName) {
+        return sandbox.resolveInside(sandbox.sessionRoot(sessionId(runtimeContext)), fileName);
+    }
+
+    /**
+     * 把整份文件读成 UTF-8 文本，供车间类工具做结构化解析。
+     *
+     * <p>与 {@link #readFile} 的分工：那个面向模型，加行号并分段截断；这个面向程序，
+     * 一次读全。为避免把超大文件读进内存，超过 {@link #MAX_WHOLE_CHARS} 字符即拒绝，
+     * 并给出可行动的提示（拆文件），而不是静默截断后算错结果。
+     *
+     * @param runtimeContext 引擎注入的会话上下文
+     * @param fileName       相对 /workspace/ 的文件名
+     * @return 文件全文（可能为空串）
+     * @throws WorkspaceAccessException 会话缺失、路径越界、文件不存在或超过单文件上限
+     */
+    public String readWholeText(RuntimeContext runtimeContext, String fileName) {
+        Path target = resolveForTool(runtimeContext, fileName);
+        if (!Files.isRegularFile(target)) {
+            if (Files.isDirectory(target)) {
+                throw new WorkspaceAccessException("「" + fileName + "」是一个目录，不能当文件读取。");
+            }
+            throw new WorkspaceAccessException("文件不存在：/workspace/" + fileName + "，请先用 workspaceListFiles 确认。");
+        }
+        try {
+            // 先看字节数再读：4 倍字符上限足以覆盖中文 UTF-8，可挡住几 MB 的文件进堆
+            long size = Files.size(target);
+            if (size > MAX_WHOLE_BYTES) {
+                throw new WorkspaceAccessException("文件过大（" + formatBytes(size)
+                        + "），超出单文件解析上限，请先拆分成多个文件。");
+            }
+            String text = Files.readString(target, StandardCharsets.UTF_8);
+            if (text.length() > MAX_WHOLE_CHARS) {
+                throw new WorkspaceAccessException("文件内容超过 " + MAX_WHOLE_CHARS
+                        + " 字符，超出单文件解析上限，请先拆分成多个文件。");
+            }
+            return text;
+        } catch (IOException e) {
+            log.warn("[Agent][readWholeText] 读取失败 file={} err={}", fileName, e.getMessage(), e);
+            throw new WorkspaceAccessException("文件读取失败，请稍后重试。");
         }
     }
 

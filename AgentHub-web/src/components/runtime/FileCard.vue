@@ -65,27 +65,37 @@ async function onDownload() {
 </template>
 
 <style scoped>
-/* 白底细框卡片：与助手卡片区分开，读起来像「附件」而不是又一段正文 */
+/* 附件行：图标 + 文件名 + 大小，右侧下载。不进正文框。 */
 .file-card {
   display: flex;
   align-items: center;
-  gap: 10px;
-  margin-top: 10px;
-  padding: 10px 12px;
-  border: 1px solid #e6e8ef;
-  border-radius: 10px;
-  background: #fafbff;
-  transition: border-color 0.15s ease, box-shadow 0.15s ease;
+  justify-content: space-between;
+  gap: 12px;
+  width: 100%;
+  box-sizing: border-box;
+  margin-top: 0;
+  padding: 12px 16px;
+  border: 1px solid #e5e7eb;
+  border-radius: 8px;
+  background: #f9fafb;
+  transition: border-color 0.15s ease;
 }
 
 .file-card:hover {
-  border-color: #cdc6ff;
-  box-shadow: 0 1px 6px rgba(99, 91, 255, 0.08);
+  border-color: #4f46e5;
 }
 
 .file-icon {
+  display: flex;
+  align-items: center;
+  justify-content: center;
   flex: none;
-  font-size: 22px;
+  width: 36px;
+  height: 36px;
+  border-radius: 6px;
+  background: #e0e7ff;
+  color: #4f46e5;
+  font-size: 18px;
   line-height: 1;
 }
 
@@ -96,42 +106,42 @@ async function onDownload() {
 
 .file-name {
   overflow: hidden;
-  color: var(--ah-text, #1f2430);
-  font-size: 13px;
-  font-weight: 600;
+  color: #1f2937;
+  font-size: 14px;
+  font-weight: 500;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
 
 .file-size {
   margin-top: 2px;
-  color: var(--ah-text-secondary, #8b90a0);
+  color: #6b7280;
   font-size: 12px;
 }
 
-/* 蓝色下载按钮：与主色紫区分，强调「这是个动作」，不是普通文字链 */
 .file-download {
   flex: none;
-  padding: 5px 14px;
-  border: 1px solid #409eff;
+  padding: 6px 12px;
+  border: 1px solid #d1d5db;
   border-radius: 6px;
   background: #fff;
-  color: #409eff;
+  color: #374151;
   cursor: pointer;
-  font-size: 12px;
-  font-weight: 600;
+  font-size: 13px;
+  font-weight: 500;
   line-height: 1.4;
-  transition: background-color 0.15s ease, color 0.15s ease;
+  transition: background-color 0.15s ease, color 0.15s ease, border-color 0.15s ease;
 }
 
 .file-download:hover:not(:disabled) {
-  background: #409eff;
+  background: #4f46e5;
+  border-color: #4f46e5;
   color: #fff;
 }
 
 .file-download:disabled {
-  border-color: #c8d9f0;
-  color: #a8bdd8;
+  border-color: #e5e7eb;
+  color: #9ca3af;
   cursor: not-allowed;
 }
 </style>

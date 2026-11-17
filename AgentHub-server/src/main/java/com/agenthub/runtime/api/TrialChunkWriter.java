@@ -25,6 +25,7 @@ import com.agenthub.runtime.model.acl.UnifiedToolCall;
 import com.agenthub.runtime.model.acl.UnifiedUsage;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import jakarta.servlet.http.HttpServletResponse;
+import lombok.extern.slf4j.Slf4j;
 
 import java.net.URLEncoder;
 import java.nio.charset.StandardCharsets;
@@ -43,6 +44,7 @@ import java.util.concurrent.ConcurrentHashMap;
  * <p>正文合批在写入器里做（见 {@code UnifiedSseWriter#messageDelta}）：
  * 本类仍是「一个增量一次回调」，合批只改变出站帧数，不改事件名、字段与顺序。
  */
+@Slf4j
 public final class TrialChunkWriter implements TrialProgress, TrialStreamEnd {
 
     private final UnifiedSseWriter writer;
@@ -145,6 +147,11 @@ public final class TrialChunkWriter implements TrialProgress, TrialStreamEnd {
      *
      * <p>载荷带 {@code begin=true}：与「只是切换归属」的轻量帧区分开，前端只在 begin 时新建块。
      * 同一 id 重复开始（并行子偶发）只发一次，避免出现两块同名参与者。
+     *
+     * <p>重复 id 只告警、不补帧、不改 id 规则：这里的 id 由 {@code ChildRunner.participantIdOf}
+     * 按「深度 + 父方案键 + 叶子键」拼出，若同一轮里真的撞了车，第二张卡就再也收不到 begin，
+     * 页面只能等收尾回放补——现象是「子专家后面才一起出现」。留一条 WARN 用来确认是否撞车，
+     * 撞车本身要靠 id 规则单独收口，不在出站层偷偷补一张卡。
      */
     @Override
     public void beginParticipant(ParticipantView participant) {
@@ -152,8 +159,11 @@ public final class TrialChunkWriter implements TrialProgress, TrialStreamEnd {
             return;
         }
         ParticipantView previous = participants.putIfAbsent(participant.id(), participant);
-        // 已经登记过：说明这一步早已开始过，不重复发 begin 帧
+        // 已经登记过：说明这一步早已开始过，不重复发 begin 帧；同名不同人则必须留痕
         if (previous != null) {
+            log.warn("参与者 begin 撞车，已忽略本次身份帧 id={} 本次={} 已登记={} kind={} depth={} routeKey={}",
+                    participant.id(), participant.name(), previous.name(), participant.kind(),
+                    participant.depth(), participant.routeKey());
             return;
         }
         emitParticipant(participant, true);
@@ -163,6 +173,38 @@ public final class TrialChunkWriter implements TrialProgress, TrialStreamEnd {
     @Override
     public void attributeParticipant(String participantId) {
         emitAttribution(participantId == null ? "" : participantId.trim());
+    }
+
+    /**
+     * 参与者终态：沿用同一个 participant 事件，带上 {@code state}（必要时带 {@code note}）。
+     *
+     * <p>为什么与 begin 共用事件名：身份是同一个契约对象，前端解析器不必新增事件分支；
+     * {@code begin=false} 明确表示「不新建块」，只收口已有块。没有 begin 登记过的 id 直接忽略——
+     * 没有块可收，发了也没有接收方。
+     *
+     * @param participant 参与者身份
+     * @param state       done / failed / aborted
+     * @param note        终态说明；可空
+     */
+    @Override
+    public void endParticipant(ParticipantView participant, String state, String note) {
+        if (participant == null || participant.id() == null || participant.id().isBlank()) {
+            return;
+        }
+        String code = state == null ? "" : state.trim();
+        if (code.isEmpty()) {
+            return;
+        }
+        // 用 begin 时登记的那份身份：名称以「块上已经显示的那位」为准，避免改名后收错块
+        ParticipantView known = participants.get(participant.id());
+        if (known == null) {
+            return;
+        }
+        // 终态与 begin 同一事件名，同样交对象：先收成字符串再交出站会再编码一次
+        Map<String, Object> payload = ParticipantJson.frame(known, code, TrialTexts.redact(note));
+        if (!payload.isEmpty()) {
+            writer.emitLegacy("participant", payload);
+        }
     }
 
     /**
@@ -193,14 +235,19 @@ public final class TrialChunkWriter implements TrialProgress, TrialStreamEnd {
     /**
      * 写一行 participant 帧。
      *
+     * <p>载荷是对象，与 {@link #workflow} 同一口径。写入器只序列化这一次，
+     * 前端一次解析就得到 begin / kind / depth。先收成 JSON 字符串再交出站，
+     * 会再包一层引号，解析结果是字符串，建卡分支直接丢掉。
+     *
      * @param participant 身份
      * @param begin       true＝该步开始（前端新建块）；false＝仅切换归属
      */
     private void emitParticipant(ParticipantView participant, boolean begin) {
-        String payload = ParticipantJson.payload(participant, begin);
-        if (payload != null) {
-            writer.emitLegacy("participant", payload);
+        Map<String, Object> payload = ParticipantJson.frame(participant, begin);
+        if (payload.isEmpty()) {
+            return;
         }
+        writer.emitLegacy("participant", payload);
     }
 
     /** {@inheritDoc} */
@@ -355,7 +402,42 @@ public final class TrialChunkWriter implements TrialProgress, TrialStreamEnd {
         payload.put("fileName", file.fileName());
         payload.put("size", file.size());
         payload.put("downloadUrl", downloadUrl(file.fileName()));
+        /*
+         * 身份随文件一起出站：产物由谁写出就挂谁的卡，作者只取文件自带的那一份。
+         * 缺作者时这一帧不带 id——前端会把产物留作无主，等真实作者卡出现再挂，
+         * 绝不按「最后一位参与者」（常常是工作流 / 汇总结论）猜宿主。
+         */
+        ParticipantView owner = ownerOf(file);
+        if (owner != null && !owner.id().isBlank()) {
+            payload.put("participantId", owner.id());
+            if (!owner.name().isBlank()) {
+                payload.put("participantName", owner.name());
+            }
+        }
         writer.emitLegacy("file_generated", payload);
+    }
+
+    /**
+     * 产物作者：**只认产生处**写进文件的那一份身份。
+     *
+     * <p>为什么不再退回「当前归属」：{@code lastParticipantId} 是整个 writer 共用的一格，
+     * 由最后一个推归属帧的参与者改写。并行子与汇总结论交错时，它常常已经不是真正写出
+     * 这个文件的人（汇总结论阶段只推「方案结论：X」，根本不切归属），于是没有作者的文件
+     * 会被署成「最后一位参与者」——工作流卡就是这样被动接下了别人的文件卡，
+     * 页面表现为「文字 → 文件 → 又变回文字」。
+     *
+     * <p>缺作者时宁可不带身份：前端会把这份产物留作无主，等真实作者卡出现再挂，
+     * 不再往工作流卡兜底。
+     *
+     * @param file 产物
+     * @return 作者身份；文件没带作者时 null（历史单专家轮次 / 工具标记产生的文件）
+     */
+    private ParticipantView ownerOf(GeneratedFile file) {
+        if (file == null || file.participantId() == null || file.participantId().isBlank()) {
+            return null;
+        }
+        return new ParticipantView(file.participantId(), file.participantName(),
+                ParticipantView.KIND_AGENT, null, 0);
     }
 
     /**

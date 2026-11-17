@@ -2,6 +2,7 @@
  * 试跑接口。所属域：runtime。
  * 前端超时只做 UX；硬拦在后端 agenthub.runtime.limits.timeout-ms。
  */
+import { asParticipantChunk } from './trialParticipantFrame'
 import request, { TOKEN_KEY } from '@/utils/request'
 import type { PageResult, Result } from '@/types'
 import type {
@@ -178,6 +179,10 @@ export interface TrialFileChunk {
   /** 字节数；< 0 表示体积未知 */
   size: number
   downloadUrl: string
+  /** 写出该文件的参与者 id；旧后端未下发时为空 */
+  participantId?: string
+  /** 写出该文件的参与者展示名；与 participantId 配套 */
+  participantName?: string
 }
 
 /**
@@ -211,6 +216,15 @@ export interface TrialParticipantChunk {
   depth?: number
   /** true＝该步开始（建块）；false＝仅切换归属 */
   begin: boolean
+  /**
+   * 参与者终态：done / failed / aborted。
+   *
+   * <p>只有「这一步结束了」才带这个字段；它总是 `begin=false`，只收口已有块、不新建块。
+   * 失败 / 中止会配合 {@link note} 说明原因，前端写进该参与者的内容框。
+   */
+  state?: string
+  /** 终态说明（已脱敏）；done 且正文已流出时为空 */
+  note?: string
 }
 
 /**
@@ -580,9 +594,12 @@ function dispatchFrame(frame: string, handlers: TrialStreamHandlers, batcher?: T
     handlers.onPhase?.(data)
   } else if (event === 'route' && typeof data === 'string') {
     handlers.onRoute?.(data)
-  } else if (event === 'participant' && data && typeof data === 'object') {
-    // 身份帧：先于该步的思考 / 工具到达，前端据此立刻建块并记住后续增量归属
-    handlers.onParticipant?.(data as TrialParticipantChunk)
+  } else if (event === 'participant') {
+    // 只认一次解析后的对象。字符串是双重编码，不再解析，begin 不到就不建卡
+    const participant = asParticipantChunk(data)
+    if (participant) {
+      handlers.onParticipant?.(participant)
+    }
   } else if (event === 'reasoning' && typeof data === 'string') {
     // 没有合批器时（理论上只有直连测试）保持原样：立即交付
     handlers.onReasoning?.(data)

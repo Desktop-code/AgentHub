@@ -17,9 +17,10 @@ import java.util.Set;
  * <p>与「一问多项交付」的边界（硬性）：
  * <ul>
  *   <li>同一件事的多块交付（「整理知识要点，并起草一份报告」）<b>不切</b>：
- *       顿号、逗号、以及「并 / 且 / 以及」连接的并列成分都算同一问；
+ *       顿号、逗号、分号，以及「并 / 且 / 以及」连接的并列成分都算同一问；
  *   <li>只有明确的第二件事才切：另起一句，或「另外 / 此外 / 同时 / 也 / 再 …」引出、
  *       且这一段带目标线索（点名某个候选，或写了「工作流 / 方案 / 专家 / 助手」）。
+ *       强引子只认小句开头，所以分号必须和逗号一样先切开，否则「；另外请…」仍粘在前一句里。
  * </ul>
  *
  * <p>不做的事：不判断谁更合适、不查库、不调模型；切不开时原样返回一条，
@@ -96,6 +97,9 @@ public final class EntryQuestionSplitter {
     /**
      * 按句末标点与「第二件事」引子切段。
      *
+     * <p>句号才是另一句；逗号和分号只切开小句，好让句首的「另外」能被认出来。
+     * 分号本身不构成新的一问。
+     *
      * @param text        用户原话
      * @param targetNames 候选展示名
      * @return 顺序保持原话顺序的段；可能只有一段
@@ -110,7 +114,9 @@ public final class EntryQuestionSplitter {
             if (sentence.isEmpty()) {
                 continue;
             }
-            String[] clauses = sentence.split("[，,]");
+            // 分号与逗号同级：都只是小句边界，不是句号。强引子（另外 / 此外）只认小句开头，
+            // 「请A…；另外请B…」若不先切开，整句仍是一段，后面的点名只能留下一个方案。
+            String[] clauses = sentence.split("[，,；;]");
             for (int c = 0; c < clauses.length; c++) {
                 String clause = clauses[c] == null ? "" : clauses[c].trim();
                 if (clause.isEmpty()) {

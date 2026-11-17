@@ -120,7 +120,7 @@
     <div v-if="span.spanType === 'ROUTE'" class="spec-block">
       <FoldableCodeBlock
         v-if="span.routeDecision"
-        label="路由决策"
+        :label="routeDecisionTitle"
         :text="routeDecisionText"
         :preview-height="codePreviewHeight"
         :expanded-max-height="codeExpandedMaxHeight"
@@ -233,6 +233,7 @@ import { ArrowRight } from '@element-plus/icons-vue'
 import type { ObsSpan } from '@/types/obs'
 import type { SpanBar } from '@/utils/traceParallel'
 import { traceTypeAccent } from '@/utils/tracePalette'
+import { routeDecisionLabel, spanTypeLabel } from '@/utils/spanTypeLabel'
 import { tryPrettyJson } from '@/utils/codeDisplay'
 import FoldableCodeBlock from '@/components/obs/FoldableCodeBlock.vue'
 
@@ -405,18 +406,13 @@ const paletteStyle = computed(() => {
 
 const typeKey = computed(() => (props.span.spanType || 'step').toLowerCase())
 
-const typeLabel = computed(() => {
-  const t = props.span.spanType
-  if (t === 'LLM') return '模型调用'
-  if (t === 'TOOL') return '工具调用'
-  if (t === 'VISION') return '图片识别'
-  if (t === 'ROUTE') return '路由'
-  if (t === 'PLAN') return '规划'
-  if (t === 'RETRIEVE') return '检索'
-  if (t === 'AGENT') return 'Agent'
-  if (t === 'SYSTEM') return '系统'
-  return t || '步骤'
-})
+/** 外壳 attrs 带 obs.role 时改显示工作流 / 方案；真专家与顶层方案根仍是 Agent */
+const typeLabel = computed(() => spanTypeLabel(props.span.spanType, props.span.attrsJson))
+
+/**
+ * 决策标题带数组长度。正文仍是原来的 JSON，不改 sub_query。
+ */
+const routeDecisionTitle = computed(() => routeDecisionLabel(props.span.routeDecision))
 
 const typeTagType = computed((): 'primary' | 'success' | 'info' | 'warning' | 'danger' => {
   const t = props.span.spanType

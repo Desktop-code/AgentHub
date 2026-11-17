@@ -13,9 +13,12 @@ import type {
   TrialWorkflowNodeView,
   TrialWorkflowView
 } from '@/types/runtime'
-import { renderSimpleMarkdown } from '@/utils/simpleMarkdown'
-import { nextBlockId } from '@/components/runtime/trialTimeline'
-import { parseRouteParticipant } from './workbench/workbenchRouteText.ts'
+import { renderSimpleMarkdown } from '../../utils/simpleMarkdown.ts'
+import { nextBlockId } from './trialTimeline.ts'
+import {
+  parseChildTitle as parseFixedChildTitle,
+  parseRouteParticipant
+} from './workbench/workbenchRouteText.ts'
 
 /**
  * 按 seq 回放。用户单独成气泡，其后的步骤并进一张助手卡片。
@@ -26,25 +29,43 @@ export function turnsFromEvents(events: TrialEvent[]): ChatTurn[] {
   const ordered = [...events].sort((a, b) => (a.seq ?? 0) - (b.seq ?? 0))
   const turns: ChatTurn[] = []
   let assistant: ChatTurn | undefined
+  // 上一条 begin 身份：其后的思考 / 工具 / 正文归它，直到下一条身份行。没有身份行就不认人。
+  let active: ReplaySpeaker | undefined
   for (const item of ordered) {
     if (item.eventType === 'user') {
       const text = displayText(item)
       assistant = undefined
+      active = undefined
       if (text) {
         turns.push(userTurn(item.id, text))
       }
+      continue
+    }
+    if (item.eventType === 'participant') {
+      const who = readParticipantEvent(item)
+      // 只认 begin：begin=false 是直播增量定向，回放不靠它换人
+      if (who?.begin) {
+        active = who
+        if (who.kind === 'gateway') {
+          assistant = ensureReplayTurn(turns, assistant, item.id)
+          assistant.entryParticipantId = who.id
+        }
+      }
+      const block = participantBeginBlock(item)
+      if (!block) {
+        continue
+      }
+      assistant = ensureReplayTurn(turns, assistant, item.id)
+      pushBlock(assistant, block)
       continue
     }
     const block = blockFromEvent(item)
     if (!block) {
       continue
     }
-    if (!assistant) {
-      // 历史回放已是终态，phase 必须 done，禁止一直显示「任务规划中」
-      assistant = assistantTurn(`e-${item.id}`, 'done')
-      assistant.phase = 'done'
-      turns.push(assistant)
-    }
+    // 落库的思考 / 正文不带身份列：跟着上一条 participant 行走，不从路由文案猜作者
+    carryReplayIdentity(block, active)
+    assistant = ensureReplayTurn(turns, assistant, item.id)
     pushBlock(assistant, block)
     if (block.kind === 'error') {
       assistant.status = 'error'
@@ -52,6 +73,91 @@ export function turnsFromEvents(events: TrialEvent[]): ChatTurn[] {
     }
   }
   return turns
+}
+
+/** 回放里当前说话人：来自 event_type=participant 的 begin 帧。depth 随帧保留，缺了不补。 */
+type ReplaySpeaker = { id: string; name: string; kind: string; depth?: number }
+
+/**
+ * 回放轮次不存在时补一张已结束的助手卡。
+ *
+ * @param turns     已收好的对话
+ * @param assistant 当前助手轮；已有则原样返回
+ * @param eventId   用来生成卡片 key 的事件 id
+ * @return 当前助手轮
+ */
+function ensureReplayTurn(turns: ChatTurn[], assistant: ChatTurn | undefined, eventId: number): ChatTurn {
+  if (assistant) {
+    return assistant
+  }
+  // 历史回放已是终态，phase 必须 done，禁止一直显示「任务规划中」
+  const created = assistantTurn(`e-${eventId}`, 'done')
+  created.phase = 'done'
+  turns.push(created)
+  return created
+}
+
+/**
+ * 把上一条参与者身份贴到本块上。
+ *
+ * <p>入口身份可以贴到随后的判定推理上（入口块按 id 认领）。
+ * 汇总身份不贴：那一段靠「方案结论：」标记进结论卡，贴到专家上会串块。
+ * 路由行只在名字对得上当前参与者时贴，避免把上一位的 id 盖到下一位的「路由到」上。
+ *
+ * @param block  本事件转出的块
+ * @param active 上一条 begin 身份；没有则本块保持无身份
+ */
+function carryReplayIdentity(block: AssistantBlock, active: ReplaySpeaker | undefined) {
+  if (!active || block.participantId || active.kind === 'conclusion') {
+    return
+  }
+  if (block.kind === 'route') {
+    if (active.kind === 'gateway') {
+      return
+    }
+    const name = parseRouteParticipant(block.text)?.name || ''
+    if (!name || name !== active.name) {
+      return
+    }
+    applyReplaySpeaker(block, active)
+    return
+  }
+  // 工作流快照跟着当时的 begin 走；对不上卡片时投影再按名字 / 编码对
+  if (block.kind === 'workflow') {
+    applyReplaySpeaker(block, active)
+    if (!block.participantKind) {
+      block.participantKind = 'workflow'
+    }
+    return
+  }
+  if (
+    block.kind !== 'reasoning' &&
+    block.kind !== 'tool' &&
+    block.kind !== 'assistant' &&
+    block.kind !== 'file' &&
+    block.kind !== 'choice' &&
+    block.kind !== 'error'
+  ) {
+    return
+  }
+  applyReplaySpeaker(block, active)
+}
+
+/**
+ * 把 begin 帧上的身份、kind、depth 贴到块上。已有的不覆盖。
+ *
+ * @param block  本事件转出的块
+ * @param active 上一条 begin 身份
+ */
+function applyReplaySpeaker(block: AssistantBlock, active: ReplaySpeaker) {
+  block.participantId = active.id
+  block.participantName = active.name
+  if (!block.participantKind && active.kind) {
+    block.participantKind = active.kind
+  }
+  if (block.participantDepth == null && typeof active.depth === 'number') {
+    block.participantDepth = active.depth
+  }
 }
 
 /** 收尾事件类型：助手正文或失败说明。出现任一即表示这一轮已结束 */
@@ -245,7 +351,7 @@ export function appendText(
  */
 export function appendParticipantBegin(
   turn: ChatTurn,
-  chunk: { id?: string; name?: string; kind?: string; routeKey?: string; begin?: boolean }
+  chunk: { id?: string; name?: string; kind?: string; routeKey?: string; depth?: number; begin?: boolean }
 ) {
   if (!chunk || chunk.begin !== true) {
     return
@@ -256,6 +362,8 @@ export function appendParticipantBegin(
   if (!id || !name || kind === 'gateway' || kind === 'conclusion') {
     return
   }
+  // depth 只在帧上真有数字时保留。缺了不猜，投影就不会给它认父
+  const depth = typeof chunk.depth === 'number' ? chunk.depth : undefined
   // 同一位参与者重复 begin（重连 / 回放）：保留第一块，不重复出块
   const existing = turn.blocks.find(
     (block) => block.kind === 'route' && (block.participantId === id || routeNameOf(block.text) === name)
@@ -264,6 +372,12 @@ export function appendParticipantBegin(
     // 该参与者的路由行已经先到（单意图会在开跑前先推一条）：只补身份，不再造占位块
     existing.participantId = existing.participantId || id
     existing.participantName = existing.participantName || name
+    if (!existing.participantKind && kind) {
+      existing.participantKind = kind
+    }
+    if (existing.participantDepth == null && depth != null) {
+      existing.participantDepth = depth
+    }
     return
   }
   const key = (chunk.routeKey || '').trim()
@@ -273,8 +387,91 @@ export function appendParticipantBegin(
     text: key ? `路由到 ${name}（${key}）` : `路由到 ${name}`,
     participantId: id,
     participantName: name,
+    participantKind: kind || undefined,
+    participantDepth: depth,
     begin: true
   })
+}
+
+/**
+ * 参与者终态：把「这一步结束了」落到时间线上。所属域：runtime（前端）。
+ *
+ * <p>为什么必须落块：进行态是按参与者算的，而身份写在 route 块上。没有终态，投影只能拿
+ * 「整轮是否还在流式」当进行态——一位已经跑完的专家仍会被画成「正在作答」，一直转到整轮结束。
+ *
+ * <p>落法：
+ * <ul>
+ *   <li><b>done</b>：只给这条 route 块打上 closed；有终态说明（一个字都没产出时后端会给）才补一条正文；</li>
+ *   <li><b>failed / aborted</b>：打 closed，并写一条带身份的错误行，卡片据此收口而不是继续转圈。</li>
+ * </ul>
+ * 同一参与者重复收到终态（并行多路 / 重连）只认第一次，避免错误行叠两条。
+ *
+ * @param turn  目标助手轮
+ * @param chunk 终态身份帧（id / name / state / note）
+ */
+export function appendParticipantEnd(
+  turn: ChatTurn,
+  chunk: { id?: string; name?: string; state?: string; note?: string }
+) {
+  if (!turn || !chunk || !chunk.state) {
+    return
+  }
+  const state = participantStateOf(chunk.state)
+  const id = (chunk.id || '').trim()
+  if (!state || !id) {
+    return
+  }
+  const name = (chunk.name || '').trim()
+  const routeBlock = turn.blocks.find(
+    (block) => block.kind === 'route' && (block.participantId === id || routeNameOf(block.text) === name)
+  )
+  // 已经收过口：重复终态帧不再补错误行
+  if (routeBlock?.closed) {
+    return
+  }
+  if (routeBlock) {
+    routeBlock.participantId = routeBlock.participantId || id
+    routeBlock.participantName = routeBlock.participantName || name || undefined
+    routeBlock.closed = state
+  }
+  const note = (chunk.note || '').trim()
+  if (state === 'done') {
+    /*
+     * 正常结束：正文已经流过时什么都不补（终答就在卡上）。
+     * 一个字都没产出才补一句终态说明——空结论也要终态，不能留一个一直转圈的空壳。
+     */
+    if (note) {
+      turn.blocks.push({
+        id: nextBlockId(turn),
+        kind: 'assistant',
+        text: note,
+        participantId: id,
+        participantName: name || undefined
+      })
+    }
+    return
+  }
+  turn.blocks.push({
+    id: nextBlockId(turn),
+    kind: 'error',
+    text: note || (state === 'aborted' ? '本轮已中止' : '本轮执行失败'),
+    participantId: id,
+    participantName: name || undefined
+  })
+}
+
+/**
+ * 规范化参与者终态：只认三个值，其它（含历史数据）一律丢弃，不猜。
+ *
+ * @param raw 后端帧上的 state
+ * @return 合法终态；不合法时 undefined
+ */
+function participantStateOf(raw: string): 'done' | 'failed' | 'aborted' | undefined {
+  const value = (raw || '').trim().toLowerCase()
+  if (value === 'done' || value === 'failed' || value === 'aborted') {
+    return value
+  }
+  return undefined
 }
 
 /**
@@ -389,30 +586,57 @@ export function completeTool(
 }
 
 /**
- * 产物块：按 fileName 去重，同名只保留最新一条。
+ * 产物块：同一参与者写同名文件只保留最新一条。
  *
  * <p>为什么要去重：Agent 常分多次写同一个文件（先写骨架再追加正文），
  * 每次都会推一条 file_generated。若逐条追加，聊天区会刷出一排指向同一文件的卡片，
  * 用户既看不出区别、也点不到「正确」的那个。
  * 覆盖更新还能同步刷新体积——最终卡片展示的必然是最后一次写入后的大小。
  *
- * @param turn 目标助手轮
- * @param file 产物视图（含后端拼好的 downloadUrl）
+ * <p>去重键必须带参与者：两位专家各写一份「报告.md」是两份产物，不能互相覆盖，
+ * 否则卡片会先挂 A 再改挂 B。身份也在这里落到块上，投影层不再按「最后一位」猜作者。
+ *
+ * @param turn            目标助手轮
+ * @param file            产物视图（含后端拼好的 downloadUrl）
+ * @param participantId   写出该文件的参与者 id（可空：旧事件 / 单专家轮次）
+ * @param participantName 写出该文件的参与者展示名（可空）
  */
-export function appendFile(turn: ChatTurn, file: TrialFileView) {
+export function appendFile(
+  turn: ChatTurn,
+  file: TrialFileView,
+  participantId?: string,
+  participantName?: string
+) {
   const name = (file.fileName || '').trim()
   if (!name) {
     return
   }
+  const ownerId = (participantId || '').trim()
+  const ownerName = (participantName || '').trim()
   const next: TrialFileView = { fileName: name, size: file.size, downloadUrl: file.downloadUrl }
-  const existing = turn.blocks.find((block) => block.kind === 'file' && block.file?.fileName === name)
+  const existing = turn.blocks.find(
+    (block) =>
+      block.kind === 'file' &&
+      block.file?.fileName === name &&
+      (block.participantId || '').trim() === ownerId
+  )
   if (existing) {
     // 原位覆盖：位置不变，用户已看到的卡片不会跳到别处
     existing.file = next
     existing.text = fileNameOf(next.fileName)
+    // 身份只补不改：后续帧没带身份时保留首次落下的作者
+    if (ownerId) {
+      existing.participantId = ownerId
+      existing.participantName = ownerName || existing.participantName
+    }
     return
   }
-  turn.blocks.push({ id: nextBlockId(turn), kind: 'file', text: fileNameOf(name), file: next })
+  const block: AssistantBlock = { id: nextBlockId(turn), kind: 'file', text: fileNameOf(name), file: next }
+  if (ownerId) {
+    block.participantId = ownerId
+    block.participantName = ownerName || undefined
+  }
+  turn.blocks.push(block)
 }
 
 /**
@@ -467,15 +691,36 @@ export function appendChoice(
  * @param turn 目标助手轮
  * @param raw  SSE 帧 / 落库正文解析出的快照；结构不完整时整块丢弃（不画空卡片）
  */
-export function appendWorkflow(turn: ChatTurn, raw: WorkflowSnapshotInput | undefined) {
+export function appendWorkflow(
+  turn: ChatTurn,
+  raw: WorkflowSnapshotInput | undefined,
+  participantId?: string,
+  participantName?: string
+) {
   const workflow = normalizeWorkflow(raw)
   if (!workflow) {
     return
   }
   const existing = turn.blocks.find((block) => block.kind === 'workflow' && sameWorkflow(block.workflow, workflow))
   if (existing) {
+    /*
+     * 正文只增不减：正文是从源端按节点增量长出来的，一份不带正文的旧快照
+     * （收尾期乱序到达 / 重连重放）不得把已经流出的文字就地清空。
+     * 只在「新快照确实带来了文字」时替换，避免「有文件就清空文字」互相打架。
+     */
+    const previousAnswer = (existing.workflow?.answer || '').trim()
+    const nextAnswer = (workflow.answer || '').trim()
+    if (!nextAnswer && previousAnswer) {
+      workflow.answer = existing.workflow?.answer || ''
+    }
     existing.workflow = workflow
-    existing.participantName = existing.participantName || workflow.name
+    if (!existing.participantId && participantId) {
+      existing.participantId = participantId
+    }
+    existing.participantName = existing.participantName || participantName || workflow.name
+    if (!existing.participantKind) {
+      existing.participantKind = 'workflow'
+    }
     return
   }
   turn.blocks.push({
@@ -483,7 +728,9 @@ export function appendWorkflow(turn: ChatTurn, raw: WorkflowSnapshotInput | unde
     kind: 'workflow',
     text: workflow.name || workflow.code,
     workflow,
-    participantName: workflow.name || workflow.code
+    participantId: participantId || undefined,
+    participantName: participantName || workflow.name || workflow.code,
+    participantKind: 'workflow'
   })
 }
 
@@ -620,8 +867,23 @@ export type ProcessLane = {
   routeKey?: string
   /** 该泳道对应的参与者身份（begin 帧给的 id）；历史数据为空 */
   participantId?: string
+  /**
+   * begin 帧的 kind。方案 / 工作流 / 专家的父子只认它，不认候选池类型。
+   * 历史泳道没有该字段时不回填。
+   */
+  participantKind?: string
+  /**
+   * begin 帧的 depth。更深的 scheme 才是父块。没有数字就不认父。
+   */
+  participantDepth?: number
   /** 决策 JSON / 依据 / 其它路由说明 */
   body?: string
+  /**
+   * 该参与者是否已经结束：done / failed / aborted（来自后端 participant 终态帧）。
+   *
+   * <p>缺省＝仍在进行。投影据此按人放进行态，而不是跟着整轮 streaming 一起转。
+   */
+  closed?: 'done' | 'failed' | 'aborted'
   steps: ProcessStep[]
 }
 
@@ -651,20 +913,27 @@ export function processSteps(blocks: AssistantBlock[]): ProcessStep[] {
 
 /**
  * 多路由按子 Agent 分块；单路由仍一块。
- * 兼容旧落库「路由到 A…；路由到 B…」拼串，按分号切开。
+ * 一条事件里用分号拼起来的多段「路由到」，仍按段切开。
+ *
+ * <p>参与者卡只从带身份的 begin / 路由行建立。一个 begin id 全程只有一条泳道。
+ * 思考和工具只追加到这条已有泳道上；begin 还没到的增量按 id 暂存，等这条泳道出现再并进去。
+ * 没有 begin 的块不按名字开卡。
+ *
+ * <p>「方案结论：」之后的增量不进任何参与者泳道。它们属于这一条汇总记录，
+ * 不写回方案卡（否则同一段正文会出现两次），也不按块上的名字再开一张。
  */
 export function processLanes(blocks: AssistantBlock[]): ProcessLane[] {
   const lanes: ProcessLane[] = []
   let current: ProcessLane | undefined
-  /*
-   * 身份 → 泳道。有 begin 帧的轮次里，思考 / 工具块自带参与者 id：
-   * 直接归到该参与者的泳道，不再靠「最后一条 route 文案」猜当前说话人。
-   * 历史数据没有 id，仍走原来的 current 口径，行为不变。
-   */
+  // 身份 → 泳道。思考 / 工具按参与者 id 归位，不按「最后一条 route 文案」认人。
   const byParticipant = new Map<string, ProcessLane>()
+  // begin 还没到的思考 / 工具，按 id 暂存。对上 begin 再并进那一条，对不上也不按名字建卡。
+  const heldSteps = new Map<string, ProcessStep[]>()
+  // 身份帧还没到时先记下的路由依据，对上同名身份泳道后再并进去；对不上就丢掉，不据此建卡。
+  const pendingRoutes: ProcessLane[] = []
   /*
-   * 是否处于「汇总」阶段：`方案结论：X` 之后的过程事件属于汇总那条独立记录，
-   * 不能再按上一位子专家的身份回填（否则汇总的思考会串进最后一位专家块）。
+   * 是否处于「汇总」阶段：`方案结论：X` 之后的过程事件属于汇总那条独立记录。
+   * 不能回填到上一位子专家，也不能因为原泳道被暂停查找就按名字再开一张。
    */
   let conclusionPhase = false
 
@@ -681,95 +950,234 @@ export function processLanes(blocks: AssistantBlock[]): ProcessLane[] {
         if (!lane) {
           continue
         }
-        if (lane.kind === 'agent') {
-          conclusionPhase = false
-          // 同名同 key 复用块（流式先决策后子开跑会再推一次「路由到」）
-          const existing = lanes.find(
-            (item) =>
-              item.kind === 'agent' &&
-              item.title === lane.title &&
-              (item.routeKey || '') === (lane.routeKey || '')
-          )
-          if (existing) {
-            if (!existing.body && lane.body) {
-              existing.body = lane.body
-            }
-            // 占位块与真实路由行落在同一泳道时，把身份也记到泳道上
-            if (block.participantId) {
-              existing.participantId = block.participantId
-              byParticipant.set(block.participantId, existing)
-            }
-            current = existing
-            continue
+        // 终态随身份行一起到达：泳道据此退出进行态（整轮还在跑，但这一位已经结束）
+        if (block.closed) {
+          lane.closed = block.closed
+        }
+        // kind / depth 跟 begin 块走，后面归组只读泳道上的这两项
+        copyParticipantShape(lane, block)
+        if (lane.kind !== 'agent') {
+          // 决策 / 说明不是参与者，入列但不成为当前作者
+          lanes.push(lane)
+          current = undefined
+          continue
+        }
+        conclusionPhase = false
+        const existing = findAgentLane(lanes, lane)
+        // 同名且是同一位才并进已有泳道。另一位即使展示名碰巧相同，也不能把已贴上的身份改挂过去。
+        const samePerson = !!existing?.participantId
+          && (!block.participantId || existing.participantId === block.participantId)
+        if (existing && samePerson) {
+          if (!existing.body && lane.body) {
+            existing.body = lane.body
           }
+          if (block.participantId) {
+            existing.participantId = block.participantId
+            byParticipant.set(block.participantId, existing)
+            // begin 之前先到的思考 / 工具并进这一张，不另开
+            absorbHeldSteps(existing, heldSteps, block.participantId)
+          }
+          // 终态只增不减：先到的 done 不会被后到的旧数据抹掉
+          if (!existing.closed && block.closed) {
+            existing.closed = block.closed
+          }
+          copyParticipantShape(existing, block)
+          current = existing
+          continue
         }
-        if (block.participantId && lane.kind === 'agent') {
-          lane.participantId = block.participantId
+        if (!block.participantId) {
+          // 没有身份：不新建参与者，只暂存依据
+          rememberPendingRoute(pendingRoutes, lane)
+          continue
         }
+        lane.participantId = block.participantId
+        copyParticipantShape(lane, block)
+        const pending = takePendingRoute(pendingRoutes, lane)
+        if (pending?.body && !lane.body) {
+          lane.body = pending.body
+        }
+        absorbHeldSteps(lane, heldSteps, block.participantId)
         lanes.push(lane)
-        if (block.participantId && lane.kind === 'agent') {
-          byParticipant.set(block.participantId, lane)
-        }
-        current = lane.kind === 'agent' ? lane : undefined
+        byParticipant.set(block.participantId, lane)
+        current = lane
       }
       continue
     }
     /*
-     * 有身份的块：落到它自己的泳道。
-     * - id 不在映射里（入口网关的判定推理 / 未能建块的参与者）：落匿名执行块，
-     *   不能退回「当前泳道」，否则会把入口的思考挂到第一位专家名下；
-     * - 汇总阶段：一律落匿名执行块，汇总内容由投影层单独收进结论记录。
+     * 汇总标记之后：思考 / 工具只留给「方案结论：」那一条记录。
+     * 不写回已经 begin 的方案或子专家（分流卡保持原样，正文也不会写第二遍），
+     * 也不按块上的名字再开泳道。
      */
-    const pinned = !conclusionPhase && block.participantId ? byParticipant.get(block.participantId) : undefined
-    if (pinned) {
-      current = pinned
-    } else if (block.participantId || conclusionPhase) {
+    if (conclusionPhase) {
+      continue
+    }
+    const id = (block.participantId || '').trim()
+    const begun = id ? byParticipant.get(id) : undefined
+    if (begun) {
+      // 同一个 begin id：后续增量回到这一张，不再新开
+      current = begun
+      appendBlockSteps(current.steps, block)
+      continue
+    }
+    if (id) {
+      // 还没有 begin：按 id 暂存。名字不能单独成为一张卡。
+      holdUntilBegin(heldSteps, block)
       current = undefined
+      continue
     }
+    // 没有身份的过程事件不建卡。只有当前已经是某位参与者时才顺进去，避免挂错人之后又造一张。
     if (!current || current.kind !== 'agent') {
-      // 尚无子块时落进匿名执行块，避免丢推理/工具；带上身份，投影层才能把入口推理认回来
-      current = { kind: 'agent', title: '执行', participantId: block.participantId, steps: [] }
-      lanes.push(current)
-      /*
-       * 同一身份的后续增量继续落这一块。
-       * 不登记的话，每个带身份的块都会另起一条「执行」泳道：入口判定推理被拆成多条，
-       * 投影层只能靠位置拼，一旦中间夹进决策行就整段丢掉。
-       */
-      if (block.participantId) {
-        byParticipant.set(block.participantId, current)
-      }
-    }
-    if (block.kind === 'reasoning') {
-      // 同 lane 内连续推理合并为一步（防 laneBound 重推路由把流式拆成一词一步；回放错步亦重建）
-      appendReasoningStep(current.steps, block.text)
       continue
     }
-    const line = block.text.trim()
-    const result = (block.detail || '').trim()
-    /*
-     * 工具开始（还没有结果）：只记一条 running 的 tool_call，用于画「正在调用」胶囊。
-     * block.text 此时是空串，工具名在 block.toolName 里。
-     */
-    if (block.toolState === 'running' && !line) {
-      const name = (block.toolName || '').trim()
-      if (name) {
-        current.steps.push({ type: 'tool_call', title: `调用工具 ${name}`, text: '', state: 'running' })
-      }
-      continue
-    }
-    if (line) {
-      current.steps.push({
-        type: 'tool_call',
-        title: toolCallTitle(line),
-        text: toolCallBody(line),
-        state: block.toolState === 'error' ? 'error' : 'done'
-      })
-    }
-    if (result) {
-      current.steps.push({ type: 'tool_result', title: '工具结果', text: result })
-    }
+    appendBlockSteps(current.steps, block)
   }
+  // 全程没有 begin 接住的过程：不按名字开卡，只留在最前给入口思考认领
+  promoteUnbegunEntry(lanes, heldSteps)
   return lanes
+}
+
+/**
+ * 把一条思考或工具块写进已有步骤。不新建泳道。
+ *
+ * @param steps 目标步骤（已有泳道或 begin 前的暂存）
+ * @param block 思考 / 工具块
+ */
+function appendBlockSteps(steps: ProcessStep[], block: AssistantBlock) {
+  if (block.kind === 'reasoning') {
+    // 同组内连续推理合并为一步（防重推路由把流式拆成一词一步）
+    appendReasoningStep(steps, block.text)
+    return
+  }
+  const line = (block.text || '').trim()
+  const result = (block.detail || '').trim()
+  // 工具开始、结果还没回来：只记一条 running 胶囊，工具名在 toolName 上
+  if (block.toolState === 'running' && !line) {
+    const name = (block.toolName || '').trim()
+    if (name) {
+      steps.push({ type: 'tool_call', title: `调用工具 ${name}`, text: '', state: 'running' })
+    }
+    return
+  }
+  if (line) {
+    steps.push({
+      type: 'tool_call',
+      title: toolCallTitle(line),
+      text: toolCallBody(line),
+      state: block.toolState === 'error' ? 'error' : 'done'
+    })
+  }
+  if (result) {
+    steps.push({ type: 'tool_result', title: '工具结果', text: result })
+  }
+}
+
+/**
+ * begin 还没出现时，按参与者 id 暂存思考 / 工具。
+ *
+ * @param held  id → 暂存步骤
+ * @param block 带身份、但还没有泳道的块
+ */
+function holdUntilBegin(held: Map<string, ProcessStep[]>, block: AssistantBlock) {
+  const id = (block.participantId || '').trim()
+  if (!id) {
+    return
+  }
+  const bucket = held.get(id) || []
+  appendBlockSteps(bucket, block)
+  if (bucket.length) {
+    held.set(id, bucket)
+  }
+}
+
+/**
+ * 把某 id 在 begin 之前暂存的步骤并进它的唯一泳道，然后清掉暂存。
+ *
+ * @param lane 已经按 begin 建立的泳道
+ * @param held 暂存
+ * @param id   begin id
+ */
+function absorbHeldSteps(lane: ProcessLane, held: Map<string, ProcessStep[]>, id: string) {
+  const steps = held.get(id)
+  if (!steps?.length) {
+    return
+  }
+  lane.steps.push(...steps)
+  held.delete(id)
+}
+
+/**
+ * 没有任何 begin 接住的过程，收成标题不是「路由到」的泳道，放在最前。
+ *
+ * <p>入口判定没有参与者 begin。这些推理只能给入口块认领，不能变成「路由到 {名}」的参与者卡。
+ * 已经 begin 过的 id 不会留在这里。
+ *
+ * @param lanes 已建立的泳道（就地把入口思考插到最前）
+ * @param held  仍未被 begin 接住的步骤
+ */
+function promoteUnbegunEntry(lanes: ProcessLane[], held: Map<string, ProcessStep[]>) {
+  const entryLanes: ProcessLane[] = []
+  for (const [id, steps] of held) {
+    if (!steps.length) {
+      continue
+    }
+    entryLanes.push({
+      kind: 'agent',
+      title: '执行',
+      participantId: id,
+      steps
+    })
+  }
+  if (entryLanes.length) {
+    lanes.unshift(...entryLanes)
+  }
+}
+
+/**
+ * 同名同 key 的参与者泳道。身份帧与稍后的「路由到」要并进同一块。
+ *
+ * @param lanes 已建立的泳道
+ * @param lane  待并入的参与者块
+ * @return 已有块；没有时为 undefined
+ */
+function findAgentLane(lanes: ProcessLane[], lane: ProcessLane): ProcessLane | undefined {
+  return lanes.find(
+    (item) => item.kind === 'agent' && item.title === lane.title && (item.routeKey || '') === (lane.routeKey || '')
+  )
+}
+
+/**
+ * 暂存一条还没有身份的路由依据。同名同 key 只留一份，后到的依据补进空位。
+ *
+ * @param pending 暂存列表
+ * @param lane    本条路由
+ */
+function rememberPendingRoute(pending: ProcessLane[], lane: ProcessLane) {
+  const existing = findAgentLane(pending, lane)
+  if (!existing) {
+    pending.push(lane)
+    return
+  }
+  if (!existing.body && lane.body) {
+    existing.body = lane.body
+  }
+}
+
+/**
+ * 取出并删除与身份泳道同名的暂存依据。
+ *
+ * @param pending 暂存列表
+ * @param lane    已有身份的参与者块
+ * @return 暂存依据；没有时为 undefined
+ */
+function takePendingRoute(pending: ProcessLane[], lane: ProcessLane): ProcessLane | undefined {
+  const index = pending.findIndex(
+    (item) => item.title === lane.title && (item.routeKey || '') === (lane.routeKey || '')
+  )
+  if (index < 0) {
+    return undefined
+  }
+  const [found] = pending.splice(index, 1)
+  return found
 }
 
 /**
@@ -798,9 +1206,16 @@ function splitRoutePieces(raw: string): string[] {
  * <p>这些子块不是判路由出来的，但同样是「这一位参与者开始作答」的真实事件：
  * 后端写成「固定并行 1/2 · 制度知识专家（policy）」。只把它当说明句，
  * 消息流就会看不见这些专家。这里归一成与「路由到 X」同构的参与者块。
+ *
+ * <p>必须用**窄口径**（只在「固定并行 / 固定串行 / 路由后串行 / 竞争选优」前缀上匹配）：
+ * 宽口径会把「路由到 X（key），依据：…」整句一起吃掉，`依据` 永远进不了 {@code lane.body}，
+ * 方案卡的内容框就只剩一句状态话。
+ *
+ * @param raw 一行路由摘要
+ * @return 子块标题解析结果；不是模板子块时为 undefined
  */
 function parseChildTitle(raw: string): { name: string; key: string } | undefined {
-  return parseRouteParticipant(raw)
+  return parseFixedChildTitle(raw)
 }
 
 /**
@@ -859,30 +1274,39 @@ function routeLane(raw: string): ProcessLane | undefined {
  * @param summary 路由摘要原文
  * @param participantId   当前归属身份（可空：历史流 / 决策块）
  * @param participantName 当前归属展示名（可空）
+ * @param begin           true 表示这是 begin 占位行，稍后的真实路由要原位补全
  */
 export function appendRoute(
   turn: ChatTurn,
   summary: string,
   participantId?: string,
-  participantName?: string
+  participantName?: string,
+  begin?: boolean,
+  identity?: { participantKind?: string; participantDepth?: number }
 ) {
   const text = (summary || '').trim()
   if (!text) {
     return
   }
-  // 先找同一位参与者的 begin 占位块：真实路由行到达时原位补全
+  // 身份只在「这条路由确实是这位参与者」时写入，避免把入口的 kind / depth 贴到决策行上
+  const sameOwner = routeNameOf(text) !== '' && routeNameOf(text) === (participantName || '').trim()
+  // 同一位已经有路由行（begin 占位，或回放里身份已经贴上）：原位补全依据，不另起一块
   const placeholder = text.startsWith('路由到')
-    ? [...turn.blocks].reverse().find((block) => block.kind === 'route' && block.begin === true
-      && sameRouteTarget(block.text, text))
+    ? [...turn.blocks].reverse().find((block) => block.kind === 'route'
+      && sameRouteTarget(block.text, text)
+      && (block.begin === true || (!!participantId && block.participantId === participantId)))
     : undefined
   if (placeholder) {
     placeholder.text = text
     placeholder.begin = false
-    if (!placeholder.participantId && participantId) {
+    if (!placeholder.participantId && participantId && sameOwner) {
       placeholder.participantId = participantId
     }
-    if (!placeholder.participantName && participantName) {
+    if (!placeholder.participantName && participantName && sameOwner) {
       placeholder.participantName = participantName
+    }
+    if (sameOwner) {
+      copyParticipantShape(placeholder, identity)
     }
     return
   }
@@ -890,15 +1314,37 @@ export function appendRoute(
   if (active === text) {
     return
   }
-  // 身份只在「这条路由确实是这位参与者」时写入，避免把上一位的 id 贴到新路由块上
-  const sameOwner = routeNameOf(text) !== '' && routeNameOf(text) === (participantName || '').trim()
   turn.blocks.push({
     id: nextBlockId(turn),
     kind: 'route',
     text,
     participantId: sameOwner ? participantId : undefined,
-    participantName: sameOwner ? participantName : undefined
+    participantName: sameOwner ? participantName : undefined,
+    participantKind: sameOwner ? identity?.participantKind : undefined,
+    participantDepth: sameOwner ? identity?.participantDepth : undefined,
+    begin: begin === true ? true : undefined
   })
+}
+
+/**
+ * 把 begin 上的 kind / depth 补到已有块。已有值不覆盖。
+ *
+ * @param target 路由块或泳道
+ * @param source kind / depth；可空
+ */
+function copyParticipantShape(
+  target: { participantKind?: string; participantDepth?: number },
+  source?: { participantKind?: string; participantDepth?: number }
+) {
+  if (!source) {
+    return
+  }
+  if (!target.participantKind && source.participantKind) {
+    target.participantKind = source.participantKind
+  }
+  if (target.participantDepth == null && typeof source.participantDepth === 'number') {
+    target.participantDepth = source.participantDepth
+  }
 }
 
 /**
@@ -1296,13 +1742,16 @@ function userTurn(id: number, text: string): ChatTurn {
 }
 
 function pushBlock(turn: ChatTurn, block: AssistantBlock) {
+  // 回放与直播共用 appendText / appendRoute：块上已经贴好的身份必须跟着走，不能在这里丢掉
   if (block.kind === 'reasoning' || block.kind === 'assistant') {
-    appendText(turn, block.kind, block.text)
+    appendText(turn, block.kind, block.text, block.participantId, block.participantName)
     return
   }
-  // 回放路由也走 appendRoute，去掉「同子重复 route」以免把连续推理拆开
   if (block.kind === 'route') {
-    appendRoute(turn, block.text)
+    appendRoute(turn, block.text, block.participantId, block.participantName, block.begin, {
+      participantKind: block.participantKind,
+      participantDepth: block.participantDepth
+    })
     return
   }
   // 计划与步骤也走 upsert：回放的是一串状态事件，必须原位合并而不是堆多张卡/多行
@@ -1314,9 +1763,10 @@ function pushBlock(turn: ChatTurn, block: AssistantBlock) {
     upsertStep(turn, block.step)
     return
   }
-  // 产物也走去重：同一文件多次生成只保留最新一条卡片
+  // 产物也走去重：同一参与者同一文件多次生成只保留最新一条卡片。
+  // 身份直接随块传入，刷新后文件仍挂原参与者，不再事后按「最后一位」回填。
   if (block.kind === 'file' && block.file) {
-    appendFile(turn, block.file)
+    appendFile(turn, block.file, block.participantId, block.participantName)
     return
   }
   // 选项也走去重：同一轮只保留一条 chips，重复回放原位覆盖
@@ -1326,7 +1776,7 @@ function pushBlock(turn: ChatTurn, block: AssistantBlock) {
   }
   // 工作流卡片同理：同一轮同一工作流只保留最新一份快照
   if (block.kind === 'workflow' && block.workflow) {
-    appendWorkflow(turn, block.workflow)
+    appendWorkflow(turn, block.workflow, block.participantId, block.participantName)
     return
   }
   // 其余块（vision / system / error / ROUTER_TRACE）直接入列：补齐稳定 id 再 push，
@@ -1389,13 +1839,22 @@ function blockFromEvent(item: TrialEvent): AssistantBlock | undefined {
     return text ? { kind: 'system', text } : undefined
   }
   if (item.eventType === 'file') {
-    // 正文是 {"fileName","size"}；downloadUrl 落库时不存（会话主键在路径里），故按当前会话现拼
+    // 正文是 {"fileName","size","participantId","participantName"}；
+    // downloadUrl 落库时不存（会话主键在路径里），故按当前会话现拼
     const file = parseFile(item.contentText, item.sessionId)
     if (!file) {
       const fallback = (item.summary || '').trim()
       return fallback ? { kind: 'system', text: fallback } : undefined
     }
-    return { kind: 'file', text: fileNameOf(file.fileName), file }
+    // 身份以落库字段为准：回放不再靠 carryReplayIdentity 猜作者
+    const owner = fileOwnerOf(item.contentText)
+    return {
+      kind: 'file',
+      text: fileNameOf(file.fileName),
+      file,
+      participantId: owner.id || undefined,
+      participantName: owner.name || undefined
+    }
   }
   if (item.eventType === 'choice') {
     /*
@@ -1438,33 +1897,51 @@ function blockFromEvent(item: TrialEvent): AssistantBlock | undefined {
  * @return 占位路由块；不入列时返回 undefined
  */
 function participantBeginBlock(item: TrialEvent): AssistantBlock | undefined {
+  const who = readParticipantEvent(item)
+  // 入口与汇总结论不占专家位：入口靠身份 id 认思考，结论靠「方案结论：」标记
+  if (!who?.begin || who.kind === 'gateway' || who.kind === 'conclusion') {
+    return undefined
+  }
+  return {
+    kind: 'route',
+    text: who.routeKey ? `路由到 ${who.name}（${who.routeKey}）` : `路由到 ${who.name}`,
+    participantId: who.id,
+    participantName: who.name,
+    participantKind: who.kind || undefined,
+    participantDepth: who.depth,
+    begin: true
+  }
+}
+
+/**
+ * 读一条 participant 事件正文。半截 JSON 直接放弃，不让回放整轮失败。
+ *
+ * @param item 落库事件
+ * @return 身份；不是 begin 或字段不全时为 undefined
+ */
+function readParticipantEvent(item: TrialEvent): (ReplaySpeaker & { begin: boolean; routeKey: string }) | undefined {
   const raw = (item.contentText || '').trim()
   if (!raw || raw[0] !== '{') {
     return undefined
   }
-  let chunk: { id?: string; name?: string; kind?: string; routeKey?: string; begin?: boolean }
+  let chunk: { id?: string; name?: string; kind?: string; routeKey?: string; begin?: boolean; depth?: number }
   try {
     chunk = JSON.parse(raw)
   } catch {
-    // 半截 JSON（快照写入时被截断）：宁可不出块，也不抛进渲染树
     return undefined
   }
-  if (!chunk || chunk.begin !== true) {
+  const id = (chunk?.id || '').trim()
+  const name = (chunk?.name || '').trim()
+  if (!chunk || chunk.begin !== true || !id || !name) {
     return undefined
   }
-  const id = (chunk.id || '').trim()
-  const name = (chunk.name || '').trim()
-  const kind = (chunk.kind || '').trim()
-  if (!id || !name || kind === 'gateway' || kind === 'conclusion') {
-    return undefined
-  }
-  const key = (chunk.routeKey || '').trim()
   return {
-    kind: 'route',
-    text: key ? `路由到 ${name}（${key}）` : `路由到 ${name}`,
-    participantId: id,
-    participantName: name,
-    begin: true
+    id,
+    name,
+    kind: (chunk.kind || '').trim(),
+    routeKey: (chunk.routeKey || '').trim(),
+    begin: true,
+    depth: typeof chunk.depth === 'number' ? chunk.depth : undefined
   }
 }
 
@@ -1543,6 +2020,28 @@ export function parseChoiceEvent(raw: string | undefined): TrialChoiceView | und
     return undefined
   }
   return { question: typeof data.question === 'string' ? data.question.trim() : '', options }
+}
+
+/**
+ * 从 FILE 正文里取「谁写的」。旧事件没有这两个字段，返回空串交给调用方走历史兜底。
+ *
+ * @param raw 事件正文 JSON
+ * @returns 身份；缺失或解析失败时两项都是空串
+ */
+export function fileOwnerOf(raw: string | undefined): { id: string; name: string } {
+  const text = (raw || '').trim()
+  if (!text) {
+    return { id: '', name: '' }
+  }
+  try {
+    const data = JSON.parse(text) as { participantId?: unknown; participantName?: unknown }
+    return {
+      id: String(data?.participantId || '').trim(),
+      name: String(data?.participantName || '').trim()
+    }
+  } catch {
+    return { id: '', name: '' }
+  }
 }
 
 /**

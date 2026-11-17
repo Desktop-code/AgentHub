@@ -292,11 +292,18 @@ public class ChildRunner {
         try {
             List<Future<ChildOutcome>> futures = new ArrayList<>(intents.size());
             ScratchBoard scratch = ScratchContext.board();
+            /*
+             * 嵌套上下文同样不跨线程：池线程默认 depth=0，会让方案内层子专家的 id 退化回根层，
+             * 与根层同名 route_key 撞车。这里把「深度 + 方案键」显式带进任务体，作用域与任务一致。
+             */
+            int nestedDepth = MaNestedContext.depth();
+            String nestedParentKey = MaNestedContext.parentKey();
             Thread submitter = Thread.currentThread();
             for (RoutedIntent intent : intents) {
-                futures.add(lane.submit(() -> ScratchContext.callAs(scratch, scratchOwner(intent), () ->
-                        runOneChild(parent, intent, modelUser, userText, userId, sessionId, deadlineNanos,
-                                progress, trace, childParent, true, isolateChild, submitter, null))));
+                futures.add(lane.submit(() -> MaNestedContext.callAt(nestedDepth, nestedParentKey, () ->
+                        ScratchContext.callAs(scratch, scratchOwner(intent), () ->
+                                runOneChild(parent, intent, modelUser, userText, userId, sessionId, deadlineNanos,
+                                        progress, trace, childParent, true, isolateChild, submitter, null)))));
             }
             List<ChildOutcome> outcomes = new ArrayList<>(intents.size());
             for (int i = 0; i < futures.size(); i++) {
@@ -476,6 +483,9 @@ public class ChildRunner {
         Long agentSpan = null;
         // 共享草稿区：本子用同一个 route_key 作为写入归属（并行时谁先写谁占位）
         ScratchContext.bindOwner(scratchOwner(intent));
+        // 参与者身份与已包装的出口必须活到 catch：失败 / 中止也要给这条 begin 收口
+        ParticipantView self = null;
+        TrialProgress childProgress = null;
         try {
             RouterClock.assertBefore(deadlineNanos);
             Candidate hit = intent.candidate();
@@ -497,27 +507,35 @@ public class ChildRunner {
             // 后续增量再带归属标记；不再在每个增量前重推同一句「路由到」。
             String childRouteLine = intent.routeLine() != null ? intent.routeLine()
                     : RouterTexts.routeSummary(hit, intent.reason());
-            TrialProgress childProgress = progress;
+            /*
+             * 身份必须在开跑前算好：没装配进度出口（工作流节点 / 窄测）时也要用它给产物署名，
+             * 不能等到「有 progress 才认人」。同一套 id 同时用于直播 begin、落库与回放。
+             */
+            ParticipantView selfView = participantOf(intent, hit);
+            self = selfView;
+            TrialProgress childProgressView = progress;
             if (progress != null) {
-                ParticipantView self = participantOf(intent, hit);
                 if (hit.isMaTarget()) {
                     /*
                      * 方案目标：外层静音只挡本层 token，内层方案的子结论与「方案结论」必须能写出去，
                      * 所以绑在 conclusionChannel 上；begin 在进入内层之前推出，方案块因此立刻出现。
                      */
                     TrialProgress schemeBase = progress.conclusionChannel();
-                    childProgress = schemeBase == null ? null
-                            : participantBound(schemeBase, self, childRouteLine);
-                    // 路由行只推一次：它是「分给谁 + 依据」的可见文案，不是每个增量的泳道分隔符
-                    progress.route(childRouteLine);
+                    childProgressView = schemeBase == null ? null
+                            : participantBound(schemeBase, selfView, childRouteLine);
+                    // 路由行只推一次，并且从本方案自己的包装器出去：
+                    // 外层若再包着别的方案，不会把这条改挂回去。
+                    TrialProgress routeOutlet = childProgressView != null ? childProgressView : progress;
+                    routeOutlet.route(childRouteLine);
                 } else {
-                    childProgress = participantBound(progress, self, childRouteLine);
-                    if (parallelWorker || MaNestedContext.inside()) {
-                        // 并行交错 / 嵌套推进：开跑前把本子那条路由文案推一次，供前端展示依据
-                        progress.route(childRouteLine);
+                    childProgressView = participantBound(progress, selfView, childRouteLine);
+                    if ((parallelWorker || MaNestedContext.inside()) && childProgressView != null) {
+                        // 并行 / 嵌套：路由从子包装器出去，归属就是这位子专家
+                        childProgressView.route(childRouteLine);
                     }
                 }
             }
+            childProgress = childProgressView;
             // 每子显式带 childParent（判路由 LLM）；并行发 N.1/N.2；禁写成根/null、禁靠共享 ThreadLocal
             agentSpan = trace == null ? null
                     : trace.open(SpanType.AGENT, hit.agent().getName(), hit.agent().getId(), childParent,
@@ -590,20 +608,41 @@ public class ChildRunner {
                 notices = plan.getNotices();
             }
             RouterClock.assertBefore(deadlineNanos);
+            // 产物在产生处定作者：本子写出的文件记在本参与者名下，内层专家已带身份的不覆盖。
+            // 这样直播帧、轮次落库与刷新回放读的是同一个作者，文件不会先挂工作流卡再改挂。
+            turn = stampFileOwners(turn, self);
             if (trace != null) {
                 SpanClose agentOk = new SpanClose();
                 agentOk.setStatus(ObsStatus.OK);
                 agentOk.setInputText(childInput.displaySubQuery());
                 agentOk.setOutputText("执行完成");
-                agentOk.setAttrsJson(RouterObs.childAgentAttrs(hit.agent(), "执行子 Agent", childInput.fallback(),
-                        extraSpanAttrs));
+                // 真专家仍是「执行子 Agent」且不打种类；方案 / 工作流外壳另标，供追踪页改标签
+                boolean schemeShell = hit.isMaTarget();
+                boolean workflowShell = hit.isWorkflowTarget();
+                agentOk.setAttrsJson(RouterObs.childAgentAttrs(hit.agent(),
+                        RouterObs.shellBrief(schemeShell, workflowShell), childInput.fallback(),
+                        RouterObs.withShellRole(extraSpanAttrs, schemeShell, workflowShell)));
                 trace.close(agentSpan, agentOk);
             }
-            // 静音包装器会在这里把整段结论钉回该参与者；已流式推过的路径默认空操作，不会重影。
-            // 方案目标的内部子结论和汇总结论由内层执行自己推，这里再推会把子正文复制进方案块。
-            if (!(hit.isMaTarget() && !nested.isEmpty())) {
-                deliverConclusion(progress, childRouteLine, turn);
+            /*
+             * 工作流目标的正文载体是它自己的执行卡片（适配层按节点完成顺序增量推 answer），
+             * 这里不再补一条 assistant：否则同一段文字会既进卡片、又进一条专家气泡，
+             * 回放还会按「###」把它当成多人拼接稿切开。
+             *
+             * 其余目标：正文出口会在本子结束处把整段结论钉回该参与者；
+             * 已经按增量流过正文的路径默认空操作，不会重影。
+             * 必须走子包装器：直接打在外层 progress 上，出口补出的正文会被外层改挂成方案。
+             * 方案目标的内部子结论和汇总结论由内层执行自己推，这里再推会把子正文复制进方案块。
+             */
+            if (!hit.isWorkflowTarget() && !(hit.isMaTarget() && !nested.isEmpty())) {
+                deliverConclusion(childProgress != null ? childProgress : progress, childRouteLine, turn);
             }
+            /*
+             * 开过 begin 的参与者必须自己收口：成功路径统一推一条终态。
+             * 工作流卡 / 方案外壳（子专家已各自收口）也在这里结束自己的块，页面不再等整轮收尾才停转。
+             */
+            closeParticipant(childProgress != null ? childProgress : progress, self,
+                    TrialProgress.PARTICIPANT_DONE, "");
             // 工作流目标：卡片终态随结果交给上层落库；其它分支 workflowView 保持 null
             if (workflowView != null) {
                 return ChildOutcome.okWorkflow(intent, notices, turn, workflowView);
@@ -623,13 +662,33 @@ public class ChildRunner {
                 agentErr.setStatus(ObsStatus.ERROR);
                 agentErr.setErrorSummary(ex.getMessage());
                 agentErr.setOutputText(ex.getMessage());
-                agentErr.setAttrsJson(ObsAttrs.withCause(ObsAttrs.withBrief(null, "子 Agent 失败"), CauseDigest.of(ex)));
+                // 失败外壳同样带种类，避免出错的工作流仍被标成 Agent；真专家文案保持「子 Agent 失败」。
+                // hit 在 try 内声明，这里用入参再取一次，失败发生在取候选之前时不加种类。
+                Candidate failedHit = intent == null ? null : intent.candidate();
+                boolean schemeShell = failedHit != null && failedHit.isMaTarget();
+                boolean workflowShell = failedHit != null && failedHit.isWorkflowTarget();
+                String failBrief = workflowShell ? "工作流失败" : (schemeShell ? "方案失败" : "子 Agent 失败");
+                String errAttrs = ObsAttrs.withCause(ObsAttrs.withBrief(null, failBrief), CauseDigest.of(ex));
+                Map<String, Object> role = RouterObs.shellRoleFields(schemeShell, workflowShell);
+                if (!role.isEmpty()) {
+                    errAttrs = ObsAttrs.withFields(errAttrs, role);
+                }
+                agentErr.setAttrsJson(errAttrs);
                 trace.close(agentSpan, agentErr);
             }
             // 并行时单子失败不抛出，写成失败段；单子路径保持抛出（与现网一致）
+            String failText = UserFacingText.safeMessage(ex, "子 Agent 执行失败");
+            /*
+             * 失败 / 中止也要收口：没有这一帧，前端只能等整轮结束才把这张卡从「进行中」放下来，
+             * 中途一直是转圈的空壳。状态区分「自身错误」与「被外部打断」。
+             */
+            String failState = Thread.currentThread().isInterrupted()
+                    || (ex instanceof TrialFailure failure && LimitHitReasons.TIMEOUT.equals(failure.getFinishReason()))
+                    ? TrialProgress.PARTICIPANT_ABORTED : TrialProgress.PARTICIPANT_FAILED;
+            closeParticipant(childProgress != null ? childProgress : progress, self, failState, failText);
             if (parallelWorker) {
                 // 失败段正文会进终答拼接：边界处清洗，避免路径/端口/异常码被复述给用户
-                return ChildOutcome.failed(intent, UserFacingText.safeMessage(ex, "子 Agent 执行失败"));
+                return ChildOutcome.failed(intent, failText);
             }
             throw ex;
         } finally {
@@ -743,15 +802,16 @@ public class ChildRunner {
     }
 
     /**
-     * 子 AGENT 挂点：优先本 trace 最近判路由 LLM；无则退 ROUTE。禁止 null/根。
+     * 子 AGENT 挂点：只认父是本层 ROUTE 的那条 LLM；没有则退回本层 ROUTE。
+     * 不读 trace 上「最近一条 LLM」——嵌套或并行外壳会把它改成别的层的模型步。
      *
      * @param trace     当前埋点；可空
-     * @param routeSpan ROUTE 行 id；可空
+     * @param routeSpan 本层 ROUTE 行 id；可空
      * @return 非根挂点；trace/route 皆空时为 null
      */
     public static Long childAgentParent(ObsTraceScope trace, Long routeSpan) {
-        if (trace != null) {
-            Long judgeLlm = trace.lastLlmSpanId();
+        if (trace != null && routeSpan != null) {
+            Long judgeLlm = trace.llmUnder(routeSpan);
             if (judgeLlm != null) {
                 return judgeLlm;
             }
@@ -862,21 +922,42 @@ public class ChildRunner {
      * 参与者结束后交出成文结论。
      *
      * <p>流式路径的默认实现是空操作（正文已经按 token 出去了）。
-     * 静音包装器覆写后会先钉路由行再推整段，消息流才能把结论挂到这个参与者名下。
+     * 静音包装器覆写后会先钉路由行再推整段；**空正文也会调用**——
+     * 出口据此给「一个字都没产出」的参与者补一句终态说明，卡片才不会一直转圈。
      *
      * @param progress  本子拿到的进度出口（可能是静音包装）
      * @param routeLine 本子路由行
-     * @param turn      本子终答；空正文不推
+     * @param turn      本子终答；空正文也照样交出（由出口决定补什么）
      */
     private static void deliverConclusion(TrialProgress progress, String routeLine, TrialTurn turn) {
-        if (progress == null || turn == null) {
+        if (progress == null) {
             return;
         }
-        String text = turn.getAssistantText();
-        if (text == null || text.isBlank()) {
+        String text = turn == null ? "" : turn.getAssistantText();
+        progress.deliverParticipantConclusion(routeLine, text == null ? "" : text.trim());
+    }
+
+    /**
+     * 给参与者推一条终态：done / failed / aborted。
+     *
+     * <p>出口缺失（窄测 / 工作流节点内）时什么都不做；出口抛异常不得影响本子结果，
+     * 状态帧是展示旁路，失败了只记 debug。
+     *
+     * @param progress 本子出口；可空
+     * @param self     本子身份；可空
+     * @param state    {@link TrialProgress#PARTICIPANT_DONE} 等
+     * @param note     终态说明；可空
+     */
+    private static void closeParticipant(TrialProgress progress, ParticipantView self, String state, String note) {
+        if (progress == null || self == null) {
             return;
         }
-        progress.deliverParticipantConclusion(routeLine, text.trim());
+        try {
+            progress.endParticipant(self, state, note);
+        } catch (RuntimeException ex) {
+            log.debug("参与者终态未写出 participantId={} state={} type={}",
+                    self.id(), state, ex.getClass().getSimpleName());
+        }
     }
 
     /**
@@ -899,9 +980,13 @@ public class ChildRunner {
         progress.beginParticipant(participant);
         String id = participant.id();
         return new TrialProgress() {
-            /** 转发前声明归属：同一位连续增量由实现去重，不会退化成每帧一发。 */
-            private void mark() {
-                progress.attributeParticipant(id);
+            /**
+             * 这次增量归本包装器。内层已经声明过时只转发，不再改挂成自己。
+             *
+             * @param forward 交给下游的动作
+             */
+            private void emit(Runnable forward) {
+                NestedAttribution.emit(() -> progress.attributeParticipant(id), forward);
             }
 
             @Override
@@ -911,21 +996,18 @@ public class ChildRunner {
 
             @Override
             public void route(String summary) {
-                mark();
-                progress.route(summary);
+                emit(() -> progress.route(summary));
             }
 
             @Override
             public void reasoning(String delta) {
-                mark();
-                progress.reasoning(delta);
+                emit(() -> progress.reasoning(delta));
             }
 
             /** 汇总这类「先推标记再推思考」的增量同样要带归属，但不再重推泳道文案。 */
             @Override
             public void reasoningPinned(String delta) {
-                mark();
-                progress.reasoningPinned(delta);
+                emit(() -> progress.reasoningPinned(delta));
             }
 
             /** 更深一层的参与者（方案内部子专家）开始：必须原样透传，否则内层块出不来。 */
@@ -942,27 +1024,37 @@ public class ChildRunner {
 
             @Override
             public void toolStart(String name) {
-                mark();
-                progress.toolStart(name);
+                emit(() -> progress.toolStart(name));
             }
 
             @Override
             public void tool(String name, String arguments, String result, boolean success) {
-                mark();
-                progress.tool(name, arguments, result, success);
+                emit(() -> progress.tool(name, arguments, result, success));
             }
 
             @Override
             public void assistant(String delta) {
-                mark();
-                progress.assistant(delta);
+                emit(() -> progress.assistant(delta));
             }
 
             /** 参与者整段结论：先切回本子，正文才会挂到这个名字下。 */
             @Override
             public void deliverParticipantConclusion(String conclusionLine, String text) {
-                mark();
-                progress.deliverParticipantConclusion(conclusionLine, text);
+                emit(() -> progress.deliverParticipantConclusion(conclusionLine, text));
+            }
+
+            /**
+             * 参与者终态：原样透传，但先切回本子。
+             *
+             * <p>为什么必须覆写：默认实现是空操作，漏了它「开过 begin 的块」永远收不了口，
+             * 页面只能等整轮 done 才把所有卡一起放下来——正是「汇总落屏、前面空壳同时闪现」。
+             * 不在这里补自己的 done：收口时机由上层（成功收尾 / 失败分支）统一给，
+             * 避免同一位参与者被推两条终态。
+             */
+            @Override
+            public void endParticipant(ParticipantView finished, String state, String note) {
+                ParticipantView who = finished == null ? participant : finished;
+                emit(() -> progress.endParticipant(who, state, note));
             }
 
             /** 内层方案的收口通道不绕过归属控制：外层自己会在需要时再包一层。 */
@@ -971,10 +1063,17 @@ public class ChildRunner {
                 return progress;
             }
 
+            /**
+             * 产物：先切回本子再透传，并在产生处补上作者。
+             *
+             * <p>工具回调只拿得到文件名与体积；直播帧若不带身份，前端只能按
+             * 「最后一位参与者」猜宿主，文件就会先挂到工作流卡上再改挂。
+             * 这里补的是同一份身份，落库侧由 {@code stampFileOwners} 再确保一次。
+             */
             @Override
             public void file(GeneratedFile file) {
-                mark();
-                progress.file(file);
+                GeneratedFile owned = file == null ? null : file.withOwner(id, participant.name());
+                emit(() -> progress.file(owned));
             }
 
             /**
@@ -983,8 +1082,7 @@ public class ChildRunner {
              */
             @Override
             public void choice(AgentChoice choice) {
-                mark();
-                progress.choice(choice);
+                emit(() -> progress.choice(choice));
             }
 
             /**
@@ -995,24 +1093,42 @@ public class ChildRunner {
              */
             @Override
             public void workflow(WorkflowRunView view) {
-                mark();
-                progress.workflow(view);
+                emit(() -> progress.workflow(view));
             }
 
             /** 子计划待批也是本子的事件：先切回本子再透传。 */
             @Override
             public void childPlanPending(ChildPlanPendingView pending) {
-                mark();
-                progress.childPlanPending(pending);
+                emit(() -> progress.childPlanPending(pending));
             }
         };
+    }
+
+    /**
+     * 落库用的身份：与开跑时 {@link #participantOf} 同一套 id / kind / routeKey。
+     *
+     * <p>必须在组装时间线分段时调用（嵌套深度与 begin 当时一致）。
+     * 跳过、没有候选时返回 null，不给没开跑的人补一张卡。
+     *
+     * @param intent 子意图；可空
+     * @return 参与者身份；无法识别时 null
+     */
+    public static ParticipantView viewOf(RoutedIntent intent) {
+        if (intent == null || intent.candidate() == null) {
+            return null;
+        }
+        return participantOf(intent, intent.candidate());
     }
 
     /**
      * 取一次子调用的参与者身份。
      *
      * <p>类型决定前端角标与分块：方案（MA）单列一块、工作流只报状态、其余按专家。
-     * id 用 route_key 优先，保证同一轮内唯一且可复现。
+     *
+     * <p>id 必须带「深度 + 父方案路由键 + 本子路由键」：两层方案都分了同名子专家（如 policy）时，
+     * 只用 {@code p-policy} 会被实时写侧的 {@code participants.putIfAbsent} 当成同一个人，
+     * 第二张卡永远收不到 begin，页面就只能等收尾回放补。同一套算法用于直播、落库与回放，
+     * 不在前端补 id。
      *
      * @param intent 子意图（含 route_key）
      * @param hit    命中的候选
@@ -1020,9 +1136,9 @@ public class ChildRunner {
      */
     private static ParticipantView participantOf(RoutedIntent intent, Candidate hit) {
         String key = intent.candidate().route().getRouteKey();
-        String id = key != null && !key.isBlank()
-                ? "p-" + key.trim()
-                : "p-" + hit.agent().getId();
+        String trimmedKey = key == null ? "" : key.trim();
+        String leaf = !trimmedKey.isEmpty() ? trimmedKey : commonIdOf(hit);
+        String id = participantIdOf(MaNestedContext.depth(), MaNestedContext.parentKey(), leaf);
         String name = RouterTexts.childLabel(hit.agent());
         int depth = MaNestedContext.depth();
         if (hit.isMaTarget()) {
@@ -1032,6 +1148,70 @@ public class ChildRunner {
             return new ParticipantView(id, name, ParticipantView.KIND_WORKFLOW, key, depth);
         }
         return ParticipantView.agent(id, name, key, depth);
+    }
+
+    /**
+     * 拼参与者稳定 id：{@code p-<depth>-<父方案键|root>-<叶子键>}。
+     *
+     * <p>父方案键来自 {@link MaNestedContext} 的栈顶；根层没有父方案时固定写 root，
+     * 保证格式统一、可复现，也避免出现 {@code p-0--policy} 这种双横线。
+     *
+     * @param depth     嵌套层数
+     * @param parentKey 当前层方案路由键；根层为空
+     * @param leafKey   本子路由键（没有 route_key 时用 Agent 主键）
+     * @return 同一轮内唯一的参与者 id
+     */
+    static String participantIdOf(int depth, String parentKey, String leafKey) {
+        int safeDepth = Math.max(0, depth);
+        String parent = parentKey == null || parentKey.isBlank() ? "root" : parentKey.trim();
+        String leaf = leafKey == null || leafKey.isBlank() ? "unknown" : leafKey.trim();
+        return "p-" + safeDepth + "-" + parent + "-" + leaf;
+    }
+
+    /**
+     * 没有 route_key 时的叶子键：Agent 主键优先，保证直播与回放算出同一个 id。
+     *
+     * @param hit 命中的候选
+     * @return 非空叶子键
+     */
+    private static String commonIdOf(Candidate hit) {
+        Long agentId = hit.agent() == null ? null : hit.agent().getId();
+        return agentId == null ? "unknown" : String.valueOf(agentId);
+    }
+
+    /**
+     * 给本子写出的产物署名（直播帧在包装器里已带，这里补轮次落库用的那一份）。
+     *
+     * <p>只补空身份：内层专家先署名的文件，外层方案不能再改写成自己；
+     * 历史 / 工具标记产生的无主文件按本子身份补齐，回放时才能挂回正确的卡。
+     *
+     * @param turn  本子结果；可空
+     * @param owner 本子参与者身份；可空
+     * @return 同一个 turn（便于链式调用）
+     */
+    private static TrialTurn stampFileOwners(TrialTurn turn, ParticipantView owner) {
+        if (turn == null || owner == null) {
+            return turn;
+        }
+        List<GeneratedFile> files = turn.getFiles();
+        if (files == null || files.isEmpty()) {
+            return turn;
+        }
+        List<GeneratedFile> stamped = new ArrayList<>(files.size());
+        boolean changed = false;
+        for (GeneratedFile file : files) {
+            if (file == null) {
+                continue;
+            }
+            GeneratedFile next = file.withOwner(owner.id(), owner.name());
+            // withOwner 在已有身份时返回自身：按引用判断是否真的补过，避免无谓 setFiles
+            changed = changed || next != file;
+            stamped.add(next);
+        }
+        if (changed) {
+            turn.setFiles(stamped);
+        }
+        return turn;
     }
 
     /**

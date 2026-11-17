@@ -18,10 +18,10 @@ export interface ContentBoxShape {
   /** 内容框里的成文正文（专家结论 / 方案汇总） */
   answer: string
   /**
-   * 是否是整轮的**最后一条**记录（真正结论）。
+   * 是否是整轮结束后的最后一条真正结论。
    *
-   * <p>它从流式第一个字起就不限高、边出边铺开；它前面所有块即使已经写完也仍是四行。
-   * 由投影按本轮实际顺序标记，组件不自己猜「谁在最后」。
+   * <p>直播过程中投影不会打这个标记，每一张内容框都限高。
+   * 整轮结束后只有这一张放开高度。由投影标记，组件不自己猜「谁在最后」。
    */
   isFinal?: boolean
 }
@@ -29,21 +29,34 @@ export interface ContentBoxShape {
 /**
  * 这个内容框是否按「中间过程」处理：最高四行、框内滚动。
  *
- * <p><b>唯一判据是「它是不是整轮最后一条真正结论」</b>，与「是否仍在流式」无关：
- * <ul>
- *   <li>整轮最后一条（`isFinal`）：**从第一个字开始就按流式铺开**，边出边长，结束后同样完整展开。
- *       先卡四行、等结束再撑开，会让用户读一段被切掉的长答，正是要改掉的行为；</li>
- *   <li>其余块（入口判定句、方案分流句、子专家结果）：始终四行 + 框内跟滚，不被放大成终局。</li>
- * </ul>
+ * <p>直播过程中每一张内容框都限高。整轮结束后，只有真正的收尾卡（`isFinal`）放开高度。
+ * 流式中不得把「当前最后一张已经有正文的卡」当成终局：那会让先写完的一块先铺满整屏。
  *
  * <p>思考框不走这条判定（见 {@link isThinkOpenByDefault}），因此「思考仍约四行」不受影响。
+ * 综答是否限高不走这里，见 {@link isUnlimitedAnswerBox}。
  *
  * @param card      内容框所属的参与者
- * @param streaming 本轮是否仍在流式输出；只为兼容旧调用保留，不参与判定
+ * @param streaming 本轮是否仍在流式输出；为 true 时一律限高
  * @return true 表示按中间过程限高
  */
 export function isMidProcessBox(card: ContentBoxShape, streaming: boolean): boolean {
+  if (streaming) {
+    return true
+  }
   return card.isFinal !== true
+}
+
+/**
+ * 综答（方案汇总那一条独立记录）不收进四行。
+ *
+ * <p>过程里的入口、分流、专家结果仍按四行滚动。汇总正文是流式往下长的终稿，
+ * 高度跟文字走，不给展开箭头。
+ *
+ * @param card 内容框所属的参与者
+ * @return true 表示这段正文不限高
+ */
+export function isUnlimitedAnswerBox(card: ContentBoxShape): boolean {
+  return card.kind === 'conclusion'
 }
 
 /**
@@ -131,6 +144,35 @@ export function nextFoldValue(
   return !foldOpenOf(overrides, key, defaultOpen)
 }
 
+/** 正文「展开全文 / 收起」按钮的三种态：不出现、展开、收起 */
+export type BodyExpandAction = 'none' | 'expand' | 'collapse'
+
+/**
+ * 正文展开按钮当前该画哪一种。
+ *
+ * <p>只作用于正文文字，不作用于文件行，也不作用于思考框。
+ * 思考框是四行内滚动，没有这颗按钮。
+ * 没超过四行时不给按钮：否则点下去高度不变，看起来像没反应。
+ *
+ * @param limited     这一块正文是否按四行截断（中间过程，或工作流所属方案还没结束）
+ * @param expanded    用户是否已经点过展开
+ * @param overflowing 正文实际高度是否超过四行
+ * @return none / expand / collapse
+ */
+export function bodyExpandAction(
+  limited: boolean,
+  expanded: boolean,
+  overflowing: boolean
+): BodyExpandAction {
+  if (!limited) {
+    return 'none'
+  }
+  if (expanded) {
+    return 'collapse'
+  }
+  return overflowing ? 'expand' : 'none'
+}
+
 /**
  * 内容框当前应当占的高度：中间过程四行，最终结论不设限（流式中也一样）。
  *
@@ -148,4 +190,26 @@ export function boxMaxHeight(
   lineHeightPx = 22
 ): string | null {
   return isMidProcessBox(card, streaming) ? `${BOX_MAX_LINES * lineHeightPx}px` : null
+}
+
+/**
+ * 思考折叠行上的耗时。只格式化已经量到的毫秒，不编造。
+ *
+ * <p>不足 1 秒写毫秒；10 秒以内保留一位小数（与演示稿 `1.2s` 同形）；再长取整秒。
+ *
+ * @param ms 已观察到的毫秒；非数字或负数视为没有
+ * @return 如 `1.2s`；没有可展示的时长时为空串
+ */
+export function formatThoughtElapsed(ms: number): string {
+  if (!Number.isFinite(ms) || ms <= 0) {
+    return ''
+  }
+  if (ms < 1000) {
+    return `${Math.round(ms)}ms`
+  }
+  const seconds = ms / 1000
+  if (seconds < 10) {
+    return `${seconds.toFixed(1)}s`
+  }
+  return `${Math.round(seconds)}s`
 }

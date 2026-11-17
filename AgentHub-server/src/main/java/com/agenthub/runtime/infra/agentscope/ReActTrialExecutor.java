@@ -568,18 +568,15 @@ public class ReActTrialExecutor {
     }
 
     /**
-     * 只放行「思考」的进度出口。
+     * 判定 / 选优调用的进度出口：正文、推理、路由、工具一律不转发给用户。
      *
-     * <p>判定 / 选优这类单轮调用的正文是给解析器读的机器 JSON 或内部判定串，不是给用户看的回答；
-     * 但它们的**推理**属于这一步的思考，必须进时间线。包一层后：phase / reasoning 透传，
-     * assistant 与 route 丢掉（否则页面会把判定 JSON 当正文、或凭空多一位参与者），
-     * 工具也丢掉（这些调用本来就不挂工具）。
-     *
-     * <p>推理走的是与子专家完全相同的一条 reasoning 事件：前端按所在泳道归属，
-     * 入口判定落在首条 route 之前，方案判定落在该方案的分流块里。
+     * <p>这类单轮调用的正文是给解析器读的机器 JSON。推理通道里则是模型复述的路由草稿
+     * （条数上限、reason 字数、内部禁语、排序步骤），不是给用户看的思考。
+     * 用户可见的依据只留在真正分发时写出的路由行 reason 里。
+     * 若把推理原样推进时间线，方案思考框就会漏出这些草稿，回放又会把同一份再画一遍。
      *
      * @param progress 下游出口；可空
-     * @return 只放行思考的出口；入参为空时返回 null
+     * @return 丢弃判定草稿的出口；入参为空时返回 null
      */
     private static TrialProgress thinkingOnly(TrialProgress progress) {
         if (progress == null) {
@@ -588,11 +585,7 @@ public class ReActTrialExecutor {
         return new TrialProgress() {
             @Override
             public void phase(String phase) {
-                // 只转发「思考中」：collector 收尾还会推 answering，那是正文阶段的措辞，
-                // 判定调用的正文不会进消息流，转发出去会让状态条提前显示「作答中」
-                if ("reasoning".equals(phase)) {
-                    progress.phase(phase);
-                }
+                // 判定没有用户可见思考，也不转发「思考中」：否则状态条会空转一拍
             }
 
             @Override
@@ -602,7 +595,7 @@ public class ReActTrialExecutor {
 
             @Override
             public void reasoning(String delta) {
-                progress.reasoning(delta);
+                // 路由草稿不进用户思考通道，见本方法说明
             }
 
             @Override

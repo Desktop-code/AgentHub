@@ -18,6 +18,7 @@
  */
 import type { AssistantBlock, TrialChoiceOption, TrialChoiceView, TrialFileView, TrialWorkflowView } from '@/types/runtime'
 import type { ProcessStep } from '@/components/runtime/trialMessages'
+import { parentIndexByBegin } from './beginParent.ts'
 import { parseRouteParticipant } from './workbenchRouteText.ts'
 import {
   buildThinkTimeline,
@@ -151,6 +152,17 @@ export interface ParticipantCard {
   /** 展示名（取配置 / 路由事件里的名字，投影层不写死别名） */
   title: string
   /**
+   * begin 身份 id。有它就说明这位参与者真的开始过，
+   * 收尾不能因为正文还空着或只剩状态句就把卡滤掉。
+   */
+  participantId?: string
+  /** begin 帧的 kind。父子与工作流只认它 */
+  participantKind?: string
+  /** begin 帧的 depth。没有数字就不认父 */
+  participantDepth?: number
+  /** 这一位自己的终态。停转和结果区展开都看它 */
+  closed?: 'done' | 'failed' | 'aborted'
+  /**
    * 「方案」；普通专家留空（角标由展示层按 kind 统一给出：入口「对话入口」、专家「Agent」）。
    */
   roleLabel?: string
@@ -158,8 +170,19 @@ export interface ParticipantCard {
   lines: string[]
   /** 思考区里的推理与工具；入口块装判定模型自己的推理，方案块装它自己的分流推理 */
   steps: ProcessStep[]
-  /** 内容框里的成文正文（专家结论 / 方案汇总）；网关与只做分发的方案为空 */
+  /**
+   * 内容框里的成文正文（专家结论 / 方案汇总）；网关与只做分发的方案为空。
+   *
+   * <p>只放真正写出来的正文。空终态说明、文件清单都不写进这个字段。
+   */
   answer: string
+  /**
+   * 这一步已经结束、但没有成文正文时的说明。
+   *
+   * <p>画在正文框外面。不进四行正文框，也不用它或文件卡把已有正文换掉。
+   * 仍有真实正文时留空。
+   */
+  terminalNote?: string
   /**
    * 需要用户拍板时的可点选项。
    *
@@ -197,6 +220,26 @@ export interface ParticipantCard {
    * 真实正文一旦落到这块上（{@link attachLoose}），标记立刻清掉，说明不会顶掉正文。
    */
   answerPromised?: boolean
+  /**
+   * 按 begin 收进本方案框里的直接子卡（专家、子方案、方案内工作流）。
+   *
+   * <p>只在 kind=scheme 且 depth 更浅的那张卡上有值。顺序就是 begin 先后，
+   * 不是按名字排出来的。页面把这些卡画在方案外框里面，不再跟方案并排。
+   */
+  children?: ParticipantCard[]
+  /**
+   * 本方案的汇总记录，画在框内专家之后。
+   *
+   * <p>汇总原来是顶层的 conclusion 卡。名字就是「方案结论」那条记录自己的名字，
+   * 用来放回这张方案卡，不拿它给专家重算归属。
+   */
+  summary?: ParticipantCard
+  /**
+   * 整轮收口，跟入口身份走，画在全部方案卡之后。
+   *
+   * <p>对不上任何方案名的「方案结论」就是这一条。不收进最后一个车间框。
+   */
+  roundDeliverable?: boolean
 }
 
 interface CollectedAnswers {
@@ -248,11 +291,7 @@ interface CollectedAnswers {
   /** 分段标题对不上任何参与者时的正文，接到最后一位参与者上，避免整段消失 */
   looseAnswers: string[]
   /**
-   * 拼接稿里认得出作者、但本轮没有对应泳道的分段。
-   *
-   * <p>历史会话可能只落了 CONCAT 终答、没有子专家路由行；分段标题本身就是作者声明，
-   * 据此补一条参与者消息，才不会出现「执行明细有子专家、消息流看不见」。
-   * 只在「至少两段且有一段能对上本轮参与者」时启用，避免普通正文里的小标题被当成专家。
+   * 恒为空。未知 `###` 标题不再补参与者卡，留在当前正文。
    */
   extraAnswers: { name: string; text: string }[]
 }
@@ -366,11 +405,45 @@ export function feedWaitsForEntry(
 }
 
 /**
+ * 收尾时这张卡是不是该丢掉的状态空壳。
+ *
+ * <p>已有 begin 身份的参与者不是空壳：直播里块已经出现，收尾不能因为正文还没写上
+ * 或只剩「已由「X」完成作答」就把人滤掉。没有身份、只剩兜底状态句的卡仍然丢掉，
+ * 避免断点续作在没有产出时凭当前线路名先弹一块。
+ *
+ * @param card 参与者卡片
+ * @return true 表示收尾不该画出来
+ */
+export function isFinishedStatusShell(card: ParticipantCard): boolean {
+  if ((card.participantId || '').trim()) {
+    return false
+  }
+  if (card.kind !== 'actor' || card.roleLabel === '方案') {
+    return false
+  }
+  // 工作流块的内容是执行卡片本身：即使没有正文 / 文件，它也不是空壳
+  if (card.workflow) {
+    return false
+  }
+  if (card.lines.length || card.steps.length || card.errors.length || card.files.length) {
+    return false
+  }
+  if (card.choice && card.choice.options.length) {
+    return false
+  }
+  const answer = (card.answer || '').trim()
+  if (!answer) {
+    return true
+  }
+  return answer === expertStatusLine(card.title, true) || answer === expertStatusLine(card.title, false)
+}
+
+/**
  * 投影本轮消息流分块。
  *
- * <p>网关、方案、专家是同一套聊天块，按真实发生顺序排队：
- * 网关块（判定句在内容框里）→ 方案块（分流句在内容框里）→ 各专家块；
- * 有真汇总时汇总另起一条排在最后。不再产出居中判定条 / 居中路由条。
+ * <p>网关、方案、专家是同一套聊天块。方案卡按 begin 先后排在入口后面。
+ * 专家不再跟方案并排，而是按 begin 的 kind / depth 收进所属方案的 children。
+ * 方案自己的汇总放在 summary，画在框内专家之后。不再把「已把问题分给…」当方案正文。
  *
  * @param input 时间线入参，另加原始块（用来把正文挂回参与者）
  * @return 消息流卡片；时间线为空时为空数组
@@ -378,7 +451,10 @@ export function feedWaitsForEntry(
 export function buildParticipantFeed(input: ThinkTimelineInput & { blocks: AssistantBlock[] }): ParticipantCard[] {
   // 历史会话 / 刷新快照可能带半截事件：投影失败只退化成「逐块渲染」，绝不让异常冒到渲染树
   try {
-    const blocks = Array.isArray(input.blocks) ? input.blocks : []
+    // 空块（历史快照里的 null）直接跳过，不让投影整轮失败
+    const blocks = (Array.isArray(input.blocks) ? input.blocks : []).filter(
+      (block) => !!block && typeof block === 'object'
+    )
     if (!Array.isArray(input.lanes) || !Array.isArray(input.routeTexts)) {
       return []
     }
@@ -399,8 +475,8 @@ export function buildParticipantFeed(input: ThinkTimelineInput & { blocks: Assis
     const steps = withoutSchemeShells(
       buildThinkTimeline({
         ...input,
-        // 工作流卡片快照：只有它在时，工作流才会单独成一块并画执行卡片
-        workflow: latestWorkflowOf(blocks),
+        // 每张工作流卡只挂对得上自己 begin 的快照，不再共用最后一张
+        workflowSnapshots: workflowSnapshotsOf(blocks),
         /*
          * 判定还在跑的前提是：既没有路线，也没有正文 / 工具 / 产物，
          * 而且**本轮确实有位入口参与者**（实时流由 gw- 身份帧给出）。
@@ -414,7 +490,7 @@ export function buildParticipantFeed(input: ThinkTimelineInput & { blocks: Assis
       return []
     }
     // 「方案块 = 分流空壳」只在它下面真挂子专家时成立；没有子专家说明它自己就是作答方
-    const schemeWithChildren = schemesWithChildren(steps, input.isTopLevelOf)
+    const schemeWithChildren = schemesWithChildren(steps)
     const answerableSchemes = new Set(
       steps
         .filter((step) => step.roleLabel === '方案' && !schemeWithChildren.has(step.title))
@@ -422,30 +498,7 @@ export function buildParticipantFeed(input: ThinkTimelineInput & { blocks: Assis
     )
     // 本轮真实出现过的参与者名：把后端 CONCAT 的「### 专家名」分段发回各自气泡要用
     const knownActors = new Set(steps.filter((step) => step.kind === 'expert').map((step) => step.title))
-    const collected = collectAnswers(blocks, input.targetTypeOf, answerableSchemes, knownActors)
-    /*
-     * 回放兜底：后端落库通常只写各子的「路由到」与最终合并正文，
-     * **不会**落「方案结论：X」标记。这种情况下如果方案确实分给了子专家、且末尾有一段
-     * 没被任何子专家认领的正文，那段就是汇总——不补的话它会落到最后一位子专家头上，
-     * 用户就会看到「报告撰写专家被放大成终局、综合台汇总那条消失」。
-     */
-    const dispatchedSchemeTitle = steps.find((step) => step.roleLabel === '方案')?.title || ''
-    /*
-     * 先按「方案自己名下的正文」认回结论：回放里 `### 企业综合台` 那一段就是它自己的汇总，
-     * 不是子专家的话（子专家各有各的标题）。这是最硬的证据，不需要靠语气猜。
-     */
-    recoverSchemeSectionAsConclusion(
-      collected,
-      knownActors,
-      dispatchedSchemeTitle,
-      schemeWithChildren.size > 0
-    )
-    recoverConclusionFromTail(
-      collected,
-      knownActors,
-      dispatchedSchemeTitle,
-      schemeWithChildren.size > 0
-    )
+    const collected = collectAnswers(blocks, answerableSchemes, knownActors)
     const cards = steps.map((step) => toCard(step, collected))
     // 入口也是参与者：头像与专家同源走 lookOf（未配置时由 lookOf 内部给固定机器人），不另造一套
     for (const card of cards) {
@@ -461,21 +514,10 @@ export function buildParticipantFeed(input: ThinkTimelineInput & { blocks: Assis
         (card.kind !== 'gateway' || card.lines.length > 0 || card.steps.length > 0) &&
         (input.streaming || !(card.roleLabel === WORKFLOW_ROLE_LABEL && !card.workflow))
     )
-    // 只在拼接稿里出现过、本轮却没有泳道的作者（历史会话常见）：补一条参与者消息
-    const withExtra = appendExtraActors(withGateway, collected, input.lookOf)
-    // 方案是否真分了子专家：有子专家泳道，或子专家只出现在拼接终答的分段里
+    // 方案是否真分了子专家：只看已经出现的子专家泳道，不从拼接稿标题补人
     const dispatchSchemes = new Set(schemeWithChildren)
-    if ((collected.extraAnswers || []).length) {
-      for (const card of withExtra) {
-        // 方案自己没有成文正文、却补出了下一位作者：说明它这一轮只是往下分
-        const ownAnswer = (collected.byName.get(card.title) || '').trim()
-        if (card.kind === 'actor' && card.roleLabel === '方案' && !ownAnswer) {
-          dispatchSchemes.add(card.title)
-        }
-      }
-    }
     // 分了子专家的方案：仍是自己的聊天块，只是内容框里的话从「正文」换成「分给了谁」
-    const withSchemes = schemeDispatchBlocks(withExtra, dispatchSchemes, input.isTopLevelOf)
+    const withSchemes = schemeDispatchBlocks(withGateway, dispatchSchemes)
     /*
      * 汇总另起一条：排在所有子专家之后，不回填分流那条。
      * 分流块在分发完成时就已冻结，后面专家执行、方案汇总都不再改动它。
@@ -485,7 +527,8 @@ export function buildParticipantFeed(input: ThinkTimelineInput & { blocks: Assis
       collected.conclusions,
       collected.conclusionSteps,
       input.streaming,
-      input.lookOf
+      input.lookOf,
+      collected.tailFromConcat
     )
     // 自己在作答的方案（入口点名、没有子专家）必须留着，否则网关块之后整段空白
     const visible = dropEmptySchemeShells(withConclusions)
@@ -494,7 +537,8 @@ export function buildParticipantFeed(input: ThinkTimelineInput & { blocks: Assis
     // 再补位：确实一句话都没有的块才写「本步结果」，真实正文永远不会被收尾句顶掉
     fillResultFallbacks(visible)
     markFinal(visible, input.streaming === true)
-    return visible
+    // 归属在正文、终态都落定之后做：只改父子位置，不重算答案
+    return nestByBegin(visible)
   } catch (error) {
     // 只提示排障，不把内部键/正文写进日志；返回空数组让调用方回退到逐块渲染
     console.warn('[工作台消息流] 本轮分块投影失败，已回退到逐块渲染', error)
@@ -503,57 +547,211 @@ export function buildParticipantFeed(input: ThinkTimelineInput & { blocks: Assis
 }
 
 /**
- * 本轮最新一份工作流卡片快照。
- *
- * <p>取最后一条而不是第一条：同一轮里 `workflow` 块是**原位覆盖**的，
- * 正常只会有一条；即便出现两条（历史数据 / 并行两个工作流），也以最后到达的为准，
- * 页面与「当时看到的」保持一致。
+ * 本轮全部工作流快照，带着 begin 身份。投影按 id 或名字对到对应的卡，不取最后一张通贴。
  *
  * @param blocks 本轮原始块
- * @return 卡片视图；没有工作流块时为 undefined
+ * @return 快照列表；没有工作流块时为空
  */
-function latestWorkflowOf(blocks: AssistantBlock[]): TrialWorkflowView | undefined {
-  for (let index = blocks.length - 1; index >= 0; index -= 1) {
-    const workflow = blocks[index]?.workflow
-    if (workflow) {
-      return workflow
+function workflowSnapshotsOf(blocks: AssistantBlock[]): { participantId?: string; view: TrialWorkflowView }[] {
+  const list: { participantId?: string; view: TrialWorkflowView }[] = []
+  for (const block of blocks) {
+    if (block.kind === 'workflow' && block.workflow) {
+      list.push({ participantId: block.participantId, view: block.workflow })
+    }
+  }
+  return list
+}
+
+/**
+ * 工作台不把 assistant 块画成整屏答案。
+ *
+ * <p>还没有参与者卡时，调试皮肤仍可以显示原文；工作台只等参与者卡把正文收进去。
+ *
+ * @param isWorkbench 当前是工作台
+ * @param hasActor    本轮是否已经有参与者卡
+ * @return true 表示可以画那条游离的 assistant
+ */
+export function showLooseAssistant(isWorkbench: boolean, hasActor: boolean): boolean {
+  if (isWorkbench) {
+    return false
+  }
+  return !hasActor
+}
+
+/**
+ * 按 begin 的 kind / depth / 先后把专家收进所属方案。
+ *
+ * <p>父的认定与时间线 {@code lanesInBeginGroups} 是同一条 {@code parentIndexByBegin}。
+ * begin id 里已经写了父方案键时，按这张卡自己的身份进对应方案；
+ * 并行直播里方案 begin 会先到齐，不能再取「当时最后一个更浅方案」。
+ * 不按名字排序，也不另写一套归属。
+ * 方案框里已经有子卡时，去掉「已把问题分给…」和「正在分发…」——
+ * 这两句是把子卡名单再写一遍当正文。
+ * 汇总记录没有 depth，按它自己的方案名放回对应方案的 summary，排在子卡之后。
+ * 对不上任何方案名的那一条是整轮收口，留在根上，跟在全部方案卡后面。
+ *
+ * @param cards 已经排好正文、终态和最后一条标记的平铺卡片
+ * @return 根上只留入口、方案和没有父的块；专家在方案的 children 里
+ */
+function nestByBegin(cards: ParticipantCard[]): ParticipantCard[] {
+  const conclusions = cards.filter((card) => card.kind === 'conclusion')
+  const body = cards.filter((card) => card.kind !== 'conclusion')
+  const nodes = body.map((card, index) => ({
+    card,
+    index,
+    participantId: card.participantId,
+    depth: typeof card.participantDepth === 'number' ? card.participantDepth : undefined,
+    kind: (card.participantKind || '').trim(),
+    parent: undefined as number | undefined,
+    children: [] as ParticipantCard[]
+  }))
+  // 父在投影时一次认完。身份里有父键就用父键；没有才退回最近的更浅方案
+  for (let i = 0; i < nodes.length; i += 1) {
+    nodes[i].parent = parentIndexByBegin(nodes, i)
+  }
+  for (const node of nodes) {
+    if (node.parent !== undefined) {
+      nodes[node.parent].children.push(node.card)
+    }
+  }
+  for (const node of nodes) {
+    if (node.kind !== 'scheme' || !node.children.length) {
+      continue
+    }
+    node.card.children = node.children
+    node.card.lines = node.card.lines.filter(
+      (line) => line !== '正在分发…' && !(line || '').includes('已把问题分给')
+    )
+  }
+  const roots = nodes.filter((node) => node.parent === undefined).map((node) => node.card)
+  const parked = new Set<ParticipantCard>()
+  for (const conclusion of conclusions) {
+    const host = findSchemeHost(roots, (conclusion.title || '').trim())
+    if (!host) {
+      continue
+    }
+    host.summary = conclusion
+    parked.add(conclusion)
+  }
+  for (const conclusion of conclusions) {
+    if (parked.has(conclusion)) {
+      continue
+    }
+    // 对不上方案名的结论是整轮收口：留在根上，跟在全部车间之后，不借最后一个车间的名字
+    conclusion.roundDeliverable = true
+    conclusion.roleLabel = '最终产物'
+    roots.push(conclusion)
+  }
+  attachRoundFiles(roots)
+  return roots
+}
+
+/**
+ * 把本轮已经归到各卡上的产物文件再列到整轮收口上。
+ *
+ * <p>文件事件仍归写出它的那位专家，专家卡上的下载行保留。
+ * 收口卡再列一份，是为了整轮结束时不用进每个车间框里翻文件名。
+ * 同一文件名加同一下载地址只列一次。
+ *
+ * @param roots 已经嵌套好的根卡
+ */
+function attachRoundFiles(roots: ParticipantCard[]): void {
+  const rounds = roots.filter((card) => card.kind === 'conclusion' && card.roundDeliverable)
+  if (!rounds.length) {
+    return
+  }
+  const files: TrialFileView[] = []
+  const seen = new Set<string>()
+  for (const card of visitParticipantCards(roots)) {
+    if (card.roundDeliverable) {
+      continue
+    }
+    for (const file of card.files || []) {
+      const key = `${file.fileName || ''}|${file.downloadUrl || ''}`
+      if (!file.fileName || seen.has(key)) {
+        continue
+      }
+      seen.add(key)
+      files.push(file)
+    }
+  }
+  if (!files.length) {
+    return
+  }
+  for (const round of rounds) {
+    round.files = files
+  }
+}
+
+/**
+ * 汇总记录该回到哪张方案卡。
+ *
+ * <p>只认 begin kind=scheme 且标题与「方案结论」同名的卡。
+ * 先看自己再看框内子方案，外层同名不会被内层抢走。
+ *
+ * @param cards 已经嵌套好的根卡
+ * @param title 汇总记录上的方案名
+ * @return 要承接这条汇总的方案卡；对不上时为空
+ */
+function findSchemeHost(cards: readonly ParticipantCard[], title: string): ParticipantCard | undefined {
+  if (!title) {
+    return undefined
+  }
+  for (const card of cards) {
+    if ((card.participantKind || '').trim() === 'scheme' && card.kind !== 'conclusion'
+      && (card.title || '').trim() === title) {
+      return card
+    }
+    if (card.children?.length) {
+      const nested = findSchemeHost(card.children, title)
+      if (nested) {
+        return nested
+      }
     }
   }
   return undefined
 }
 
 /**
- * 标记整轮的**最后一条**记录：只有它完成后不限高。
+ * 深度优先列出卡片：自己、框内子卡、汇总。
  *
- * <p>口径：
- * <ul>
- *   <li>有真汇总时：最后一条是汇总记录（有正文或带过程的那条），它就是终局；</li>
- *   <li>没有汇总时：最后一位**有正文**的参与者才是终局——通常是入口直分的单专家，
- *       或只分给子专家但没有汇总的那条末尾专家；</li>
- *   <li>找不到任何有正文的块（例如只报了一句工作流状态）时，不标记，谁都不放开高度。</li>
- * </ul>
+ * <p>页面不靠这份平铺来画。工作流展开和测试要顺着框里的卡往下找时用它。
  *
- * <p>为什么不直接取数组末尾：末尾可能是只做分流的方案块（它的内容就是分流句，
- * 不该被放大成终局），也可能是空壳。必须按「有没有成文正文」这一步筛。
- *
- * @param cards 已排好序的卡片（就地打标）
+ * @param cards 根卡或某一层的子卡
+ * @return 深度优先的卡片
  */
+export function visitParticipantCards(cards: readonly ParticipantCard[]): ParticipantCard[] {
+  const out: ParticipantCard[] = []
+  for (const card of cards) {
+    out.push(card)
+    if (card.children?.length) {
+      out.push(...visitParticipantCards(card.children))
+    }
+    if (card.summary) {
+      out.push(card.summary)
+    }
+  }
+  return out
+}
+
 /**
- * 标记「整轮最后一条真正结论」，只有它的内容框从头就铺开。
+ * 标记「整轮最后一条真正结论」。直播过程中不打这个标记，内容框一律限高。
+ * 整轮结束后才认汇总，或最后一位有正文的参与者。
  *
- * <p>**流式中的判定更严**：只认数组末尾那一条。理由：并行的另一位专家还在跑时，
- * 前面那位刚写完的专家只是「先交了卷」，不是终局；若此刻把它标成终局，它会先铺开、
- * 等后面那条出正文再收缩，用户看到的是高度来回跳。结束之后仍按「最后一条有正文的参与者」兜底
- * （后端偶尔不会给最末位补正文）。
+ * <p>在嵌套之前打标：汇总还在平铺数组末尾，标完再收进方案框，标记跟着那张卡走。
  *
- * @param cards     已排好序的卡片
+ * @param cards     已排好序、尚未嵌套的卡片
  * @param streaming 本轮是否仍在流式输出
  */
 function markFinal(cards: ParticipantCard[], streaming = false): void {
   for (const card of cards) {
     card.isFinal = false
   }
-  // 汇总记录优先：它在数组末尾且一定有正文（appendConclusionRecords 已滤掉空记录）
+  // 直播中谁都不放开高度。先写完的那一张不是终局，等整轮结束再认最后一条
+  if (streaming) {
+    return
+  }
+  // 汇总记录优先：它在数组末尾。没有成文时框外有说明，这里仍把它当作这一轮的收尾卡
   const conclusion = [...cards].reverse().find((card) => card.kind === 'conclusion')
   if (conclusion) {
     conclusion.isFinal = true
@@ -564,8 +762,7 @@ function markFinal(cards: ParticipantCard[], streaming = false): void {
   const expert = [...cards]
     .reverse()
     .find((card) => card.kind === 'actor' && (!!card.answer.trim() || !!card.choice))
-  // 流式中只认末尾那一条：前面刚写完的专家还在等别人，不能提前铺开
-  if (expert && (!streaming || expert === cards[cards.length - 1])) {
+  if (expert) {
     expert.isFinal = true
   }
 }
@@ -576,9 +773,8 @@ function markFinal(cards: ParticipantCard[], streaming = false): void {
  * <p>同一方案名被推了多次「路由到」时，归组只把子专家挂到最后一块，前面几块只剩
  * 「正在由／已由「方案名」作答」。消息流和补充轨迹都不该把这些空壳画出来。
  *
- * <p>另一个要丢的是**匿名执行块**：汇总阶段的过程事件（reasoning / tool）在时间线里
- * 没有对应的参与者，会被兜成一条标题为「执行」的匿名专家块。它既不是网关也不是专家，
- * 汇总过程已单独收进「汇总」那条记录，画出来等于多一条无主人的参与者。
+ * <p>另一个要丢的是**匿名执行块**：没有 begin 的过程如果漏进专家列表，标题会是「执行」。
+ * 它不是参与者。入口思考应留在入口块上，汇总过程只在「方案结论：」那一条记录里。
  *
  * 不改 {@link buildThinkTimeline} 的返回值，已有时间线用例的口径保持不变。
  *
@@ -615,8 +811,11 @@ export function withoutSchemeShells(steps: ThinkTimelineStep[]): ThinkTimelineSt
     keptShell.add(step.title)
     out.push({
       ...step,
-      // 子专家还没到：用进行态，不用「正在由／已由「方案名」作答」
-      lines: step.pending ? ['正在分发…'] : []
+      /*
+       * 子专家还没到：已有 begin 身份时用进行态「正在分发…」撑住内容框，
+       * 没有身份的历史数据仍留空（由 dropEmptySchemeShells 删掉），不凭空白造一张卡。
+       */
+      lines: step.pending && (step.participantId || '').trim() ? ['正在分发…'] : []
     })
   }
   return out
@@ -625,8 +824,7 @@ export function withoutSchemeShells(steps: ThinkTimelineStep[]): ThinkTimelineSt
 /**
  * 是否是时间线兜底出来的匿名执行块。
  *
- * <p>`processLanes` 在「没有当前泳道」时会把推理 / 工具落进一条标题为「执行」的匿名车道。
- * 汇总阶段正是这种情况（「方案结论：」不是参与者，其后的过程事件就没有归属）。
+ * <p>没有 begin 的过程不会按名字开卡。若仍漏进时间线，标题是「执行」，不能当成一位专家画出来。
  *
  * @param step 时间线步骤
  * @return true 表示这条块没有真实参与者
@@ -651,34 +849,22 @@ function isStatusShell(step: ThinkTimelineStep): boolean {
 }
 
 /**
- * 哪些方案块下面真的挂了子专家。
+ * 哪些方案块下面真的挂了更深一层的子块。
  *
- * <p>判定只用已有事实：方案块之后出现了「不在入口候选池」的参与者。
- * 只有这类块才是分流空壳。入口点名的方案若没有子专家，说明它自己在作答，
- * 删掉就会让网关块之后整段空白。
+ * <p>只看 begin 留下的 depth：方案之后、depth 更大、还没回到同层或更浅，就算分下去了。
+ * 没有 depth 的旧步骤不当子块，也不靠候选池猜。
  *
- * @param steps        时间线步骤（已去掉重复空壳）
- * @param isTopLevelOf 是否入口候选；不传时无法判定，按「没有子专家」处理
- * @return 有子专家的方案名
+ * @param steps 时间线步骤（已去掉重复空壳）
+ * @return 有子块的方案名
  */
-function schemesWithChildren(
-  steps: ThinkTimelineStep[],
-  isTopLevelOf?: (name: string) => boolean
-): Set<string> {
+function schemesWithChildren(steps: ThinkTimelineStep[]): Set<string> {
   const titles = new Set<string>()
-  if (!isTopLevelOf) {
-    return titles
-  }
   for (let index = 0; index < steps.length; index += 1) {
     const step = steps[index]
-    if (!step || step.roleLabel !== '方案') {
+    if (!step || step.roleLabel !== '方案' || typeof step.participantDepth !== 'number') {
       continue
     }
-    // 方案之后只要出现一位非入口候选，就说明它确实把问题分了下去
-    const hasChild = steps
-      .slice(index + 1)
-      .some((next) => !!next && next.roleLabel !== '方案' && isTopLevelOf(next.title) === false)
-    if (hasChild) {
+    if (hasDirectChild(steps, index, step.participantDepth)) {
       titles.add(step.title)
     }
   }
@@ -686,55 +872,22 @@ function schemesWithChildren(
 }
 
 /**
- * 把拼接稿里认得出作者、但本轮没有泳道的分段补成参与者消息。
+ * 方案后面是否紧跟着更深的子块（遇到同层或更浅就停）。
  *
- * <p>历史会话可能只落了 CONCAT 终答、没有子专家路由行（或路由行是更早的写法）。
- * 分段标题本身就是后端写的作者声明，据此补一条，内容才不会只剩一个人。
- * 只处理「至少两段且有一段能对上本轮参与者」的拼接稿，普通正文里的标题不在此列。
- *
- * @param cards     已投影的卡片
- * @param collected 归集结果
- * @param lookOf    按名称解析形象；可空
- * @return 补上额外参与者后的卡片
+ * @param steps 时间线
+ * @param index 方案下标
+ * @param depth 方案 depth
+ * @return true 表示至少有一个直接或间接子块
  */
-function appendExtraActors(
-  cards: ParticipantCard[],
-  collected: CollectedAnswers,
-  lookOf?: (name: string) => ExpertLookView
-): ParticipantCard[] {
-  const extras = Array.isArray(collected.extraAnswers) ? collected.extraAnswers : []
-  if (!extras.length) {
-    return cards
-  }
-  const out = cards.slice()
-  for (const extra of extras) {
-    const name = (extra.name || '').trim()
-    const text = (extra.text || '').trim()
-    if (!name || !text) {
-      continue
+function hasDirectChild(steps: ThinkTimelineStep[], index: number, depth: number): boolean {
+  for (let cursor = index + 1; cursor < steps.length; cursor += 1) {
+    const next = steps[cursor]
+    if (!next || typeof next.participantDepth !== 'number' || next.participantDepth <= depth) {
+      return false
     }
-    // 已经有同名参与者（专家或方案）时不重复造块
-    if (out.some((card) => card.title === name && card.kind !== 'gateway')) {
-      const existing = out.find((card) => card.kind === 'actor' && card.title === name)
-      if (existing && !existing.answer) {
-        existing.answer = text
-      }
-      continue
-    }
-    out.push({
-      key: `extra-${name}`,
-      kind: 'actor',
-      title: name,
-      lines: [],
-      steps: [],
-      answer: text,
-      errors: [],
-      files: [],
-      look: lookOf?.(name),
-      pending: false
-    })
+    return true
   }
-  return out
+  return false
 }
 
 /**
@@ -750,13 +903,11 @@ function appendExtraActors(
  *
  * @param cards             按发生顺序排好的卡片
  * @param dispatchSchemes   真的分了子专家的方案名
- * @param isTopLevelOf      是否入口候选；用于确定这条方案的子专家范围
  * @return 收成聊天块后的卡片
  */
 function schemeDispatchBlocks(
   cards: ParticipantCard[],
-  dispatchSchemes: Set<string>,
-  isTopLevelOf?: (name: string) => boolean
+  dispatchSchemes: Set<string>
 ): ParticipantCard[] {
   if (!dispatchSchemes.size) {
     return cards
@@ -772,18 +923,28 @@ function schemeDispatchBlocks(
     const existing = blocks.get(card.title)
     if (existing) {
       // 同名方案的第二行泳道：只并子专家名，不再出第二块
-      for (const line of dispatchLinesOf(card, cards, index, isTopLevelOf)) {
+      for (const line of dispatchLinesOf(card, cards, index)) {
         if (!existing.lines.includes(line)) {
           existing.lines.push(line)
         }
       }
+      // 真实分流句已到：撤掉进行态占位，方案卡从「正在分发」切成已发生的事实
+      if (existing.lines.some((line) => line !== '正在分发…')) {
+        existing.lines = existing.lines.filter((line) => line !== '正在分发…')
+        existing.pending = false
+      }
       continue
     }
-    const lines = dispatchLinesOf(card, cards, index, isTopLevelOf)
-    // 连子专家名都拿不到就不画块：宁可不出，也不要一块内容框里没字的空壳
-    if (!lines.length) {
+    const lines = dispatchLinesOf(card, cards, index)
+    /*
+     * 子专家名还没投影出来时，只要这张方案卡已有 begin 身份就先留着：
+     * 用户已经看见它开始分发了，等子专家卡出现再补齐分流句，而不是先删卡再补卡。
+     * 没有身份的旧数据仍按「拿不到名字不画块」处理，避免凭空造空壳。
+     */
+    if (!lines.length && !(card.participantId || '').trim()) {
       continue
     }
+    const pendingLines = lines.length ? lines : ['正在分发…']
     const block: ParticipantCard = {
       ...card,
       /*
@@ -793,13 +954,14 @@ function schemeDispatchBlocks(
       kind: 'actor',
       // 分流句就是这一块内容框里的话：放 lines，不占用 answer 正文位；
       // 方案自己的思考（分流判定模型的推理）留在 steps 里，子专家的思考各自在他们块里
-      lines,
+      lines: pendingLines,
       steps: Array.isArray(card.steps) ? card.steps : [],
       answer: '',
       errors: [],
       files: [],
       look: card.look,
-      pending: false
+      // 还没拿到子专家名的 pending 壳保持进行态；拿到分流句就按已发生的分流结果处理
+      pending: !lines.length
     }
     blocks.set(card.title, block)
     out.push(block)
@@ -810,68 +972,57 @@ function schemeDispatchBlocks(
 /**
  * 方案分流句的人话：优先用后端已落库的分流句，没有就按真实子专家名拼一句。
  *
- * @param card          方案卡
- * @param cards         全部卡片
- * @param index         该卡位置
- * @param isTopLevelOf  是否入口候选
+ * @param card  方案卡
+ * @param cards 全部卡片
+ * @param index 该卡位置
  * @return 一行或多行分流说明；没有任何子专家时为空
  */
-function dispatchLinesOf(
-  card: ParticipantCard,
-  cards: ParticipantCard[],
-  index: number,
-  isTopLevelOf?: (name: string) => boolean
-): string[] {
+function dispatchLinesOf(card: ParticipantCard, cards: ParticipantCard[], index: number): string[] {
   const recorded = (Array.isArray(card.lines) ? card.lines : []).filter((line) =>
     (line || '').includes('已把问题分给')
   )
   if (recorded.length) {
     return recorded
   }
-  const children = childNamesAfter(cards, index, isTopLevelOf)
+  const children = childNamesAfter(cards, index)
   if (!children.length) {
     return []
   }
-  // 与后端 schemeChildrenLineOf 同一句式，只是数据来自本轮真实子专家
+  // 与后端 schemeChildrenLineOf 同一句式，只是数据来自本轮真实子块
   return [`已把问题分给${children.map((name) => `「${name}」`).join('')}`]
 }
 
 /**
- * 某条方案之后、下一位入口候选之前的专家名（方案真正分下去的那几位）。
+ * 方案后面 depth 正好深一层的子块名字。
  *
- * <p>嵌套方案：遇到「另一位方案」就把它算进来并停——那一层的内层子专家归它自己那块，
- * 不能重复算进外层方案的分流结果。
+ * <p>内层方案算进外层的分流句；它自己的子块 depth 更深，不重复算进外层。
+ * 没有 depth 就不认子块。
  *
- * @param cards        全部卡片
- * @param index        方案卡位置
- * @param isTopLevelOf 是否入口候选
- * @return 子专家名（去重、保持顺序）
+ * @param cards 全部卡片
+ * @param index 方案卡位置
+ * @return 直接子块名（去重、保持 begin 顺序）
  */
-function childNamesAfter(
-  cards: ParticipantCard[],
-  index: number,
-  isTopLevelOf?: (name: string) => boolean
-): string[] {
+function childNamesAfter(cards: ParticipantCard[], index: number): string[] {
+  const self = cards[index]
+  const depth = self?.participantDepth
+  if (typeof depth !== 'number') {
+    return []
+  }
   const names: string[] = []
-  const selfTitle = cards[index]?.title
   for (let cursor = index + 1; cursor < cards.length; cursor += 1) {
     const next = cards[cursor]
-    // 网关与已回填的结论块不是「这一位分下去的子专家」，跳过继续找
-    if (next.kind === 'gateway' || next.kind === 'conclusion') {
+    if (next.kind === 'conclusion') {
+      break
+    }
+    if (typeof next.participantDepth !== 'number' || next.participantDepth <= depth) {
+      break
+    }
+    if (next.participantDepth !== depth + 1 || next.kind === 'gateway') {
       continue
     }
-    if (!isTopLevelOf || isTopLevelOf(next.title)) {
-      break
-    }
-    // 内层方案：外层确实把它分下去了，名字要算；但它自己的子专家归它那块，到此为止
-    if (next.roleLabel === '方案' && next.title !== selfTitle) {
-      if (!names.includes(next.title)) {
-        names.push(next.title)
-      }
-      break
-    }
-    if (!names.includes(next.title)) {
-      names.push(next.title)
+    const title = (next.title || '').trim()
+    if (title && title !== self.title && !names.includes(title)) {
+      names.push(title)
     }
   }
   return names
@@ -890,6 +1041,14 @@ function childNamesAfter(
 function dropEmptySchemeShells(cards: ParticipantCard[]): ParticipantCard[] {
   return cards.filter((card) => {
     if (card.kind !== 'actor' || card.roleLabel !== '方案') {
+      return true
+    }
+    /*
+     * 已有 begin 身份就说明这张方案卡真的开始了（后端推过 participant 帧）。
+     * 与 {@link isFinishedStatusShell} 同一口径：身份本身就是「不是空壳」的证据，
+     * 不能因为子专家名还没投影出来就把整块删掉——那是「直播先消失、结束再补」的来源。
+     */
+    if ((card.participantId || '').trim()) {
       return true
     }
     return (
@@ -924,9 +1083,17 @@ function attachLoose(cards: ParticipantCard[], collected: CollectedAnswers) {
    * - 汇总记录也不接（那是方案汇总自己的结论，混进子专家的散稿会篡改它）；
    * - 已带执行卡片的工作流块优先让位：它的正文在卡片产物区里，再接一次就是同一段话出现两遍。
    */
+  /*
+   * 兜底承接方永远不能是工作流卡：工作流块的内容是它自己那张执行卡片，
+   * 把无主文件 / 正文挂上去，用户就会看到「文字 → 文件卡 → 工作流跑完又变回文字」。
+   * 没有可承接的专家时宁可留在 loose，等真实作者卡出现再挂，也不先塞给工作流。
+   */
   const host =
-    [...cards].reverse().find((card) => card.kind === 'actor' && card.roleLabel !== '方案' && !card.workflow) ||
-    [...cards].reverse().find((card) => card.kind === 'actor' && card.roleLabel !== '方案')
+    [...cards].reverse().find((card) => card.kind === 'actor' && card.roleLabel !== '方案'
+      && !card.workflow && card.roleLabel !== WORKFLOW_ROLE_LABEL) ||
+    // 历史数据可能真的没有专家卡：最后才退到方案块，但依然不碰工作流卡
+    [...cards].reverse().find((card) => card.kind === 'actor'
+      && !card.workflow && card.roleLabel !== WORKFLOW_ROLE_LABEL)
   if (!host) {
     return
   }
@@ -994,7 +1161,12 @@ function isFillerLine(line: string, title: string): boolean {
  */
 function isSchemeShellLine(line: string, title: string): boolean {
   const text = (line || '').trim()
-  if (!text || text === '正在分发…' || text === '没有额外的思考记录') {
+  /*
+   * 「正在分发…」是方案卡唯一的进行态人话，必须留在内容框里：
+   * 以前在这里把它滤掉，`withoutSchemeShells` 又刚把它补上，等于「补了又过滤」，
+   * 方案块在子专家到达前就剩一张空壳，最后被 `dropEmptySchemeShells` 整块删掉。
+   */
+  if (!text || text === '没有额外的思考记录') {
     return true
   }
   return text === expertStatusLine(title, true) || text === expertStatusLine(title, false)
@@ -1072,27 +1244,77 @@ function shortFailureOf(raw: string): string {
 }
 
 /**
+ * 标题是否像报告章节（「（一）…」「一、…」「第 1 章」），而不是 CONCAT 作者名。
+ *
+ * <p>专家报告正文常带这类 ATX 小标题；若按「凡是 ### 就切段」会把一篇报告拆成多张假专家卡。
+ * 后端 CONCAT 作者行是参与者展示名，不会长成章节枚举。
+ *
+ * @param name 已去掉尾部冒号的标题文本
+ * @return true 表示应按正文保留，不能当作者分段
+ */
+export function looksLikeChapterHeading(name: string): boolean {
+  const title = (name || '').trim()
+  if (!title) {
+    return false
+  }
+  // （一）背景 / (1) 背景 / 【一】…
+  if (/^[（(【\[]\s*[一二三四五六七八九十百千零〇两\d]+\s*[）)\]】]/.test(title)) {
+    return true
+  }
+  // 一、制度依据 / 十二、落实建议
+  if (/^[一二三四五六七八九十百千零〇两]+、/.test(title)) {
+    return true
+  }
+  // 1. 背景 / 2、建议 / 3．要点
+  if (/^\d+\s*[.．、]/.test(title)) {
+    return true
+  }
+  // 第一章 / 第 2 节 / 第三条
+  if (/^第\s*[一二三四五六七八九十百千零〇两\d]+\s*[章节部分条款篇]/.test(title)) {
+    return true
+  }
+  return false
+}
+
+/**
  * 后端 CONCAT 终答的分段：`### {专家名}` 起一段。
  *
  * <p>并行 / 多子轮次落库时只有一条 ASSISTANT 事件，正文是「### 甲 … ### 乙 …」的拼接稿。
  * 只把它挂给最后一位，就会出现「整段正文堆在一个人身上、别人什么都没有」。
  * 这里按标题切回各自的作者。
  *
- * @param text 助手正文
- * @return 分段；不是拼接稿（没有标题行）时为空
+ * <p>切段纪律：只有标题能对上本轮已经出现的参与者名，才新开一段。
+ * 章节（（一）/一、/第 N 章）和文稿占位（【待确认：…】）留在当前作者正文里，
+ * 不再因为「像个标题」就补一张专家卡。对不上名单的标题同样留在正文。
+ *
+ * @param text        助手正文
+ * @param knownActors 本轮已出现的参与者展示名；空则不按标题切作者
+ * @return 分段；没有命中参与者的标题行时为空
  */
-export function splitNamedSections(text: string): { name: string; text: string }[] {
+export function splitNamedSections(
+  text: string,
+  knownActors?: Set<string>
+): { name: string; text: string }[] {
   const lines = (text || '').split('\n')
   const sections: { name: string; text: string }[] = []
   let current: { name: string; text: string[] } | undefined
   for (const line of lines) {
-    // ATX 标题就是分段标记；名字去掉尾部「：」与空格，便于对上参与者展示名
+    // ATX 标题才可能是分段标记；名字去掉尾部「：」与空格，便于对上参与者展示名
     const heading = /^\s{0,3}#{1,6}\s+(.+?)\s*$/.exec(line)
     if (heading) {
+      const name = (heading[1] || '').replace(/[：:]\s*$/, '').trim()
+      const knownAuthor = !!name && !!knownActors && knownActors.has(name) && !looksLikeChapterHeading(name)
+      // 不是已落库/已出现的参与者：整行留在当前正文，不新开作者
+      if (!knownAuthor) {
+        if (current) {
+          current.text.push(line)
+        }
+        continue
+      }
       if (current) {
         sections.push({ name: current.name, text: current.text.join('\n').trim() })
       }
-      current = { name: (heading[1] || '').replace(/[：:]\s*$/, '').trim(), text: [] }
+      current = { name, text: [] }
       continue
     }
     if (current) {
@@ -1102,8 +1324,21 @@ export function splitNamedSections(text: string): { name: string; text: string }
   if (current) {
     sections.push({ name: current.name, text: current.text.join('\n').trim() })
   }
-  // 文首若有散段（首个标题之前的内容），不在这里处理：由调用方按原逻辑归给当前参与者
+  // 文首若有散段（首个作者标题之前的内容），不在这里处理：由调用方按原逻辑归给当前参与者
   return sections.filter((section) => !!section.name)
+}
+
+/**
+ * 一段多标题正文是否应按 CONCAT 作者稿切开。
+ *
+ * <p>至少两段标题都对上本轮参与者，才是真 CONCAT。
+ * 对不上的标题（章节、【待确认】、没出现过的名字）不参与切卡。
+ *
+ * @param claimed 对得上 knownActors 的分段
+ * @return true 表示按作者切开
+ */
+function isConcatAuthorDraft(claimed: { name: string; text: string }[]): boolean {
+  return claimed.length >= 2
 }
 
 /**
@@ -1159,35 +1394,24 @@ function summarizePhaseSteps(blocks: AssistantBlock[]): ProcessStep[] {
  * @param sections     分段
  * @param knownActors  本轮真实出现过的参与者名
  * @param byName       专家正文归集（就地追加）
- * @param extraAnswers 本轮没有泳道的作者（就地追加）
- * @param looseAnswers 认不出作者的分段（就地追加）
+ * @param looseAnswers 认不出作者的分段（就地追加，不另造卡）
  */
 function distributeNamedSections(
   sections: { name: string; text: string }[],
   knownActors: Set<string>,
   byName: Map<string, string>,
-  extraAnswers: { name: string; text: string }[],
   looseAnswers: string[]
 ): void {
   for (const section of sections) {
     if (!section.text) {
       continue
     }
-    if (knownActors.has(section.name)) {
+    if (knownActors.has(section.name) && !looksLikeChapterHeading(section.name)) {
       byName.set(section.name, (byName.get(section.name) || '') + section.text)
       continue
     }
-    if (sections.length >= 2) {
-      // 多段拼接稿：标题就是作者声明，本轮没有它的泳道也补一条，不能整段消失
-      const existing = extraAnswers.find((item) => item.name === section.name)
-      if (existing) {
-        existing.text += `\n\n${section.text}`
-      } else {
-        extraAnswers.push({ name: section.name, text: section.text })
-      }
-      continue
-    }
-    looseAnswers.push(section.text)
+    // 对不上参与者的标题留在正文，不另造卡
+    looseAnswers.push(`### ${section.name}\n${section.text}`)
   }
 }
 
@@ -1201,17 +1425,17 @@ function distributeNamedSections(
  * 这类正文按标题发回各自的作者，不再整段堆在最后一位身上。
  *
  * @param blocks        本轮块
- * @param targetTypeOf  展示名 → 目标类型；方案不占用专家正文名额
  * @param answerableSchemes 自己在作答的方案名（没有子专家）；这些名字可以接正文
  * @param knownActors   本轮真实出现过的参与者名；分段标题据此认领
  * @return 专家结论与方案汇总结论
  */
 function collectAnswers(
   blocks: AssistantBlock[],
-  targetTypeOf?: (name: string) => 'AGENT' | 'MA' | 'WORKFLOW' | undefined,
   answerableSchemes: Set<string> = new Set(),
   knownActors: Set<string> = new Set()
 ): CollectedAnswers {
+  // 方案 / 工作流只认 begin 写下的 kind，不读候选池
+  const kindOf = participantKindOf(blocks)
   const byName = new Map<string, string>()
   const choiceByName = new Map<string, ParticipantChoiceView>()
   const conclusions: { name: string; text: string }[] = []
@@ -1228,7 +1452,18 @@ function collectAnswers(
   let sawConclusionMark = false
   let tailFromConcat = false
   const rememberFile = (file: TrialFileView, pinned = '') => {
-    const who = expertOwner(pinned || owner, lastExpert, targetTypeOf, answerableSchemes)
+    const who = expertOwner(pinned || owner, lastExpert, kindOf, answerableSchemes)
+    /*
+     * 工作流文件必须自带身份。
+     *
+     * <p>没有身份的文件不能靠「最近一位路由对象」落到工作流卡上：工作流一步接一步跑，
+     * 后到的专家文件会被先挂到工作流再改挂，用户看到的就是「文件在卡之间跳」。
+     * 身份缺失时留作 loose，宁可落到真正的专家块，也不往工作流卡兜底。
+     */
+    if (!pinned && kindOf(who) === 'workflow') {
+      looseFiles.push(file)
+      return
+    }
     if (!who) {
       looseFiles.push(file)
       return
@@ -1238,7 +1473,7 @@ function collectAnswers(
     filesByName.set(who, list)
   }
   const rememberError = (text: string, pinned = '') => {
-    const who = expertOwner(pinned || owner, lastExpert, targetTypeOf, answerableSchemes)
+    const who = expertOwner(pinned || owner, lastExpert, kindOf, answerableSchemes)
     if (!who) {
       looseErrors.push(text)
       return
@@ -1266,12 +1501,16 @@ function collectAnswers(
       }
       // 汇总阶段结束（或根本没进汇总）：后续事件不再算进汇总那条记录
       conclusionName = ''
-      // 参与者名必须同时认「路由到 X」与固定模板的「固定并行 1/2 · X」，
-      // 否则固定模板跑出来的子专家拿不到自己的正文与文件
+      // 只把正文交给「本块自带身份」或「时间线里已经出现的参与者」。对不上的路由行不改当前作者，也不新建卡。
       const name = parseRouteParticipant(text)?.name || parseRouteText(text).name
-      owner = name || ''
-      if (name && targetTypeOf?.(name) !== 'MA') {
-        lastExpert = name
+      const named = (block.participantName || '').trim()
+      const identified = !!(block.participantId || named) || (!!name && knownActors.has(name))
+      if (!identified) {
+        continue
+      }
+      owner = name || named || ''
+      if (owner && kindOf(owner) !== 'scheme') {
+        lastExpert = owner
       }
       continue
     }
@@ -1287,7 +1526,7 @@ function collectAnswers(
       continue
     }
     if (block.kind === 'file' && block.file) {
-      rememberFile(block.file, pinOf(block, targetTypeOf))
+      rememberFile(block.file, pinOf(block, kindOf))
       continue
     }
     /*
@@ -1295,7 +1534,7 @@ function collectAnswers(
      * 它不属于「正文」，因此不参与拼接稿分段的任何判断。
      */
     if (block.kind === 'choice' && block.choice && block.choice.options.length) {
-      const who = expertOwner(pinOf(block, targetTypeOf) || owner, lastExpert, targetTypeOf, answerableSchemes)
+      const who = expertOwner(pinOf(block, kindOf) || owner, lastExpert, kindOf, answerableSchemes)
       if (who) {
         choiceByName.set(who, block.choice)
       }
@@ -1304,7 +1543,19 @@ function collectAnswers(
     if (block.kind === 'error') {
       const text = sanitizeThinkText(block.text)
       if (text) {
-        rememberError(text, pinOf(block, targetTypeOf))
+        /*
+         * 终态错误自带身份时必须按身份归位：方案外壳的失败如果走「最近一位专家」兜底，
+         * 就会被甩到它最后一位子专家卡上（用户看到错误的红字挂错了人）。
+         * 历史回放的 error 块没有身份，仍按原兜底。
+         */
+        const pinnedName = (block.participantName || '').trim()
+        if (pinnedName) {
+          const list = errorsByName.get(pinnedName) || []
+          list.push(text)
+          errorsByName.set(pinnedName, list)
+        } else {
+          rememberError(text)
+        }
       }
       continue
     }
@@ -1324,14 +1575,14 @@ function collectAnswers(
        * 内容其实是子专家各说各话——用户说的「汇总块没有最终回答」正是这种。
        * 多段且至少两段对得上本轮参与者时，按「### 作者」发回各自气泡，汇总这条不落正文。
        */
-      const summarySections = splitNamedSections(piece)
+      const summarySections = splitNamedSections(piece, knownActors)
       const summaryClaimed = summarySections.filter((section) => knownActors.has(section.name))
       /*
-       * 判据与普通拼接稿一致：多段 + 至少一段对得上本轮参与者，就是「### 作者」拼接稿。
-       * 汇总这条记录的归属本身就是方案（MA），这种稿只可能是它分下去的子专家写的。
+       * 标题对上本轮参与者就不是汇总正文：发回对应专家，不写进结论卡。
+       * 对不上的标题（章节、【待确认】、没出现过的名字）留在该专家正文里。
        */
-      if (summarySections.length >= 2 && summaryClaimed.length >= 1) {
-        distributeNamedSections(summarySections, knownActors, byName, extraAnswers, looseAnswers)
+      if (summaryClaimed.length >= 1) {
+        distributeNamedSections(summarySections, knownActors, byName, looseAnswers)
         tailFromConcat = true
         continue
       }
@@ -1347,21 +1598,17 @@ function collectAnswers(
      * 有身份帧的轮次：这段正文属于谁由 identity 直接决定，不看「最后一条 route 文案」。
      * 交错时（A 还在说、B 的 route 已到）按文案会把 A 的话挂到 B 名下，正是要修的串块。
      */
-    const pinnedOwner = pinOf(block, targetTypeOf)
+    const pinnedOwner = pinOf(block, kindOf)
     if (pinnedOwner) {
       lastExpert = pinnedOwner
     }
     const speaker = pinnedOwner || owner
     // 后端 CONCAT 拼接稿：按「### 专家名」分段发回各自的作者，不再整段堆给最后一位。
-    // 只有「至少两段能对上本轮参与者 / 当前归属」时才当拼接稿：
-    // 专家自己写的报告常带「### 一、制度依据」这类小标题，绝不能被当成多人分段。
-    const sections = splitNamedSections(piece)
+    // 章节标题（（一）/一、…）已在 splitNamedSections 留在正文内，不再误当作者。
+    const sections = splitNamedSections(piece, knownActors)
     const claimed = sections.filter((section) => knownActors.has(section.name) || section.name === speaker)
-    // 方案自己不接正文：这种轮次里的多段稿只可能是它分下去的子专家写的，按标题补作者
-    const schemeOwned = !!speaker && targetTypeOf?.(speaker) === 'MA'
-    const isConcat = claimed.length >= 2 || (sections.length >= 2 && (schemeOwned || claimed.length === 1))
-    if (isConcat) {
-      distributeNamedSections(sections, knownActors, byName, extraAnswers, looseAnswers)
+    if (isConcatAuthorDraft(claimed)) {
+      distributeNamedSections(sections, knownActors, byName, looseAnswers)
       // 这一段是「### 作者」分段稿：各归各家，不能当方案汇总
       tailFromConcat = true
       continue
@@ -1373,7 +1620,7 @@ function collectAnswers(
      * 各自结论后到，丢弃会让两位专家同时只剩折叠条。正文只属于当前 owner，
      * 不会被复制给别的人；方案自己有子专家时不接正文，落回最后一位参与者兜底。
      */
-    const ownerTakesAnswer = !!speaker && (targetTypeOf?.(speaker) !== 'MA' || answerableSchemes.has(speaker))
+    const ownerTakesAnswer = !!speaker && (kindOf(speaker) !== 'scheme' || answerableSchemes.has(speaker))
     if (ownerTakesAnswer && speaker) {
       byName.set(speaker, (byName.get(speaker) || '') + piece)
     } else if (claimed.length === 1) {
@@ -1389,177 +1636,39 @@ function collectAnswers(
 }
 
 /**
- * 回放兜底：把「方案自己名下那段正文」认成它的汇总结论（没有结论记录时新建，有则补正文）。
+ * 从 begin 块上收集「展示名 → kind」。先到的为准。
  *
- * <p>为什么这条最可靠：后端多问并跑的落库正文是「### 作者 + 正文」拼接稿，
- * 方案自己那一段用的就是方案的展示名。这一段只可能是方案自己写的汇总，
- * 不是任何子专家的话（子专家各自有各自的标题），因此不需要靠语气猜。
- *
- * <p>两种落库形状都要接住：
- * <ul>
- *   <li>有「方案结论：X」标记、但正文只在末尾拼接稿里：把那段补进已有的结论记录，
- *       否则汇总那条会只剩一句「没写出正文」；</li>
- *   <li>没有标记（旧会话 / 落库漏写）：按这段正文新建一条结论记录。</li>
- * </ul>
- *
- * <p>不认的情形：方案体里自己还是一份「### 子专家 … ### 子专家 …」拼接稿——
- * 说明方案内部走的是 CONCAT，不是真汇总，不假造一块结论。
- *
- * @param collected        归集结果（就地修正）
- * @param knownActors      本轮真实出现过的参与者名
- * @param schemeTitle      入口方案的展示名；没有方案时为空串
- * @param schemeDispatched 本轮方案是否真的分给了子专家
+ * @param blocks 本轮块
+ * @return 按名字取 kind；没有记录时为 undefined
  */
-function recoverSchemeSectionAsConclusion(
-  collected: CollectedAnswers,
-  knownActors: Set<string>,
-  schemeTitle: string,
-  schemeDispatched: boolean
-): void {
-  if (!schemeDispatched) {
-    return
-  }
-  const scheme = schemeTitle.trim()
-  if (!scheme) {
-    return
-  }
-  /*
-   * 标记一出现，正文可能已经被上面按「汇总这段」收进去了；这里只处理「还在 byName 里」的情况。
-   * 没有 byName 正文时什么都不做，绝不拿子专家的话拼一条结论。
-   */
-  const own = (collected.byName.get(scheme) || '').trim()
-  if (!own) {
-    return
-  }
-  /*
-   * 方案这一段里面若还套着两位以上子专家的标题，它本身就是拼接稿：
-   * 记成「汇总」就等于把子专家的话搬成一结论，正是要避免的假汇总。
-   */
-  const innerSections = splitNamedSections(own)
-  const innerClaimed = innerSections.filter((section) => section.name !== scheme && knownActors.has(section.name))
-  if (innerClaimed.length >= 2) {
-    return
-  }
-  collected.byName.delete(scheme)
-  // chips 必须跟着真正出选项的那一段走，不能留在被搬空的方案块上
-  collected.choiceByName.delete(scheme)
-  /*
-   * 已经有结论记录（真汇总开始过、标记已落库）：说明这段是那条记录的正文，
-   * 补进原记录，别另起一条。已有正文时保持原样，避免同一段话出现两次。
-   */
-  const record = collected.conclusions.find((item) => item.name === scheme)
-  if (record) {
-    if (!record.text.trim()) {
-      record.text = own
+function participantKindOf(blocks: AssistantBlock[]): (name: string) => string | undefined {
+  const map = new Map<string, string>()
+  for (const block of blocks) {
+    const name = (block.participantName || '').trim()
+    const kind = (block.participantKind || '').trim()
+    if (name && kind && !map.has(name)) {
+      map.set(name, kind)
     }
-    return
   }
-  collected.conclusions.push({ name: scheme, text: own })
-}
-
-/**
- * 回放兜底：没有「方案结论：X」标记时，把末尾那段汇总正文认回来。
- *
- * <p>后端落库形状（Router 汇总轮）：`路由到 方案` → `路由到 子甲` → `路由到 子乙`
- * → 一条 ASSISTANT（合并后的汇总正文）。**没有**汇总标记，也没有各子的独立正文。
- * 旧逻辑会把这条 ASSISTANT 归给「当前 owner」＝最后一位子专家，于是：
- *
- * <ul>
- *   <li>最后那位子专家被放大成整轮结论（正文还不属于它）；</li>
- *   <li>方案汇总这条记录永远不会出现 —— 用户说的「总结完那条没了」正是这个。</li>
- * </ul>
- *
- * <p>为什么必须保守：多数轮次里「最后一位子专家的正文」本来就是它自己的话，
- * 把它认成汇总会让子专家凭空丢掉结果（实测会让 6 个既有用例全红）。
- * 因此只有**正文里明确出现汇总口吻**（或带汇总专属小标题）时才认回，
- * 认不出就宁可不动 —— 少认一次只是少一条汇总，错认一次会篡改子专家的话。
- *
- * @param collected         归集结果（就地修正）
- * @param knownActors       本轮真实出现过的参与者名
- * @param schemeTitle       入口方案的展示名；没有方案时为空串
- * @param schemeDispatched  本轮方案是否真的分给了子专家
- */
-function recoverConclusionFromTail(
-  collected: CollectedAnswers,
-  knownActors: Set<string>,
-  schemeTitle: string,
-  schemeDispatched: boolean
-): void {
-  if (collected.sawConclusionMark || !schemeDispatched || collected.conclusions.length) {
-    return
-  }
-  const scheme = schemeTitle.trim()
-  if (!scheme) {
-    return
-  }
-  /*
-   * 拼接稿不能当汇总：`### 甲 … ### 乙 …` 是各子自己的话，已经被各归各家。
-   * 不排除它的话，最后一位子专家的正文会被错认成汇总，汇总那条正文也就跟着错。
-   */
-  if (collected.tailFromConcat) {
-    return
-  }
-  // 只认「最后一位子专家名下的正文」：它就是可能被错认成终局的那段
-  const lastExpert = [...knownActors].reverse().find((name) => (collected.byName.get(name) || '').trim())
-  if (!lastExpert) {
-    return
-  }
-  const text = (collected.byName.get(lastExpert) || '').trim()
-  if (!looksLikeSchemeSummary(text, scheme)) {
-    return
-  }
-  collected.byName.delete(lastExpert)
-  // 正文搬到汇总那条记录后，选项不能再留在空掉的专家块上（chips 必须跟在真正出选项的那段下面）
-  collected.choiceByName.delete(lastExpert)
-  collected.conclusions.push({ name: scheme, text })
-}
-
-/**
- * 一段正文是否「读起来像方案汇总」。
- *
- * <p>只认两类明确线索，不做模糊猜测：
- * <ul>
- *   <li>正文里出现方案自己的展示名（「企业综合台汇总 …」这类落库文案）；</li>
- *   <li>正文带汇总专属小标题（`### 汇总` / `## 综合结论` / `一、总体结论` 之类）。</li>
- * </ul>
- *
- * @param text   正文
- * @param scheme 方案展示名
- * @return true 表示可以当作汇总
- */
-function looksLikeSchemeSummary(text: string, scheme: string): boolean {
-  const body = (text || '').trim()
-  if (!body) {
-    return false
-  }
-  // 第一行带方案名（后端落库时会把「X 汇总：…」作为首行）
-  const head = body.split('\n')[0] || ''
-  if (scheme && head.includes(scheme)) {
-    return true
-  }
-  // 汇总口吻的小标题
-  return /^\s{0,3}#{1,6}\s*(汇总|综合结论|总体结论|总结)/m.test(body)
+  return (name: string) => map.get((name || '').trim())
 }
 
 /**
  * 块身份 → 该块内容应归属的参与者展示名。
  *
- * <p>只认身份帧写下的名字；方案（MA）不接正文 / 文件（否则会篡改分流结论），
+ * <p>只认身份帧写下的名字；方案不接正文 / 文件（否则会篡改分流结论），
  * 仍交给既有兜底（最后一位专家）。
  *
- * @param block         本轮块
- * @param targetTypeOf  展示名 → 目标类型
+ * @param block  本轮块
+ * @param kindOf 展示名 → begin kind
  * @return 参与者名；没有身份或目标是方案时为空串
  */
-function pinOf(
-  block: AssistantBlock,
-  targetTypeOf?: (name: string) => 'AGENT' | 'MA' | 'WORKFLOW' | undefined
-): string {
+function pinOf(block: AssistantBlock, kindOf: (name: string) => string | undefined): string {
   const name = (block.participantName || '').trim()
   if (!name) {
     return ''
   }
-  return targetTypeOf?.(name) === 'MA' ? '' : name
+  return kindOf(name) === 'scheme' ? '' : name
 }
 
 /**
@@ -1567,17 +1676,17 @@ function pinOf(
  *
  * @param owner             当前路由名
  * @param lastExpert        最近一位非方案参与者
- * @param targetTypeOf      展示名 → 目标类型
+ * @param kindOf            展示名 → begin kind
  * @param answerableSchemes 自己在作答的方案名
  * @return 应接收的专家名；还没有专家时为空
  */
 function expertOwner(
   owner: string,
   lastExpert: string,
-  targetTypeOf?: (name: string) => 'AGENT' | 'MA' | 'WORKFLOW' | undefined,
+  kindOf: (name: string) => string | undefined,
   answerableSchemes: Set<string> = new Set()
 ): string {
-  if (owner && (targetTypeOf?.(owner) !== 'MA' || answerableSchemes.has(owner))) {
+  if (owner && (kindOf(owner) !== 'scheme' || answerableSchemes.has(owner))) {
     return owner
   }
   return lastExpert
@@ -1622,7 +1731,8 @@ function toCard(step: ThinkTimelineStep, collected: CollectedAnswers): Participa
   const files = step.kind === 'gateway' ? [] : (collected.filesByName.get(title) || [])
   // 网关永远不是「正在作答」的一方：它有判定句就是结果，不能再补一句进行态。
   // 只有一组可点选项的块同样已经是「本步结果」，不能判成还在跑
-  const pending = step.kind !== 'gateway' && step.pending && !answer && !choice && !errors.length && !files.length
+  // 停转只看这一位的终态（step.pending 已经是「整轮还在流且这一位没 closed」）
+  const pending = step.kind !== 'gateway' && step.pending
   /*
    * 这里**只放真实正文**，不再顺手补状态句。
    *
@@ -1642,6 +1752,10 @@ function toCard(step: ThinkTimelineStep, collected: CollectedAnswers): Participa
     key: `${step.kind}-${title}`,
     kind: step.kind === 'gateway' ? 'gateway' : 'actor',
     title,
+    participantId: step.participantId,
+    participantKind: step.participantKind,
+    participantDepth: step.participantDepth,
+    closed: step.closed,
     roleLabel: step.roleLabel,
     lines,
     /*
@@ -1660,9 +1774,6 @@ function toCard(step: ThinkTimelineStep, collected: CollectedAnswers): Participa
     answerPromised
   }
 }
-
-/** 参与者在气泡里可见的最短结论的最大字数：折叠区仍有完整过程 */
-const STEP_RESULT_MAX = 200
 
 /** 「承诺 / 收尾句」判定的长度上限：真正的方案不会短到这个程度 */
 const PROMISE_ONLY_MAX = 160
@@ -1744,63 +1855,18 @@ function thinkingCarriesDeliverable(steps: ProcessStep[]): boolean {
 }
 
 /**
- * 没有成文正文时，按真实事件给这一位补一句「本步结果」。
+ * 给仍然**没有任何正文**的参与者补一句终态说明。
  *
- * <ul>
- *   <li>有产物：写生成了哪些文件（文件卡仍单独展示，文字不能缺）；</li>
- *   <li>有工具返回：截断最后一条返回（机器 JSON 不摊到气泡里）；</li>
- *   <li>只在跑：交给调用方显示进行态；</li>
- *   <li>以上都没有：用现网已有一致的状态句，不再造「没有额外的思考记录」。</li>
- * </ul>
+ * <p>说明只写进 {@link ParticipantCard.terminalNote}，不写进 {@code answer}。
+ * 正文框只画真正的正文；文件在框下一行单独画。用「已由谁完成作答」或「已生成 N 个文件」
+ * 填进正文，用户看到的就是正文被一句话或一张文件卡换掉。
  *
- * @param steps   该参与者自己的工具 / 推理步
- * @param files   归到该参与者的产物
- * @param pending 是否仍在生成
- * @return 可见结果句；不会返回空串
- */
-function stepResultText(
-  title: string,
-  steps: ProcessStep[],
-  files: TrialFileView[],
-  pending: boolean
-): string {
-  if (files.length) {
-    const names = files
-      .map((file) => (file?.fileName || '').trim())
-      .filter(Boolean)
-      .slice(0, 3)
-    const tail = files.length > names.length ? ' 等' : ''
-    return names.length
-      ? `已生成 ${files.length} 个文件：${names.join('、')}${tail}`
-      : `已生成 ${files.length} 个文件`
-  }
-  const last = [...steps].reverse().find((step) => step.type === 'tool_result' && (step.text || '').trim())
-  const body = (last?.text || '').trim()
-  // 机器 JSON / 键值串不进气泡：它属于折叠区里的工具过程
-  if (body && !/^[[{]/.test(body)) {
-    return body.length > STEP_RESULT_MAX ? `${body.slice(0, STEP_RESULT_MAX)}…` : body
-  }
-  const calls = steps.filter((step) => step.type === 'tool_call').length
-  if (calls > 0) {
-    // 工具过程已经做成胶囊（在内容框上方），这里不再指路「见折叠」
-    return pending ? '' : `已调用工具 ${calls} 次`
-  }
-  // 什么都没有：用现网一致的状态句，不造「没有额外的思考记录」
-  return pending ? '' : expertStatusLine(title, false)
-}
-
-/**
- * 给仍然**没有任何正文**的参与者补一句「本步结果」。
+ * <p>为什么必须在 {@link attachLoose} 之后单独跑一遍：先写说明再拼没人认领的正文，
+ * 真实内容会被说明盖住。先归属再补位，真实正文永远留在 {@code answer}。
  *
- * <p>为什么必须在 {@link attachLoose} 之后单独跑一遍：
- * <ul>
- *   <li>先说结论的话，气泡会先写一句「已由「X」完成作答」，再把没人认领的正文拼在后面——
- *       用户看到的就是「完整方案被一句收尾盖住」，这正是要修掉的现象；</li>
- *   <li>先归属再补位，则真实正文永远是这块的主内容，补位句只出现在**真的一句话都没有**的块上。</li>
- * </ul>
- *
- * <p>补位口径不变：文件清单 → 最后一条工具返回（截断）→ 现网状态句；
- * 网关判定句 / 方案分流句 / 已有正文 / 只有选项的块一律不动。
+ * <p>网关判定句 / 方案分流句 / 已有正文 / 只有选项 / 工作流执行卡片一律不动。
+ * 有文件时不补说明：文件行自己就在，不再造一句清单去占正文的位置。
+ * 没有助手正文时只在框外留一句终态说明。工具返回留在胶囊里，不填进结果框。
  *
  * @param cards 已完成正文归属的卡片
  */
@@ -1810,45 +1876,59 @@ function fillResultFallbacks(cards: ParticipantCard[]): void {
       continue
     }
     /*
-     * 工作流块的结果就是那张执行卡片（节点时间轴 + 产物区）：
-     * 这里再补一句「已由 X 完成作答」会在卡片下面多出一条没有信息量的框。
-     *
-     * <p>还没收到卡片快照的占位块（工作流正在起 run）同样不补：它不是「作答方」，
-     * 补一句完成态就是在编造一次已经结束的执行。
+     * 工作流块的结果就是执行卡片里的正文和文件行。
+     * 这里再补一句终态说明，会在卡片下面多出一条没有正文的框。
      */
     if (card.workflow || card.roleLabel === WORKFLOW_ROLE_LABEL) {
       continue
     }
     /*
-     * 正文只有一句「承诺 / 收尾」：绝不拿这句话当结果，也**绝不**把思考草稿搬进结果框。
-     * 仍在流式时先留白（思考框还在走，用户看得到过程）；结束后给一句明确说明，
-     * 并区分「方案确实被写进了思考」与「什么都没有」，不无中生有。
+     * 正文只有一句「承诺 / 收尾」：不拿这句话当正文，也不把思考草稿搬进结果框。
+     * 仍在流式时先留白；结束后把说明放到框外。
      */
     if (card.answerPromised) {
-      if (card.pending) {
-        continue
+      if (!card.pending) {
+        card.terminalNote = thinkingCarriesDeliverable(card.steps || [])
+          ? ANSWER_CHANNEL_SPLIT_NOTE
+          : ANSWER_MISSING_NOTE
       }
-      card.answer = thinkingCarriesDeliverable(card.steps || [])
-        ? ANSWER_CHANNEL_SPLIT_NOTE
-        : ANSWER_MISSING_NOTE
+      card.answer = ''
       card.answerPromised = false
       continue
     }
     if ((card.answer || '').trim() || card.choice || (card.errors || []).length) {
       continue
     }
-    card.answer = stepResultText(card.title, card.steps || [], card.files || [], card.pending)
+    // 文件单独成行。没有终稿时不拿工具返回顶上，也不造一句清单占结果框
+    if ((card.files || []).length) {
+      continue
+    }
+    const steps = card.steps || []
+    if (card.pending) {
+      continue
+    }
+    const calls = steps.filter((step) => step.type === 'tool_call').length
+    // 工具过程已经是胶囊。没有正文时只在框外留一句，不装进正文框
+    card.terminalNote = calls > 0 ? `已调用工具 ${calls} 次` : STEP_EMPTY_NOTE
   }
 }
 
 /**
- * 汇总没有写出正文时的明确说明。
+ * 汇总记录自己没有助手正文，也不是把子专家分段稿发回去之后留下的空位。
  *
- * <p>为什么需要：后端「方案结论：X」标记可能先到（汇总真的开始了），但模型最终没有返回正文
- * （超时 / 空响应 / 降级）。这种块如果什么都不写，就是一个只有头像和名字的空壳；
- * 挂一句明确说明比留白更诚实，也不假装有结论。
+ * <p>只说明这一条记录上没有正文。子专家正文和文件不会被复制到汇总卡上。
  */
-export const SUMMARY_EMPTY_NOTE = '汇总未产出结论：本轮汇总模型没有返回正文。'
+export const SUMMARY_EMPTY_NOTE = '本轮汇总没有返回正文。'
+
+/**
+ * 标记之后的助手文本被认出是「### 参与者」分段稿，已经发回各卡。
+ *
+ * <p>这时汇总卡上没有单独成文，不能再说「模型没有返回正文」——正文在上面的卡片里。
+ */
+export const SUMMARY_REDISTRIBUTED_NOTE = '汇总没有单独成文，正文在上面各位的卡片里。'
+
+/** 专家这一步结束了，投影里没有成文正文、也没有文件。不写成「已由谁完成作答」 */
+export const STEP_EMPTY_NOTE = '本步没有返回正文。'
 
 /**
  * 把方案汇总结论落成**另一条独立记录**（不回填分流那条）。
@@ -1859,14 +1939,16 @@ export const SUMMARY_EMPTY_NOTE = '汇总未产出结论：本轮汇总模型没
  *
  * <p>位置：排在所有已分出的子专家块之后（本轮最后），不插回分流条与专家块之间。
  * 无真汇总（`conclusions` 为空）时一条都不产出；子专家正文 / 文件不会被复制到这里。
- * 有标记但没正文时：流式中保留记录（思考可见），结束后改成一句明确失败说明，
- * 绝不挂空结果框。
+ * 有标记但没正文时：流式中保留记录（思考可见），结束后把说明放在正文框外。
+ * 分段稿已经发回各卡时，说明写成「正文在上面」，不再说模型没返回正文。
+ * 文件不挂到这条记录上。
  *
  * @param cards           已按发生顺序排好的卡片
  * @param conclusions     汇总结论（按到达顺序）
  * @param conclusionSteps 按方案名分开的汇总过程步（各归各的，不共用一条列表）
  * @param streaming       本轮是否仍在流式输出；决定这条记录是否显示为「仍在汇总」
  * @param lookOf          按名称解析形象；与专家同一套兜底
+ * @param tailFromConcat  标记之后的正文是否已按「### 参与者」发回各卡
  * @return 追加汇总记录后的卡片
  */
 function appendConclusionRecords(
@@ -1874,7 +1956,8 @@ function appendConclusionRecords(
   conclusions: { name: string; text: string }[],
   conclusionSteps: Map<string, ProcessStep[]>,
   streaming: boolean,
-  lookOf?: (name: string) => ExpertLookView
+  lookOf?: (name: string) => ExpertLookView,
+  tailFromConcat = false
 ): ParticipantCard[] {
   if (!conclusions.length) {
     return cards
@@ -1890,11 +1973,14 @@ function appendConclusionRecords(
       return
     }
     /*
-     * 有真汇总但模型没写出结论：
-     * - 仍在流式：先留记录（思考框可见），正文等真实增量，不预挂占位结论；
-     * - 已结束：写一句明确失败说明，避免留下一个只有名字的空框。
+     * 正文只留真正写在这条记录上的字。
+     * 没有正文时：流式中先空着（思考还在走）；结束后说明放在框外。
+     * 分段稿已经发回各卡，就不要再说「没有返回正文」。
      */
-    const answer = text || (streaming ? '' : SUMMARY_EMPTY_NOTE)
+    const answer = text
+    const terminalNote = text || streaming
+      ? ''
+      : (tailFromConcat ? SUMMARY_REDISTRIBUTED_NOTE : SUMMARY_EMPTY_NOTE)
     out.push({
       // 同样不带下标：结论晚到时不重挂，避免重建闪动
       key: `conclusion-${name}`,
@@ -1906,6 +1992,7 @@ function appendConclusionRecords(
       // 汇总过程（思考默认折叠；没有过程就不出折叠条）
       steps: [...steps],
       answer,
+      terminalNote,
       errors: [],
       files: [],
       // 形象与其它参与者一致：仍走 lookOf，不在这里另造兜底

@@ -4,10 +4,12 @@ import com.agenthub.runtime.application.router.NestedRoute;
 import com.agenthub.runtime.domain.model.AgentChoice;
 import com.agenthub.runtime.domain.model.EventType;
 import com.agenthub.runtime.domain.model.GeneratedFile;
+import com.agenthub.runtime.domain.model.ParticipantView;
 import com.agenthub.runtime.domain.model.RunEvent;
 import com.agenthub.runtime.domain.model.TrialTrace;
 import com.agenthub.runtime.domain.model.TrialTurn;
 import com.agenthub.runtime.domain.service.GeneratedFileMarker;
+import com.agenthub.runtime.domain.service.ParticipantJson;
 import com.agenthub.runtime.domain.service.TrialTexts;
 import com.agenthub.runtime.domain.service.WorkbenchChoiceJson;
 import com.agenthub.runtime.domain.service.WorkflowRunJson;
@@ -74,6 +76,8 @@ final class TrialTimelineWriter {
          * 顺序不能反：前端回放时，首条 route 之前的推理才算入口的思考；
          * 判定句一旦先落，后面的思考就会被算到第一位参与者名下。
          */
+        // 入口身份在判定推理之前：回放靠它认入口，不把这段思考算到第一位子专家
+        seq = appendParticipant(sessionId, seq, routed.gateway(), written);
         if (routed.judgeReasoning() != null && !routed.judgeReasoning().isBlank()) {
             written.add(writer.append(sessionId, seq++, EventType.REASONING, routed.judgeReasoning(), null, null));
         }
@@ -85,10 +89,14 @@ final class TrialTimelineWriter {
             if (routed.summary() != null && !routed.summary().isBlank()) {
                 written.add(writer.append(sessionId, seq++, EventType.ROUTE, routed.summary(), null, null));
             }
+            // 没有分段时整轮只有这一份终答：过程与文件写在这里，正文留给调用方写在结论标记之后
             seq = appendTraces(sessionId, seq, routed.turn(), written);
+            seq = appendFiles(sessionId, seq, routed.turn(), written);
             return appendConclusion(sessionId, seq, routed, written);
         }
         for (RouterTrialExecutor.RouteSegment segment : segments) {
+            // 身份行紧挨在该参与者的路由 / 思考之前，与直播 begin 同一顺序
+            seq = appendParticipant(sessionId, seq, segment.participant(), written);
             if (segment.routeLine() != null && !segment.routeLine().isBlank()) {
                 written.add(writer.append(sessionId, seq++, EventType.ROUTE, segment.routeLine(), null, null));
             }
@@ -121,6 +129,7 @@ final class TrialTimelineWriter {
              * 改为逐跳写：方案之后紧跟「路由到 子专家」+ 该子自己的 traces。
              */
             if (!segment.children().isEmpty()) {
+                // 父段 turn 是各子终稿的拼接或汇总，不能再整段写在父卡上
                 seq = appendNested(sessionId, seq, segment.children(), written);
                 /*
                  * 目标方案自己的汇总结论：必须紧跟它分下去的各子专家之后落库。
@@ -133,7 +142,8 @@ final class TrialTimelineWriter {
                  */
                 seq = appendNestedConclusion(sessionId, seq, segment, routed, written);
             } else if (segment.turn() != null) {
-                seq = appendTraces(sessionId, seq, segment.turn(), written);
+                // 这一位自己的终稿写在他的思考 / 工具之后、下一位 begin 之前
+                seq = appendParticipantTurn(sessionId, seq, segment.turn(), written);
             }
         }
         return appendConclusion(sessionId, seq, routed, written);
@@ -146,8 +156,8 @@ final class TrialTimelineWriter {
      * <ul>
      *   <li>没有真汇总（CONCAT / 降级）时 `conclusionName` 为空 → 一行都不写，绝不假造汇总块；</li>
      *   <li>外层结论<strong>同名</strong>（单意图直跑同一个方案）→ 让位，同一份汇总不写两遍；</li>
-     *   <li>外层结论是另一个名字（入口把问题分给了方案 B）→ 照写：实时页面上本来就是两条，
-     *       回放也必须两条，否则方案 B 那条汇总一结束就消失。</li>
+     *   <li>外层结论是另一个名字，或外层根本不汇总（多问各自成文）→ 照写标记、推理和汇总正文。
+     *       正文不写的话，回放只剩外层拼接稿，汇总记录会被看成空的。</li>
      * </ul>
      *
      * @param sessionId 会话主键
@@ -168,10 +178,20 @@ final class TrialTimelineWriter {
         if (outer != null && outer.trim().equalsIgnoreCase(name.trim())) {
             return seq;
         }
+        seq = appendParticipant(sessionId, seq, conclusionOf(name), written);
         written.add(writer.append(sessionId, seq++, EventType.ROUTE, "方案结论：" + name, null, null));
         if (segment.conclusionReasoning() != null && !segment.conclusionReasoning().isBlank()) {
             written.add(writer.append(sessionId, seq++, EventType.REASONING,
                     segment.conclusionReasoning(), null, null));
+        }
+        /*
+         * 汇总正文必须紧跟标记。直播是在「方案结论：」之后把这段字推出去的；
+         * 落库若只留标记和推理，回放就只剩外层拼接稿。投影会把它当成「正文已发回各卡」，
+         * 汇总记录上就只剩那句占位。这里写下的是方案终答里的同一段字，不另造一条卡。
+         */
+        String summary = segment.turn() == null ? null : segment.turn().getAssistantText();
+        if (summary != null && !summary.isBlank()) {
+            written.add(writer.append(sessionId, seq++, EventType.ASSISTANT, summary, null, null));
         }
         return seq;
     }
@@ -193,6 +213,7 @@ final class TrialTimelineWriter {
         if (routed.conclusionName() == null || routed.conclusionName().isBlank()) {
             return seq;
         }
+        seq = appendParticipant(sessionId, seq, conclusionOf(routed.conclusionName()), written);
         written.add(writer.append(sessionId, seq++, EventType.ROUTE,
                 "方案结论：" + routed.conclusionName(), null, null));
         if (routed.conclusionReasoning() != null && !routed.conclusionReasoning().isBlank()) {
@@ -220,6 +241,7 @@ final class TrialTimelineWriter {
             if (child == null) {
                 continue;
             }
+            seq = appendParticipant(sessionId, seq, child.participant(), written);
             if (child.routeLine() != null && !child.routeLine().isBlank()) {
                 written.add(writer.append(sessionId, seq++, EventType.ROUTE, child.routeLine(), null, null));
             }
@@ -228,18 +250,125 @@ final class TrialTimelineWriter {
                         "子 Agent 失败：" + child.error(), null, null));
             }
             if (child.turn() != null) {
-                seq = appendTraces(sessionId, seq, child.turn(), written);
+                // 子专家的终稿只属于这一跳，不并进方案卡，也不等整轮末尾那条总稿
+                seq = appendParticipantTurn(sessionId, seq, child.turn(), written);
             }
         }
         return seq;
     }
 
     /**
+     * 落一行参与者开始事件。正文是 {@link ParticipantJson}，思考和终答仍是纯文本。
+     *
+     * @param sessionId 会话主键
+     * @param seq       当前序号
+     * @param who       身份；空则不写
+     * @param written   已写事件
+     * @return 推进后的序号
+     */
+    private int appendParticipant(Long sessionId, int seq, ParticipantView who, List<RunEvent> written) {
+        if (who == null || who.id() == null || who.id().isBlank()) {
+            return seq;
+        }
+        String payload = ParticipantJson.payload(who, true);
+        if (payload == null) {
+            return seq;
+        }
+        written.add(writer.append(sessionId, seq++, EventType.PARTICIPANT, who.name(), payload, null, null));
+        return seq;
+    }
+
+    /**
+     * 真汇总的身份。直播不靠 conclusion-begin 建卡，回放仍先落这一行，再写「方案结论：」。
+     *
+     * @param name 方案名
+     * @return 汇总身份
+     */
+    private static ParticipantView conclusionOf(String name) {
+        String title = name == null ? "" : name.trim();
+        return ParticipantView.conclusion("c-" + title, title);
+    }
+
+    /**
+     * 这一位参与者的过程与终稿：思考、工具、终稿、文件按直播终态的顺序落在同一段里。
+     *
+     * <p>终稿必须写在下一位 begin 之前。整轮末尾那条总稿会跟着最后一位走，
+     * 不能代替这里的逐人落库。
+     *
+     * @param sessionId 会话主键
+     * @param seq       下一条序号
+     * @param turn      这一位自己的执行结果
+     * @param written   已写事件
+     * @return 推进后的下一条序号
+     */
+    int appendParticipantTurn(Long sessionId, int seq, TrialTurn turn, List<RunEvent> written) {
+        if (turn == null) {
+            return seq;
+        }
+        seq = appendTraces(sessionId, seq, turn, written);
+        seq = appendOwnAssistant(sessionId, seq, turn, written);
+        return appendFiles(sessionId, seq, turn, written);
+    }
+
+    /**
+     * 把这一位已经生成完的终稿写成助手正文。
+     *
+     * <p>空正文、待批准计划不写：空事件会让回放多出一只空框，
+     * 计划轮本来就没有终答。有正文才落，和直播结果框是同一段字。
+     *
+     * @param sessionId 会话主键
+     * @param seq       下一条序号
+     * @param turn      这一位的执行结果
+     * @param written   已写事件
+     * @return 推进后的下一条序号
+     */
+    private int appendOwnAssistant(Long sessionId, int seq, TrialTurn turn, List<RunEvent> written) {
+        if (turn == null || turn.isAssistantSuppressed()) {
+            return seq;
+        }
+        String text = turn.getAssistantText();
+        if (text == null || text.isBlank()) {
+            return seq;
+        }
+        written.add(assistant(sessionId, seq, turn));
+        return seq + 1;
+    }
+
+    /**
+     * 分段已经各自落下终稿之后，整轮还要不要再写一条助手正文。
+     *
+     * <p>没有分段时，终答只在这一条上，必须写。有分段且本轮真的做了汇总时，
+     * 汇总正文不在任何子段里，要写在「方案结论」之后。其余情况子段已经各有终稿，
+     * 再写拼接稿只会贴到最后一位参与者身上。
+     *
+     * @param routed 本轮路由结果
+     * @return true 表示调用方还应写 {@code routed.turn()} 的助手正文
+     */
+    static boolean owesRoundAssistant(RouterTrialExecutor.RoutedTurn routed) {
+        if (routed == null || routed.turn() == null) {
+            return false;
+        }
+        String summary = routed.turn().getAssistantText();
+        if (summary == null || summary.isBlank() || routed.turn().isAssistantSuppressed()) {
+            return false;
+        }
+        if (routed.conclusionName() != null && !routed.conclusionName().isBlank()) {
+            return true;
+        }
+        List<RouterTrialExecutor.RouteSegment> segments = routed.segments();
+        return segments == null || segments.isEmpty();
+    }
+
+    /**
      * 按引擎顺序写思考和工具。空白思考跳过，避免没有中间步时造出假 reasoning。
      * 工具行带脱敏参数。结果另起一段放正文。没有参数时不补空 JSON。
+     *
+     * <p>这里不写终稿、不写文件：终稿要跟在工具后面、又要排在文件前面，
+     * 由 {@link #appendParticipantTurn} 串起来。没有分段的合并轮只走本方法，
+     * 终稿仍由调用方写一次。
      */
     int appendTraces(Long sessionId, int seq, TrialTurn turn, List<RunEvent> written) {
-        if (turn.getTraces() == null) {
+        if (turn == null || turn.getTraces() == null) {
             return seq;
         }
         for (TrialTrace trace : turn.getTraces()) {
@@ -264,7 +393,6 @@ final class TrialTimelineWriter {
                 written.add(writer.append(sessionId, seq++, EventType.TOOL, line, body, null, null));
             }
         }
-        seq = appendFiles(sessionId, seq, turn, written);
         return seq;
     }
 
@@ -275,8 +403,10 @@ final class TrialTimelineWriter {
      * 刷新页面或换设备后这张卡片就消失了——用户在历史会话里找不到自己刚生成的文件。
      * 正文用结构化 JSON，与 SSE 帧、内存快照共用同一字段形状，前端一套解析即可。
      *
-     * <p>去重口径与前端一致：同名文件只保留最后一次生成的那条，
-     * 避免同一轮反复写同一路径时时间线上刷出一排重复卡片。
+     * <p>去重口径与前端一致：同一参与者写同名文件只保留最后一次生成的那条；
+     * 不同参与者各写同名文件是两份产物，各落一条（否则文件会改挂到别人名下）。
+     * 正文带 {@code participantId / participantName}，刷新回放按落库身份挂卡，
+     * 不再靠「最后一位参与者」猜作者。
      *
      * @param sessionId 会话主键
      * @param seq       下一条事件序号
@@ -285,7 +415,7 @@ final class TrialTimelineWriter {
      * @return 推进后的下一条序号
      */
     int appendFiles(Long sessionId, int seq, TrialTurn turn, List<RunEvent> written) {
-        if (turn.getFiles() == null || turn.getFiles().isEmpty()) {
+        if (turn == null || turn.getFiles() == null || turn.getFiles().isEmpty()) {
             return seq;
         }
         for (GeneratedFile file : turn.getFiles()) {
@@ -294,7 +424,8 @@ final class TrialTimelineWriter {
             }
             String summary = file.fileName() + "（" + file.humanSize() + "）";
             written.add(writer.append(sessionId, seq++, EventType.FILE, summary,
-                    GeneratedFileMarker.payload(file.fileName(), file.size()), null, null));
+                    GeneratedFileMarker.payload(file.fileName(), file.size(),
+                            file.participantId(), file.participantName()), null, null));
         }
         return seq;
     }
@@ -308,9 +439,26 @@ final class TrialTimelineWriter {
      * @return 落库后的事件
      */
     RunEvent assistant(Long sessionId, int seq, TrialTurn turn) {
+        return assistant(sessionId, seq, turn, true);
+    }
+
+    /**
+     * 助手答复事件。
+     *
+     * <p>{@code recordTokens=false} 用于「各子段已经各自记过用量」之后补上的汇总正文，
+     * 避免评测把同一轮的 token 再加一次。
+     *
+     * @param sessionId    会话主键
+     * @param seq          事件序号
+     * @param turn         本轮或这一位的结果
+     * @param recordTokens 是否把这份结果上的 token 写进事件
+     * @return 落库后的事件
+     */
+    RunEvent assistant(Long sessionId, int seq, TrialTurn turn, boolean recordTokens) {
         // 摘要给列表；正文走 content_text，保留 Markdown 换行，不在这里折行
-        return writer.append(sessionId, seq, EventType.ASSISTANT, turn.getAssistantText(),
-                turn.getPromptTokens(), turn.getCompletionTokens());
+        Integer prompt = recordTokens ? turn.getPromptTokens() : null;
+        Integer completion = recordTokens ? turn.getCompletionTokens() : null;
+        return writer.append(sessionId, seq, EventType.ASSISTANT, turn.getAssistantText(), prompt, completion);
     }
 
     /**
