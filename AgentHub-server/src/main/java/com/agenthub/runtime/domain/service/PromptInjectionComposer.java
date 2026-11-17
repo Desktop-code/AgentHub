@@ -465,6 +465,8 @@ public final class PromptInjectionComposer {
             return "";
         }
         StringBuilder catalog = new StringBuilder("\n\n## 工具目录");
+        // 冒号前是调用名，冒号后才是给用户看的中文名。正文里再写调用名，胶囊已经是中文时就会对不上。
+        catalog.append("\n对用户说话时只用每行冒号后的中文名，不要写出冒号前的调用名。");
         for (CatalogLine line : lines) {
             String row = catalogRow(line, max);
             catalog.append(row);
@@ -487,6 +489,7 @@ public final class PromptInjectionComposer {
             return "";
         }
         StringBuilder text = new StringBuilder("\n\n## 工具目录");
+        text.append("\n对用户说话时不要写出这些调用名。");
         for (CatalogLine line : lines) {
             text.append("\n- ").append(line.name());
             if (!line.callable()) {
