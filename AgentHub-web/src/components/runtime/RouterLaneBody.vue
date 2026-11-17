@@ -16,21 +16,27 @@
     </div>
 
     <div class="grid">
-      <div v-for="row in decoratedRows" :key="row.key" class="row" :class="`is-${row.kind}`">
+      <div
+        v-for="entry in decoratedRows"
+        :key="entry.row.key"
+        class="row"
+        :class="[`is-${entry.row.kind}`, { 'is-nested': entry.depth > 0 }]"
+        :style="entry.depth > 0 ? { '--row-indent': `${entry.depth * 14}px` } : undefined"
+      >
         <div class="label">
-          <span class="name" :title="row.title">{{ row.title }}</span>
-          <span class="sub" :title="row.subtitle">{{ row.subtitle }}</span>
+          <span class="name" :title="entry.row.title">{{ entry.row.title }}</span>
+          <span class="sub" :title="entry.row.subtitle">{{ entry.row.subtitle }}</span>
         </div>
         <div class="track">
           <!-- 总控基线：ROUTE 覆盖整轮，用细线表示「编排根一直在」，避免被误读成判路由占满全程 -->
           <span
-            v-if="row.routeBar"
+            v-if="entry.row.routeBar"
             class="rail"
-            :style="{ left: `${row.routeBar.left}%`, width: `${row.routeBar.width}%` }"
-            :title="row.routeBar.tip"
+            :style="{ left: `${entry.row.routeBar.left}%`, width: `${entry.row.routeBar.width}%` }"
+            :title="entry.row.routeBar.tip"
           />
           <button
-            v-for="bar in row.bars"
+            v-for="bar in entry.row.bars"
             :key="bar.id"
             type="button"
             class="bar"
@@ -42,7 +48,7 @@
             <span class="bar-text">{{ bar.label }}</span>
           </button>
           <!-- CONCAT：没有模型调用，只在轨道末端给一个灰字，代表「拼接」这一步 -->
-          <span v-if="row.kind === 'aggregate' && !row.spans.length" class="chip">
+          <span v-if="entry.row.kind === 'aggregate' && !entry.row.spans.length" class="chip">
             {{ model.aggregate === LANE_AGGREGATE_SUMMARIZE
               ? '未找到汇总调用'
               : model.aggregate === LANE_AGGREGATE_NONE
@@ -53,9 +59,14 @@
           </span>
         </div>
         <div class="state">
-          <el-tag v-if="row.running" size="small" type="primary" effect="plain">进行中</el-tag>
-          <el-tag v-else-if="row.failed" size="small" type="danger" effect="plain">失败</el-tag>
-          <el-tag v-else-if="row.kind === 'aggregate' && !row.spans.length" size="small" type="info" effect="plain">
+          <el-tag v-if="entry.row.running" size="small" type="primary" effect="plain">进行中</el-tag>
+          <el-tag v-else-if="entry.row.failed" size="small" type="danger" effect="plain">失败</el-tag>
+          <el-tag
+            v-else-if="entry.row.kind === 'aggregate' && !entry.row.spans.length"
+            size="small"
+            type="info"
+            effect="plain"
+          >
             {{ model.aggregate === LANE_AGGREGATE_SUMMARIZE
               ? '降级'
               : model.aggregate === LANE_AGGREGATE_NONE
@@ -113,7 +124,8 @@ import {
   LANE_TEMPLATE_ROUTER_PARALLEL,
   laneToneOf,
   type OrchestrationLaneEvent,
-  type OrchestrationLaneModel
+  type OrchestrationLaneModel,
+  type OrchestrationLaneRow
 } from '@/utils/orchestrationLane'
 
 const props = withDefaults(
@@ -138,12 +150,24 @@ const highlightIds = ref<number[]>([])
 
 const eventList = computed(() => (props.events.length ? props.events : props.model.events))
 
+/** 执行明细的泳道行：优先读分层视图；旧调用方没有 laneRows 时退回扁平 rows */
+const laneRows = computed<OrchestrationLaneRow[]>(() =>
+  props.model.laneRows?.length ? props.model.laneRows : props.model.rows
+)
+
 /** 包络基准优先用调用方给的完整步骤：工具子步也要能把父区间撑到真实结束 */
 const allSpans = computed(() => {
   if (props.spans.length) {
     return props.spans
   }
-  return props.model.rows.flatMap((row) => row.spans)
+  // 内层 Agent 也参与包络：外壳的区间要能撑到它内部专家的真实结束
+  const flat: ObsSpan[] = []
+  const walk = (row: OrchestrationLaneRow) => {
+    flat.push(...row.spans)
+    row.nested.forEach(walk)
+  }
+  laneRows.value.forEach(walk)
+  return flat
 })
 
 /** 与 TraceSpanFlow 同源：包络后的 latency + 统一时间轴，保证两条视图不打架 */
@@ -199,37 +223,63 @@ function barOf(span: ObsSpan, rowKind: string, template: string): LaneBar | null
   return { id: span.id, left, width, tone, label, tip: `${label} · ${gantt.tip}` }
 }
 
+/** 带 bars 的一行：原泳道行 + 层级（内层按 depth 缩进） */
+interface DecoratedLaneRow {
+  row: OrchestrationLaneRow & {
+    bars: LaneBar[]
+    routeBar: LaneBar | null
+  }
+  depth: number
+}
+
 /**
- * 带 bars 的行；bar 计算放在这里，复用 traceParallel 的甘特实现。
+ * 单行 → 带 bars 的行。bar 计算放在这里，复用 traceParallel 的甘特实现。
  *
  * 总控行的 ROUTE span 在服务端被包络成「覆盖整轮」，直接画块会看起来像判路由跑满全程；
  * 因此把它降级成细基线（routeBar），JUDGE 块只取判路由 LLM 的真实区间。
+ *
+ * @param row 原始泳道行（可能是入口目标，也可能是某个外壳的内层 Agent）
+ * @return 追加了 bars / routeBar 的行；不改入参
  */
-const decoratedRows = computed(() =>
-  props.model.rows.map((row) => {
-    const routeSpan = props.model.routeSpan
-    if (row.kind !== 'judge' || routeSpan == null) {
-      return {
-        ...row,
-        bars: row.spans
-          .map((span) => barOf(span, row.kind, props.model.template))
-          .filter((bar): bar is LaneBar => bar != null),
-        routeBar: null
-      }
+function laneRowOf(row: OrchestrationLaneRow): DecoratedLaneRow['row'] {
+  const routeSpan = props.model.routeSpan
+  if (row.kind !== 'judge' || routeSpan == null) {
+    return {
+      ...row,
+      bars: row.spans
+        .map((span) => barOf(span, row.kind, props.model.template))
+        .filter((bar): bar is LaneBar => bar != null),
+      routeBar: null
     }
-    // 去掉 ROUTE 基线本身，只把判路由 LLM 画成 JUDGE 块
-    const bars = row.spans
-      .filter((span) => span.id !== routeSpan.id)
-      .map((span) => barOf(span, row.kind, props.model.template))
-      .filter((bar): bar is LaneBar => bar != null)
-    const routeBar = barOf(routeSpan, 'judge', props.model.template)
-    // 判路由回退到无 LLM 时只剩基线：把基线当唯一块，总控行不留空
-    if (!bars.length) {
-      return { ...row, bars: routeBar ? [routeBar] : [], routeBar: null }
-    }
-    return { ...row, bars, routeBar }
-  })
-)
+  }
+  // 去掉 ROUTE 基线本身，只把判路由 LLM 画成 JUDGE 块
+  const bars = row.spans
+    .filter((span) => span.id !== routeSpan.id)
+    .map((span) => barOf(span, row.kind, props.model.template))
+    .filter((bar): bar is LaneBar => bar != null)
+  const routeBar = barOf(routeSpan, 'judge', props.model.template)
+  // 判路由回退到无 LLM 时只剩基线：把基线当唯一块，总控行不留空
+  if (!bars.length) {
+    return { ...row, bars: routeBar ? [routeBar] : [], routeBar: null }
+  }
+  return { ...row, bars, routeBar }
+}
+
+/**
+ * 泳道渲染序列：外层行在前，内层 Agent 紧跟自己的外壳行并按 depth 缩进。
+ *
+ * <p>为什么在这里摊平而不是在模型里摊平：模型要保留 nested 结构（中栏卡片、计数都按
+ * 「入口直接目标」算），只有泳道这一层需要「缩进着一行一行画」。
+ */
+const decoratedRows = computed<DecoratedLaneRow[]>(() => {
+  const list: DecoratedLaneRow[] = []
+  const walk = (row: OrchestrationLaneRow, depth: number) => {
+    list.push({ row: laneRowOf(row), depth })
+    row.nested.forEach((inner) => walk(inner, depth + 1))
+  }
+  laneRows.value.forEach((row) => walk(row, 0))
+  return list
+})
 
 /** 轴总时长文字 */
 const totalLabel = computed(() => formatMs(axis.value?.totalDuration ?? 0))
@@ -300,12 +350,22 @@ function clockOf(ms: number | null) {
   min-height: 30px;
 }
 
+/*
+ * 内层 Agent（外壳里的编排根 / 工作流节点专家）：标题列缩进 + 一条极淡竖线，
+ * 让「谁在谁里面」一眼可读。不改变时间轨宽度，条仍与整轮同一根轴对齐。
+ */
+.row.is-nested .label {
+  border-left: 1px solid #e2e4ec;
+}
+
 .label {
   display: flex;
   flex: none;
   flex-direction: column;
   width: 156px;
   min-width: 0;
+  /* 内层 Agent 按层级缩进：不新开容器，只把标题列往里推，时间轨仍对齐同一根轴 */
+  padding-left: var(--row-indent, 0);
 }
 
 .name {
@@ -489,6 +549,44 @@ function clockOf(ms: number | null) {
   .ruler-pad,
   .label {
     width: 112px;
+  }
+}
+
+/*
+ * 窄容器自适应：泳道可能出现在三栏窄栏、抽屉，也可能出现在右上角 420px 的浮层里。
+ * 视口媒体查询对它无效（1440px 屏幕上的 420px 盒子仍命中宽屏规则），
+ * 因此按「容器自身宽度」收标题列，保证时间轨还有可读宽度、行名不被裁成省略号。
+ * 放在 @media 之后：容器更窄时以容器为准，两者不打架。
+ */
+.lane-body {
+  container-type: inline-size;
+}
+
+@container (max-width: 430px) {
+  .ruler-pad,
+  .label {
+    width: 104px;
+  }
+
+  /* 状态列同时收窄，把省下的宽度让给时间轨，避免条被压成几像素 */
+  .state {
+    width: 48px;
+  }
+
+  .ruler,
+  .row {
+    gap: 8px;
+  }
+}
+
+@container (max-width: 360px) {
+  .ruler-pad,
+  .label {
+    width: 88px;
+  }
+
+  .state {
+    width: 44px;
   }
 }
 </style>

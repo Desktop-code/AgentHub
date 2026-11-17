@@ -4,8 +4,11 @@
     收起态只给摘要（调度状态 / 耗时 / 子 Agent 数），展开后是泳道 + 事件。
     数据全部来自 props（obs span 树归纳结果）；本组件只读，不发请求、不落库，
     也不把任何内容写回 agent_run_event。
+
+    closable=true 时本卡就是「执行明细悬浮框」的正文：顶栏保留摘要与模板/链路入口，
+    右侧换成 X 关闭（不再有刷新），外面不再包抽屉或标题栏。
   -->
-  <section class="router-card" :class="`is-${status}`">
+  <section class="router-card" :class="[`is-${status}`, { 'is-floating': closable }]">
     <header class="router-card__head">
       <button
         type="button"
@@ -20,8 +23,21 @@
       <span v-if="metaText" class="router-card__meta">{{ metaText }}</span>
       <span class="router-card__spacer" />
       <el-tag v-if="model?.hasRouterTrace" size="small" effect="plain">{{ templateLabel }}</el-tag>
-      <el-button v-if="traceId" link size="small" @click="drawerOpen = true">完整链路</el-button>
-      <el-button link size="small" :loading="loading" @click="emit('refresh')">刷新</el-button>
+      <el-button v-if="headActions.showTraceLink" link size="small" @click="drawerOpen = true">完整链路</el-button>
+      <el-button v-if="headActions.showRefresh" link size="small" :loading="loading" @click="emit('refresh')">
+        刷新
+      </el-button>
+      <!-- 浮层形态的收口：点 X 由外层把悬浮框收起，本组件不自己关自己 -->
+      <button
+        v-if="headActions.showClose"
+        type="button"
+        class="router-card__close"
+        aria-label="关闭执行明细"
+        title="关闭"
+        @click="emit('close')"
+      >
+        <el-icon><Close /></el-icon>
+      </button>
     </header>
 
     <el-alert
@@ -67,9 +83,10 @@
  * - 本轮结束自动收起，进行中自动展开，避免终答被一张大图压到很下面。
  */
 import { computed, ref, watch } from 'vue'
-import { ArrowRight } from '@element-plus/icons-vue'
+import { ArrowRight, Close } from '@element-plus/icons-vue'
 import { ElCollapseTransition } from 'element-plus'
 import type { ObsSpan } from '@/types/obs'
+import { inspectHeadActions } from '@/components/runtime/workbench/inspectOverlay'
 import {
   LANE_TEMPLATE_COMPETE,
   LANE_TEMPLATE_CRITIC_LOOP,
@@ -112,6 +129,11 @@ const props = withDefaults(
     defaultExpanded?: boolean
     /** 状态从 running 变 done 时是否自动收起；详细抽屉传 false，避免看到一半被收起 */
     autoCollapse?: boolean
+    /**
+     * 浮层形态：本卡即「执行明细悬浮框」的正文。
+     * <p>true 时顶栏刷新换成 X，点击 emit('close') 由外层收起；外面不再包抽屉 / 标题栏。
+     */
+    closable?: boolean
   }>(),
   {
     traceData: null,
@@ -124,14 +146,22 @@ const props = withDefaults(
     sessionId: null,
     startTime: 0,
     now: 0,
-    autoCollapse: true
+    autoCollapse: true,
+    closable: false
   }
 )
 
 const emit = defineEmits<{
   /** 手动刷新编排数据；数据源在 TrialPanel，本组件不自己请求 */
   refresh: []
+  /** 浮层形态下点 X：由外层把悬浮框收起（本组件不自己关自己） */
+  close: []
 }>()
+
+/** 顶栏按钮组合：浮层形态刷新让位给 X，两者不并排 */
+const headActions = computed(() =>
+  inspectHeadActions({ closable: props.closable, hasTraceId: !!props.traceId })
+)
 
 /** 展开态。对话流里进行中默认展开、结束自动收起；详细抽屉用 defaultExpanded 固定展开 */
 const expanded = ref(props.defaultExpanded ?? props.status === 'running')
@@ -251,6 +281,26 @@ watch(
   background: #fafbff;
 }
 
+/*
+ * 浮层形态：这一块本身就是悬浮框的内容，外层已经给了卡片外观（半透明底 / 描边 / 投影），
+ * 这里不再重复画边框与底色，也不留外边距，避免「框里再套框」。
+ * 半透明落在浮层容器上；浮层不带遮罩，因此也不存在「遮罩负责底色」这回事。
+ */
+.router-card.is-floating {
+  margin: 0;
+  border: 0;
+  background: transparent;
+}
+
+/* 浮层里横向留白交回容器统一控制，卡片只负责纵向节奏 */
+.router-card.is-floating .router-card__head {
+  padding: 2px 2px 6px;
+}
+
+.router-card.is-floating .router-card__body {
+  padding: 0 2px 2px;
+}
+
 .router-card__head {
   display: flex;
   flex-wrap: wrap;
@@ -291,6 +341,30 @@ watch(
 
 .router-card__spacer {
   flex: 1;
+}
+
+/*
+ * 浮层形态的 X：与顶栏其它 link 按钮同高，靠右收口。
+ * 只在 closable 时出现；浮层里不再有「刷新」，两者不会并排。
+ */
+.router-card__close {
+  display: inline-grid;
+  place-items: center;
+  width: 22px;
+  height: 22px;
+  padding: 0;
+  border: 0;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--ah-text-secondary, #8b90a0);
+  font: inherit;
+  cursor: pointer;
+  transition: color 0.15s ease, background-color 0.15s ease;
+}
+
+.router-card__close:hover {
+  color: var(--ah-text, #1f2430);
+  background: rgba(16, 24, 40, 0.06);
 }
 
 .router-card__alert {

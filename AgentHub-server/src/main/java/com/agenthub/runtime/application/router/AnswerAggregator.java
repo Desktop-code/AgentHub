@@ -76,24 +76,50 @@ public class AnswerAggregator {
     }
 
     /**
-     * 一条消息里的多个问题：各自出正文，不做跨问汇总。所属域：runtime。
+     * 一条消息里的多个问题：各自出正文，再给整轮一条收口。所属域：runtime。
      *
      * <p>为什么不能走 {@link #finishAnswer}：SUMMARIZE / VOTE 会把两问合成一段，
-     * 用户要的是「第 1 问的答案 + 第 2 问的答案」，合起来反而是假汇总；
-     * 子正文此时已经在各自参与者块上流式展示过，这里只负责把计量与落库正文收好。
+     * 用户要的是各车间自己的结论，而不是再调一次模型把拼接稿说成汇总。
+     * 子正文已经在各自参与者块上。这里另走已有的「方案结论」通道，推出
+     * {@link RoundCloseout}：各方案要点，不带 {@code ###} 拼接稿。
+     * 落库名交给调用方写进本轮 {@code conclusionName}，刷新后仍是卡片之后的那一条。
      *
      * @param outcomes 各问的目标执行结果（含失败 / 跳过占位）
-     * @return 终答（按问顺序的可读拼接）+ 空说明；不推任何新正文
+     * @return 收口正文作为终答；没有结果时正文为空、不记结论名
      */
     public AggregateOutcome separateAnswers(List<ChildOutcome> outcomes) {
+        return separateAnswers(null, outcomes, null);
+    }
+
+    /**
+     * 多问收口，并在直播上立刻推「方案结论」。
+     *
+     * <p>入口名是整轮身份。空名字退成「最终产物」，避免收口卡因为没有标题被丢掉，
+     * 也不借用最后一个车间的名字。
+     *
+     * @param rootName 入口方案展示名；可空
+     * @param outcomes 各问结果
+     * @param progress 直播出口；可空（只准备落库正文）
+     * @return 带结论名的终答；没有要点时不记结论名、也不推标记
+     */
+    public AggregateOutcome separateAnswers(String rootName, List<ChildOutcome> outcomes, TrialProgress progress) {
         if (outcomes == null || outcomes.isEmpty()) {
             TrialTurn empty = new TrialTurn();
             empty.setAssistantText("");
             return new AggregateOutcome(empty, List.of(), null, -1);
         }
-        // 复用 CONCAT 的可读分段（### 作者 + 正文）：刷新回放时前端能按作者把正文归回各自块
-        String text = concatAnswers(outcomes);
-        return new AggregateOutcome(mergeTurns(outcomes, text), List.of(), null, -1);
+        // 要点不是拼接稿：各专家全文已经在自己的卡上，这里再贴 ### 会被投影拆走
+        String closeout = RoundCloseout.textOf(outcomes);
+        if (closeout.isBlank()) {
+            return new AggregateOutcome(mergeTurns(outcomes, ""), List.of(), null, -1);
+        }
+        String name = rootName == null || rootName.isBlank() ? "最终产物" : rootName.trim();
+        if (progress != null) {
+            // 先标记再正文，和真汇总同一顺序：投影靠标记另起一条，不续到最后一位专家
+            progress.route("方案结论：" + name);
+            progress.assistant(closeout);
+        }
+        return new AggregateOutcome(mergeTurns(outcomes, closeout), List.of(), null, -1, name, null);
     }
 
     /**
@@ -250,6 +276,11 @@ public class AnswerAggregator {
             }
         }
         TrialTurn turn = mergeTurns(outcomes, concat);
+        // 纯拼接没有模型步。补一个挂在本层 ROUTE 下的节点，拓扑才认得出综答。
+        // 真汇总 / 投票已经另开过 LLM，这里不再补，避免多出一个拼接节点。
+        if (mode == RouterAnswerMode.CONCAT) {
+            RouterObs.noteConcat(trace, routeSpan);
+        }
         // 多子 / 投票 / 汇总已经按参与者交出过结论：再推拼接稿会把子正文复制一遍。
         // 只剩「单子失败、当时没有流式正文」才补一段失败说明。
         boolean participantsAlreadyShown = outcomes.size() > 1
@@ -481,7 +512,8 @@ public class AnswerAggregator {
             if (text.length() > 0) {
                 text.append("\n\n");
             }
-            text.append("### ").append(RouterTexts.sectionTitle(outcome)).append('\n');
+            // 章节名与参与者卡名同一套（子 Agent 展示名）。意图文案只留在投票 / 汇总提示词里。
+            text.append("### ").append(RouterTexts.concatHeading(outcome)).append('\n');
             if (outcome.skipped()) {
                 // 跳过不是失败：明确写「已跳过」，避免用户以为子 Agent 跑挂了
                 text.append("（已跳过）").append(outcome.error());

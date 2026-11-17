@@ -171,9 +171,11 @@ public final class PlanProgressRecorder implements TrialProgress {
         if (file == null || file.fileName() == null || file.fileName().isBlank()) {
             return;
         }
-        // 摘要给「文件名 + 可读体积」，正文是结构化 JSON：前端要拿 fileName 去拼下载地址
+        // 摘要给「文件名 + 可读体积」，正文是结构化 JSON：前端要拿 fileName 去拼下载地址；
+        // 身份随正文一起落帧，计划模式回放时文件仍挂原参与者
         frames.add(new Frame(EventType.FILE, file.fileName() + "（" + file.humanSize() + "）",
-                GeneratedFileMarker.payload(file.fileName(), file.size())));
+                GeneratedFileMarker.payload(file.fileName(), file.size(),
+                        file.participantId(), file.participantName())));
         if (delegate != null) {
             delegate.file(file);
         }

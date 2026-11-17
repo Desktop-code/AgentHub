@@ -158,14 +158,13 @@ function alignBlocks(fresh: AssistantBlock[], local: AssistantBlock[]): Assistan
 }
 
 /**
- * 配对上的块：内容与终态用回放的，**身份与 id 沿用本地**。
+ * 配对上的块：内容用回放的，渲染 id 沿用本地。
  *
- * <p>为什么身份必须沿用本地：落库事件里的正文块只有 kind / text，没有 `participantName`。
- * 整份换成回放对象，正文就丢了「这是谁说的」——投影只能按当前路由认领，
- * 结果两位子专家的正文挤到最后一位头上、另一位只剩一句兜底话。
+ * <p>身份以回放块上已经贴好的为准。回放现在会带参与者，本地若还留着旧的空戳或错戳，
+ * 不能再盖掉正确身份。回放没有身份时才沿用本地，避免刷新把直播里已经认好的人丢掉。
  *
- * @param fresh 回放块（内容真源）
- * @param local 本地块（身份真源）
+ * @param fresh 回放块（内容与身份真源）
+ * @param local 本地块（渲染 id 真源）
  * @return 合并后的块
  */
 function adoptBlockData(fresh: AssistantBlock, local: AssistantBlock): AssistantBlock {
@@ -174,12 +173,11 @@ function adoptBlockData(fresh: AssistantBlock, local: AssistantBlock): Assistant
   if (local.id || fresh.id) {
     merged.id = local.id || fresh.id
   }
-  // 身份帧只有流式路径带着（回放拿不到）：缺失时沿用本地，正文才不会串块
-  if (local.participantId || fresh.participantId) {
-    merged.participantId = local.participantId || fresh.participantId
+  if (fresh.participantId || local.participantId) {
+    merged.participantId = fresh.participantId || local.participantId
   }
-  if (local.participantName || fresh.participantName) {
-    merged.participantName = local.participantName || fresh.participantName
+  if (fresh.participantName || local.participantName) {
+    merged.participantName = fresh.participantName || local.participantName
   }
   return merged
 }

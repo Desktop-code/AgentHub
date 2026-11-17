@@ -33,7 +33,7 @@ export interface TrialSession {
   startTime?: string
   endTime?: string
   messageCount?: number
-  /** 会话标题：后端在首轮成功后写入（首句截断 ≤24 字符），或用户手改。空表示尚未生成 */
+  /** 会话标题：后端首轮结束后异步写入（模型摘要 ≤10 字），或用户手改。空表示尚未生成 */
   sessionTitle?: string
   /** 标题来源：AUTO 自动生成 / MANUAL 用户手改 */
   titleSource?: string
@@ -150,11 +150,32 @@ export interface AssistantBlock {
   /** 该块的参与者展示名（与 participantId 同时写入，便于正文 / 文件 / 报错归属） */
   participantName?: string
   /**
+   * begin 帧上的 kind（gateway / scheme / agent / workflow / conclusion）。
+   *
+   * <p>归属只认这一项，不拿候选池类型去猜谁是方案、谁是工作流。
+   * 历史块没有该字段时不回填，也不再退回点名归组。
+   */
+  participantKind?: string
+  /**
+   * begin 帧上的嵌套层级。入口为 0；更深的 scheme 是父块。
+   *
+   * <p>缺省表示这条块没有 depth（旧会话）。没有 depth 就不认父，不靠候选池补一层。
+   */
+  participantDepth?: number
+  /**
    * true＝这条 route 块只是「这一步开始」时补的占位行（只有名字与 route_key，没有依据）。
    *
    * <p>真实路由行随后到达时**原位补全**这条块，不另起一条，避免同一参与者出现两块。
    */
   begin?: boolean
+  /**
+   * 该参与者是否已经结束：done / failed / aborted（SSE `participant` 终态帧写入）。
+   *
+   * <p>为什么挂在 route 块上：进行态是按参与者算的，而身份就写在这条块上。
+   * 没有它，投影只能拿「整轮是否还在流式」当进行态，一位已经跑完的专家仍会被画成
+   * 「正在作答」，一直转到整轮结束。
+   */
+  closed?: 'done' | 'failed' | 'aborted'
 }
 
 /**
@@ -223,7 +244,7 @@ export interface TrialWorkflowView {
   code: string
   /** CREATED / RUNNING / PAUSED_HUMAN / SUCCESS / FAILED / CANCELLED */
   status: string
-  /** 终答文本；运行中为空。没有文件时产物区展示这段文本 */
+  /** 终答正文；运行中按「节点完成」增量追加，不再是运行期恒空 */
   answer?: string
   /** 按图顺序的真实节点；可能为空表（事件还没到） */
   nodes: TrialWorkflowNodeView[]

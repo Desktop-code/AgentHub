@@ -106,11 +106,12 @@ export function looksLikeRouteMachineJson(raw: string): boolean {
  * 一行里是否夹着「判路由决策对象」（含 route_key + sub_query 的 JSON 片段）。
  *
  * <p>与 {@link looksLikeRouteMachineJson} 的分工：那个只认「整行就是一个 JSON」，
- * 这个认「JSON 被模型复述进正文中间」的情况——那同样是把内部分流数据打给了终端用户。
- * 只要同时出现 route_key / sub_query 两个决策字段就整行丢弃，普通业务文本不受影响。
+ * 这个认「JSON 被模型复述进正文中间」的情况。展示层应**抠掉决策片段、保留周围人话**，
+ * 不能整行丢弃——入口判定模型的思考常在同一行里顺口写出 `route_key` / `sub_query`，
+ * 整行丢掉会把真实推理一起清掉，入口块就再也没有「查看思考过程与工具调用」。
  *
  * @param line 原始一行文本
- * @return true 表示含决策对象，展示层应丢弃整行
+ * @return true 表示含决策对象字段，需要再做片段剥离
  */
 export function looksLikeRouteDecisionPayload(line: string): boolean {
   const text = line || ''
@@ -123,7 +124,125 @@ export function looksLikeRouteDecisionPayload(line: string): boolean {
 }
 
 /**
- * 正文脱敏：丢掉机器路由 JSON / 决策对象行，其余行只抹内部键后保留。
+ * 找到从 `start` 起配对的 `]` / `}`；括号不平衡时返回 -1。
+ *
+ * @param text  原文
+ * @param start 开括号下标（`[` 或 `{`）
+ * @return 闭括号下标；配不上为 -1
+ */
+function matchingBracketEnd(text: string, start: number): number {
+  const open = text[start]
+  const close = open === '[' ? ']' : '}'
+  let depth = 0
+  let inString = false
+  let escape = false
+  for (let index = start; index < text.length; index += 1) {
+    const ch = text[index]
+    if (inString) {
+      if (escape) {
+        escape = false
+      } else if (ch === '\\') {
+        escape = true
+      } else if (ch === '"') {
+        inString = false
+      }
+      continue
+    }
+    if (ch === '"') {
+      inString = true
+      continue
+    }
+    if (ch === open) {
+      depth += 1
+    } else if (ch === close) {
+      depth -= 1
+      if (depth === 0) {
+        return index
+      }
+    }
+  }
+  return -1
+}
+
+/**
+ * 从一行里抠掉可解析的路由决策 JSON 片段（`{…}` / `[…]`），保留周围人话。
+ *
+ * <p>只删 {@link looksLikeRouteMachineJson} 认得出的片段；普通业务 JSON 原样留下。
+ *
+ * @param line 可能夹着决策 JSON 的一行
+ * @return 去掉决策 JSON 后的文本（可能仍含 `route_key=` 散写，交给后续脱敏）
+ */
+export function stripEmbeddedRouteDecisionJson(line: string): string {
+  const source = line || ''
+  if (!source) {
+    return ''
+  }
+  let out = ''
+  let index = 0
+  while (index < source.length) {
+    const ch = source[index]
+    if (ch === '[' || ch === '{') {
+      const end = matchingBracketEnd(source, index)
+      if (end >= index) {
+        const chunk = source.slice(index, end + 1)
+        // 只有真·路由决策 JSON 才抠掉；其它对象 / 半截括号当普通字留下
+        if (looksLikeRouteMachineJson(chunk)) {
+          index = end + 1
+          continue
+        }
+      }
+    }
+    out += ch
+    index += 1
+  }
+  return out
+}
+
+/**
+ * 抹掉散写的 sub_query / subQuery 字段（与 {@link stripWorkbenchInternalKeys} 对 route_key 的口径对齐）。
+ *
+ * @param raw 已可能去过 JSON 片段的文本
+ * @return 不含 sub_query 键值的文本
+ */
+function stripSubQueryKeys(raw: string): string {
+  if (!raw) {
+    return ''
+  }
+  return raw
+    .replace(/"?(?:sub_query|subQuery)"?\s*[:=：]\s*"(?:[^"\\]|\\.)*"\s*,?/g, '')
+    .replace(/\b(?:sub_query|subQuery)\b\s*[:=：]\s*[^\s,;，；)\]}]+/g, '')
+    .replace(/\b(?:sub_query|subQuery)\b/g, '')
+    .replace(/,\s*([\]}])/g, '$1')
+    .replace(/\s{2,}/g, ' ')
+    .trim()
+}
+
+/**
+ * 一行思考 / 正文的展示脱敏：纯机器 JSON 整行丢；夹带决策 JSON 时只抠片段；再抹内部键。
+ *
+ * @param line 原始一行
+ * @return 可展示文本；没有可留内容时为空串
+ */
+export function sanitizeVisibleLine(line: string): string {
+  const raw = line || ''
+  if (!raw.trim()) {
+    return ''
+  }
+  // 整行就是决策 JSON：一个字都不留
+  if (looksLikeRouteMachineJson(raw.trim())) {
+    return ''
+  }
+  let text = raw
+  // 人话夹 JSON：抠掉决策对象，留下「先看看 … 再答」这类真实推理
+  if (looksLikeRouteDecisionPayload(text)) {
+    text = stripEmbeddedRouteDecisionJson(text)
+  }
+  text = stripSubQueryKeys(stripWorkbenchInternalKeys(text))
+  return text.trim()
+}
+
+/**
+ * 正文脱敏：丢掉纯机器路由 JSON 行，夹带决策 JSON 的行只抠片段，其余抹内部键后保留。
  *
  * <p>用在「气泡正文」这类最终对用户可见的位置：即使历史会话把决策 JSON 落进了
  * 助手正文块，或模型把 JSON 复述进回答里，也不会被打给用户。
@@ -139,8 +258,8 @@ export function stripRouteDecisionJson(raw: string): string {
   }
   return source
     .split('\n')
-    .filter((line) => !looksLikeRouteMachineJson(line) && !looksLikeRouteDecisionPayload(line))
-    .map((line) => stripWorkbenchInternalKeys(line))
+    .map((line) => sanitizeVisibleLine(line))
+    .filter((line) => line.length > 0)
     .join('\n')
     .trim()
 }

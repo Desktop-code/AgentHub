@@ -27,8 +27,19 @@ public final class ObsTraceScope {
     /** 已落库步骤 id → step_no，供 bindParent 写入 stack */
     private final ConcurrentHashMap<Long, String> stepNoById = new ConcurrentHashMap<>();
     private final ThreadLocal<ObsSpanStack> stacks = ThreadLocal.withInitial(ObsSpanStack::new);
-    /** 本 trace 最近一次成功打开的 LLM 行 id；Router 扇出前可读作判路由 LLM */
+    /**
+     * 本 trace 最近一次成功打开的 LLM 行 id。
+     * 并行外壳会互相覆盖它，扇出挂点不要读这个，改读 {@link #llmUnder(Long)}。
+     */
     private final AtomicReference<Long> lastLlmSpanId = new AtomicReference<>();
+    /** 与 {@link #lastLlmSpanId} 成对：那条 LLM 落库时的父 id，供按层保存 / 写回 */
+    private final AtomicReference<Long> lastLlmParentId = new AtomicReference<>();
+    /**
+     * 父步骤 id → 挂在它下面的最近一条 LLM。
+     * 为什么按父而不是按 trace：多问并行时工作流线程会改写全局最近 LLM，
+     * 内层专家必须仍能找到「父是本层 ROUTE」的那条，而不是入口判路由那条。
+     */
+    private final ConcurrentHashMap<Long, Long> llmByParent = new ConcurrentHashMap<>();
     /**
      * 工具调用 id → TOOL 行 id。
      * <p>为什么需要：知识库检索等工具执行在 {@code boundedElastic} 线程，拿到本次 TOOL 行 id
@@ -131,12 +142,60 @@ public final class ObsTraceScope {
 
     /**
      * 本 trace 最近一次成功打开的 LLM 行 id。
-     * Router 在判路由结束后、子 AGENT 扇出前读取，作为子挂点；无判路由 LLM（关键字短路等）为空。
+     * 扇出挂点请用 {@link #llmUnder(Long)}：并行时后开的 LLM 会覆盖本值。
      *
      * @return LLM 行主键；尚未开过 LLM 时为 null
      */
     public Long lastLlmSpanId() {
         return lastLlmSpanId.get();
+    }
+
+    /**
+     * 取挂在指定父步骤下的最近一条 LLM。
+     * 内层子专家只认「父是本层 ROUTE」的模型步；别的层后写入的 LLM 不会顶掉这一条。
+     *
+     * @param parentSpanId 本层 ROUTE（或其它容器）的 span id
+     * @return 该父下最近的 LLM id；没有或父为空时为 null
+     */
+    public Long llmUnder(Long parentSpanId) {
+        if (parentSpanId == null) {
+            return null;
+        }
+        return llmByParent.get(parentSpanId);
+    }
+
+    /**
+     * 记下当前全局 LLM 指针，供进入目标方案前保存、出来后写回。
+     * 不碰 {@link #llmByParent}：按父索引在嵌套期间仍要能查到外层判路由 LLM。
+     *
+     * @return 当时的 LLM id 与其父 id；都还没有时两个字段均为 null
+     */
+    public LlmCursor captureLlmCursor() {
+        return new LlmCursor(lastLlmSpanId.get(), lastLlmParentId.get());
+    }
+
+    /**
+     * 写回先前记下的全局 LLM 指针。传入 null 表示清掉，让内层在开出自己的模型步之前看不到外层。
+     *
+     * @param cursor {@link #captureLlmCursor()} 的结果；可空
+     */
+    public void restoreLlmCursor(LlmCursor cursor) {
+        if (cursor == null) {
+            lastLlmSpanId.set(null);
+            lastLlmParentId.set(null);
+            return;
+        }
+        lastLlmSpanId.set(cursor.spanId());
+        lastLlmParentId.set(cursor.parentId());
+    }
+
+    /**
+     * 一次全局 LLM 指针的快照。所属域：obs。
+     *
+     * @param spanId   LLM 行 id，可空
+     * @param parentId 该 LLM 落库时的父 id，可空
+     */
+    public record LlmCursor(Long spanId, Long parentId) {
     }
 
     /**
@@ -220,10 +279,16 @@ public final class ObsTraceScope {
             stack.rememberAgent(agentId);
         }
         Long owner = agentId != null ? agentId : stack.stepAgentId();
+        // 显式父优先；没传时与落库口径一致，用当前栈父（LLM/TOOL/RETRIEVE 会回落到它）
+        Long effectiveParent = parentId != null ? parentId : stack.parentId();
         Long id = recorder.openSpan(this, new SpanDraft(type, name, owner, parentId, inputText, parallelFanout));
-        // 仅成功落库的 LLM 计入，供 Router「先链后扇」挂子 AGENT
+        // 仅成功落库的 LLM 计入：全局指针给「按层保存」，按父索引给子专家挂点
         if (id != null && type == SpanType.LLM) {
             lastLlmSpanId.set(id);
+            lastLlmParentId.set(effectiveParent);
+            if (effectiveParent != null) {
+                llmByParent.put(effectiveParent, id);
+            }
         }
         // TOOL 行也留一个「最近一次」兜底：个别引擎事件不带 callId 时，工具内子步仍能挂上
         if (id != null && type == SpanType.TOOL) {

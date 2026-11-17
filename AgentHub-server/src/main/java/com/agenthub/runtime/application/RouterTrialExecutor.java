@@ -118,6 +118,15 @@ public class RouterTrialExecutor {
     private static final String MIGRATED_MA_NAME_SUFFIX = "（迁移）";
 
     /**
+     * 参与者一个字都没产出时的终态说明。
+     *
+     * <p>为什么要落成正文而不是直接 return：卡片已经因为 begin 建出来了，没有正文也没有结束标记，
+     * 前端只能一直显示「正在由「X」作答」直到整轮收尾。写一句明确说明，比让用户对着转圈猜更诚实，
+     * 也不会把这类块伪装成「已完成作答」。
+     */
+    private static final String EMPTY_CONCLUSION_NOTE = "本轮未产出正文（该步骤已结束）。";
+
+    /**
      * 本轮判定 / 汇总推理的暂存（线程级）。
      *
      * <p>为什么用线程级而不是一路加参数：判路由发生在 {@code choose} / {@code chooseOrdered}，
@@ -269,7 +278,8 @@ public class RouterTrialExecutor {
      * <p>{@code hint} 只影响判路由提示词与「强制命中」两个分支：
      * <ul>
      *   <li>传 {@code null}（调试 / 试跑）时行为与刀3 之前逐字节一致；</li>
-     *   <li>有沿用线路时只在提示词里说明「优先沿用」，判路由仍可改派；</li>
+     *   <li>有沿用线路时只在提示词里说明「优先沿用」。本轮选定后只说这一次分发，
+     *       不再追加「已将线路改派」去改已经说出的入口句；</li>
      *   <li>有强制线路且命中候选时跳过判路由；未命中则回落正常判路由并留一条可见说明。</li>
      * </ul>
      *
@@ -283,6 +293,22 @@ public class RouterTrialExecutor {
      */
     public RoutedTurn execute(AgentDef parent, MaRunSpec spec, String userText, String modelUser, long userId,
                               long sessionId, TrialProgress progress, RouteHint hint) {
+        // 顶层调用不传观测父：方案根与 judge 继续父为空
+        return execute(parent, spec, userText, modelUser, userId, sessionId, progress, hint, null);
+    }
+
+    /**
+     * 同 {@link #execute(AgentDef, MaRunSpec, String, String, long, long, TrialProgress, RouteHint)}，
+     * 并指定方案根的观测父。
+     *
+     * <p>只有 {@link #runMaTarget} 传入外壳 span。公开入口一律传 null，
+     * 避免顶层单方案的根被挂到别的步骤下面。
+     *
+     * @param schemeObsParent 嵌套时的外壳 span；顶层为 null
+     * @return 路由说明、分段、终答与粘性回写指令
+     */
+    private RoutedTurn execute(AgentDef parent, MaRunSpec spec, String userText, String modelUser, long userId,
+                               long sessionId, TrialProgress progress, RouteHint hint, Long schemeObsParent) {
         // 本轮推理暂存：进入时新建，退出恢复（嵌套方案内联同线程时不能把外层的打掉）
         TurnNotes previous = NOTES.get();
         TurnNotes notes = new TurnNotes();
@@ -294,10 +320,11 @@ public class RouterTrialExecutor {
         notes.leafChoice = LeafChoiceHolder.enabled();
         NOTES.set(notes);
         try {
-            RoutedTurn routed = executeScoped(parent, spec, userText, modelUser, userId, sessionId, progress, hint);
+            RoutedTurn routed = executeScoped(parent, spec, userText, modelUser, userId, sessionId, progress, hint,
+                    schemeObsParent);
             // 推理只补到返回值上供落库，路由结果与终答完全不受影响
             return routed.withNotes(notes.judgeReasoning.toString(), notes.conclusionName,
-                    notes.conclusionReasoning.toString());
+                    notes.conclusionReasoning.toString()).withGateway(notes.gateway);
         } finally {
             if (previous == null) {
                 NOTES.remove();
@@ -314,7 +341,8 @@ public class RouterTrialExecutor {
      * 执行语义（模板 → 判路由 → 子 Agent → 汇总）保持原样。
      */
     private RoutedTurn executeScoped(AgentDef parent, MaRunSpec spec, String userText, String modelUser,
-                                     long userId, long sessionId, TrialProgress progress, RouteHint hint) {
+                                     long userId, long sessionId, TrialProgress progress, RouteHint hint,
+                                     Long schemeObsParent) {
         EffectiveLimits parentLimits = limitResolver.resolve(parent);
         // 方案优先：模板与上下文策略以 ma_def.config_json 为准，避免执行时又读回 Agent 镜像
         AgentRuntimeConfig runtime = spec != null
@@ -326,18 +354,24 @@ public class RouterTrialExecutor {
         // 入口参与者「真正开始」：先于本次判路由的任何思考，前端据此立刻画出入口块。
         // 只在最外层推：嵌套方案已有自己的 scheme begin，不能再多一个同名的入口块。
         if (progress != null && MaNestedContext.depth() == 0) {
-            progress.beginParticipant(ParticipantView.gateway(
+            ParticipantView gateway = ParticipantView.gateway(
                     "gw-" + (rootId(parent) == null ? "ma-" + (spec == null ? "0" : spec.maId()) : rootId(parent)),
-                    rootName(parent, spec)));
+                    rootName(parent, spec));
+            progress.beginParticipant(gateway);
+            // 与 SSE 同一份身份，供时间线在入口思考之前落一行 participant
+            TurnNotes current = NOTES.get();
+            if (current != null) {
+                current.gateway = gateway;
+            }
         }
         if (scratch == null) {
             return executeRun(parent, spec, userText, modelUser, userId, sessionId, progress, runtime, parentLimits,
-                    hint);
+                    hint, schemeObsParent);
         }
         try {
             return ScratchContext.callAs(scratch, "", () ->
                     executeRun(parent, spec, userText, modelUser, userId, sessionId, progress, runtime, parentLimits,
-                            hint));
+                            hint, schemeObsParent));
         } finally {
             // 取消 / 异常同样走到这里：停止接受新写，已写入内容本轮内仍可读，下一轮直接消失
             scratch.close();
@@ -383,19 +417,32 @@ public class RouterTrialExecutor {
         RouterClock.assertBefore(deadlineNanos);
         ObsTraceScope trace = ObsTraceHolder.current();
         // 目标方案以自己为根：退出时要把父挂点还原，
-        // 否则本轮后续的汇总 / 投票 LLM 会挂到编排根而不是 ROUTE
+        // 否则本轮后续的汇总 / 投票 LLM 会挂到编排根而不是 ROUTE。
+        // previousParent 就是外壳 span（子执行开外壳后已 bind），嵌套方案根挂在它下面。
         Long previousParent = trace == null ? null : trace.implicitParent();
-        MaNestedContext.enter();
+        // 外层模型步先摘下来：内层没开 LLM 时不能顺着「最近一条」挂回入口 judge
+        ObsTraceScope.LlmCursor outerLlm = trace == null ? null : trace.captureLlmCursor();
+        if (trace != null) {
+            trace.restoreLlmCursor(null);
+        }
+        // 进入方案层时记下「这一层是哪个方案」：内层子专家的参与者 id 要带它，
+        // 否则两层方案都分同名 route_key 时会被 putIfAbsent 认成同一个人，第二张卡不出。
+        String schemeRouteKey = intent == null || intent.candidate() == null || intent.candidate().route() == null
+                ? "" : intent.candidate().route().getRouteKey();
+        MaNestedContext.enter(schemeRouteKey);
         try {
-            // parent 传 null：目标方案不需要任何 Agent 根，执行器按 spec 装配
-            RoutedTurn nested = execute(null, target, userText, modelUser, userId, sessionId, progress, null);
+            // parent 传 null：目标方案不需要任何 Agent 根，执行器按 spec 装配。
+            // 观测父传外壳：只有这一层嵌套才把方案根挂上去，顶层调用仍传 null。
+            RoutedTurn nested = execute(null, target, userText, modelUser, userId, sessionId, progress, null,
+                    previousParent);
             List<String> notices = new ArrayList<>();
             // 目标方案内部每一跳原样带出去：时间线按「方案 → 各子专家」逐块展示，
             // 不再压成一条「子编排内部：路由到…」的说明句（那会让参与者全部隐身）
             List<NestedRoute> children = new ArrayList<>();
             if (nested.segments() != null) {
                 for (RouteSegment segment : nested.segments()) {
-                    children.add(new NestedRoute(segment.routeLine(), segment.turn(), segment.error()));
+                    children.add(new NestedRoute(segment.routeLine(), segment.turn(), segment.error(),
+                            segment.participant()));
                 }
             }
             if (nested.notices() != null) {
@@ -406,6 +453,8 @@ public class RouterTrialExecutor {
         } finally {
             MaNestedContext.exit();
             if (trace != null) {
+                // 写回外层模型步，再把栈父还原到外壳；内层按父索引的 LLM 留在表里，不跟这次写回一起清掉
+                trace.restoreLlmCursor(outerLlm);
                 trace.bindParent(previousParent);
             }
         }
@@ -425,20 +474,25 @@ public class RouterTrialExecutor {
      * @param progress     可空
      * @param runtime      已归一化的运行配置
      * @param parentLimits 父墙钟与轮次上限
-     * @param hint         线路提示；可空（调试 / 试跑恒空）
+     * @param hint            线路提示；可空（调试 / 试跑恒空）
+     * @param schemeObsParent 方案根的观测父；顶层 null，嵌套时为外壳 span
      * @return 路由说明、分段与终答
      */
     private RoutedTurn executeRun(AgentDef parent, MaRunSpec spec, String userText, String modelUser, long userId,
                                   long sessionId, TrialProgress progress, AgentRuntimeConfig runtime,
-                                  EffectiveLimits parentLimits, RouteHint hint) {
-        // 方案以自己为根：开一个只读「编排根」步骤，泳道才有根，attrs 才能带 ma.def_id / code / template
+                                  EffectiveLimits parentLimits, RouteHint hint, Long schemeObsParent) {
+        // 方案以自己为根：开一个只读「编排根」步骤，泳道才有根，attrs 才能带 ma.def_id / code / template。
+        // 父只在嵌套时指向外壳；顶层 schemeObsParent 为 null，根继续父为空。
         ObsTraceScope trace = ObsTraceHolder.current();
         Long maRootSpan = null;
         if (trace != null && spec != null) {
-            maRootSpan = trace.open(SpanType.AGENT, RouterObs.maRootName(spec), null, null, null);
+            maRootSpan = trace.open(SpanType.AGENT, RouterObs.maRootName(spec), null, schemeObsParent, null);
             trace.bindParent(maRootSpan);
         }
         RuntimeException failure = null;
+        // 只有入口智能网关把 judge 挂到网关根上。普通单方案保持父空，退出时还原，不把开关留在内层。
+        boolean previousHang = RouteSpan.judgeHangsOnRoot();
+        RouteSpan.judgeHangsOnRoot(isEntryRouter(spec));
         try {
             return executeTemplates(parent, spec, userText, modelUser, userId, sessionId, progress, runtime,
                     parentLimits, hint);
@@ -447,6 +501,7 @@ public class RouterTrialExecutor {
             failure = ex;
             throw ex;
         } finally {
+            RouteSpan.judgeHangsOnRoot(previousHang);
             RouterObs.closeMaRoot(trace, maRootSpan, spec, failure);
         }
     }
@@ -501,8 +556,9 @@ public class RouterTrialExecutor {
             if (!choice.multiQuestion() && !runtime.multiIntentOn() && intents.size() > 1) {
                 intents = List.of(intents.get(0));
             }
-            // 改派 / 手动换线的可见说明：进 SYSTEM 事件（思考区），不打断正文
-            List<String> routeNotices = routeNotices(choice, hint, candidates, intents);
+            // 手动换线 / 强制目标失效的可见说明：进 SYSTEM 事件，不打断正文。
+            // 沿用线路与本轮选择不一致时不再写「已将线路改派」：入口句已经按本轮选择说出，再补一句就是改口。
+            List<String> routeNotices = routeNotices(choice, intents);
             List<String> routeLines = new ArrayList<>();
             for (RoutedIntent intent : intents) {
                 routeLines.add(RouterTexts.routeSummary(intent.candidate(), intent.reason()));
@@ -512,29 +568,18 @@ public class RouterTrialExecutor {
                             item.candidate().route().getRouteKey() == null ? "" : item.candidate().route().getRouteKey(),
                             item.subQuery()))
                     .toList());
-            // 多意图 / 多问：先推完整决策块；各子「路由到」改在子开跑时推，避免收束后只剩一条糊在一起的摘要
+            // 多意图 / 多问：只推决策块。各子「路由到」在子开跑的 begin 时再推，位置由 begin 先后决定
             if (progress != null) {
                 if (intents.size() >= 2) {
+                    /*
+                     * 决策行只告诉入口「拆成了几问、交给谁」。
+                     * 不再在子任务开始前按工作流优先预推无身份的「路由到」：
+                     * 那些行会先占块位，begin 到达后只能原位补身份，卡片就停在预推的位置上。
+                     * 块序只认各自 begin 帧的 depth、kind 和先后。
+                     */
                     progress.route(choice.multiQuestion()
                             ? RouterTexts.questionDecisionLine(intents)
                             : RouterTexts.decisionLine(intents));
-                    /*
-                     * 一条消息多个问题：决策块之后按**块位**先把各问的「路由到」各推一次。
-                     *
-                     * 为什么必须由这里推：子任务在线程池里并行开跑，各自的「路由到」谁先到谁先出块，
-                     * 位置就被「谁先出 token」决定了。这里同步按块位推一遍，消息流的第一层块序当场定下来：
-                     * 工作流卡是固定黑盒整卡，固定排在方案与专家之前；其余按提问顺序。
-                     *
-                     * 为什么这个顺序就是最终的块位：子开跑时再推同一条只是原句补全（同名同 route_key 复用泳道），
-                     * 已有的块不会因此换位；落库回放也按同一块位投影，流式与回放是同一个顺序。
-                     *
-                     * 只对「一条消息多个问题」这样做：普通多意图并行保持原来「子开跑时再推」的口径。
-                     */
-                    if (choice.multiQuestion()) {
-                        for (String line : displayOrderRouteLines(intents, routeLines)) {
-                            progress.route(line);
-                        }
-                    }
                 } else if (!routeLines.isEmpty()) {
                     progress.route(routeLines.get(0));
                 }
@@ -546,6 +591,12 @@ public class RouterTrialExecutor {
             routeFields.put("ma.context", runtime.maContextPolicyOrDefault());
             // 绑根没有合成根步骤：方案标识补在这里，两条入口都能按 ma.def_id 检索
             routeFields.putAll(RouterObs.maAttrs(spec));
+            /*
+             * 多问拆分的只读打点：只写「是否拆分 / 问题条数 / 去重目标数」三个计数，
+             * 不写问题正文与目标名，也不改变分流结果。块序不靠这几个数重排。
+             */
+            RouterObs.questionAttrs(routeFields, choice.multiQuestion(), intents.size(),
+                    RouterTexts.distinctLabels(intents).size());
             // 共享草稿只写键数 / 冲突次数（有则显示），不写任何 key / value 正文
             routeFields.putAll(RouterObs.scratchAttrs());
             route.ok(String.join("；", routeLines), decisionJson,
@@ -554,22 +605,26 @@ public class RouterTrialExecutor {
                             : "多意图路由×" + intents.size(),
                     routeFields);
 
-            // 多子或 SUMMARIZE / VOTE：子侧仍推 tool/reasoning；屏蔽子 assistant，
-            // 等齐后由汇总那一步统一出正文（SUMMARIZE 已是流式推送，见 AnswerAggregator）。
-            // 一条消息里的多个问题是并列的不同请求：各自出正文，既不静音也不跨问汇总。
+            /*
+             * 多子 / SUMMARIZE / VOTE：子侧正文**照样按身份增量出字**（见 childBodyOutlet）。
+             * 旧实现把每个子的 assistant 整段静音、等该子结束才补一次，页面就是
+             * 「泳道转很久 → 各子同时冒出整段」。前端早已按 participantId 分块，
+             * 交错增量不会串块，所以这里不再压住正文。
+             * 仍然要压的只有选项块：chips 必须挂在真正对用户说话的那一段下面。
+             */
             boolean multiQuestion = choice.multiQuestion();
-            boolean muteChildAssistant = !multiQuestion && (intents.size() > 1
+            boolean bodyDeferred = !multiQuestion && (intents.size() > 1
                     || runtime.answerModeEnum() == RouterAnswerMode.SUMMARIZE
-                    // VOTE 也要等投票结论出来才能推终答，不能让子正文先流出去
+                    // VOTE 的终答是投票结论，子正文只作为各自的作答展示
                     || runtime.answerModeEnum() == RouterAnswerMode.VOTE);
             // 路由列表≥2 强制隔离上下文；单意图继承父历史（兼容追问）
             boolean isolateChild = intents.size() >= 2;
-            TrialProgress childProgress = muteChildAssistant ? muteAssistant(progress, true) : progress;
+            TrialProgress childProgress = childBodyOutlet(progress, true);
             // 先链后扇：子 AGENT 挂判路由 LLM，禁止挂 ROUTE/根；无 LLM 时退 ROUTE
             Long childParent = ChildRunner.childAgentParent(trace, route.id());
             // 选项块只给「单专家」：多意图并行时每个子都抛一组选项会让用户无从拍板；
-            // 子正文被静音（汇总 / 投票）时同样不开——chips 必须挂在真正对用户说话的那一段下面
-            boolean leafChoice = !multiQuestion && intents.size() == 1 && !muteChildAssistant && notesLeafChoice();
+            // 汇总 / 投票时同样不开——chips 必须挂在真正对用户说话的那一段下面
+            boolean leafChoice = !multiQuestion && intents.size() == 1 && !bodyDeferred && notesLeafChoice();
             List<ChildOutcome> outcomes = children.runChildren(parent, intents, modelUser, userText, userId, sessionId,
                     deadlineNanos, childProgress, trace, childParent, isolateChild, leafChoice);
             // 路由侧说明先写：换线 / 改派要排在本轮子结果之前，时间线顺序才符合因果
@@ -580,9 +635,7 @@ public class RouterTrialExecutor {
                 notices.addAll(outcome.notices());
                 String line = i < routeLines.size() ? routeLines.get(i)
                         : RouterTexts.routeSummary(outcome.intent().candidate(), outcome.intent().reason());
-                segments.add(new RouteSegment(line, outcome.turn(), outcome.error(), outcome.children(),
-                        outcome.reasoning(), outcome.workflow(), outcome.conclusionName(),
-                        outcome.conclusionReasoning()));
+                segments.add(ranSegment(outcome, line));
             }
             /*
              * 未允许被编排调用的子不参与判路由，但必须在时间线留「已跳过」：
@@ -593,7 +646,7 @@ public class RouterTrialExecutor {
                 segments.add(new RouteSegment(blocked.intent().routeLine(), null, null));
             }
             AggregateOutcome aggregate = multiQuestion
-                    ? answers.separateAnswers(outcomes)
+                    ? answers.separateAnswers(rootName(parent, spec), outcomes, progress)
                     : answers.finishAnswer(parent, spec, parentLimits, runtime, userText, outcomes, intents,
                             userId, sessionId, deadlineNanos, progress, trace, route.id());
             // 投票结论也要进时间线：winner 一行 + 降级 / 跳过投票的中文说明
@@ -683,11 +736,8 @@ public class RouterTrialExecutor {
                                     : item.candidate().route().getRouteKey(),
                             item.subQuery()))
                     .toList());
-            // 多子或 SUMMARIZE / VOTE 时屏蔽子 assistant，等齐后再出终答（与判路由路径同口径）
-            boolean mute = intents.size() > 1
-                    || runtime.answerModeEnum() == RouterAnswerMode.SUMMARIZE
-                    || runtime.answerModeEnum() == RouterAnswerMode.VOTE;
-            TrialProgress childProgress = mute ? muteAssistant(progress, true) : progress;
+            // 多子或 SUMMARIZE / VOTE：正文仍按身份增量出字，等齐后再由汇总那一步收口终答
+            TrialProgress childProgress = childBodyOutlet(progress, true);
             List<ChildOutcome> outcomes = parallel
                     ? children.runChildren(parent, intents, modelUser, userText, userId, sessionId, deadlineNanos,
                     childProgress, trace, route.id(),
@@ -712,9 +762,7 @@ public class RouterTrialExecutor {
             for (ChildOutcome outcome : all) {
                 notices.addAll(outcome.notices());
                 // 跳过不是失败：只留「已跳过」路由行，不写成子 Agent 失败
-                segments.add(new RouteSegment(outcome.intent().routeLine(), outcome.turn(),
-                        outcome.skipped() ? null : outcome.error(), outcome.children(), outcome.reasoning(),
-                        outcome.workflow(), outcome.conclusionName(), outcome.conclusionReasoning()));
+                segments.add(ranSegment(outcome, outcome.intent().routeLine()));
             }
             /*
              * 未允许被编排调用的子：只追加路由行 + notice，不进 all，
@@ -814,8 +862,8 @@ public class RouterTrialExecutor {
                                     : item.candidate().route().getRouteKey(),
                             item.subQuery()))
                     .toList());
-            // 多子竞争必然多段正文：静音 token，结束时按参与者各推一次结论，不再额外推一份赢家重影
-            TrialProgress childProgress = muteAssistant(progress, true);
+            // 参赛者各按身份增量出字；收尾只推赢家那条时不把同一段正文再贴一次
+            TrialProgress childProgress = childBodyOutlet(progress, true);
             List<ChildOutcome> outcomes = children.runChildren(parent, intents, modelUser, userText, userId, sessionId,
                     deadlineNanos, childProgress, trace, route.id(),
                     // 同题竞争必须隔离：子只看用户原问，互相不可见，保证比较公平
@@ -848,8 +896,7 @@ public class RouterTrialExecutor {
                 String line = outcome == pick.outcome()
                         ? outcome.intent().routeLine() + " · ★ 选中"
                         : outcome.intent().routeLine();
-                segments.add(new RouteSegment(line, outcome.turn(), outcome.skipped() ? null : outcome.error(),
-                        outcome.children()).withWorkflow(outcome.workflow()));
+                segments.add(ranSegment(outcome, line));
             }
             for (RoutedIntent skip : skipped) {
                 segments.add(new RouteSegment(skip.routeLine(), null, null));
@@ -1167,11 +1214,8 @@ public class RouterTrialExecutor {
                 progress.route(RouterTexts.decisionLine(intents));
             }
             // 3) 串行 FANOUT：复用固定串行实现，前置摘要 / 部分失败继续 / P&E 冒泡一并继承
-            // 多子或 VOTE 时同样屏蔽子正文：投票结论出来前不能让某一路先流出去
-            boolean mute = intents.size() > 1
-                    || runtime.answerModeEnum() == RouterAnswerMode.SUMMARIZE
-                    || runtime.answerModeEnum() == RouterAnswerMode.VOTE;
-            TrialProgress childProgress = mute ? muteAssistant(progress, true) : progress;
+            // 多子 / VOTE 同样按身份增量出字：投票结论只在收尾追加，不压住各路作答
+            TrialProgress childProgress = childBodyOutlet(progress, true);
             List<ChildOutcome> outcomes = children.runFixedSequence(parent, modelUser, userText, userId, sessionId,
                     deadlineNanos, childProgress, trace, ChildRunner.childAgentParent(trace, route.id()), intents, runtime);
             // 所有执行步都没产出正文：整次 FAIL，不拿占位段假装成功
@@ -1189,9 +1233,7 @@ public class RouterTrialExecutor {
             for (ChildOutcome outcome : all) {
                 notices.addAll(outcome.notices());
                 // 跳过不是失败：只留「已跳过」行，不写成子 Agent 失败
-                segments.add(new RouteSegment(outcome.intent().routeLine(), outcome.turn(),
-                        outcome.skipped() ? null : outcome.error(), outcome.children(), outcome.reasoning(),
-                        outcome.workflow(), outcome.conclusionName(), outcome.conclusionReasoning()));
+                segments.add(ranSegment(outcome, outcome.intent().routeLine()));
             }
             /*
              * 未获允许的子不参与判路由，但必须在时间线留「已跳过」：
@@ -1250,7 +1292,7 @@ public class RouterTrialExecutor {
         RouteSpan route = RouteSpan.open(trace, "critic-loop", rootId(parent));
         // 评审环的所有阶段都静音 assistant：初稿若直接流出，REVISE 后会变成「两版答复」拼在时间线上
         // 评审环不按参与者分块交结论：仍只在收尾推一版执行稿，避免和终稿叠成两段
-        TrialProgress stageProgress = muteAssistant(progress, false);
+        TrialProgress stageProgress = childBodyOutlet(progress, false);
         List<RouteSegment> segments = new ArrayList<>();
         List<String> notices = new ArrayList<>();
         List<ChildOutcome> stages = new ArrayList<>();
@@ -1686,6 +1728,24 @@ public class RouterTrialExecutor {
      * @param notices   SYSTEM 说明收集器
      * @param aggregate 汇总结果
      */
+    /**
+     * 真正跑过的子段：带上与 SSE begin 相同的身份，供时间线在路由行之前落 participant。
+     *
+     * <p>跳过的子没有 begin，身份留空，避免回放多出一张没开跑的卡。
+     *
+     * @param outcome 子结果
+     * @param line    路由行
+     * @return 分段
+     */
+    private static RouteSegment ranSegment(ChildOutcome outcome, String line) {
+        ParticipantView who = outcome != null && !outcome.skipped()
+                ? ChildRunner.viewOf(outcome.intent()) : null;
+        return new RouteSegment(line, outcome.turn(),
+                outcome.skipped() ? null : outcome.error(), outcome.children(), outcome.reasoning(),
+                outcome.workflow(), outcome.conclusionName(), outcome.conclusionReasoning())
+                .withParticipant(who);
+    }
+
     private void applyAggregate(List<RouteSegment> segments, List<String> notices, AggregateOutcome aggregate) {
         notices.addAll(aggregate.notices());
         int winner = aggregate.winnerIndex();
@@ -1694,7 +1754,8 @@ public class RouterTrialExecutor {
             RouteSegment old = segments.get(winner);
             segments.set(winner, new RouteSegment(
                     (old.routeLine() == null ? "" : old.routeLine()) + " · ★ 选中", old.turn(), old.error(),
-                    old.children(), old.reasoning()).withWorkflow(old.workflow()));
+                    old.children(), old.reasoning()).withWorkflow(old.workflow())
+                    .withParticipant(old.participant()));
         }
         if (aggregate.segmentLine() != null) {
             segments.add(new RouteSegment(aggregate.segmentLine(), null, null));
@@ -1710,16 +1771,34 @@ public class RouterTrialExecutor {
     }
 
     /**
-     * 并行 / 多子执行时丢掉 assistant 增量，避免多子正文交错；route/tool/reasoning 仍可见。
+     * 子正文出口：直播时按身份转发正文增量，收尾只补「这一段还没流过」的结论。
      *
-     * @param progress           下游进度；可空
-     * @param deliverConclusions true 时在参与者结束补推整段成文结论（按路由行钉住）；
-     *                           评审环传 false，避免和收尾终稿叠成两段
+     * <p>为什么不再整段静音：旧实现把多子 / SUMMARIZE / VOTE 下每个子的 {@code assistant}
+     * 全部丢掉，等该子结束才补一次整段。页面表现就是「泳道转很久 → 所有子专家同一拍冒出整段」，
+     * 直播期间一个字都没有。前端早已按 {@code participantId} 分块（同一位参与者才合并），
+     * 交错到达的增量会被切回各自分块，因此可以边生成边推。
+     *
+     * <p>不重影：收尾的 {@link TrialProgress#deliverParticipantConclusion(String, String)}
+     * 只在「这一位一个增量都没推过」时才整段补（模型没走流式、或子只产出了工具步）。
+     * 判定按参与者 id 记，并按线程保存当前归属——并行子各在各自线程上推，互不串味。
+     *
+     * @param progress 下游进度；可空（窄测 / 不展示进度）
+     * @param liveBody true 表示转发正文增量（子专家边跑边出字）；
+     *                 false 表示仍然整段静音（评审环：初稿若流出，回修后会变成两版答复）
      */
-    private TrialProgress muteAssistant(TrialProgress progress, boolean deliverConclusions) {
+    private TrialProgress childBodyOutlet(TrialProgress progress, boolean liveBody) {
         if (progress == null) {
             return null;
         }
+        /*
+         * 当前归属 + 已出过正文的参与者。归属用 ThreadLocal：participantBound 保证
+         * 「先 attribute 再转发」且与增量同线程顺序执行；集合用并发实现是因为并行子
+         * 会在多个线程上同时登记。
+         */
+        ThreadLocal<String> current = new ThreadLocal<>();
+        java.util.Set<String> streamed = java.util.concurrent.ConcurrentHashMap.newKeySet();
+        // 本线程上这一位是否已经把正文推出去过：收尾据此决定要不要整段补
+        ThreadLocal<Boolean> bodyStreamed = ThreadLocal.withInitial(() -> Boolean.FALSE);
         return new TrialProgress() {
             @Override
             public void phase(String phase) {
@@ -1731,15 +1810,18 @@ public class RouterTrialExecutor {
                 progress.route(summary);
             }
 
-            /** 参与者开始必须原样透传：静音的是正文，不是分块信号。 */
+            /** 参与者开始必须原样透传：这里只是正文出口，不是分块信号。 */
             @Override
             public void beginParticipant(ParticipantView participant) {
+                // 换了一位：本线程的「已出正文」重新判定，避免串到上一位的结论去
+                bodyStreamed.set(Boolean.FALSE);
                 progress.beginParticipant(participant);
             }
 
-            /** 归属切换同样透传：否则子专家增量会落到上一位名下。 */
+            /** 归属切换同样透传，同时记下本线程当前归属，供收尾判重影。 */
             @Override
             public void attributeParticipant(String participantId) {
+                current.set(participantId == null ? "" : participantId);
                 progress.attributeParticipant(participantId);
             }
 
@@ -1749,7 +1831,7 @@ public class RouterTrialExecutor {
             }
 
             /**
-             * 归属刚推出去那条 route 的思考：静音只针对助手正文，推理必须透传；
+             * 归属刚推出去那条 route 的思考：正文出口只压 / 放正文，推理必须透传；
              * 用 pinned 通道才不会被下游的泳道包装器再重推一次泳道路由。
              */
             @Override
@@ -1768,27 +1850,61 @@ public class RouterTrialExecutor {
                 progress.tool(name, arguments, result, success);
             }
 
+            /**
+             * 正文增量：直播路径按身份原样转发，并登记「这一位已经出过字」。
+             *
+             * <p>静音路径（评审环）仍然丢掉：初稿流出后回修，时间线上会留下两版答复。
+             */
             @Override
             public void assistant(String delta) {
-                // token 增量静音：结论改由 deliverParticipantConclusion 按参与者整段交
+                if (delta == null || delta.isEmpty() || !liveBody) {
+                    return;
+                }
+                String id = current.get();
+                if (id != null && !id.isBlank()) {
+                    streamed.add(id);
+                }
+                bodyStreamed.set(Boolean.TRUE);
+                progress.assistant(delta);
             }
 
             /**
-             * 参与者结束时的整段结论。先钉路由行，正文才能归到这个名字下，而不是并进上一位。
+             * 参与者结束时的整段结论：已经按增量流过的**不重复补**，否则同一段正文出现两次。
+             * 只有本线程这一位一个字都没流过（非流式模型 / 只有工具步 / 被撞限打断）才整段补。
+             *
+             * <p><b>空结论也要收口</b>：调用方现在对空正文也会调用本方法。一个字都没有时
+             * 不能直接 return——否则这张卡既没有正文、也没有结束标记，前端只能等整轮 done，
+             * 表现就是「一直转圈，汇总落屏时前面的空壳才一起闪现」。这里补一句明确的终态说明。
              */
             @Override
             public void deliverParticipantConclusion(String routeLine, String text) {
-                if (!deliverConclusions || text == null || text.isBlank()) {
+                if (!liveBody) {
+                    // 评审环等静音口径不变：不补正文，也不在这里造终态说明
+                    return;
+                }
+                String id = current.get();
+                boolean alreadyStreamed = Boolean.TRUE.equals(bodyStreamed.get())
+                        || (id != null && !id.isBlank() && streamed.contains(id));
+                if (alreadyStreamed) {
                     return;
                 }
                 if (routeLine != null && !routeLine.isBlank()) {
                     progress.route(routeLine);
                 }
-                progress.assistant(text);
+                String body = text == null || text.isBlank() ? EMPTY_CONCLUSION_NOTE : text.trim();
+                progress.assistant(body);
             }
 
             /**
-             * 内层方案要能写出子结论和汇总结论，不能再套一层外层静音。
+             * 参与者终态原样透传：这里只压正文，不压「这一步结束了」这个事实。
+             */
+            @Override
+            public void endParticipant(ParticipantView participant, String state, String note) {
+                progress.endParticipant(participant, state, note);
+            }
+
+            /**
+             * 内层方案要能写出子结论和汇总结论，不能再套一层外层正文出口。
              */
             @Override
             public TrialProgress conclusionChannel() {
@@ -1796,7 +1912,7 @@ public class RouterTrialExecutor {
             }
 
             /**
-             * 产物必须原样透传：静音的是助手正文，不是文件生成。
+             * 产物必须原样透传：这里压的是正文，不是文件生成。
              * 漏掉这个覆写会让并行 / 汇总路径下的下载卡片凭空消失（默认实现是空操作）。
              */
             @Override
@@ -1822,7 +1938,7 @@ public class RouterTrialExecutor {
             }
 
             /**
-             * 工作流执行卡片必须原样透传：静音的是「并行子正文」，不是这张卡片本身。
+             * 工作流执行卡片必须原样透传：这里压的是「并行子正文」，不是这张卡片本身。
              * 漏掉这个覆写会让多意图 / 汇总轮里的工作流节点时间轴完全不出现。
              */
             @Override
@@ -2377,43 +2493,27 @@ public class RouterTrialExecutor {
     }
 
     /**
-     * 线路类可见说明：手动换线 / Router 改派 / 强制目标失效。
+     * 线路类可见说明：手动换线 / 强制目标失效。
      *
      * <p>只写用户能理解的中文与候选展示名，不暴露 route_key；
      * 这些说明会落成 SYSTEM 事件（思考区），不打断正文。
+     * 沿用线路与本轮选择不同时不写「已将线路改派」：入口路由行已经是本轮的唯一分发，
+     * 再补一条从旧线路指向新线路的说明，页面上就是说完又改口。
      *
-     * @param choice     判路由结果
-     * @param hint       本轮线路提示；可空
-     * @param candidates 可用候选（用于把旧键翻译成展示名）
-     * @param intents    最终执行的意图（已被多意图开关截断）
+     * @param choice  判路由结果
+     * @param intents 最终执行的意图（已被多意图开关截断）
      * @return 中文说明；不需要说明时为空列表
      */
-    private List<String> routeNotices(RoutedChoice choice, RouteHint hint, List<Candidate> candidates,
-                                      List<RoutedIntent> intents) {
+    private List<String> routeNotices(RoutedChoice choice, List<RoutedIntent> intents) {
         List<String> notices = new ArrayList<>();
         if (choice.forceMissed()) {
             notices.add("手动换线的目标线路已停用或不存在，本轮改由 Router 重新判定");
         }
-        if (intents.isEmpty()) {
+        if (intents.isEmpty() || !choice.manual()) {
             return notices;
         }
-        String chosen = intents.get(0).candidate().route().getRouteKey();
-        if (choice.manual()) {
-            notices.add("手动换线：本轮按你选择的线路「" + childLabel(intents.get(0).candidate().agent())
-                    + "」执行，未走判路由");
-            return notices;
-        }
-        // 改派只对单意图有意义：多意图没有「一条主线路」，本轮会清空粘性
-        if (hint == null || hint.forceRouteKey() != null || intents.size() >= 2) {
-            return notices;
-        }
-        String stickyKey = hint.stickyRouteKey();
-        if (stickyKey == null || chosen == null || stickyKey.trim().equalsIgnoreCase(chosen.trim())) {
-            return notices;
-        }
-        Candidate before = byRouteKey(candidates, stickyKey);
-        String from = before == null ? "原线路" : childLabel(before.agent());
-        notices.add("已将线路改派：" + from + " → " + childLabel(intents.get(0).candidate().agent()));
+        notices.add("手动换线：本轮按你选择的线路「" + childLabel(intents.get(0).candidate().agent())
+                + "」执行，未走判路由");
         return notices;
     }
 
@@ -2601,7 +2701,9 @@ public class RouterTrialExecutor {
             prompt.append("本次做意图路由：用户可能含多个意图。输出 JSON 数组，每项 ")
                     .append("{\"route_key\":\"...\",\"sub_query\":\"切给该子的子问题\",\"reason\":\"一句话依据\"}。")
                     .append(reasonRule)
-                    .append("按重要性排序；同 route_key 只出现一次；最多 ").append(maxN).append(" 项。")
+                    .append("同一件事的先后步骤仍是一个意图，只派一位最合适的；")
+                    .append("只有用户明确提出互不包含的几件事时才输出多项。")
+                    .append("同 route_key 只出现一次；最多 ").append(maxN).append(" 项。")
                     .append("单意图则数组长度为 1。不要解释。都不合适时回复 []。\n");
         } else {
             prompt.append("本次只做路由选择：输出 JSON 数组且仅一项 ")
@@ -3041,56 +3143,6 @@ public class RouterTrialExecutor {
     }
 
     /**
-     * 一条消息多个问题时的「块位」路由行：工作流在前、其余按提问序。
-     *
-     * <p>为什么要在起子任务之前就把顺序定下来：各子并行开跑，谁先出 token 谁就先出块；
-     * 若任由到达顺序决定位置，工作流块会被方案挤到后面，跑完又被回放挪回前面。
-     * 这里按块位先各推一次，消息流的第一层位置当场钉死，后续再推同一条只是原句补全。
-     *
-     * <p>块位口径与前端投影一致：工作流目标（固定黑盒整卡）排最前，其余按提问顺序；
-     * 同组内保持 {@code intents} 的顺序。
-     *
-     * @param intents    本次派发的意图（已按提问顺序）
-     * @param routeLines 与 {@code intents} 等长的路由行
-     * @return 按块位排好的路由行
-     */
-    private static List<String> displayOrderRouteLines(List<RoutedIntent> intents, List<String> routeLines) {
-        List<String> ordered = new ArrayList<>(routeLines.size());
-        // 第一轮只收工作流目标：它是整卡黑盒，固定排在入口之后、方案与专家之前
-        for (int i = 0; i < intents.size() && i < routeLines.size(); i++) {
-            Candidate hit = intents.get(i).candidate();
-            if (hit != null && hit.isWorkflowTarget()) {
-                ordered.add(routeLineAt(intents, routeLines, i));
-            }
-        }
-        // 第二轮收其余目标：保持提问顺序，方案与它的子专家才能成组
-        for (int i = 0; i < intents.size() && i < routeLines.size(); i++) {
-            Candidate hit = intents.get(i).candidate();
-            if (hit == null || !hit.isWorkflowTarget()) {
-                ordered.add(routeLineAt(intents, routeLines, i));
-            }
-        }
-        return ordered;
-    }
-
-    /**
-     * 取某一路真正会推出去的那条路由行。
-     *
-     * <p>必须与 {@code ChildRunner} 的口径一致（意图自带 routeLine 时用它的，否则用拼好的摘要）：
-     * 这里先推的那条与子开跑时再推的那条是同一个字符串，前端才会按「同名同 route_key」原地补全，
-     * 而不是把它们当成两位参与者各出一块。
-     *
-     * @param intents    本次派发的意图
-     * @param routeLines 与 {@code intents} 等长的摘要行
-     * @param index      下标
-     * @return 该路的路由行
-     */
-    private static String routeLineAt(List<RoutedIntent> intents, List<String> routeLines, int index) {
-        String own = intents.get(index).routeLine();
-        return own != null ? own : routeLines.get(index);
-    }
-
-    /**
      * 汇总被挡下候选的具体原因（去重、保持出现顺序），供零可用时的中文失败文案。
      *
      * <p>把原因摊开而不是写「被编排开关或子运行模式」这种二选一模糊话术：
@@ -3228,7 +3280,8 @@ public class RouterTrialExecutor {
      */
     public record RoutedTurn(String summary, String decisionBlock, List<RouteSegment> segments,
                              List<String> notices, TrialTurn turn, RouteSticky sticky,
-                             String judgeReasoning, String conclusionName, String conclusionReasoning) {
+                             String judgeReasoning, String conclusionName, String conclusionReasoning,
+                             ParticipantView gateway) {
 
         /**
          * 兼容构造：多数模板分支不判路由、也没有真汇总。
@@ -3242,7 +3295,7 @@ public class RouterTrialExecutor {
          */
         public RoutedTurn(String summary, String decisionBlock, List<RouteSegment> segments,
                           List<String> notices, TrialTurn turn, RouteSticky sticky) {
-            this(summary, decisionBlock, segments, notices, turn, sticky, null, null, null);
+            this(summary, decisionBlock, segments, notices, turn, sticky, null, null, null, null);
         }
 
         /**
@@ -3257,7 +3310,22 @@ public class RouterTrialExecutor {
             return new RoutedTurn(summary, decisionBlock, segments, notices, turn, sticky,
                     judge == null || judge.isBlank() ? null : judge,
                     name == null || name.isBlank() ? null : name,
-                    conclusion == null || conclusion.isBlank() ? null : conclusion);
+                    conclusion == null || conclusion.isBlank() ? null : conclusion,
+                    gateway);
+        }
+
+        /**
+         * 挂上入口身份。嵌套方案没有入口 begin，传 null 时保持原值。
+         *
+         * @param who 入口参与者；可空
+         * @return 带入口身份的结果
+         */
+        public RoutedTurn withGateway(ParticipantView who) {
+            if (who == null) {
+                return this;
+            }
+            return new RoutedTurn(summary, decisionBlock, segments, notices, turn, sticky,
+                    judgeReasoning, conclusionName, conclusionReasoning, who);
         }
     }
 
@@ -3272,10 +3340,11 @@ public class RouterTrialExecutor {
      * @param workflow  工作流目标的执行卡片终态（只有 WORKFLOW 目标会非空）；落库后刷新仍能看卡片
      * @param conclusionName      目标方案自己的汇总结论名；没有真汇总时为 null
      * @param conclusionReasoning 目标方案汇总模型的推理；随「方案结论：X」一起落库
+     * @param participant         开跑时的身份；与 SSE begin 同一份。没开跑（跳过 / 说明行）为 null
      */
     public record RouteSegment(String routeLine, TrialTurn turn, String error, List<NestedRoute> children,
                                String reasoning, WorkflowRunView workflow, String conclusionName,
-                               String conclusionReasoning) {
+                               String conclusionReasoning, ParticipantView participant) {
 
         /**
          * 兼容构造：普通子 Agent / 工作流目标没有下一层可展开，也没有自己的判定推理。
@@ -3285,7 +3354,7 @@ public class RouterTrialExecutor {
          * @param error     失败摘要；成功为 null
          */
         public RouteSegment(String routeLine, TrialTurn turn, String error) {
-            this(routeLine, turn, error, List.of(), null, null, null, null);
+            this(routeLine, turn, error, List.of(), null, null, null, null, null);
         }
 
         /**
@@ -3297,7 +3366,7 @@ public class RouterTrialExecutor {
          * @param children  下一层跳
          */
         public RouteSegment(String routeLine, TrialTurn turn, String error, List<NestedRoute> children) {
-            this(routeLine, turn, error, children, null, null, null, null);
+            this(routeLine, turn, error, children, null, null, null, null, null);
         }
 
         /**
@@ -3311,7 +3380,7 @@ public class RouterTrialExecutor {
          */
         public RouteSegment(String routeLine, TrialTurn turn, String error, List<NestedRoute> children,
                             String reasoning) {
-            this(routeLine, turn, error, children, reasoning, null, null, null);
+            this(routeLine, turn, error, children, reasoning, null, null, null, null);
         }
 
         /**
@@ -3326,7 +3395,19 @@ public class RouterTrialExecutor {
          */
         public RouteSegment(String routeLine, TrialTurn turn, String error, List<NestedRoute> children,
                             String reasoning, WorkflowRunView workflow) {
-            this(routeLine, turn, error, children, reasoning, workflow, null, null);
+            this(routeLine, turn, error, children, reasoning, workflow, null, null, null);
+        }
+
+        /**
+         * 兼容构造：结论名已有、身份稍后用 {@link #withParticipant} 补。
+         *
+         * @param conclusionName      汇总结论名
+         * @param conclusionReasoning 汇总推理
+         */
+        public RouteSegment(String routeLine, TrialTurn turn, String error, List<NestedRoute> children,
+                            String reasoning, WorkflowRunView workflow, String conclusionName,
+                            String conclusionReasoning) {
+            this(routeLine, turn, error, children, reasoning, workflow, conclusionName, conclusionReasoning, null);
         }
 
         /**
@@ -3338,7 +3419,19 @@ public class RouterTrialExecutor {
         public RouteSegment withWorkflow(WorkflowRunView view) {
             return view == null ? this
                     : new RouteSegment(routeLine, turn, error, children, reasoning, view,
-                            conclusionName, conclusionReasoning);
+                            conclusionName, conclusionReasoning, participant);
+        }
+
+        /**
+         * 挂上开跑时的身份（不改其它字段）。
+         *
+         * @param who 参与者身份；null 时原样返回
+         * @return 带身份的段
+         */
+        public RouteSegment withParticipant(ParticipantView who) {
+            return who == null ? this
+                    : new RouteSegment(routeLine, turn, error, children, reasoning, workflow,
+                            conclusionName, conclusionReasoning, who);
         }
 
         /** 下一层跳防御性归一：null → 空表，写时间线时不必逐处判空。 */
@@ -3364,6 +3457,8 @@ public class RouterTrialExecutor {
         private final StringBuilder judgeReasoning = new StringBuilder();
         /** 真汇总记录名（方案名）；没有真汇总时为 null */
         private String conclusionName;
+        /** 最外层入口身份；嵌套方案不写 */
+        private ParticipantView gateway;
         /** 汇总模型这一轮的推理 */
         private final StringBuilder conclusionReasoning = new StringBuilder();
         /**

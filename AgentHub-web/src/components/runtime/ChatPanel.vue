@@ -272,30 +272,35 @@
             思考默认折叠在名称与内容框之间；全场「查看思考与路由轨迹」不放消息流，执行明细在右上角。
           -->
           <div v-if="isWorkbench && participantFeedOf(row.turn).length" class="wb-actors">
-            <template v-for="card in participantFeedOf(row.turn)" :key="card.key">
+            <WorkbenchActorTree :cards="participantFeedOf(row.turn)">
+              <template #default="{ card }">
               <section class="wb-actor" :class="'is-' + card.kind">
-                <span
-                  class="wb-actor-avatar"
-                  :class="{ 'is-workflow': isWorkflowCard(card) }"
-                  :style="participantAvatarStyle(card)"
-                  :title="card.title"
-                >
-                  <!-- 工作流卡固定黑色齿轮：不读 lookOf、不按名称换形象，与上方头像同一套方座 -->
-                  <WorkflowGearGlyph v-if="isWorkflowCard(card)" />
-                  <img
-                    v-else-if="card.look?.iconSrc"
-                    :src="card.look.iconSrc"
-                    :class="{ 'is-custom': card.look.custom }"
-                    alt=""
-                  />
-                  <AgentLookArt
-                    v-else-if="card.look?.art"
-                    :art="card.look.art"
-                    :color="card.look.initialColor"
-                  />
-                  <span v-else>{{ card.look?.initial || (card.title || '专').slice(0, 1) }}</span>
-                </span>
-                <div class="wb-actor-main">
+                <!--
+                  头像与名称、角标同一行并垂直居中（对照 temp/test.html / test-l.html）。
+                  下方思考 / 工具 / 气泡 / 工作流卡缩进到名称列，不把头像拉高到整块高度。
+                -->
+                <div class="wb-actor-topline">
+                  <span
+                    class="wb-actor-avatar"
+                    :class="{ 'is-workflow': isWorkflowCard(card), 'is-running': card.pending === true }"
+                    :style="participantAvatarStyle(card)"
+                    :title="card.title"
+                  >
+                    <!-- 工作流卡固定黑色齿轮：不读 lookOf、不按名称换形象，与上方头像同一套方座 -->
+                    <WorkflowGearGlyph v-if="isWorkflowCard(card)" />
+                    <img
+                      v-else-if="card.look?.iconSrc"
+                      :src="card.look.iconSrc"
+                      :class="{ 'is-custom': card.look.custom }"
+                      alt=""
+                    />
+                    <AgentLookArt
+                      v-else-if="card.look?.art"
+                      :art="card.look.art"
+                      :color="card.look.initialColor"
+                    />
+                    <span v-else>{{ card.look?.initial || (card.title || '专').slice(0, 1) }}</span>
+                  </span>
                   <div class="wb-actor-head">
                     <span class="wb-actor-name">{{ card.title }}</span>
                     <!--
@@ -308,9 +313,16 @@
                       :class="{ 'is-wf': !!card.workflow }"
                     >{{ actorRoleBadge(card) }}</span>
                   </div>
-                  <!-- 思考区：流式中展开（框内跟滚，整框约 88px），结束即收起为可点标题 -->
+                </div>
+                <div class="wb-actor-main">
+                  <!--
+                    有子卡或汇总时，外框就是这一张方案。思考、工具、正文留在框的上半，
+                    专家卡和汇总画在框内，不再跟方案并排，也不把专家名单再写一遍当正文。
+                  -->
+                  <div :class="{ 'wb-scheme-frame': schemeMembers(card).length > 0 }">
+                  <!-- 思考区：进行中先出这一行并保持可看；结束后默认收起，点左侧箭头再展开 -->
                   <div
-                    v-if="actorHasThink(card) || actorThinkingText(card)"
+                    v-if="showThoughtToggle(row.turn, card)"
                     class="wb-actor-thought"
                     :class="{
                       'is-streaming': actorThinkOpenByDefault(row.turn, card),
@@ -321,11 +333,15 @@
                       type="button"
                       class="wb-thought-head"
                       :aria-expanded="isOpen(row.turn, actorThinkPart(card), actorThinkOpenByDefault(row.turn, card))"
-                      :aria-label="isOpen(row.turn, actorThinkPart(card), actorThinkOpenByDefault(row.turn, card)) ? '收起思考过程与工具调用' : '查看思考过程与工具调用'"
+                      :aria-label="thoughtToggleLabel(row.turn, card)"
                       @click.stop.prevent="toggle(row.turn, actorThinkPart(card), actorThinkOpenByDefault(row.turn, card))"
                     >
-                      <span class="section-label">查看思考过程与工具调用</span>
-                      <span class="chevron" :class="{ open: isOpen(row.turn, actorThinkPart(card), actorThinkOpenByDefault(row.turn, card)) }" aria-hidden="true" />
+                      <span
+                        class="thought-chevron"
+                        :class="{ open: isOpen(row.turn, actorThinkPart(card), actorThinkOpenByDefault(row.turn, card)) }"
+                        aria-hidden="true"
+                      />
+                      <span class="section-label">{{ thoughtToggleLabel(row.turn, card) }}</span>
                     </button>
                     <div
                       class="wb-actor-fold"
@@ -357,18 +373,7 @@
                           <template v-else-if="pill.state === 'done'">✓</template>
                           <template v-else>✕</template>
                         </span>
-                        <span class="wb-tool-label">
-                          <template v-if="pill.state === 'running'">
-                            正在调用 {{ pill.name }}{{ pill.total > 1 ? `（${pill.total}）` : '' }}…
-                          </template>
-                          <template v-else-if="pill.state === 'done'">
-                            已调用 {{ pill.name }}{{ pill.total > 1 ? `（${pill.total} 次）` : '' }}
-                          </template>
-                          <template v-else>
-                            {{ pill.name }}：成功 {{ pill.ok }} / 失败 {{ pill.failed }}
-                            <template v-if="pill.firstError">· {{ pill.firstError }}</template>
-                          </template>
-                        </span>
+                        <span class="wb-tool-label">{{ toolPhrase(pill) }}</span>
                         <span v-if="pill.state !== 'running' && toolHasDetail(pill)" class="wb-tool-more">
                           {{ toolDetailOpen[pill.key] === true ? '收起' : '详情' }}
                         </span>
@@ -376,68 +381,120 @@
                       <pre
                         v-if="pill.state !== 'running' && toolDetailOpen[pill.key] === true && toolHasDetail(pill)"
                         class="wb-tool-detail"
-                      >{{ pill.detail }}</pre>
+                      >{{ presentToolDetail(pill.detail) }}</pre>
                     </template>
                   </div>
                   <!--
-                    工作流执行卡片（视觉以 temp/test-l.html 为准）：
-                    块内只有这一张卡，不再把工作流里的节点 / 专家拆成普通 Agent 块。
-                    时间轴只画真实节点（START / END 已在后端剔除），状态全部来自运行事件；
-                    跑完后展开产物区：有真实文件才出文件卡与下载，没有文件就放终答文本。
+                    工作流执行卡片（视觉以 temp/test-l.html 为准，过程/结果上下分栏）：
+                    块内只有这一张卡，内部子专家只出现在时间轴节点上，不在卡下再拆 Agent 块。
+                    上方过程区浅底；下方结果区实线分隔 +「结果」小标题；产物走 Markdown（保留换行）。
                   -->
-                  <div v-if="card.workflow" class="wf-card" :class="{ completed: wfCompleted(card.workflow) }">
-                    <div class="wf-card-header">
-                      <div class="wf-title">⚙️ 自动化执行流</div>
-                      <div class="wf-status" :class="wfStatusClass(card.workflow)">
-                        <span v-if="wfStatusClass(card.workflow) === 'is-running'" class="wf-spin" aria-hidden="true">⏳</span>
-                        {{ wfStatusText(card.workflow) }}
-                      </div>
-                    </div>
-                    <div v-if="card.workflow.nodes.length" class="wf-steps">
-                      <div
-                        v-for="(node, nodeIndex) in card.workflow.nodes"
-                        :key="node.code || ('wf-' + nodeIndex)"
-                        class="wf-step-item"
-                        :class="'is-' + wfStepState(node)"
-                      >
-                        <div class="wf-step-icon" :class="'is-' + wfStepState(node)">
-                          <span v-if="wfStepState(node) === 'active'" class="wf-spin" aria-hidden="true">⏳</span>
-                          <template v-else-if="wfStepState(node) === 'done'">✓</template>
-                          <template v-else-if="wfStepState(node) === 'failed'">✕</template>
-                          <template v-else>{{ nodeIndex + 1 }}</template>
+                  <div v-if="card.workflow" class="wf-card" :class="{ completed: wfCompleted(card.workflow, card.closed) }">
+                    <div class="wf-process">
+                      <div class="wf-card-header">
+                        <!-- 标题不加齿轮：左侧消息流头像已是固定黑齿轮，卡内再画会叠成两个 -->
+                        <div class="wf-title">自动化执行流</div>
+                        <div class="wf-status" :class="wfStatusClass(card.workflow, card.closed)">
+                          <!-- 运行中只画一个旋转沙漏；文案侧不再带 ⏳，避免两个沙漏叠在一起 -->
+                          <span v-if="wfStatusClass(card.workflow, card.closed) === 'is-running'" class="wf-spin" aria-hidden="true">⏳</span>
+                          {{ wfStatusText(card.workflow, card.closed) }}
                         </div>
-                        <div class="wf-step-main">
-                          <div class="wf-step-name">
-                            {{ node.name || node.code }}
-                            <span v-if="node.code && node.code !== node.name" class="wf-step-code">{{ node.code }}</span>
+                      </div>
+                      <div v-if="card.workflow.nodes.length" class="wf-steps">
+                        <div
+                          v-for="(node, nodeIndex) in card.workflow.nodes"
+                          :key="node.code || ('wf-' + nodeIndex)"
+                          class="wf-step-item"
+                          :class="'is-' + wfStepState(node)"
+                        >
+                          <div class="wf-step-icon" :class="'is-' + wfStepState(node)">
+                            <span v-if="wfStepState(node) === 'active'" class="wf-spin" aria-hidden="true">⏳</span>
+                            <template v-else-if="wfStepState(node) === 'done'">✓</template>
+                            <template v-else-if="wfStepState(node) === 'failed'">✕</template>
+                            <template v-else>{{ nodeIndex + 1 }}</template>
                           </div>
-                          <div class="wf-step-note">{{ wfStepNote(node) }}</div>
+                          <div class="wf-step-main">
+                            <div class="wf-step-name">
+                              {{ node.name || node.code }}
+                              <span v-if="node.code && node.code !== node.name" class="wf-step-code">{{ node.code }}</span>
+                            </div>
+                            <div class="wf-step-note">{{ wfStepNote(node) }}</div>
+                            <!-- 仅图上 TOOL 节点出胶囊；AGENT 内部工具未进快照，不编造 -->
+                            <div
+                              v-for="pill in wfNodeToolPills(node)"
+                              :key="pill.key"
+                              class="wb-tool-pills wf-step-tools"
+                            >
+                              <span class="wb-tool-pill" :class="'is-' + pill.state">
+                                <span class="wb-tool-icon" aria-hidden="true">
+                                  <template v-if="pill.state === 'running'">◠</template>
+                                  <template v-else-if="pill.state === 'done'">✓</template>
+                                  <template v-else>✕</template>
+                                </span>
+                                <span class="wb-tool-label">{{ workflowNodeToolLabel(pill, node.status, toolFaceName(pill.name, toolTitleByName)) }}</span>
+                              </span>
+                            </div>
+                          </div>
                         </div>
                       </div>
                     </div>
-                    <div v-if="wfOutputVisible(card)" class="wf-output" :class="{ 'is-text': !wfFilesOf(card).length }">
-                      <div class="output-tip">{{ wfOutputTip(card) }}</div>
-                      <FileCard v-for="file in wfFilesOf(card)" :key="file.fileName" :file="file" />
+                    <!--
+                      结果区：正文固定四行，框内滚动；移入后底部箭头展开。
+                      文件在正文下面单独一行，不进正文框。
+                    -->
+                    <div
+                      v-if="wfOutputVisible(row.turn, card)"
+                      class="wf-result"
+                      :class="{ 'is-text': !wfFilesOf(card).length }"
+                    >
+                      <div class="wf-result-title">{{ wfResultTitle(card) }}</div>
+                      <p v-if="wfOutputTip(card)" class="wf-result-tip">{{ wfOutputTip(card) }}</p>
                       <div
                         v-if="wfAnswerOf(card)"
-                        class="md answer wf-output-text"
-                        v-html="markdown(row.turn.key + ':wf:' + card.key, wfAnswerOf(card), false)"
-                      />
+                        class="wb-result-box"
+                      >
+                        <button
+                          type="button"
+                          class="wb-copy"
+                          aria-label="复制"
+                          @click.stop.prevent="copyResult(wfAnswerOf(card))"
+                        >
+                          <el-icon :size="14"><CopyDocument /></el-icon>
+                        </button>
+                        <div
+                          :ref="answerTextRef(row.turn.key, card.key)"
+                          class="md answer wf-output-text"
+                          :class="bodyTextClass(row.turn, card)"
+                          v-html="markdown(row.turn.key + ':wf:' + card.key, displayAnswer(wfAnswerOf(card)), row.turn.status === 'streaming' && card.pending)"
+                        />
+                        <button
+                          v-if="bodyExpandActionOf(row.turn, card) !== 'none'"
+                          type="button"
+                          class="wb-result-jump"
+                          :class="{ 'is-up': bodyExpandActionOf(row.turn, card) === 'collapse' }"
+                          :aria-label="bodyExpandActionOf(row.turn, card) === 'collapse' ? '收回四行' : '展开全文'"
+                          @click.stop.prevent="toggleMidBoxExpand(row.turn.key, card.key)"
+                        >
+                          <span class="wb-jump-chevron" aria-hidden="true" />
+                        </button>
+                      </div>
+                      <div v-if="wfFilesOf(card).length" class="wb-file-row">
+                        <FileCard v-for="file in wfFilesOf(card)" :key="file.fileName" :file="file" />
+                      </div>
                     </div>
                   </div>
                   <!--
-                    内容框（气泡）：每位参与者都有一块，与专家同一个 .answer-block。
-                    网关判定句 / 方案分流句是这一块的结果，写在框内，不做框外提示行。
-                    中间过程（流式中）框内最高四行并自动滚动跟看；最终结果不限高、完整展开。
+                    空终态说明在正文框外面。它不是正文，也不占四行框。
+                  -->
+                  <p v-if="card.terminalNote && !card.workflow" class="wb-terminal-note">{{ card.terminalNote }}</p>
+                  <!--
+                    内容框（气泡）：只放判定句、分流句、报错、正文和选项。
+                    正文默认四行，框内可滚；移入后底部箭头展开，再点收回。
+                    文件不进这个框，在框下面单独一行。
                   -->
                   <div
                     v-if="actorHasBubble(row.turn, card)"
-                    :ref="actorBoxRef(row.turn.key, card.key)"
                     class="answer-block"
-                    :class="{
-                      'is-mid-process': actorBoxMidProcess(row.turn, card),
-                      'is-expanded': midBoxExpanded[row.turn.key + ':' + card.key] === true
-                    }"
                   >
                     <p
                       v-for="(line, resultIndex) in actorResultLines(card)"
@@ -447,9 +504,33 @@
                     <p v-for="(err, errIndex) in card.errors" :key="'err-' + errIndex" class="wb-soft-error">{{ err }}</p>
                     <div
                       v-if="card.answer"
-                      class="md answer"
-                      v-html="markdown(row.turn.key + ':' + card.key, card.answer, row.turn.status === 'streaming' && card.pending)"
-                    />
+                      class="wb-result-box"
+                    >
+                      <button
+                        type="button"
+                        class="wb-copy"
+                        aria-label="复制"
+                        @click.stop.prevent="copyResult(card.answer)"
+                      >
+                        <el-icon :size="14"><CopyDocument /></el-icon>
+                      </button>
+                      <div
+                        :ref="answerTextRef(row.turn.key, card.key)"
+                        class="md answer"
+                        :class="bodyTextClass(row.turn, card)"
+                        v-html="markdown(row.turn.key + ':' + card.key, displayAnswer(card.answer), row.turn.status === 'streaming' && card.pending)"
+                      />
+                      <button
+                        v-if="bodyExpandActionOf(row.turn, card) !== 'none'"
+                        type="button"
+                        class="wb-result-jump"
+                        :class="{ 'is-up': bodyExpandActionOf(row.turn, card) === 'collapse' }"
+                        :aria-label="bodyExpandActionOf(row.turn, card) === 'collapse' ? '收回四行' : '展开全文'"
+                        @click.stop.prevent="toggleMidBoxExpand(row.turn.key, card.key)"
+                      >
+                        <span class="wb-jump-chevron" aria-hidden="true" />
+                      </button>
+                    </div>
                     <!--
                       可点选项：模型需要用户拍板时给的 chips（机器块已从正文里摘掉）。
                       只有「整轮最后一条助手消息」上的选项可点：历史轮次的选项已失效，
@@ -469,24 +550,16 @@
                         >{{ option.label }}</button>
                       </div>
                     </div>
+                  </div>
+                  <div v-if="!card.workflow && card.files.length" class="wb-file-row">
                     <FileCard v-for="file in card.files" :key="file.fileName" :file="file" />
                   </div>
-                  <!-- 四行装不下时给一句可点的展开入口：只展开这一块，不改其它参与者 -->
-                  <button
-                    v-if="midBoxNeedsExpand(row.turn.key, card.key)"
-                    type="button"
-                    class="wb-actor-more"
-                    @click.stop.prevent="toggleMidBoxExpand(row.turn.key, card.key)"
-                  >展开全文</button>
-                  <button
-                    v-else-if="actorBoxMidProcess(row.turn, card) && midBoxExpanded[row.turn.key + ':' + card.key] === true"
-                    type="button"
-                    class="wb-actor-more"
-                    @click.stop.prevent="toggleMidBoxExpand(row.turn.key, card.key)"
-                  >收起</button>
+                  <WorkbenchActorNest v-if="schemeMembers(card).length" :cards="schemeMembers(card)" />
+                  </div>
                 </div>
               </section>
-            </template>
+              </template>
+            </WorkbenchActorTree>
           </div>
 
           <!-- 调试皮肤：多路由按子 Agent 分块的原始时间线。工作台消息流不再放全场轨迹 -->
@@ -578,32 +651,8 @@
               </button>
               <pre v-show="isOpen(row.turn, VISION_KEY, false)" class="vision-body">{{ block.text }}</pre>
             </div>
-            <template v-else-if="block.kind === 'assistant' && !participantFeedHasActor(row.turn)">
-              <!-- 工作台：作答 Agent 的身份只跟着正文气泡走（气泡上方、面板之外），思考面板不套这层标题 -->
-              <div
-                v-if="isWorkbench && index === firstAssistantIndex(row.turn)"
-                class="wb-answer-head"
-              >
-                <span
-                  class="wb-answer-avatar"
-                  :style="assistantAvatarStyle(row.turn)"
-                  :title="assistantDisplayName(row.turn)"
-                >
-                  <img
-                    v-if="assistantLook(row.turn).iconSrc"
-                    :src="assistantLook(row.turn).iconSrc"
-                    :class="{ 'is-custom': assistantLook(row.turn).custom }"
-                    alt=""
-                  />
-                  <AgentLookArt
-                    v-else-if="assistantLook(row.turn).art"
-                    :art="assistantLook(row.turn).art!"
-                    :color="assistantLook(row.turn).initialColor"
-                  />
-                  <span v-else>{{ assistantLook(row.turn).initial }}</span>
-                </span>
-                <span class="msg-name">{{ assistantDisplayName(row.turn) }}</span>
-              </div>
+            <template v-else-if="block.kind === 'assistant' && showLooseAssistant(isWorkbench, participantFeedHasActor(row.turn))">
+              <!-- 工作台不走这条：正文只出现在参与者卡里。调试皮肤在还没有参与者卡时仍显示原文 -->
               <div class="answer-block">
               <!-- 工作台：隐藏朗读 ▷ 与「最终回答」黑话标题 -->
               <div v-if="!isWorkbench" class="answer-head">
@@ -831,7 +880,7 @@
  * 折叠默认展开，仅当用户点过标题才收起；终答出现也不自动收起。
  */
 import { computed, onBeforeUnmount, onErrorCaptured, onMounted, onUpdated, reactive, ref, watch } from 'vue'
-import { Microphone, Picture, Headset, VideoPlay, VideoPause, Loading, Close } from '@element-plus/icons-vue'
+import { Microphone, Picture, Headset, VideoPlay, VideoPause, Loading, Close, CopyDocument } from '@element-plus/icons-vue'
 import type {
   AssistantBlock,
   ChatTurn,
@@ -856,28 +905,44 @@ import {
 } from '@/components/runtime/trialMessages'
 import type { TurnSections } from '@/components/runtime/trialMessages'
 import ProcessTimeline from '@/components/runtime/ProcessTimeline.vue'
-import { buildParticipantFeed, feedWaitsForEntry } from '@/components/runtime/workbench/workbenchParticipantFeed'
+import { buildParticipantFeed, feedWaitsForEntry, isFinishedStatusShell, showLooseAssistant, visitParticipantCards } from '@/components/runtime/workbench/workbenchParticipantFeed'
+import { ParticipantFeedCache } from '@/components/runtime/workbench/workbenchFeedCache'
 import type {
   ParticipantCard,
   ParticipantChoiceOption
 } from '@/components/runtime/workbench/workbenchParticipantFeed'
-import { aggregateToolPills } from '@/components/runtime/workbench/workbenchToolPill'
-import { expertStatusLine, WORKFLOW_ROLE_LABEL } from '@/components/runtime/workbench/workbenchThinkTimeline'
+import { aggregateToolPills, maskToolCallNames, presentToolDetail, toolFaceName } from '@/components/runtime/workbench/workbenchToolPill'
+import {
+  schemeChildrenSettled,
+  workflowOutputState
+} from '@/components/runtime/workbench/workflowOutputView'
+import { WORKFLOW_ROLE_LABEL } from '@/components/runtime/workbench/workbenchThinkTimeline'
 import {
   isMidProcessBox,
   isThinkOpenByDefault,
   BOX_MAX_LINES,
+  bodyExpandAction,
   foldOpenOf,
+  formatThoughtElapsed,
+  isUnlimitedAnswerBox,
   nextFoldValue
 } from '@/components/runtime/workbench/workbenchContentBox'
 import { liveStepHintOf } from '@/components/runtime/workbench/workbenchStepHint'
 import RouterTimeline from '@/components/runtime/RouterTimeline.vue'
 import FileCard from '@/components/runtime/FileCard.vue'
+import WorkbenchActorTree from '@/components/runtime/workbench/WorkbenchActorTree.vue'
+import WorkbenchActorNest from '@/components/runtime/workbench/WorkbenchActorNest.vue'
 import ElapsedSeconds from '@/components/runtime/ElapsedSeconds.vue'
 import AgentLookArt from '@/components/agent/AgentLookArt.vue'
 import WorkflowGearGlyph from '@/components/runtime/workbench/WorkflowGearGlyph.vue'
+import {
+  workflowNodeToolLabel,
+  workflowNodeToolPill
+} from '@/components/runtime/workbench/workbenchWorkflowNode'
 import { WORKFLOW_AVATAR_COLOR, isWorkflowAvatarCard } from '@/components/runtime/workbench/workbenchAvatar'
 import { resolveFollowAfterScroll } from '@/components/runtime/chatFollow'
+import { listAllItems } from '@/api/tool'
+import { presentVisibleResult } from '@/components/runtime/workbench/workbenchVisibleText'
 import { renderMarkdownMemo } from '@/utils/simpleMarkdown'
 import {
   friendlyWorkbenchError,
@@ -1670,72 +1735,23 @@ const candidateSignature = computed(() =>
 )
 
 /**
- * 每轮消息流投影的内容签名。
+ * 每轮消息流投影的「签名 + 缓存」闸。所属域：runtime（前端展示）。
  *
- * <p>为什么要有：模板里每轮至少要问三次「有没有分块」（头像让位、分块区、逐块兜底），
- * 每次调用都会重扫全部路由与块。长会话按「轮 × 块」放大，主线程会被拖住，
- * 表现就是打开页面长时间空白。这里每帧只算一遍浅签名，投影按签名命中缓存。
- *
- * <p>已结束的轮次内容不会再变（历史轮 / 刚落地的终答），签名算一次就记下来，
- * 之后每帧直接命中，不再随流式轮的增量一起重扫全量块。
+ * <p>签名与缓存都收在 {@link ParticipantFeedCache} 里：模板每轮至少要问三次「有没有分块」，
+ * 没有闸就会按「轮 × 块」反复重扫。签名覆盖身份 / begin / 工作流状态，
+ * 因此「原位补身份」这类不改变块数量与文字长度的变化也会让缓存失效。
  */
-const settledFeedSignatures = new Map<string, string>()
-/**
- * 已结算签名所属的「全局前缀」（入口名 + 候选集签名）。
- * 这两个值一变，所有已结算签名的文本就都不再对应当前配置，必须整表作废，
- * 否则改名后已结束的轮次会一直用旧标题（结算缓存省下的是重扫，不是正确性）。
- */
-let settledFeedPrefix = ''
+const feedCache = new ParticipantFeedCache()
 
-const feedSignatures = computed(() => {
-  const signatures = new Map<string, string>()
-  // 入口名来自配置：配置名后到 / 改名时缓存必须失效，否则消息流会一直用旧标题
-  const entry = (props.entryName || '').trim()
-  const prefix = `${entry}|${candidateSignature.value}`
-  if (prefix !== settledFeedPrefix) {
-    settledFeedPrefix = prefix
-    settledFeedSignatures.clear()
-  }
-  for (const turn of props.turns) {
-    // 仍在流式：内容每帧都在长，签名必须现算，同时作废它可能残留的旧缓存
-    if (turn.status === 'streaming') {
-      settledFeedSignatures.delete(turn.key)
-    } else {
-      const cached = settledFeedSignatures.get(turn.key)
-      if (cached !== undefined) {
-        signatures.set(turn.key, cached)
-        continue
-      }
-    }
-    const blocks = Array.isArray(turn.blocks) ? turn.blocks : []
-    let signature = `${turn.status}|${entry}|${candidateSignature.value}|${turn.entryParticipantId || ''}|${turn.continuation === true ? 'cont' : ''}`
-    for (const block of blocks) {
-      signature += `|${block.kind}:${(block.text || '').length}:${(block.detail || '').length}:${block.file?.fileName || ''}`
-      /*
-       * 工作流卡片是**状态快照**：正文长度不变但节点状态在推进。
-       * 不把状态算进签名，节点点亮时投影缓存不会失效，页面就会一直停在第一拍。
-       */
-      if (block.workflow) {
-        signature += `|wf:${block.workflow.name}:${block.workflow.status}:`
-          + `${block.workflow.nodes.map((node) => node.status).join(',')}:${(block.workflow.answer || '').length}`
-      }
-    }
-    signatures.set(turn.key, signature)
-    if (turn.status !== 'streaming') {
-      settledFeedSignatures.set(turn.key, signature)
-    }
-  }
-  return signatures
-})
-
-/** 投影缓存：同一轮同一签名只投影一次；切会话（turns 换数组）时整体清掉 */
-const feedMemo = new Map<string, { signature: string; cards: ParticipantCard[] }>()
+/** 每帧算一遍每轮签名；投影按签名命中缓存（见 {@link ParticipantFeedCache}） */
+const feedSignatures = computed(() =>
+  feedCache.signatures(props.turns, (props.entryName || '').trim(), candidateSignature.value)
+)
 
 watch(
   () => props.turns,
   () => {
-    feedMemo.clear()
-    settledFeedSignatures.clear()
+    feedCache.clear()
     // 切会话：上一份时间线的测量缓存 / 思考节拍状态都不再有效
     midBoxMeasuredLen.clear()
     openThinkKeys.clear()
@@ -1765,44 +1781,6 @@ function hasParticipantEvidence(blocks: AssistantBlock[]): boolean {
 }
 
 /**
- * 专家块是否只是一句状态句的空壳（没有内容框里该有的任何东西）。
- *
- * <p>为什么要在展示层再挡一次：投影层为了兼容历史会话，会在「没有泳道」时兜一条
- * 中性状态句（`正在由「X」作答` / `已由「X」完成作答`）。多意图决策块到达后、
- * 子专家还没开始产出思考的那一瞬，就会兜出一个名字都用的是临时展示名的空壳，
- * 看起来就是「先弹一个块、过一会标题/正文自己变了」。这里把这层空壳拦掉，
- * 参与者只在真有思考 / 工具 / 结果 / 报错 / 产物时出现。
- *
- * <p>方案块不走这里：它们的内容框里的话是分流句（lines），由投影层判空。
- *
- * @param card 参与者卡片
- * @return true 表示不该画出来
- */
-function isStatusPlaceholder(card: ParticipantCard): boolean {
-  if (card.kind !== 'actor' || card.roleLabel === '方案') {
-    return false
-  }
-  // 工作流块的内容是执行卡片本身：即使没有正文 / 文件，它也不是空壳
-  if (card.workflow) {
-    return false
-  }
-  if (card.lines.length || card.steps.length || card.errors.length || card.files.length) {
-    return false
-  }
-  // 只有一组可点选项也是「有东西」：它就是要用户拍板的那一步，不能被当空壳拦掉
-  if (card.choice && card.choice.options.length) {
-    return false
-  }
-  const answer = (card.answer || '').trim()
-  // 什么都没有（还在等产出）：不是参与者，是对未来的一层预设
-  if (!answer) {
-    return true
-  }
-  // 只剩现网兜底状态句：同样没有「本步结果」，不能当块画出来
-  return answer === expertStatusLine(card.title, true) || answer === expertStatusLine(card.title, false)
-}
-
-/**
  * 工作台消息流：入口块、方案块、专家块同一种聊天块，按真实顺序排。
  *
  * <p>形象仍走 lookOf。拼接终答不挂到最后一位，也不再在块下面重复贴一整段。
@@ -1822,39 +1800,82 @@ function participantFeedOf(turn: ChatTurn): ParticipantCard[] {
     return []
   }
   const signature = feedSignatures.value.get(turn.key) || ''
-  const cached = feedMemo.get(turn.key)
-  if (cached && cached.signature === signature) {
-    return cached.cards
-  }
-  // 投影再崩也只影响本轮：返回空数组让下面的逐块渲染接手，整页不会跟着变白
-  try {
-    const cards = buildParticipantFeed({
-      routeTexts: turn.blocks.filter((block) => block.kind === 'route').map((block) => block.text),
-      lanes: lanesOf(turn),
-      blocks: turn.blocks,
-      targetTypeOf,
-      streaming: turn.status === 'streaming',
-      entryName: props.entryName,
-      fallbackName: assistantDisplayName(turn),
-      // 入口身份：入口判定的推理按 id 认回入口块（位置口径之外的第二道保险）
-      entryParticipantId: turn.entryParticipantId,
-      // 续作轮没有入口判定：不去等入口报身份，专家自己的思考直接出块
-      expectEntry: turn.continuation !== true,
-      lookOf,
-      descriptionOf,
-      isTopLevelOf
-    })
-      // 空壳专家块（只有兜底状态句 / 还什么都没有）不画：块要等这一步真的开始。
-      // 但实时轮次里「这一步真的开始」由后端 begin 帧给出——那一瞬就该出块，
-      // 不能因为思考还在缓冲里就把它当空壳丢掉；状态句兜底过滤只留给历史回放。
-      .filter((card) => turn.status === 'streaming' || !isStatusPlaceholder(card))
-    feedMemo.set(turn.key, { signature, cards })
+  /*
+   * 签名 / 缓存闸：签名覆盖参与者身份与 begin 占位标记，因此 begin 原位补身份后
+   * 必然未命中缓存、重新投影——「有身份就保留 pending 壳」的判定在直播路径真正执行。
+   * 投影再崩也只影响本轮：返回空数组让下面的逐块渲染接手，整页不会跟着变白。
+   */
+  return feedCache.project(turn, signature, () => {
+    try {
+      const cards = buildParticipantFeed({
+        routeTexts: turn.blocks.filter((block) => block.kind === 'route').map((block) => block.text),
+        lanes: lanesOf(turn),
+        blocks: turn.blocks,
+        streaming: turn.status === 'streaming',
+        entryName: props.entryName,
+        fallbackName: assistantDisplayName(turn),
+        // 入口身份：入口判定的推理按 id 认回入口块（位置口径之外的第二道保险）
+        entryParticipantId: turn.entryParticipantId,
+        // 续作轮没有入口判定：不去等入口报身份，专家自己的思考直接出块
+        expectEntry: turn.continuation !== true,
+        lookOf,
+        descriptionOf
+      })
+      // 没有 begin 身份、只剩状态句的卡在收尾丢掉。框里的子卡同一口径，不能只滤根上那一层。
+      return omitFinishedShells(cards, turn.status === 'streaming')
+    } catch (error) {
+      console.warn('[工作台消息流] 本轮分块投影失败，已回退到逐块渲染', error)
+      // 记成空卡片：同一签名下不必每帧再抛一次
+      feedCache.rememberEmpty(turn, signature)
+      return []
+    }
+  })
+}
+
+/**
+ * 方案框里要排的成员：直接子卡在前，汇总在最后。
+ *
+ * <p>子卡是投影按 begin 收好的，这里只决定框内顺序，不再重算谁属于哪个方案。
+ *
+ * @param card 当前这张卡
+ * @return 框内成员；没有子卡也没有汇总时为空
+ */
+function schemeMembers(card: ParticipantCard): ParticipantCard[] {
+  const children = Array.isArray(card.children) ? card.children : []
+  return card.summary ? [...children, card.summary] : children
+}
+
+/**
+ * 收尾时丢掉没有 begin 身份、只剩状态句的卡。直播保留，框里的子卡和汇总同一口径。
+ *
+ * @param cards     根卡或某一层子卡
+ * @param streaming 本轮是否仍在流式输出
+ * @return 还要画出来的卡
+ */
+function omitFinishedShells(cards: ParticipantCard[], streaming: boolean): ParticipantCard[] {
+  if (streaming) {
     return cards
-  } catch (error) {
-    console.warn('[工作台消息流] 本轮分块投影失败，已回退到逐块渲染', error)
-    feedMemo.set(turn.key, { signature, cards: [] })
-    return []
   }
+  const kept: ParticipantCard[] = []
+  for (const card of cards) {
+    if (isFinishedStatusShell(card)) {
+      continue
+    }
+    const children = card.children?.length ? omitFinishedShells(card.children, streaming) : card.children
+    const summary = card.summary && !isFinishedStatusShell(card.summary) ? card.summary : undefined
+    const childrenChanged = (card.children?.length || 0) !== (children?.length || 0)
+    const summaryChanged = card.summary !== summary
+    if (!childrenChanged && !summaryChanged) {
+      kept.push(card)
+      continue
+    }
+    kept.push({
+      ...card,
+      children: children?.length ? children : undefined,
+      summary
+    })
+  }
+  return kept
 }
 
 /**
@@ -1863,12 +1884,15 @@ function participantFeedOf(turn: ChatTurn): ParticipantCard[] {
  * <p>为什么单独判：只剩网关块时（方案还在跑、工作流只报一句、历史数据里只有判定），
  * 逐块的正文 / 报错 / 文件必须照常显示；一按「有分块就全交给分块」把正文藏光，
  * 用户看到的就是网关块下面一片空白。
+ * 专家收进方案框之后仍算有参与者，不能只看根上那一层。
  *
  * @param turn 本轮助手消息
  * @return true 表示已有专家 / 方案 / 结论块，逐块渲染让位
  */
 function participantFeedHasActor(turn: ChatTurn): boolean {
-  return participantFeedOf(turn).some((card) => card.kind === 'actor' || card.kind === 'conclusion')
+  return visitParticipantCards(participantFeedOf(turn)).some(
+    (card) => card.kind === 'actor' || card.kind === 'conclusion'
+  )
 }
 
 /**
@@ -1914,7 +1938,7 @@ function isWorkflowCard(card: ParticipantCard): boolean {
 }
 
 /**
- * 参与者头像样式：白底方座，线稿色用该套形象色。
+ * 参与者头像样式：圆圈中间白底，银圈由样式画；线稿色用该套形象色。
  *
  * <p>工作流是唯一例外：头像固定白底黑齿轮，不读 lookOf（有没有保存形象都不改）。
  *
@@ -1922,7 +1946,7 @@ function isWorkflowCard(card: ParticipantCard): boolean {
  * @return 内联样式
  */
 function participantAvatarStyle(card: ParticipantCard) {
-  // 工作流头像固定浅底 + 黑色线稿，与上方头像同一套方座，不跟随形象色
+  // 圆圈中间固定白底，描边由样式画成银圈；形象色只留给字，不再铺成方座底色
   if (isWorkflowCard(card)) {
     return {
       background: '#fff',
@@ -1930,8 +1954,8 @@ function participantAvatarStyle(card: ParticipantCard) {
     }
   }
   return {
-    background: card.look?.color || '#fff',
-    color: card.look?.initialColor || '#635bff'
+    background: '#fff',
+    color: card.look?.initialColor || '#111827'
   }
 }
 
@@ -1958,29 +1982,6 @@ function candidateOf(name: string) {
     return undefined
   }
   return (props.routeCandidates || []).find((item) => (item.agentName || '').trim() === wanted)
-}
-
-/**
- * 是否是「入口直接分发」的参与者：能在本会话候选池里对上名。
- *
- * <p>方案内部的子专家不在候选池，因此对不上——时间线据此把它们归到方案块下面，
- * 而不是把方案内部那一跳误写成入口判定。
- *
- * @param name 展示名
- * @return true 表示入口候选
- */
-function isTopLevelOf(name: string): boolean {
-  return !!candidateOf(name)
-}
-
-/**
- * 目标类型：工作流 / 方案要按不同策略展示（只报状态，不展开内部思考）。
- *
- * @param name 展示名
- * @return AGENT / MA / WORKFLOW；未知为 undefined
- */
-function targetTypeOf(name: string): 'AGENT' | 'MA' | 'WORKFLOW' | undefined {
-  return candidateOf(name)?.targetType
 }
 
 /**
@@ -2044,7 +2045,8 @@ function lookOf(name: string) {
  * <p>口径读配置与卡片类型，不写死展示名：
  * <ul>
  *   <li>入口块（kind=gateway）：名称是配置里的入口方案名（如 Router），角标恒为「对话入口」；</li>
- *   <li>方案（roleLabel=方案）：分流与汇总两条**都标「方案」**，靠位置与内容区分；</li>
+ *   <li>方案（roleLabel=方案）：分流与框内汇总都标「方案」；</li>
+ *   <li>整轮收口（roleLabel=最终产物）：标「最终产物」，排在全部方案卡之后；</li>
  *   <li>其余参与者（单兵专家 / 方案内部子专家）：标「Agent」，不允许空着。</li>
  * </ul>
  *
@@ -2054,6 +2056,9 @@ function lookOf(name: string) {
 function actorRoleBadge(card: ParticipantCard): string {
   if (card.kind === 'gateway') {
     return '对话入口'
+  }
+  if (card.roundDeliverable || card.roleLabel === '最终产物') {
+    return '最终产物'
   }
   if (card.roleLabel === '方案') {
     return '方案'
@@ -2111,18 +2116,32 @@ function actorResultLines(card: ParticipantCard): string[] {
  * @param workflow 卡片视图
  * @return true 表示运行成功
  */
-function wfCompleted(workflow: TrialWorkflowView): boolean {
+function wfCompleted(workflow: TrialWorkflowView, closed?: string): boolean {
+  if (closed === 'done') {
+    return true
+  }
   return (workflow.status || '').toUpperCase() === 'SUCCESS'
 }
 
 /**
  * 工作流卡片：状态徽标文案。口径与后端 `WorkflowRunJson.statusText` 一致，
  * 未知状态按「运行中」处理，不伪造已完成。
+ * <p>运行中只回纯文案「运行中」：模板里已有旋转 ⏳，文案再带沙漏会叠成两个图标。
  *
  * @param workflow 卡片视图
- * @return 形如「⏳ 运行中」「✅ 已完成」
+ * @return 形如「运行中」「✅ 已完成」
  */
-function wfStatusText(workflow: TrialWorkflowView): string {
+function wfStatusText(workflow: TrialWorkflowView, closed?: string): string {
+  // 这一位的终态先于快照状态：终态到了就停转，不等整轮、也不等节点快照改口
+  if (closed === 'done') {
+    return '✅ 已完成'
+  }
+  if (closed === 'failed') {
+    return '❌ 运行失败'
+  }
+  if (closed === 'aborted') {
+    return '⏹ 已取消'
+  }
   const status = (workflow.status || '').toUpperCase()
   if (status === 'SUCCESS') {
     return '✅ 已完成'
@@ -2136,7 +2155,7 @@ function wfStatusText(workflow: TrialWorkflowView): string {
   if (status === 'PAUSED_HUMAN') {
     return '⏸ 等待人工处理'
   }
-  return '⏳ 运行中'
+  return '运行中'
 }
 
 /**
@@ -2145,7 +2164,16 @@ function wfStatusText(workflow: TrialWorkflowView): string {
  * @param workflow 卡片视图
  * @return 样式类名
  */
-function wfStatusClass(workflow: TrialWorkflowView): string {
+function wfStatusClass(workflow: TrialWorkflowView, closed?: string): string {
+  if (closed === 'done') {
+    return 'is-success'
+  }
+  if (closed === 'failed') {
+    return 'is-failed'
+  }
+  if (closed === 'aborted') {
+    return 'is-cancelled'
+  }
   const status = (workflow.status || '').toUpperCase()
   if (status === 'SUCCESS') {
     return 'is-success'
@@ -2219,46 +2247,79 @@ function wfFilesOf(card: ParticipantCard): TrialFileView[] {
 }
 
 /**
- * 产物区正文：只有「没有文件」时才展示终答文本，避免同一段话出现两遍。
+ * 产物区正文：终答文本与文件**并列**展示，不再「有文件就清空文字」。
+ *
+ * <p>以前的写法一见文件就把文字置空：文件先被错误地挂到工作流卡上时，
+ * 用户看到「整段文字 → 闪成文件卡 → 方案跑完文件改挂走、文字又回来」。
+ * 归属修好后，文件只在确实属于该工作流时才会出现在这里；即便如此，
+ * 文字也不该被文件挤掉——二者是同一份结果的不同形态，同时展示即可。
  *
  * @param card 参与者卡片
  * @return 终答文本；没有时为空串
  */
 function wfAnswerOf(card: ParticipantCard): string {
-  if (wfFilesOf(card).length) {
-    return ''
-  }
   return (card.workflow?.answer || '').trim()
 }
 
 /**
- * 产物区是否展开：只在运行结束后展开，且确有文件或终答。
+ * 所属方案的子块是否还没全部结束。为 true 时工作流正文先按四行展示，不整屏。
  *
- * <p>运行中不展开：此时还没有交付物，提前铺一块空白产物区等于伪造进度。
+ * <p>不看整轮 streaming。没有方案父块时，只看这张卡自己有没有终态。
  *
+ * @param turn 本轮助手消息
  * @param card 参与者卡片
- * @return true 表示可以展开
+ * @return true 表示先按四行展示
  */
-function wfOutputVisible(card: ParticipantCard): boolean {
-  const workflow = card.workflow
-  if (!workflow) {
-    return false
-  }
-  const status = (workflow.status || '').toUpperCase()
-  if (status === 'RUNNING' || status === 'CREATED') {
-    return false
-  }
-  return wfFilesOf(card).length > 0 || !!wfAnswerOf(card)
+function wfHoldOf(turn: ChatTurn, card: ParticipantCard): boolean {
+  return !schemeChildrenSettled(participantFeedOf(turn), card)
 }
 
 /**
- * 产物区标题：有真实文件说交付物，没有文件说结果（不虚构文件名 / 大小 / 下载按钮）。
+ * 工作流结果区是否出现。
+ *
+ * <p>有正文或文件就出现。所属方案还没结束时也出现，只是正文限高四行，
+ * 不再收成「已产出 N 段」那一行。
+ *
+ * @param turn 本轮助手消息
+ * @param card 参与者卡片
+ * @return true 表示画出结果区
+ */
+function wfOutputVisible(turn: ChatTurn, card: ParticipantCard): boolean {
+  return workflowOutputState(
+    card.workflow,
+    wfAnswerOf(card),
+    wfFilesOf(card).length,
+    false,
+    wfHoldOf(turn, card)
+  ) !== 'hidden'
+}
+
+/**
+ * 结果区副文案：有真实文件时补一句交付物说明；纯文本正文只靠「结果」小标题，避免叠两句。
+ *
+ * <p>运行中不补「执行完毕」：那时文件是中间产物，说「完毕」是假话。
  *
  * @param card 参与者卡片
- * @return 一行提示
+ * @return 一行提示；无文件或仍在运行时为空串
  */
 function wfOutputTip(card: ParticipantCard): string {
-  return wfFilesOf(card).length ? '✨ 流程执行完毕，为您生成交付物：' : '✨ 流程执行完毕，结果如下：'
+  if (!wfFilesOf(card).length) {
+    return ''
+  }
+  const status = (card.workflow?.status || '').toUpperCase()
+  // 收尾态才说「执行完毕」：运行中出现的文件属于中间产物
+  return status === 'RUNNING' || status === 'CREATED' ? '流程产出文件：' : '流程执行完毕，为您生成交付物：'
+}
+
+/**
+ * 节点上的工具胶囊列表：0 或 1 条（仅 TOOL 节点）。
+ *
+ * @param node 工作流卡节点
+ * @return 可直接 v-for 的数组
+ */
+function wfNodeToolPills(node: TrialWorkflowNodeView) {
+  const pill = workflowNodeToolPill(node)
+  return pill ? [pill] : []
 }
 
 /**
@@ -2282,6 +2343,146 @@ function actorThinkingText(card: ParticipantCard): string {
  */
 function actorToolPills(card: ParticipantCard): ToolPillView[] {
   return cardViewOf(card).pills
+}
+
+/** 调用名 → 工具项标题。目录还没到或没有权限时为空，胶囊退回「工具」而不是英文函数名。 */
+const toolTitleByName = reactive<Record<string, string>>({})
+
+/**
+ * 拉一次工具项目录，只用已有的 title 字段。
+ *
+ * <p>失败（无权限、网络）只留空表，不在前端写死英文名对照。
+ */
+async function loadToolFaceTitles() {
+  if (!isWorkbench.value) {
+    return
+  }
+  try {
+    const rows = await listAllItems()
+    for (const row of rows) {
+      const name = (row.name || '').trim()
+      const title = (row.title || '').trim()
+      if (name && title) {
+        toolTitleByName[name] = title
+      }
+    }
+  } catch {
+    // 工作台账号不一定有工具目录权限：没有标题就不显示函数名
+  }
+}
+
+/**
+ * 胶囊上的一句。聚合仍按英文调用名，句子里只放中文名。
+ *
+ * @param pill 聚合后的胶囊
+ * @return 如「已调用【知识库检索】」
+ */
+function toolPhrase(pill: ToolPillView): string {
+  const face = `【${toolFaceName(pill.name, toolTitleByName)}】`
+  if (pill.state === 'running') {
+    const times = pill.total > 1 ? `（${pill.total}）` : ''
+    return `正在调用${face}${times}…`
+  }
+  if (pill.state === 'done') {
+    const times = pill.total > 1 ? `（${pill.total} 次）` : ''
+    return `已调用${face}${times}`
+  }
+  const error = pill.firstError ? ` · ${pill.firstError}` : ''
+  return `${face}：成功 ${pill.ok} / 失败 ${pill.failed}${error}`
+}
+
+/** 思考耗时的刷新时钟。只有本轮还在流式时才走表，回放不编造秒数。 */
+const thoughtNow = ref(Date.now())
+/** 这一位思考开始的时刻（只记本次页面上看见它还在跑的时候） */
+const thinkStartedAt = new Map<string, number>()
+/** 这一位结束后冻住的毫秒，避免停表后还跟着时钟涨 */
+const thinkFrozenMs = new Map<string, number>()
+let thoughtTimer = 0
+
+/**
+ * 思考行上的耗时。没在这次停留里看见它跑过，就不写秒数（回放没有逐步耗时）。
+ *
+ * @param turn 本轮
+ * @param card 参与者
+ * @return 毫秒；没有观察起点时为 null
+ */
+function observedThoughtMs(turn: ChatTurn, card: ParticipantCard): number | null {
+  const key = `${turn.key}:${card.key}`
+  const now = thoughtNow.value
+  const running = turn.status === 'streaming' && card.pending === true
+  if (running) {
+    if (!thinkStartedAt.has(key)) {
+      thinkStartedAt.set(key, now)
+    }
+    return Math.max(0, now - (thinkStartedAt.get(key) as number))
+  }
+  if (thinkFrozenMs.has(key)) {
+    return thinkFrozenMs.get(key) as number
+  }
+  if (thinkStartedAt.has(key)) {
+    const elapsed = Math.max(0, now - (thinkStartedAt.get(key) as number))
+    thinkFrozenMs.set(key, elapsed)
+    return elapsed
+  }
+  return null
+}
+
+/**
+ * 折叠行文案。有真实耗时才带「(耗时 Xs)」。
+ *
+ * @param turn 本轮
+ * @param card 参与者
+ * @return 一行标题
+ */
+function thoughtToggleLabel(turn: ChatTurn, card: ParticipantCard): string {
+  const elapsed = formatThoughtElapsed(observedThoughtMs(turn, card) ?? 0)
+  return elapsed ? `思考与工具执行过程 (耗时 ${elapsed})` : '思考与工具执行过程'
+}
+
+/**
+ * 思考行什么时候出现。
+ *
+ * <p>已经有推理就一直在。还在跑、结果还没落地时也先把这一行摆上，
+ * 不等整轮结束才出现。结束后如果从头到尾没有推理，就不留空行。
+ *
+ * @param turn 本轮
+ * @param card 参与者
+ * @return true 表示画出折叠行
+ */
+function showThoughtToggle(turn: ChatTurn, card: ParticipantCard): boolean {
+  if (actorHasThink(card)) {
+    return true
+  }
+  return card.pending === true && turn.status === 'streaming' && !actorHasResult(card)
+}
+
+/**
+ * 工作流结果区标题。完成后用演示稿那句，进行中不写成「已完毕」。
+ *
+ * @param card 参与者
+ * @return 标题
+ */
+function wfResultTitle(card: ParticipantCard): string {
+  const done = card.workflow ? wfCompleted(card.workflow, card.closed) : false
+  return done ? '流程执行完毕，结果如下：' : '执行结果'
+}
+
+/**
+ * 复制结果框里用户看见的正文（检索 JSON 已收成引用文本）。
+ *
+ * @param raw 卡片上的原文
+ */
+async function copyResult(raw: string) {
+  const text = displayAnswer(raw)
+  if (!text) {
+    return
+  }
+  try {
+    await navigator.clipboard.writeText(text)
+    ElMessage.success('已复制')
+  } catch {
+    ElMessage.error('复制失败')
+  }
 }
 
 /** 卡片派生视图：思考正文 + 工具胶囊（模板每块要问多次，只算一次） */
@@ -2365,37 +2566,34 @@ function toggleToolDetail(key: string) {
 }
 
 /**
- * 内容框 / 思考区的 DOM 句柄。键为「轮 key:参与者 key」。
+ * 正文节点 / 思考文字的 DOM 句柄。键为「轮 key:参与者 key」。
  *
- * <p>为什么用 ref 函数而不是整体 querySelector：这两块在流式期每个增量都要读 scrollHeight、
- * 写 scrollTop，查一次 DOM 树代价太高；键里带轮与参与者，切会话重建时会自然换成新节点。
+ * <p>正文限高四行，展开看全文，不在框里跟滚。思考文字单独限高四行并在框内滚动，
+ * 所以滚动句柄登记在思考文字上，不登记在带标题的整框上。
  */
-const actorBoxEls = new Map<string, HTMLElement>()
+const answerTextEls = new Map<string, HTMLElement>()
 const actorFoldEls = new Map<string, HTMLElement>()
 
 /**
- * 内容框 ref 回调：节点挂上时登记，卸载时摘掉。
+ * 正文节点 ref：用来量这段文字有没有超过四行。文件行不进这个节点。
  *
  * @param turnKey 本轮 key
  * @param cardKey 参与者 key
  * @return Vue 的 ref 回调
  */
-function actorBoxRef(turnKey: string, cardKey: string) {
+function answerTextRef(turnKey: string, cardKey: string) {
   const key = `${turnKey}:${cardKey}`
   return (el: unknown) => {
     if (el instanceof HTMLElement) {
-      actorBoxEls.set(key, el)
+      answerTextEls.set(key, el)
     } else {
-      actorBoxEls.delete(key)
+      answerTextEls.delete(key)
     }
   }
 }
 
 /**
- * 思考区 ref 回调：节点挂上时登记，卸载时摘掉。
- *
- * <p>登记的是「整块思考框」而不是内部文本容器：流式时限高 88px 的是整框（含标题），
- * 只有把滚动写在整框上，标题才会固定、正文在下面滚。
+ * 思考文字 ref：滚动发生在这四行文字里，标题行不跟着滚。
  *
  * @param turnKey 本轮 key
  * @param cardKey 参与者 key
@@ -2405,9 +2603,8 @@ function actorFoldRef(turnKey: string, cardKey: string) {
   const key = `${turnKey}:${cardKey}`
   return (el: unknown) => {
     if (el instanceof HTMLElement) {
-      // 向上找整块思考框：ref 挂在内容容器上，滚动容器是它的父级
-      const box = el.closest('.wb-actor-thought') as HTMLElement | null
-      actorFoldEls.set(key, box ?? el)
+      const thinking = el.querySelector('.wb-actor-thinking')
+      actorFoldEls.set(key, thinking instanceof HTMLElement ? thinking : el)
     } else {
       actorFoldEls.delete(key)
     }
@@ -2422,21 +2619,22 @@ const openThinkKeys = new Set<string>()
 let actorScrollFrame = 0
 
 /**
- * 把仍在流式中的内容框 / 思考区滚到底部（跟看最后一行）。
+ * 把仍在流式中的思考文字滚到底部（跟看最后一行）。
  *
- * <p>只滚 `is-mid-process` 的框：最终结果不限高、也不再需要跟滚。
- * 用户手动往上翻过（该元素不在底部附近）就跳过，不抢方向盘。
+ * 思考文字和结果框都在四行里跟到最新一行。
+ * 用户往上翻过（离开底部超过一行）就不再拽回去。
  */
 function tickMidProcessScroll() {
   actorScrollFrame = 0
   for (const key of pendingScrollKeys) {
-    const box = actorBoxEls.get(key)
-    if (box && box.classList.contains('is-mid-process')) {
-      followScrollable(box)
-    }
     const fold = actorFoldEls.get(key)
     if (fold) {
       followScrollable(fold)
+    }
+    const answer = answerTextEls.get(key)
+    // 展开后的全文不再被四行框拽到底；收在四行里时才跟最新一行
+    if (answer && answer.classList.contains('is-clamped')) {
+      followScrollable(answer)
     }
   }
   pendingScrollKeys.clear()
@@ -2454,24 +2652,6 @@ function followScrollable(el: HTMLElement) {
     return
   }
   el.scrollTop = el.scrollHeight
-}
-
-/**
- * 把内容框 / 思考区滚回顶部。
- *
- * <p>流式刚结束时调用：先回到第一行，再取消高度限制，用户从开头完整读这一块。
- *
- * @param key 「轮 key:参与者 key」
- */
-function scrollMidProcessToTop(key: string) {
-  const box = actorBoxEls.get(key)
-  if (box) {
-    box.scrollTop = 0
-  }
-  const fold = actorFoldEls.get(key)
-  if (fold) {
-    fold.scrollTop = 0
-  }
 }
 
 /**
@@ -2518,10 +2698,10 @@ function requestMidProcessScroll() {
 }
 
 /**
- * 中间过程内容框是否被用户展开（键 = 「轮 key:参与者 key」）。
+ * 正文是否被用户展开（键 = 「轮 key:参与者 key」）。
  *
- * <p>网关判定 / 方案分流这类**已结束**的中间过程框最高四行；超过四行时给一个
- * 「展开全文」，点了就不再限高。仍在流式输出的框不用这个开关——它靠框内跟滚看最新一行。
+ * <p>中间过程正文默认四行。点「展开全文」去掉限高，点「收起」恢复。
+ * 思考框不走这个开关，它在四行里滚动。
  */
 const midBoxExpanded = reactive<Record<string, boolean>>({})
 /**
@@ -2534,7 +2714,7 @@ const midBoxExpanded = reactive<Record<string, boolean>>({})
 const midBoxOverflow = reactive<Record<string, boolean>>({})
 
 /**
- * 中间过程框的单行高度（px）：与 `.chat.is-workbench .answer-block` 的
+ * 正文单行高度（px）：与 `.chat.is-workbench .md.answer` 的
  * `font-size: 14px` × `line-height: 1.6` 一致。
  *
  * <p>为什么用常量而不是 `getComputedStyle(el).lineHeight`：读计算样式会强制同步样式计算，
@@ -2542,8 +2722,6 @@ const midBoxOverflow = reactive<Record<string, boolean>>({})
  * 这两处样式属于界面固定口径，改字号时同步改这里（下方 CSS 注释也留了对照）。
  */
 const MID_BOX_LINE_HEIGHT_PX = 14 * 1.6
-/** 中间过程框上下内边距（px）：与 `.answer-block` 的 `padding: 16px 20px` 一致 */
-const MID_BOX_PADDING_Y_PX = 16
 /** 两次实测之间的最小间隔（毫秒）：流式期降频，攒到下一个间隔再统一量 */
 const MID_BOX_MEASURE_MIN_GAP_MS = 80
 /** 每个框上次测量时的内容长度：长度没变就不可能溢出，直接跳过读布局 */
@@ -2552,10 +2730,11 @@ const midBoxMeasuredLen = new Map<string, number>()
 let midBoxMeasuredAt = 0
 
 /**
- * 量一次每个中间过程框的内容是否超过四行，决定要不要给「展开全文」。
+ * 量一次每段正文是否超过四行，决定要不要给「展开全文」。
  *
- * <p>测量不用 `max-height` 反推：展开态该值是 `none`，按它量会让「收起」入口消失。
- * 这里按「四行正文 + 上下内边距」现算一个上限，与内容高度直接比较。
+ * <p>只量正文节点，不把文件卡、终态说明算进去。文件在框外，说明也在框外，
+ * 它们都很矮，若和正文量在一起，点展开不会改变看见的高度。
+ * 展开之后 max-height 是 none，仍用「四行行高」和 scrollHeight 比，收起入口才不会丢。
  *
  * <p>降频与去重（P0-B9）：
  * <ul>
@@ -2572,17 +2751,23 @@ function measureMidBoxOverflow() {
   }
   const now = Date.now()
   const throttled = now - midBoxMeasuredAt < MID_BOX_MEASURE_MIN_GAP_MS
-  // 四行正文 + 上下内边距 = 这个框在「中间过程」下的可视高度上限
-  const limit = BOX_MAX_LINES * MID_BOX_LINE_HEIGHT_PX + 2 * MID_BOX_PADDING_Y_PX
+  // 四行正文：限高加在文字上，内边距在外层气泡，不计入这四行
+  const limit = BOX_MAX_LINES * MID_BOX_LINE_HEIGHT_PX
   for (const turn of props.turns) {
     if (turn.role !== 'assistant') {
       continue
     }
     for (const card of participantFeedOf(turn)) {
       const key = `${turn.key}:${card.key}`
-      const el = actorBoxEls.get(key)
-      // 没有节点 / 不是中间过程：不参与四行截断（最终结果不限高）
-      if (!el || !actorBoxMidProcess(turn, card)) {
+      const el = answerTextEls.get(key)
+      // 最终结果不限高；没有正文节点也不给展开按钮
+      if (!bodyTextLimited(turn, card)) {
+        if (midBoxOverflow[key]) {
+          midBoxOverflow[key] = false
+        }
+        continue
+      }
+      if (!el) {
         continue
       }
       // 内容长度没变：上一拍量过且结论没变，不必再读一次布局
@@ -2594,6 +2779,7 @@ function measureMidBoxOverflow() {
       if (throttled && turn.status === 'streaming') {
         continue
       }
+      // 四行按文字节点的 scrollHeight 和四行行高比，不读整只气泡
       const overflowing = el.scrollHeight - limit > 2
       midBoxMeasuredLen.set(key, contentLength)
       if (midBoxOverflow[key] !== overflowing) {
@@ -2607,38 +2793,34 @@ function measureMidBoxOverflow() {
 }
 
 /**
- * 内容框里可见正文的近似长度：只用来判断「内容有没有变」，不是展示值。
+ * 正文长度：只用来判断「文字有没有变」，不是展示值。文件名不算，避免文件一到就误判成正文变了。
  *
  * @param card 参与者卡片
- * @return 正文字符数（含结果句 / 正文 / 报错 / 选项题干 / 文件名）
+ * @return 正文字符数
  */
 function boxContentLength(card: ParticipantCard): number {
-  let length = (card.answer || '').length
-  for (const line of card.lines || []) {
-    length += line.length
+  if (card.workflow) {
+    return (card.workflow.answer || '').length
   }
-  for (const error of card.errors || []) {
-    length += error.length
-  }
-  for (const file of card.files || []) {
-    length += (file.fileName || '').length
-  }
-  if (card.choice) {
-    length += (card.choice.question || '').length
-  }
-  return length
+  return (card.answer || '').length
 }
 
 /**
- * 中间过程框是否被四行截断（需要「展开全文」）。
+ * 这一段正文现在该出「展开全文」还是「收起」。
  *
- * @param turnKey 本轮 key
- * @param cardKey 参与者 key
- * @return true 表示画出展开入口
+ * <p>没超过四行时是 none：按钮不出现，避免点了高度不变。
+ *
+ * @param turn 本轮助手消息
+ * @param card 参与者卡片
+ * @return none / expand / collapse
  */
-function midBoxNeedsExpand(turnKey: string, cardKey: string): boolean {
-  const key = `${turnKey}:${cardKey}`
-  return midBoxOverflow[key] === true && midBoxExpanded[key] !== true
+function bodyExpandActionOf(turn: ChatTurn, card: ParticipantCard) {
+  const key = `${turn.key}:${card.key}`
+  return bodyExpandAction(
+    bodyTextLimited(turn, card),
+    midBoxExpanded[key] === true,
+    midBoxOverflow[key] === true
+  )
 }
 
 /**
@@ -2649,11 +2831,8 @@ function midBoxNeedsExpand(turnKey: string, cardKey: string): boolean {
  */
 function toggleMidBoxExpand(turnKey: string, cardKey: string) {
   const key = `${turnKey}:${cardKey}`
+  // 限高加在正文节点的 is-clamped 上：这里一翻转，四行和全文就会换过来
   midBoxExpanded[key] = midBoxExpanded[key] !== true
-  // 收起时把框滚回第一行，避免停在被截断的尾巴上
-  if (midBoxExpanded[key] !== true) {
-    scrollMidProcessToTop(key)
-  }
 }
 
 /**
@@ -2761,6 +2940,43 @@ function actorBoxMidProcess(turn: ChatTurn, card: ParticipantCard): boolean {
 }
 
 /**
+ * 这段正文是否按四行截断。
+ *
+ * <p>入口、专家、分流停在四行里滚。综答（方案汇总）不截断，流式时正文往下长。
+ * 用户点了展开之后，限高类名去掉，这里对仍限高的块返回 true，好让收回箭头留在页面上。
+ *
+ * @param turn 本轮助手消息（签名与调用处对齐，限高不看整轮状态）
+ * @param card 参与者卡片
+ * @return true 表示这段文字处在四行口径下
+ */
+function bodyTextLimited(turn: ChatTurn, card: ParticipantCard): boolean {
+  const text = card.workflow ? wfAnswerOf(card) : (card.answer || '')
+  if (!text.trim()) {
+    return false
+  }
+  // 综答随流式全文往下长。入口、专家、分流仍停在四行里滚。
+  if (isUnlimitedAnswerBox(card)) {
+    return false
+  }
+  return true
+}
+
+/**
+ * 正文节点的限高类名。展开时去掉 is-clamped，高度立刻放开；收起时加回来。
+ *
+ * @param turn 本轮助手消息
+ * @param card 参与者卡片
+ * @return 类名表
+ */
+function bodyTextClass(turn: ChatTurn, card: ParticipantCard): Record<string, boolean> {
+  const key = `${turn.key}:${card.key}`
+  const expanded = midBoxExpanded[key] === true
+  return {
+    'is-clamped': bodyTextLimited(turn, card) && !expanded
+  }
+}
+
+/**
  * 内容框是否要画：必须已有本步**真实结果**，且思考这一拍已经结束。
  *
  * <p>不再用 `pending` 兜底：进行中挂一块空结果框（还带闪烁光标），正是要修掉的
@@ -2779,12 +2995,11 @@ function actorHasBubble(turn: ChatTurn, card: ParticipantCard): boolean {
     return false
   }
   const errors = Array.isArray(card.errors) ? card.errors : []
-  const files = Array.isArray(card.files) ? card.files : []
   return !!(
     card.answer ||
     actorResultLines(card).length ||
     errors.length ||
-    files.length ||
+    // 文件在框外单独一行，不因为有文件就再套一只空正文框
     // 只有一组可点选项、没有正文的块也是「本步结果」：不把它判成空壳，否则用户看不到按钮
     (card.choice && card.choice.options.length)
   )
@@ -2891,15 +3106,28 @@ const pendingFinishKeys = new Set<string>()
 let finishFrame = 0
 
 /**
- * 把刚结束的轮次里所有中间过程容器滚回顶部。
+ * 流式结束时把思考文字滚回第一行。
  *
- * <p>高度限制由模板的 `is-mid-process` 随 `turn.status` 一起撤销，
- * 这里只负责滚动位置，不直接改样式，避免与 Vue 的渲染抢 DOM。
+ * <p>正文不再在框内滚动，所以这里不碰正文节点。
+ *
+ * @param key 「轮 key:参与者 key」
+ */
+function scrollThinkToTop(key: string) {
+  const fold = actorFoldEls.get(key)
+  if (fold) {
+    fold.scrollTop = 0
+  }
+}
+
+/**
+ * 把刚结束的轮次里的思考文字滚回顶部。
+ *
+ * <p>最终卡的正文限高由投影的 isFinal 撤掉，这里不改样式。
  */
 function tickFinishReset() {
   finishFrame = 0
   for (const key of pendingFinishKeys) {
-    scrollMidProcessToTop(key)
+    scrollThinkToTop(key)
   }
   pendingFinishKeys.clear()
 }
@@ -2971,7 +3199,30 @@ onMounted(() => {
       autoCollapsedThink[turn.key] = true
     }
   }
+  void loadToolFaceTitles()
 })
+
+/**
+ * 只有还有人在跑时才刷新思考行上的耗时。回放没有流式轮次，不启动这只表。
+ */
+watch(
+  () => props.turns.some((turn) => turn.role === 'assistant' && turn.status === 'streaming'),
+  (live) => {
+    if (live && !thoughtTimer) {
+      thoughtNow.value = Date.now()
+      thoughtTimer = window.setInterval(() => {
+        thoughtNow.value = Date.now()
+      }, 400)
+      return
+    }
+    if (!live && thoughtTimer) {
+      window.clearInterval(thoughtTimer)
+      thoughtTimer = 0
+      thoughtNow.value = Date.now()
+    }
+  },
+  { immediate: true }
+)
 
 /**
  * 兜底触发：本轮发送结束（sending 由 true 变 false）后再扫一次。
@@ -3275,11 +3526,15 @@ onBeforeUnmount(() => {
     cancelAnimationFrame(finishFrame)
     finishFrame = 0
   }
+  if (thoughtTimer) {
+    window.clearInterval(thoughtTimer)
+    thoughtTimer = 0
+  }
   pendingScrollKeys.clear()
   pendingFinishKeys.clear()
   openThinkKeys.clear()
   midBoxMeasuredLen.clear()
-  actorBoxEls.clear()
+  answerTextEls.clear()
   actorFoldEls.clear()
   // 自动收起定时器同理：组件销毁后不能再写响应式状态
   for (const timer of autoCollapseTimers.values()) {
@@ -3480,11 +3735,21 @@ function thinkText(raw: string) {
 
 /**
  * 工作台正文展示：剥文首人设/调试小节标题；调试形态原样。
- * 只影响渲染，不改 turns 落库内容。
+ * 直播终态和回放共用这一条，只影响渲染，不改 turns 落库内容。
+ *
+ * @param raw 结果框原文（助手正文或工作流终答）
+ * @return 交给 Markdown 的可见正文
  */
 function displayAnswer(raw: string) {
-  // 气泡正文是用户可见终稿：内部路由 JSON（含历史落库的旧数据）一律不展示
-  return isWorkbench.value ? stripRouteDecisionJson(stripWorkbenchLeadHeadings(raw)) : raw
+  // 气泡正文是用户可见终稿：路由 JSON 与检索结构都不原样铺出来
+  if (!isWorkbench.value) {
+    return raw
+  }
+  // 调用名换成目录标题：胶囊已是中文，正文不再重复函数名。目录未到时原样
+  return maskToolCallNames(
+    presentVisibleResult(stripRouteDecisionJson(stripWorkbenchLeadHeadings(raw))),
+    toolTitleByName
+  )
 }
 
 /**
@@ -3838,12 +4103,12 @@ function removeAttachment(index: number) {
   border-radius: 0;
 }
 
-/* AI 正文气泡：只包 answer-block，不含折叠灰字 / 线路 chip / 友好报错。
-   宽度按内容收缩（短答不再拉满整列），上限与 User 气泡同档视觉宽度 */
+/* AI 正文气泡：与思考框、工作流卡同一档宽度，不按字数各自收缩 */
 .chat.is-workbench .answer-block {
-  width: fit-content;
-  max-width: min(100%, 640px);
-  background-color: #f9fafb;
+  position: relative;
+  width: 100%;
+  box-sizing: border-box;
+  background-color: #f8fafc;
   padding: 16px 20px;
   border: 1px solid #e5e7eb;
   border-radius: 12px;
@@ -3851,37 +4116,114 @@ function removeAttachment(index: number) {
 }
 
 /*
- * 中间过程的内容框（网关判定 / 方案分流 / 正在流式输出的块）：
- * 高度跟着内容走，但最多四行；超出在框内滚动跟看，不在页面上铺开一大片。
- * 四行 = 4 × 1.6em 行高；padding 上下各 16px 由 max-height 一并计入，
- * 所以这里用 calc 把正文可用高度锁在四行整。
- * 注意：这里的 14px / 1.6 / 16px 与 ChatPanel 里的 MID_BOX_* 常量是同一口径，
- * 改字号或内边距时必须同步改常量（「展开全文」的判定靠它们算上限）。
+ * 结果正文：默认四行，框内滚动。展开后去掉 is-clamped，高度回到全文。
+ * 四行 = 4 × 1.6em。14px / 1.6 与 MID_BOX_LINE_HEIGHT_PX 是同一口径。
  */
-.chat.is-workbench .answer-block.is-mid-process {
-  max-height: calc(4 * 1.6em + 32px);
+.chat.is-workbench .md.answer.is-clamped {
+  max-height: calc(4 * 1.6em);
+  overflow-x: hidden;
   overflow-y: auto;
-  /* 滚动时不拽动外层消息流：滚到框底继续滚才轮到整页 */
   overscroll-behavior: contain;
-  /* 细滚动条，避免四行框里再挤一条粗条 */
   scrollbar-width: thin;
-}
-
-/* 最终结果：不设高度，正文 / 结论 / 报错 / 文件卡完整展开 */
-.chat.is-workbench .answer-block:not(.is-mid-process) {
-  max-height: none;
-  overflow-y: visible;
-}
-
-/* 中间过程框点了「展开全文」：这一次也不限高，读完可再收起 */
-.chat.is-workbench .answer-block.is-mid-process.is-expanded {
-  max-height: none;
-  overflow-y: visible;
 }
 
 .chat.is-workbench .md.answer {
   color: #1f2937;
   line-height: 1.6;
+}
+
+/* 结果框：复制图标和底部箭头都只在移入文本框时出现 */
+.wb-result-box {
+  position: relative;
+}
+
+.wb-copy {
+  position: absolute;
+  top: 4px;
+  right: 4px;
+  z-index: 1;
+  display: grid;
+  place-items: center;
+  width: 28px;
+  height: 28px;
+  padding: 0;
+  border: 1px solid #e5e7eb;
+  border-radius: 8px;
+  background: #fff;
+  color: #6b7280;
+  box-shadow: 0 1px 2px rgba(15, 23, 42, 0.06);
+  cursor: pointer;
+  opacity: 0;
+  pointer-events: none;
+}
+
+.wb-result-box:hover .wb-copy,
+.wb-copy:focus-visible {
+  opacity: 1;
+  pointer-events: auto;
+}
+
+.wb-copy:hover {
+  border-color: #d1d5db;
+  background: #f9fafb;
+  color: #374151;
+}
+
+.wb-result-jump {
+  position: absolute;
+  left: 50%;
+  bottom: 2px;
+  z-index: 1;
+  display: grid;
+  place-items: center;
+  width: 28px;
+  height: 18px;
+  margin: 0;
+  padding: 0;
+  border: 0;
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.92);
+  box-shadow: 0 1px 4px rgba(15, 23, 42, 0.12);
+  transform: translateX(-50%);
+  opacity: 0;
+  pointer-events: none;
+  cursor: pointer;
+}
+
+.wb-result-box:hover .wb-result-jump {
+  opacity: 1;
+  pointer-events: auto;
+}
+
+.wb-jump-chevron {
+  width: 0;
+  height: 0;
+  border-left: 5px solid transparent;
+  border-right: 5px solid transparent;
+  border-top: 6px solid #111;
+}
+
+.wb-result-jump.is-up .wb-jump-chevron {
+  border-top: 0;
+  border-bottom: 6px solid #111;
+}
+
+/* 文件在正文框下面单独一行，宽度跟结果框对齐，不进气泡，也不替换正文 */
+.chat.is-workbench .wb-file-row {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  width: 100%;
+  margin-top: 8px;
+}
+
+/* 没有正文时的终态说明：框外一行，不装进四行正文框 */
+.chat.is-workbench .wb-terminal-note {
+  margin: 8px 0 0;
+  max-width: min(100%, 640px);
+  color: #6b7280;
+  font-size: 13px;
+  line-height: 1.5;
 }
 
 /*
@@ -4010,6 +4352,35 @@ function removeAttachment(index: number) {
 }
 
 /*
+ * 方案外框：专家卡画在这只框里面，头像和思考仍是原来的专家卡。
+ * 方案自己的思考在框的上半，汇总卡在专家后面，不写进专家正文。
+ */
+.wb-scheme-frame {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  box-sizing: border-box;
+  width: 100%;
+  min-width: 0;
+  margin-top: 4px;
+  padding: 12px;
+  border: 1px solid #e4e4f7;
+  border-radius: 12px;
+  background: #fff;
+}
+
+/* 子卡的 key 包装不占高度，专家卡仍是方案框的直接内容 */
+.wb-scheme-frame :deep(.wb-scheme-member) {
+  display: contents;
+}
+
+/* 框已经缩在方案内容列里，内部专家卡不要再按 640px 硬撑出框 */
+.wb-scheme-frame .wb-actor-main {
+  width: auto;
+  max-width: 100%;
+}
+
+/*
  * 消息流底部的步骤提示：一行浅灰小字 + 呼吸点，左对齐到参与者内容列。
  * 不做胶囊、不做居中、不粘顶——它只回答「下一步在等什么」。
  */
@@ -4045,34 +4416,66 @@ function removeAttachment(index: number) {
 
 .wb-actor {
   display: flex;
-  align-items: flex-start;
+  flex-direction: column;
+  gap: 6px;
+  align-items: stretch;
+}
+
+/* 头像 + 名称 + 角标同一行垂直居中；下方内容缩进到名称列 */
+.wb-actor-topline {
+  display: flex;
+  align-items: center;
   gap: 12px;
+  min-width: 0;
 }
 
 .wb-actor-main {
   min-width: 0;
-  flex: 1;
+  /* 同一轮里思考框、结果框、工作流卡共用这一档宽度，不再按每张卡的字数各缩各的 */
+  width: min(100%, 640px);
+  /* 36px 头像 + 12px 间距，与名称列左缘对齐 */
+  margin-left: 48px;
+  max-width: min(100%, 640px);
 }
 
 .wb-actor-head {
   display: flex;
   align-items: center;
   gap: 8px;
-  margin-bottom: 6px;
+  min-width: 0;
 }
 
 .wb-actor-avatar {
+  position: relative;
   display: grid;
   place-items: center;
   flex: none;
+  box-sizing: border-box;
   width: 36px;
   height: 36px;
   overflow: hidden;
-  border-radius: 9px;
-  box-shadow: inset 0 0 0 1px #e5e7eb;
+  border: 1.5px solid #c0c4cc;
+  border-radius: 50%;
   background: #fff;
   font-size: 14px;
   font-weight: 650;
+}
+
+/* 还在执行：只转外圈的一段银弧，形象本身不转。结束后去掉这一层，留下整圈银边。 */
+.wb-actor-avatar.is-running {
+  border-color: transparent;
+}
+
+.wb-actor-avatar.is-running::before {
+  content: '';
+  position: absolute;
+  inset: 0;
+  z-index: 2;
+  border-radius: 50%;
+  background: conic-gradient(#c0c4cc 0 28%, transparent 0 100%);
+  mask: radial-gradient(farthest-side, transparent calc(100% - 1.5px), #000 calc(100% - 1.4px));
+  animation: wb-avatar-spin 0.8s linear infinite;
+  pointer-events: none;
 }
 
 .wb-actor-avatar img {
@@ -4082,8 +4485,7 @@ function removeAttachment(index: number) {
 }
 
 /*
- * 工作流头像：固定浅底 + 黑色齿轮线稿。
- * 方座尺寸 / 圆角 / 内描边沿用上面的 `.wb-actor-avatar`，不单独改，保证与方案、专家头像对齐。
+ * 工作流头像：固定白底 + 黑色齿轮线稿，外圈与其它参与者同一只银圈。
  */
 .wb-actor-avatar.is-workflow {
   background: #fff;
@@ -4113,23 +4515,23 @@ function removeAttachment(index: number) {
 }
 
 /*
- * 工作流执行卡片（视觉以 temp/test-l.html 为准）。
+ * 工作流执行卡片（视觉以 temp/test-l.html 为准；过程/结果上下分栏）。
  * 只作用于工作流块：专家 / 方案块仍走 .answer-block 那套气泡，样式互不影响。
+ * 最大宽度与入口/方案/专家气泡对齐（640），不拉满整行。
  */
 .wf-card {
+  width: 100%;
   margin-top: 2px;
   overflow: hidden;
-  border: 1px solid #e2e8f0;
-  border-radius: 12px;
+  border: 1px solid #d1fae5;
+  border-radius: 8px;
   background: #fff;
-  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.03);
-  transition: border-color 0.3s;
+  box-shadow: none;
 }
 
-/* 跑完才转绿：描边与头部底色一起变，和状态徽标同口径 */
-.wf-card.completed {
-  border-color: #bbf7d0;
-  box-shadow: 0 4px 12px rgba(22, 163, 74, 0.05);
+/* 只有标题栏是淡绿，标题以下保持白底 */
+.wf-process {
+  background: #fff;
 }
 
 .wf-card-header {
@@ -4137,13 +4539,8 @@ function removeAttachment(index: number) {
   align-items: center;
   justify-content: space-between;
   gap: 12px;
-  padding: 14px 18px;
-  border-bottom: 1px solid #e2e8f0;
-  background: #f8fafc;
-  transition: background 0.3s;
-}
-
-.wf-card.completed .wf-card-header {
+  padding: 16px;
+  border-bottom: 1px solid #d1fae5;
   background: #f0fdf4;
 }
 
@@ -4151,7 +4548,7 @@ function removeAttachment(index: number) {
   display: flex;
   align-items: center;
   gap: 8px;
-  color: #1e293b;
+  color: #166534;
   font-size: 15px;
   font-weight: 600;
 }
@@ -4173,8 +4570,9 @@ function removeAttachment(index: number) {
 }
 
 .wf-status.is-success {
-  background: #dcfce7;
-  color: #166534;
+  background: #fff;
+  color: #059669;
+  border: 1px solid #a7f3d0;
 }
 
 .wf-status.is-failed {
@@ -4192,7 +4590,7 @@ function removeAttachment(index: number) {
   color: #c2410c;
 }
 
-/* 垂直时间轴：连接线在左，节点圆点压在线上面 */
+/* 垂直时间轴：连接线在左，节点圆点压在线上面；一行一项 */
 .wf-steps {
   position: relative;
   display: flex;
@@ -4215,7 +4613,7 @@ function removeAttachment(index: number) {
 .wf-step-item {
   position: relative;
   display: flex;
-  align-items: center;
+  align-items: flex-start;
   gap: 16px;
   color: #94a3b8;
   font-size: 14px;
@@ -4245,6 +4643,7 @@ function removeAttachment(index: number) {
   flex: none;
   width: 22px;
   height: 22px;
+  margin-top: 1px;
   border: 2px solid #fff;
   border-radius: 50%;
   background: #f1f5f9;
@@ -4273,11 +4672,30 @@ function removeAttachment(index: number) {
   min-width: 0;
 }
 
+.wf-step-name {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+}
+
 .wf-step-code {
-  margin-left: 6px;
-  color: #94a3b8;
+  color: #9ca3af;
+  font-family: ui-monospace, Consolas, monospace;
   font-size: 12px;
   font-weight: 400;
+}
+
+/* 节点种类角标：只标 Agent，形态靠近消息流角标但不抢工作流紫色 */
+.wf-step-kind {
+  padding: 0 6px;
+  border: 1px solid #c7d2fe;
+  border-radius: 4px;
+  background: #eef2ff;
+  color: #4f46e5;
+  font-size: 11px;
+  font-weight: 500;
+  line-height: 18px;
 }
 
 .wf-step-note {
@@ -4287,33 +4705,81 @@ function removeAttachment(index: number) {
   font-weight: 400;
 }
 
-/* 产物区：只在跑完后出现；有文件画文件卡，没有文件放终答正文 */
-.wf-output {
-  padding: 16px 18px;
-  border-top: 1px dashed #bbf7d0;
-  background: #f8fafc;
+.wf-step-tools {
+  margin: 8px 0 0;
 }
 
-/* 长终答不能像演示稿那样被 200px 截断：给一个可滚动上限，正文完整可读 */
-.wf-output.is-text {
-  max-height: 420px;
-  overflow-y: auto;
+/* 节点内工具胶囊只读：快照没有入参出参，不可点开详情 */
+.wf-step-tools .wb-tool-pill {
+  cursor: default;
 }
 
-.output-tip {
+/* 结果区：虚线与过程区隔开，白底。正文四行在框内滚，不另套灰框。 */
+.wf-result {
+  padding: 16px;
+  border-top: 1px dashed #d1fae5;
+  background: #fff;
+}
+
+/*
+  运行中的折叠行：替代整屏结果区。
+  与「结果」同一位置（过程区下方、实线之上），形状是一条可点的窄条，
+  不抢高度、不压滚动位置；点开后同一张卡就地展开正文。
+*/
+.wf-result-fold {
+  padding: 10px 18px;
+  border-top: 1px solid #e2e8f0;
+  background: #fff;
+}
+
+.wf-result-fold-btn {
   display: flex;
   align-items: center;
-  gap: 6px;
-  margin-bottom: 12px;
+  justify-content: space-between;
+  gap: 12px;
+  width: 100%;
+  padding: 6px 10px;
+  border: 1px dashed #cbd5e1;
+  border-radius: 8px;
+  background: #f8fafc;
+  color: #475569;
+  font-size: 13px;
+  cursor: pointer;
+  text-align: left;
+}
+
+.wf-result-fold-btn:hover {
+  border-color: #635bff;
+  color: #4c46c9;
+}
+
+.wf-result-fold-label {
+  font-weight: 600;
+}
+
+.wf-card.completed .wf-result {
+  border-top-color: #d1fae5;
+}
+
+.wf-result-title {
+  margin: 0 0 10px;
+  color: #1e293b;
+  font-size: 13px;
+  font-weight: 650;
+  letter-spacing: 0.02em;
+}
+
+.wf-result-tip {
+  margin: 0 0 10px;
   color: #64748b;
   font-size: 13px;
 }
 
 .wf-output-text {
-  padding: 10px 12px;
-  border: 1px solid #e5e7eb;
-  border-radius: 8px;
-  background: #fff;
+  padding: 0;
+  border: 0;
+  border-radius: 0;
+  background: transparent;
 }
 
 .wf-spin {
@@ -4365,22 +4831,16 @@ function removeAttachment(index: number) {
 
 /* ===== 思考框（对齐 temp/test.html 的 .thought-box）===== */
 
-/* 整块是一个浅灰圆角框；流式时限高 88px（含标题）并在框内跟滚 */
+/* 整块是一个浅灰圆角框。思考文字自己限高四行并在框内滚动，标题不跟着滚 */
 .wb-actor-thought {
+  width: 100%;
+  box-sizing: border-box;
   margin: 0 0 8px;
   border: 1px solid #e5e7eb;
   border-radius: 8px;
   background: #f9fafb;
   overflow: hidden;
-  transition: max-height 0.24s ease, background 0.18s ease, border-color 0.18s ease;
-}
-
-/* 流式中：整框最高约 88px，超出在框内滚动（标题固定，正文滚动） */
-.wb-actor-thought.is-streaming {
-  max-height: 88px;
-  overflow-y: auto;
-  overscroll-behavior: contain;
-  scrollbar-width: thin;
+  transition: background 0.18s ease, border-color 0.18s ease;
 }
 
 /* 已收起：只剩标题那一行，点标题展开；底与描边淡出，读起来像一行可点文字 */
@@ -4409,19 +4869,41 @@ function removeAttachment(index: number) {
   padding: 8px 12px;
   border: 0;
   background: transparent;
-  color: #6b7280;
+  color: #9ca3af;
   font: inherit;
   font-size: 13px;
-  font-weight: 500;
+  font-weight: 400;
   text-align: left;
   cursor: pointer;
   user-select: none;
 }
 
-/* 思考正文：等宽、逐行排布，一行就一行高（不预留空白） */
+.wb-thought-head:hover {
+  color: #4f46e5;
+}
+
+.thought-chevron {
+  flex: none;
+  width: 0;
+  height: 0;
+  border-top: 4px solid transparent;
+  border-bottom: 4px solid transparent;
+  border-left: 5px solid currentColor;
+  transition: transform 0.2s ease;
+}
+
+.thought-chevron.open {
+  transform: rotate(90deg);
+}
+
+/* 思考正文：固定四行，超出在这四行里面滚动，不把整段铺到页面上 */
 .wb-actor-thinking {
   margin: 0;
   padding: 0 12px 12px;
+  max-height: calc(4 * 1.6em + 12px);
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  scrollbar-width: thin;
   color: #4b5563;
   font-size: 13px;
   line-height: 1.6;
@@ -4516,6 +4998,12 @@ function removeAttachment(index: number) {
 }
 
 @keyframes wb-tool-spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+@keyframes wb-avatar-spin {
   to {
     transform: rotate(360deg);
   }

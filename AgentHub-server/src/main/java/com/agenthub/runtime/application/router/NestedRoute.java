@@ -1,5 +1,6 @@
 package com.agenthub.runtime.application.router;
 
+import com.agenthub.runtime.domain.model.ParticipantView;
 import com.agenthub.runtime.domain.model.TrialTurn;
 
 /**
@@ -13,9 +14,21 @@ import com.agenthub.runtime.domain.model.TrialTurn;
  * <p>只承载展示所需的三件事：分给了谁（{@code routeLine}）、它自己想了什么
  * （{@code turn.traces}）、失败原因。不改路由结果，也不参与终答拼接。
  *
- * @param routeLine 「路由到 {子展示名}（key），依据：…」；不含密钥
- * @param turn      该子在目标方案里的执行结果；失败 / 跳过时可空
- * @param error     失败摘要；成功为 null
+ * @param routeLine   「路由到 {子展示名}（key），依据：…」；不含密钥
+ * @param turn        该子在目标方案里的执行结果；失败 / 跳过时可空
+ * @param error       失败摘要；成功为 null
+ * @param participant 开跑时的身份（与 SSE begin 同一份）；未开跑为 null
  */
-public record NestedRoute(String routeLine, TrialTurn turn, String error) {
+public record NestedRoute(String routeLine, TrialTurn turn, String error, ParticipantView participant) {
+
+    /**
+     * 兼容构造：没有身份时只带路由行与结果。
+     *
+     * @param routeLine 路由行
+     * @param turn      子结果
+     * @param error     失败摘要
+     */
+    public NestedRoute(String routeLine, TrialTurn turn, String error) {
+        this(routeLine, turn, error, null);
+    }
 }

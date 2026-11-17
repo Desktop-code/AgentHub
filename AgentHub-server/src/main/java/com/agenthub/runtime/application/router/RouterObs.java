@@ -5,6 +5,7 @@ import com.agenthub.agent.domain.model.AgentRunMode;
 import com.agenthub.obs.domain.ObsTraceScope;
 import com.agenthub.obs.domain.model.ObsStatus;
 import com.agenthub.obs.domain.model.SpanClose;
+import com.agenthub.obs.domain.model.SpanType;
 import com.agenthub.obs.domain.service.ObsAttrs;
 import com.agenthub.runtime.domain.model.MaRunSpec;
 import com.agenthub.runtime.domain.model.ScratchBoard;
@@ -48,6 +49,27 @@ public final class RouterObs {
         fields.put("ma.template", spec.template());
         // 方案就是自己的根：不再区分「绑根 / 虚拟根」，统一标注 SCHEME 供泳道识别
         fields.put("ma.root", "SCHEME");
+    }
+
+    /**
+     * 多问拆分的只读打点：是否拆分、问题条数、去重后的目标数。
+     *
+     * <p>只写计数，<b>不写</b>问题正文与目标名：用户问句可能含业务数据，ROUTE attrs 会落进
+     * 追踪表。这三个数足够核对「块位是否按提问顺序」，不必再靠日志反推。
+     *
+     * @param fields        目标 attrs map
+     * @param questionSplit 本轮是否走了「一条消息多个问题」拆分
+     * @param questionCount 问题条数（＝意图条数，不按目标去重）
+     * @param topicCount    去重后的目标数（与决策块正文里的名单个数一致）
+     */
+    public static void questionAttrs(Map<String, Object> fields, boolean questionSplit,
+                                     int questionCount, int topicCount) {
+        if (fields == null) {
+            return;
+        }
+        fields.put("ma.question_split", questionSplit);
+        fields.put("ma.question_count", Math.max(0, questionCount));
+        fields.put("ma.question_topic_count", Math.max(0, topicCount));
     }
 
     /**
@@ -133,6 +155,104 @@ public final class RouterObs {
             fields.putAll(extra);
         }
         return ObsAttrs.withFields(ObsAttrs.withBrief(null, brief), fields);
+    }
+
+    /** 外壳种类键。真专家不写；前端据此把 AGENT 显示成「工作流」或「方案」。 */
+    public static final String OBS_ROLE = "obs.role";
+
+    /**
+     * 综答种类键。值为 {@code concat} 时表示这一步是拼接、没有模型调用。
+     * 拓扑据此认出汇总节点，不依赖「又开了一次 LLM」。
+     */
+    public static final String OBS_SUMMARY = "obs.summary";
+
+    /** {@link #OBS_SUMMARY}：按序拼接，无模型调用。 */
+    public static final String SUMMARY_CONCAT = "concat";
+
+    /** {@link #OBS_ROLE}：这一步是工作流外壳，节点仍在工作流自己的 trace 里。 */
+    public static final String ROLE_WORKFLOW = "workflow";
+
+    /** {@link #OBS_ROLE}：这一步是被路由进来的方案外壳，不是方案自己的编排根。 */
+    public static final String ROLE_SCHEME = "scheme";
+
+    /**
+     * 外壳成功收口的人话摘要。真专家保持「执行子 Agent」，避免顶层单 Agent 文案被改掉。
+     *
+     * @param scheme   目标是另一套方案
+     * @param workflow 目标是工作流
+     * @return 写入 brief 的短句
+     */
+    public static String shellBrief(boolean scheme, boolean workflow) {
+        if (workflow) {
+            return "执行工作流";
+        }
+        if (scheme) {
+            return "执行方案";
+        }
+        return "执行子 Agent";
+    }
+
+    /**
+     * 给外壳 attrs 补上种类。真专家原样返回调用方的 extra，不新增键。
+     *
+     * @param extra    模板已有的扁平字段；可空
+     * @param scheme   目标是另一套方案
+     * @param workflow 目标是工作流
+     * @return 合入种类后的新表；非外壳时就是传入的 extra
+     */
+    public static Map<String, Object> withShellRole(Map<String, Object> extra, boolean scheme, boolean workflow) {
+        Map<String, Object> role = shellRoleFields(scheme, workflow);
+        if (role.isEmpty()) {
+            return extra;
+        }
+        Map<String, Object> fields = new LinkedHashMap<>();
+        if (extra != null && !extra.isEmpty()) {
+            fields.putAll(extra);
+        }
+        fields.putAll(role);
+        return fields;
+    }
+
+    /**
+     * 外壳种类字段。空表表示真专家，调用方不要写入。
+     *
+     * @param scheme   目标是另一套方案
+     * @param workflow 目标是工作流
+     * @return 仅含 {@link #OBS_ROLE} 的表，或空表
+     */
+    public static Map<String, Object> shellRoleFields(boolean scheme, boolean workflow) {
+        if (workflow) {
+            return Map.of(OBS_ROLE, ROLE_WORKFLOW);
+        }
+        if (scheme) {
+            return Map.of(OBS_ROLE, ROLE_SCHEME);
+        }
+        return Map.of();
+    }
+
+    /**
+     * 记下 CONCAT 综答这一步。不调用模型，只留一个挂在本层 ROUTE 下的节点，
+     * 拓扑才能在「拼接 / 无调用」时也画出汇总，而不是只在又开了 LLM 时才有。
+     *
+     * @param trace     本轮 trace；可空
+     * @param routeSpan 本层 ROUTE；可空（没有路由步时不记）
+     */
+    public static void noteConcat(ObsTraceScope trace, Long routeSpan) {
+        if (trace == null || routeSpan == null) {
+            return;
+        }
+        Long span = trace.open(SpanType.SYSTEM, "拼接", null, routeSpan, null);
+        if (span == null) {
+            return;
+        }
+        SpanClose close = new SpanClose();
+        close.setStatus(ObsStatus.OK);
+        close.setOutputText("按序拼接，无模型调用");
+        Map<String, Object> fields = new LinkedHashMap<>();
+        fields.put("ma.aggregate", "CONCAT");
+        fields.put(OBS_SUMMARY, SUMMARY_CONCAT);
+        close.setAttrsJson(ObsAttrs.withFields(ObsAttrs.withBrief(null, "无调用"), fields));
+        trace.close(span, close);
     }
 
     /**

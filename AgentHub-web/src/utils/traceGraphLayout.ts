@@ -191,11 +191,28 @@ export function groupSiblingSpans(
  * @return 是否按汇总类处理
  */
 export function isAggregateSibling(span: ObsSpan, agentEndMs: number | null): boolean {
-  if (agentEndMs == null || isAgent(span)) {
+  if (isAgent(span)) {
+    return false
+  }
+  // CONCAT 拼接没有模型步，attrs 已标明是综答：不靠开工时刻，避免无小数秒时被排到子 Agent 前面
+  if (isConcatSummary(span)) {
+    return true
+  }
+  if (agentEndMs == null) {
     return false
   }
   const start = parseTime(span.startTime)
   return start != null && start >= agentEndMs - CAUSAL_EPS_MS
+}
+
+/**
+ * 拼接综答节点。与后端 obs.summary=concat 对齐，并行并组规则不看这个标记。
+ *
+ * @param span 待判定步骤
+ * @return 是否为无模型调用的拼接综答
+ */
+function isConcatSummary(span: ObsSpan): boolean {
+  return parseAttrs(span.attrsJson)['obs.summary'] === 'concat'
 }
 
 /**

@@ -924,11 +924,10 @@ async function refreshSessionTitle(id: number) {
 }
 
 /**
- * 首轮结束后补拉左栏标题。
+ * 首轮结束后按 [3s, 8s] 补拉左栏标题。
  *
- * <p>为什么还需要：标题在本轮请求内同步写库，done 之后已按会话单查补过一次左栏；
- * 这里保留两次列表补拉兜底，防止单查与列表接口的可见性时序差让「新对话」一直挂着。
- * 命中即停，不做常驻轮询。
+ * <p>标题由后端异步生成：done 后已单查一次；这里再延迟补拉，等摘要写入。
+ * 命中即停，不做常驻轮询。失败时保持「新对话」，不另造展示规则。
  *
  * <p>为什么只补首轮：标题只由首轮生成，后续轮次不会再变，补拉纯属浪费一次请求。
  *
@@ -937,7 +936,7 @@ async function refreshSessionTitle(id: number) {
 function scheduleTitleRefresh(id: number) {
   stopTitleRefresh()
   const row = history.value.find((item) => item.id === id)
-  // 已有标题（或不是首轮）就不必等：后端不会再改它
+  // 已有标题就不必等：后端不会再改它（手改 MANUAL 也不会被异步覆盖）
   if (row && (row.sessionTitle || '').trim()) {
     return
   }
@@ -1137,7 +1136,7 @@ async function purgeUnaskedSessions(items: TrialSession[]) {
 }
 
 /**
- * 主标题：只认 session_title（首轮后自动写入的首句截断，或用户手改）。
+ * 主标题：只认 session_title（首轮后异步摘要，或用户手改）。
  *
  * <p>为什么不用 lastMsgPreview 兜底：那是用户第一句话的截断，直接当标题会让左栏变成
  * 一长串问句，和真标题混在一起分不清。没有标题就固定显示「新对话」，
@@ -1991,12 +1990,18 @@ async function send(content: string, images?: string[]) {
         childPending.value = pending
       },
       onFileGenerated: (file) => {
-        // 产物是结果而不是过程：不改 phase，避免状态条从「回答生成中」退回「工具执行中」
-        appendFile(live, {
-          fileName: file.fileName,
-          size: file.size,
-          downloadUrl: file.downloadUrl
-        })
+        // 产物是结果而不是过程：不改 phase，避免状态条从「回答生成中」退回「工具执行中」。
+        // 身份随帧下发时一并带上；单专家轮次没有身份，留空即可。
+        appendFile(
+          live,
+          {
+            fileName: file.fileName,
+            size: file.size,
+            downloadUrl: file.downloadUrl
+          },
+          file.participantId,
+          file.participantName
+        )
         touchSnapshot()
       },
       onAssistant: (text) => {
@@ -2046,8 +2051,7 @@ async function send(content: string, images?: string[]) {
       } else {
         dropLive(sessionId)
       }
-      // 首轮标题由后端在本次请求内同步写库（首句截断）：先按会话单查补进左栏，
-      // 「新对话」立刻变成首句摘要；延迟补拉保留为「服务端暂时不可见」时的兜底
+      // 首轮标题由后端异步生成：先单查一次，再按 [3s, 8s] 补拉；空标题保持「新对话」
       if ((session.value?.messageCount ?? 0) <= 1) {
         await refreshSessionTitle(sessionId)
         scheduleTitleRefresh(sessionId)

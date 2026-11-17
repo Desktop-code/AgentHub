@@ -573,10 +573,10 @@ public class TrialRunAppService {
                 agentOk.setAttrsJson(ObsAttrs.withBrief(null, "执行 Agent"));
                 trace.close(agentSpan, agentOk);
             }
-            int next = timeline.appendTraces(session.getId(), seq, turn, written);
-            written.add(timeline.assistant(session.getId(), next, turn));
+            // 终稿写在这一位的思考 / 工具之后、文件之前，不再另补一条贴到轮末
+            int next = timeline.appendParticipantTurn(session.getId(), seq, turn, written);
             // 续作轮同样可能再次需要拍板（多步确认），选项紧跟本轮正文落库
-            appendChoice(session.getId(), next + 1, written);
+            appendChoice(session.getId(), next, written);
             // 方案会话不给记忆开写窗口：它在主链路上也被跳过，续作不能悄悄补一次写
             if (session.getMaDefId() == null) {
                 memory.afterAssistant(session, turn.getAssistantText());
@@ -1038,9 +1038,19 @@ public class TrialRunAppService {
             // 按子分段落库：决策块 + 每子「路由到」+ 该子 traces，禁止拼成单条时间线
             seq = timeline.appendRouterSegments(session.getId(), seq, routed, written);
             seq = appendNotices(session.getId(), seq, routed.notices(), written);
-            written.add(timeline.assistant(session.getId(), seq, routed.turn()));
+            /*
+             * 各参与者的终稿已经写在自己的分段里。这里只补「方案结论」之后的那一段：
+             * 真汇总是汇总模型的正文，多问并行是整轮收口（各方案要点，不是拼接稿）。
+             * 它挂在刚落下的结论身份之后，不会再贴回前面的专家卡或最后一个车间。
+             */
+            if (TrialTimelineWriter.owesRoundAssistant(routed)) {
+                boolean expanded = routed.segments() != null && !routed.segments().isEmpty();
+                // 子段已经各自记过用量时，汇总正文只补文字，不再把合计 token 写第二遍
+                written.add(timeline.assistant(session.getId(), seq, routed.turn(), !expanded));
+                seq++;
+            }
             // 选项（若本轮收口出了结构）紧跟助手正文落库：chips 在气泡下方，刷新后也按同一顺序回放
-            appendChoice(session.getId(), seq + 1, written);
+            appendChoice(session.getId(), seq, written);
             if (!schemeTurn && agent != null) {
                 memory.afterAssistant(session, routed.turn().getAssistantText());
             }
@@ -1077,8 +1087,8 @@ public class TrialRunAppService {
                 agentOk.setAttrsJson(ObsAttrs.withBrief(null, "执行 Agent"));
                 trace.close(agentSpan, agentOk);
             }
-            seq = timeline.appendTraces(session.getId(), seq, turn, written);
-            written.add(timeline.assistant(session.getId(), seq, turn));
+            // 单专家没有分段：终稿与思考、工具、文件写在同一段，不再在过程之后另补一条
+            seq = timeline.appendParticipantTurn(session.getId(), seq, turn, written);
             memory.afterAssistant(session, turn.getAssistantText());
             return turn;
         } catch (RuntimeException ex) {

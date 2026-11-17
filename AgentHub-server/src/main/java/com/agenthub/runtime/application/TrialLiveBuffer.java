@@ -192,6 +192,15 @@ public class TrialLiveBuffer {
                 delegate.deliverParticipantConclusion(routeLine, text);
             }
 
+            /**
+             * 参与者终态只走出站：快照是「进行中一轮的内存镜像」，终态由下一轮落库事件接管；
+             * 但这里绝不能吞掉——吞掉前端就永远收不了口。
+             */
+            @Override
+            public void endParticipant(ParticipantView participant, String state, String note) {
+                delegate.endParticipant(participant, state, note);
+            }
+
             /** 内层方案的收口通道要保持镜像，不能在这里把内存快照丢掉。 */
             @Override
             public TrialProgress conclusionChannel() {
@@ -469,10 +478,12 @@ public class TrialLiveBuffer {
             if (file == null || file.fileName() == null || file.fileName().isBlank()) {
                 return;
             }
-            // 摘要用「文件名 + 可读体积」：左栏/时间线折叠时也能看出生成了哪个文件
+            // 摘要用「文件名 + 可读体积」：左栏/时间线折叠时也能看出生成了哪个文件；
+            // 正文带参与者身份，断线重连走内存快照时文件仍挂回写出它的那一位
             String summary = file.fileName() + "（" + file.humanSize() + "）";
             turn.append(EventType.FILE, TrialTexts.summary(summary),
-                    GeneratedFileMarker.payload(file.fileName(), file.size()), null);
+                    GeneratedFileMarker.payload(file.fileName(), file.size(),
+                            file.participantId(), file.participantName()), null);
         }
 
         /**

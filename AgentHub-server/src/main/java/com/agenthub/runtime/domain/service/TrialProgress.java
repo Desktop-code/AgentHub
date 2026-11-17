@@ -80,6 +80,36 @@ public interface TrialProgress {
         // 不需要分块的实现默认忽略
     }
 
+    /** 参与者正常结束：交出结论（可以没有正文），卡片据此退出进行态。 */
+    String PARTICIPANT_DONE = "done";
+
+    /** 参与者失败：执行异常 / 撞限 / 节点失败；必须带一句用户可见原因。 */
+    String PARTICIPANT_FAILED = "failed";
+
+    /** 参与者被中止：墙钟到期、请求取消、计划未获批准等非自身错误。 */
+    String PARTICIPANT_ABORTED = "aborted";
+
+    /**
+     * 某个参与者**结束**：done / failed / aborted。
+     *
+     * <p>为什么必须有：{@link #beginParticipant(ParticipantView)} 一旦建块，页面就进入「进行中」。
+     * 只靠正文增量收不掉进行态——子专家一个字都没产出（被撞限打断、工具全失败、非流式模型）
+     * 时，卡片会一直转圈到整轮收尾，汇总落屏那一下前面的空壳才一起闪现。这条让每一步都能自行收口。
+     *
+     * <p>与 {@link #deliverParticipantConclusion(String, String)} 的分工：那条负责「正文」，
+     * 这条负责「状态」。失败 / 中止必须把原因带在 {@code note} 里（已脱敏），
+     * 前端把它写进该参与者的内容框，而不是只留一个红点。
+     *
+     * <p>幂等：同一参与者重复收口由实现按 id 去重；没有 begin 过的 id 直接忽略。
+     *
+     * @param participant 参与者身份（与 begin 同一份 id / 名称）
+     * @param state       {@link #PARTICIPANT_DONE} / {@link #PARTICIPANT_FAILED} / {@link #PARTICIPANT_ABORTED}
+     * @param note        终态说明；可空（done 且正文已流出时不需要）
+     */
+    default void endParticipant(ParticipantView participant, String state, String note) {
+        // 不展示分块的实现（落库回放 / 窄测）不必关心
+    }
+
     /**
      * 一次工具**开始**执行。与 {@link #tool(String, String, String, boolean)} 成对：
      * 这条用于把「正在调用」显示成胶囊，那条用于把胶囊收成成功 / 失败态。
