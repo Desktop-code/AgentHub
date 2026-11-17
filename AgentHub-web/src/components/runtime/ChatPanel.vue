@@ -1011,6 +1011,12 @@ const props = defineProps<{
    * 缺省=调试试跑，行为与样式保持原样。
    */
   skin?: 'default' | 'workbench'
+  /**
+   * 页签是否在前台。工作台 KeepAlive 失活时为 false，停 400ms 思考时钟。
+   * 缺省视为在前台：试跑抽屉不传，行为与改前一致。
+   * 只停表，不改轮次、不收起思考面板。
+   */
+  pageActive?: boolean
   /** 工作台思考摘要用的线路展示名；勿写死「接待助手」 */
   routeHint?: string
   /**
@@ -3206,7 +3212,9 @@ onMounted(() => {
  * 只有还有人在跑时才刷新思考行上的耗时。回放没有流式轮次，不启动这只表。
  */
 watch(
-  () => props.turns.some((turn) => turn.role === 'assistant' && turn.status === 'streaming'),
+  () =>
+    props.pageActive !== false &&
+    props.turns.some((turn) => turn.role === 'assistant' && turn.status === 'streaming'),
   (live) => {
     if (live && !thoughtTimer) {
       thoughtNow.value = Date.now()
@@ -3218,7 +3226,10 @@ watch(
     if (!live && thoughtTimer) {
       window.clearInterval(thoughtTimer)
       thoughtTimer = 0
-      thoughtNow.value = Date.now()
+      // 本轮真结束才补一次时刻。只是页签失活时不写，避免后台再触发一轮渲染
+      if (props.pageActive !== false) {
+        thoughtNow.value = Date.now()
+      }
     }
   },
   { immediate: true }
