@@ -898,6 +898,7 @@ import { useSpeechPlayer } from '@/composables/speechPlayer'
 import {
   hasRouterTrace,
   isPlanFlow,
+  lanesForDebugSkin,
   planStateText,
   processLanes,
   stepStateText,
@@ -3577,9 +3578,20 @@ function phaseLabel(phase?: string) {
   return ''
 }
 
-/** 多路由分块；单意图通常一块。 */
+/**
+ * 本轮思考泳道。
+ *
+ * <p>工作台必须走严格 {@link processLanes}：没有 begin 不建卡，避免再冒出匿名「执行」。
+ * 调试皮肤（单 Agent / 抽屉）没有参与者身份帧，被丢掉的推理和工具由
+ * {@link lanesForDebugSkin} 收成一条「思考过程」。两条函数的建卡规则不要并回一处。
+ *
+ * @param item 助手轮
+ */
 function lanesOf(item: ChatTurn) {
-  return processLanes(item.blocks)
+  if (isWorkbench.value) {
+    return processLanes(item.blocks)
+  }
+  return lanesForDebugSkin(item.blocks)
 }
 
 /** 从「路由到 {名}」抽出子 Agent 显示名，供红色强调。 */
