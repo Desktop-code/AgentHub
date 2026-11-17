@@ -98,6 +98,7 @@ docs/*
 !docs/architecture/
 !docs/architecture/**
 bin/
+samples/
 
 # 会话级文件工具的本地工作区（agenthub.workspace.root-path 默认 ./workspace-test）
 **/workspace-test/
