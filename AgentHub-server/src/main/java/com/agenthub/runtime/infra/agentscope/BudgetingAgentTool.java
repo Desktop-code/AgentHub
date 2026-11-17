@@ -105,14 +105,17 @@ public final class BudgetingAgentTool implements AgentTool {
     /**
      * 先占配额再调原工具；失败计入连续失败，并留下首错。
      *
-     * <p><b>首错留存（本刀收口）</b>：引擎的工具失败有两种形态——
+     * <p><b>首错留存</b>：引擎的工具失败有两种形态——
      * <ol>
      *   <li>抛异常：{@code doOnError} 分支，异常直接进首错；</li>
-     *   <li>返回 {@code state=ERROR} 的结果块：没有异常对象，**原先这里把 error 传成 null**，
-     *       首错因此被写成「未记录到首错（引擎只返回失败状态，没有异常对象）」。
-     *       现在先把结果块里的错误正文抽出来，作为首错原因交给 {@link RunBudget}。</li>
+     *   <li>返回 {@code state=ERROR} 的结果块：没有异常对象，把结果块里的错误正文抽出来，
+     *       作为首错原因交给 {@link RunBudget}。</li>
      * </ol>
      * 首错只落一次，后续熔断文案不得覆盖它。
+     *
+     * <p><b>成功判定（本刀收口）</b>：只有「异常」与 {@code state=ERROR} 才算失败。
+     * {@code RUNNING} 等非终态、以及缺省 state 的结果块，只要正文是健康内容就按成功计——
+     * 检索命中、空目录提示都不是错误。{@code state} 原值一律打进日志，保留可排查性。
      *
      * @param param 引擎入参
      * @return 原结果；撞限时以错误 Mono 结束
@@ -132,6 +135,8 @@ public final class BudgetingAgentTool implements AgentTool {
         return delegate.callAsync(param)
                 .doOnNext(result -> {
                     boolean success = isSuccess(result);
+                    // state 原值是排查「为什么被记成失败」的唯一依据：非 SUCCESS/null 一律留痕
+                    logState(result, success);
                     // 失败但没有异常：结果块正文就是唯一可得的根因，必须带走
                     record(budget, owner, success, null, success ? "" : errorTextOf(result));
                 })
@@ -144,6 +149,21 @@ public final class BudgetingAgentTool implements AgentTool {
                     log.warn("工具执行异常 tool={} type={} cause={}",
                             safeName(), error.getClass().getSimpleName(), CauseDigest.of(error), error);
                 });
+    }
+
+    /**
+     * 结果块的 state 原值留痕：只对「非 SUCCESS 且非 null」打，正常调用不产生噪音。
+     *
+     * @param result  工具结果块；可空
+     * @param success 本次按 {@link #isSuccess(ToolResultBlock)} 判定的结果
+     */
+    private void logState(ToolResultBlock result, boolean success) {
+        ToolResultState state = result == null ? null : result.getState();
+        if (state == null || state == ToolResultState.SUCCESS) {
+            return;
+        }
+        log.info("工具结果 state={} tool={} owner={} hasBody={} judgedSuccess={}",
+                state, safeName(), owner.isEmpty() ? "-" : owner, !errorTextOf(result).isBlank(), success);
     }
 
     /**
@@ -240,12 +260,32 @@ public final class BudgetingAgentTool implements AgentTool {
         }
     }
 
+    /**
+     * 工具结果是否按成功记账。
+     *
+     * <p>判据只认「引擎明确失败」：{@code state=ERROR}，异常由 {@code doOnError} 单独处理。
+     * {@code RUNNING} / 缺省 / 其它非终态**不再**当失败——线上真实踩到的就是这类结果块：
+     * {@code searchKnowledgeBase} 正常返回 15 条命中、{@code workspaceListFiles} 返回
+     * 「当前会话工作区还没有任何文件」，两者都被记成连续失败，三次就把该专家的工具链短路。
+     *
+     * <p>其余态以结果正文为辅助：有正文（或 state 明确 SUCCESS）即成功；正文也空时按成功计，
+     * 因为没有任何证据说明它失败，不能凭状态枚举猜错。
+     *
+     * @param result 工具结果块；可空
+     * @return true 表示按成功计
+     */
     private static boolean isSuccess(ToolResultBlock result) {
         if (result == null) {
             return false;
         }
-        ToolResultState state = result.getState();
-        // null 按成功计（部分工具未设 state）；RUNNING 不应在 callAsync 完成时出现
-        return state == null || state == ToolResultState.SUCCESS;
+        // ERROR 是引擎唯一明确的失败态；异常另由 doOnError 记账
+        if (result.getState() == ToolResultState.ERROR) {
+            return false;
+        }
+        /*
+         * SUCCESS / RUNNING / 缺省都按成功计：
+         * 结果正文是否为空只作日志辅助（见 logState），不拿状态枚举反推失败。
+         */
+        return true;
     }
 }
