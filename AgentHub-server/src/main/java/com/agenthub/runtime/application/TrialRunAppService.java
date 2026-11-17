@@ -32,7 +32,6 @@ import com.agenthub.runtime.domain.model.RouteSticky;
 import com.agenthub.runtime.domain.model.RunSession;
 import com.agenthub.runtime.domain.model.RunStatus;
 import com.agenthub.runtime.domain.model.TrialIdemGuard;
-import com.agenthub.runtime.domain.model.TitleSource;
 import com.agenthub.runtime.domain.model.TrialPlan;
 import com.agenthub.runtime.domain.model.TrialTurn;
 import com.agenthub.runtime.domain.repository.RunEventRepository;
@@ -43,7 +42,6 @@ import com.agenthub.runtime.domain.service.ChoiceContinue;
 import com.agenthub.runtime.domain.service.LeafChoiceHolder;
 import com.agenthub.runtime.domain.service.PlanJson;
 import com.agenthub.runtime.domain.service.PromptInjectionHolder;
-import com.agenthub.runtime.domain.service.SessionTitleTexts;
 import com.agenthub.runtime.domain.service.MeterTurnHolder;
 import com.agenthub.runtime.domain.service.TrialFailure;
 import com.agenthub.runtime.domain.service.SessionCancelFace;
@@ -1313,12 +1311,9 @@ public class TrialRunAppService {
         recordTurn(session, userText, "", advance);
         operLogWriter.write("runtime", "run", "agent_run_session", String.valueOf(session.getId()),
                 "试跑会话 " + session.getId() + " 本轮完成");
-        // MA 自动标题（刀：自动会话标题）：首轮成功后立刻用首句原文截出标题并写库，
-        // 左栏随下一次列表请求即可见；只有截不出标题（原文空白）时才回落既有 LLM 兜底。
-        boolean titled = applyFirstMessageTitle(session, userText);
-        if (!titled) {
-            maybeGenerateTitle(session, userText, turn);
-        }
+        // 首轮问答都已落库，交给后台按问答内容起个短标题；成功与否都不影响本轮响应。
+        // 禁止在这里用首问截断先写 session_title：一旦有值，异步生成会因「已有标题」永久跳过。
+        maybeGenerateTitle(session, userText, turn);
         // 待批准：本轮没有助手正文，预览给一句可读说明，不把空串写进左栏。
         // 可点选项的机器块不能进左栏预览：列表里出现一段 ```agenthub-choice 只会让人以为是乱码
         String preview = turn.isAssistantSuppressed()
@@ -1331,46 +1326,7 @@ public class TrialRunAppService {
     }
 
     /**
-     * 首轮成功后写入「首句截断」标题（MA 自动会话标题的唯一规则）。
-     *
-     * <p>为什么放在请求线程同步写：产品要求左栏在首轮结束后立刻有标题，
-     * 交给异步任务会晚 3～8 秒才出现；这里一条带条件的 UPDATE，开销可忽略。
-     *
-     * <p>边界：
-     * <ul>
-     *   <li>只在 {@code message_count == 1}（首轮）写，后续轮次不再动标题；</li>
-     *   <li>用户已手改（{@code title_source=MANUAL}）或已有标题时，
-     *       {@link RunSessionRepository#updateAutoTitleIfAbsent} 的条件更新会命中 0 行，
-     *       标题保持不变——这就是「手改后不再覆盖」的实现；</li>
-     *   <li>虚拟根会话同样生效：只依赖会话行，不需要 Agent。</li>
-     * </ul>
-     *
-     * @param session  本轮会话（轮次已累加）
-     * @param userText 用户这一轮原文
-     * @return true 表示已经存在确定性标题（无论本次是否真的写入），调用方不必再走 LLM 兜底
-     */
-    private boolean applyFirstMessageTitle(RunSession session, String userText) {
-        if (session == null || session.getId() == null || safeCount(session) != 1) {
-            return false;
-        }
-        String title = SessionTitleTexts.fromFirstMessage(userText);
-        if (title.isEmpty()) {
-            return false;
-        }
-        boolean written = sessions.updateAutoTitleIfAbsent(session.getId(), title, operatorContext.requireUserId());
-        if (written) {
-            // 本地对象同步成已写状态：后续同一轮的续跑不会重复尝试（条件更新本就只会命中一次）
-            session.setSessionTitle(title);
-            session.setTitleSource(TitleSource.AUTO.name());
-        }
-        return true;
-    }
-
-    /**
-     * 首轮结束后触发异步标题生成（LLM 兜底，仅当首句截断写不出标题时才走到这里）。
-     *
-     * <p>本刀（自动会话标题）的正常路径是 {@link #applyFirstMessageTitle}：首句原文直接截断入库、
-     * 不产生任何出站；本方法保留为既有能力复用，处理「用户原文全是空白」这类极端输入。
+     * 首轮结束后触发异步标题生成（LLM 摘要 ≤10 字写入 session_title）。
      *
      * <p>为什么只在 message_count == 1 时触发：标题概括的是会话主题，首轮就定了；
      * 后续轮次再调模型纯属浪费 token。批准计划那条路径的 advance=false、轮次仍是 1，
@@ -1378,6 +1334,9 @@ public class TrialRunAppService {
      *
      * <p>为什么这里不判标题是否已存在：判定要在异步线程读最新库值才准，
      * 由 {@link SessionTitleGeneratorAppService} 自己做；这里只做「是否首轮」这一层最省事的过滤。
+     *
+     * <p>工作台虚拟根会话 {@code agentId} 常为空：优先把本轮粘性专家传给生成器解析 SUMMARY 槽；
+     * 仍为空时生成器走平台 SUMMARY / CHAT 降级，不得因此整段跳过。
      *
      * @param session  本轮会话（轮次已累加）
      * @param userText 用户这一轮原文
@@ -1394,11 +1353,10 @@ public class TrialRunAppService {
         if (safeCount(session) != 1) {
             return;
         }
-        if (session.getAgentId() == null) {
-            return;
-        }
+        // 绑根会话用 agentId；工作台虚拟根用本轮粘性专家；都空则交给生成器走平台槽
+        Long modelAgentId = session.getAgentId() != null ? session.getAgentId() : session.getStickyAgentId();
         try {
-            titleGenerator.asyncGenerateTitle(session.getId(), session.getAgentId(), userText, answer);
+            titleGenerator.asyncGenerateTitle(session.getId(), modelAgentId, userText, answer);
         } catch (RuntimeException ex) {
             // 线程池拒绝等提交期异常：标题可以没有，本轮响应必须正常返回
             log.warn("提交会话标题生成任务失败 sessionId={} type={} cause={}",
@@ -1473,10 +1431,9 @@ public class TrialRunAppService {
     /**
      * 只在还没有预览时用用户原文生成 last_msg_preview。
      *
-     * <p>严禁在这里写 session_title：首轮开始时系统只落一条副标题预览；
-     * 主标题由 {@link #applyFirstMessageTitle} 在本轮成功后用首句原文截断写入
-     * （写不出时才由 {@link SessionTitleGeneratorAppService} 兜底），或由用户手动改名产生。
-     * 若这里顺手写了标题，条件更新会因为「已有值」而跳过，标题就等于绕开了统一规则。
+     * <p>严禁在这里写 session_title：首轮开始时系统只落一条副标题预览，
+     * 真正的主标题由 {@link SessionTitleGeneratorAppService} 在本轮结束后异步生成，
+     * 或由用户手动改名产生。若这里顺手写了标题，异步任务会因为「已有值」而永远跳过。
      *
      * @param session  会话
      * @param userText 用户原文

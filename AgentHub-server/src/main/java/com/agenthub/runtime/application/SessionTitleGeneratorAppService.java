@@ -23,11 +23,7 @@ import java.util.Optional;
 import java.util.concurrent.ThreadPoolExecutor;
 
 /**
- * 首轮对话结束后异步生成会话标题（LLM 兜底）。所属域：runtime。
- *
- * <p>与 MA 自动标题的关系：<b>正常路径不经过本类</b>。MA 试跑的首轮成功后由
- * {@code TrialRunAppService#applyFirstMessageTitle} 用「首条用户消息截断」同步写库；
- * 只有在原文截不出标题（全空白）时，才由本类花一次模型出站兜底。
+ * 首轮对话结束后异步生成会话标题。所属域：runtime。
  *
  * <p>职责：拿一轮的问答正文，让 SUMMARY 槽模型概括成不超过 {@value SessionTitleTexts#TITLE_LIMIT}
  * 个汉字的短标题，写回 {@code agent_run_session.session_title}，来源标为 AUTO。
@@ -38,7 +34,10 @@ import java.util.concurrent.ThreadPoolExecutor;
  *       不得丢进 router 池，也不能退回无界线程池；</li>
  *   <li>只在标题为空时写：用户可能已经手改（title_source=MANUAL），那种情况一律放弃。
  *       应用层判空只为省一次出站，真正的并发保护是仓储里那条带条件的 UPDATE；</li>
- *   <li>任何失败只记 warn 日志、不抛给调用方：标题是锦上添花，不能回头污染已经落库的一轮对话；</li>
+ *   <li>任何失败只记 warn 日志、不抛给调用方：标题是锦上添花，不能回头污染已经落库的一轮对话；
+ *       失败时也不要把首问截断写成「最终标题」，否则会挡住后续补生成；</li>
+ *   <li>{@code agentId} 可空（工作台虚拟根）：解析 SUMMARY 时走平台默认 / CHAT 降级；
+ *       计量渠道仍用 CONSOLE，agentId 缺失时记 0；</li>
  *   <li>异步线程没有 Sa-Token 登录态，也不继承 {@code ObsTraceHolder} / {@code PromptInjectionHolder}，
  *       因此本类不读 {@code OperatorContext}，用户 id 一律从会话行取；出站仍走
  *       {@link MemoryModelClient}，计量渠道固定 CONSOLE。</li>
@@ -94,14 +93,14 @@ public class SessionTitleGeneratorAppService {
      * 首轮对话结束后异步生成标题。调用方在整轮落库之后触发，不等待返回、不关心成败。
      *
      * @param sessionId       会话主键
-     * @param agentId         Agent 主键，用于解析 SUMMARY 槽并计量
+     * @param agentId         Agent 主键，用于解析 SUMMARY 槽并计量；工作台虚拟根可空（走平台槽）
      * @param userQuery       用户这一轮的原始提问
      * @param assistantAnswer 助手这一轮的完整回答
      */
     @Async("lightTaskExecutor")
     public void asyncGenerateTitle(Long sessionId, Long agentId, String userQuery, String assistantAnswer) {
-        if (sessionId == null || agentId == null) {
-            log.warn("自动生成会话标题跳过 reason=missing_ids sessionId={} agentId={}", sessionId, agentId);
+        if (sessionId == null) {
+            log.warn("自动生成会话标题跳过 reason=missing_sessionId");
             return;
         }
         if (!properties.isAutoTitleEnabled()) {
@@ -132,12 +131,14 @@ public class SessionTitleGeneratorAppService {
                 log.info("自动生成会话标题跳过 reason=empty_dialogue sessionId={}", sessionId);
                 return;
             }
-            // 解析 SUMMARY 槽：与滚动摘要共用同一套三级解析，未配摘要模型时允许降到 CHAT
+            // 解析 SUMMARY 槽：agentId 为空时跳过 Agent 绑定，直接平台 / ENV / CHAT 降级
             long modelId = requireSummaryModel(agentId);
             long userId = session.getUserId() == null ? 0L : session.getUserId();
-            String rawTitle = models.complete(agentId, sessionId, userId, modelId, INSTRUCTION, dialogue);
+            long meterAgentId = agentId == null ? 0L : agentId;
+            String rawTitle = models.complete(meterAgentId, sessionId, userId, modelId, INSTRUCTION, dialogue);
             String cleanTitle = SessionTitleTexts.clean(rawTitle);
             if (cleanTitle.isEmpty()) {
+                // 清洗后为空：不落库、不用首问冒充，左栏继续显示「新对话」，避免挡住后续补生成
                 log.warn("自动生成会话标题放弃 reason=empty_after_clean sessionId={} modelId={} rawChars={}",
                         sessionId, modelId, rawTitle == null ? 0 : rawTitle.length());
                 return;
@@ -153,9 +154,9 @@ public class SessionTitleGeneratorAppService {
     }
 
     /**
-     * 解析该 Agent 的 SUMMARY 模型实例。
+     * 解析 SUMMARY 模型实例。
      *
-     * @param agentId Agent 主键
+     * @param agentId Agent 主键，可空（虚拟根走平台槽）
      * @return 可用实例 id
      * @throws BizException 三级解析与 CHAT 降级都无可用实例
      */

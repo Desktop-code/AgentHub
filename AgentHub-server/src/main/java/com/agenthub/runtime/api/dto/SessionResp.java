@@ -29,7 +29,7 @@ public class SessionResp {
     private LocalDateTime startTime;
     private LocalDateTime endTime;
     private Integer messageCount;
-    /** 会话标题。空表示尚未生成，前端退回展示 lastMsgPreview */
+    /** 会话标题（异步摘要或手改）。空表示尚未生成，前端显示「新对话」 */
     private String sessionTitle;
     /** AUTO 自动生成 / MANUAL 用户手改 */
     private String titleSource;

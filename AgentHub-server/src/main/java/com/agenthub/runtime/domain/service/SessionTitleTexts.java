@@ -2,12 +2,9 @@ package com.agenthub.runtime.domain.service;
 
 /**
  * 会话标题的清洗与截断。所属域：runtime。
- * <p>两条来源共用本类：
- * <ul>
- *   <li>{@link #fromFirstMessage}：MA 试跑的默认规则——首条用户消息去空白后直接截断，保留标点；</li>
- *   <li>{@link #clean}：模型兜底标题的清洗——模型常带引号、书名号、句号或「标题：」前缀，
- *       左栏只有一行宽度，标点与空白会把汉字挤出去。</li>
- * </ul>
+ * <p>产品主路径：模型摘要经 {@link #clean} 写入 session_title（不超过 {@link #TITLE_LIMIT} 字）。
+ * {@link #fromFirstMessage} 仅作文本工具保留，<b>不得</b>再当作自动标题的持久化主路径——
+ * 用首问截断先落库会挡住异步摘要生成。
  * <p>约束：只做纯文本变换，不查库、不调用模型、不抛业务异常（空输入返回空串）。
  */
 public final class SessionTitleTexts {
@@ -16,9 +13,7 @@ public final class SessionTitleTexts {
     public static final int TITLE_LIMIT = 10;
 
     /**
-     * 「首条用户消息截断」标题的长度上限（MA 试跑自动标题）。
-     * <p>比模型标题宽松：首句截断保留原话，太短会切掉主题；24 个字符约 24 个汉字，
-     * 仍远小于 session_title 的容量。
+     * 「首条用户消息截断」长度上限（仅工具方法；产品自动标题不走此路径）。
      */
     public static final int FIRST_MESSAGE_LIMIT = 24;
 
@@ -78,18 +73,13 @@ public final class SessionTitleTexts {
     }
 
     /**
-     * 从首条用户消息直接截出会话标题（MA 试跑自动标题的唯一规则）。
+     * 从首条用户消息直接截出短预览（文本工具，非自动标题主路径）。
      *
-     * <p>规则写死（不再调模型）：
-     * <ol>
-     *   <li>先脱敏，避免用户原文里的密钥片段被抄进左栏；</li>
-     *   <li>换行 / 连续空白归一成单个空格，并去掉首尾空白；</li>
-     *   <li>超过 {@link #FIRST_MESSAGE_LIMIT} 个字符时截断并追加「…」；</li>
-     *   <li>与模型标题不同，<b>保留标点</b>：这是用户原话，去掉标点会变得不可读。</li>
-     * </ol>
+     * <p>规则：脱敏 → 空白归一 → 超长截断并追加「…」；保留标点。
+     * 产品左栏主标题须走模型 {@link #clean}，不得用本方法持久化挡异步生成。
      *
      * @param raw 用户首条消息原文，可空
-     * @return 可直接入库的标题；无有效字符时返回空串（调用方据此决定是否回落 LLM）
+     * @return 截断文本；无有效字符时返回空串
      */
     public static String fromFirstMessage(String raw) {
         if (raw == null || raw.isBlank()) {
