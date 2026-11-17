@@ -48,6 +48,11 @@ public final class ObsTraceScope {
     private final ConcurrentHashMap<String, Long> toolSpanByCallId = new ConcurrentHashMap<>();
     /** 最近一次成功打开的 TOOL 行 id；callId 缺失或事件尚未落库时的兜底挂点 */
     private final AtomicReference<Long> lastToolSpanId = new AtomicReference<>();
+    /**
+     * 只活在这一轮里的旁路数据（例如同轮知识库检索复用）。
+     * 下一轮是新的 scope，{@link #clearTurnSlots()} 再兜住「同一个对象被拿去复用」。
+     */
+    private final ConcurrentHashMap<String, Object> turnSlots = new ConcurrentHashMap<>();
 
     /**
      * 全新 trace：seq 与 step_no 都从 1 起号。
@@ -236,6 +241,46 @@ public final class ObsTraceScope {
         if (toolCallId != null && !toolCallId.isBlank()) {
             toolSpanByCallId.remove(toolCallId);
         }
+    }
+
+    /**
+     * 读取本轮槽。没有则 null。所属域：obs。
+     * <p>
+     * 槽只挂在当前这条 trace 上，不进全局表。调用方用固定名字存放自己的本轮数据。
+     *
+     * @param name 槽名；空则 null
+     * @return 槽里的值；没有则为 null
+     */
+    public Object turnSlot(String name) {
+        if (name == null || name.isBlank()) {
+            return null;
+        }
+        return turnSlots.get(name);
+    }
+
+    /**
+     * 槽还没有值时放入。并发下保留先写入的那份。
+     *
+     * @param name  槽名；空则忽略
+     * @param value 要放入的值；空则忽略
+     * @return 槽里最终的值；名字或值为空时为 null
+     */
+    public Object putTurnSlotIfAbsent(String name, Object value) {
+        if (name == null || name.isBlank() || value == null) {
+            return null;
+        }
+        Object raced = turnSlots.putIfAbsent(name, value);
+        return raced == null ? value : raced;
+    }
+
+    /**
+     * 本轮结束，丢掉只应活在这一轮里的数据。
+     * <p>
+     * 下一条用户消息会新开 scope，本来就看不到这里的内容。
+     * 这里再清一次，是为了轮结束当下就失效，避免同一个 scope 被继续拿去查。
+     */
+    public void clearTurnSlots() {
+        turnSlots.clear();
     }
 
     /**

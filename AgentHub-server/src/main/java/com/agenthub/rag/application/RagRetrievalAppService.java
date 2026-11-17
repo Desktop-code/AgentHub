@@ -41,6 +41,8 @@ import java.util.Map;
  *   <li><b>可观测</b>：工具调用内按检索链路写 obs 子步（{@link RagObsSpans}）；无 trace 时全部空操作，
  *       不改变这里的任何算法与返回。</li>
  * </ul>
+ * 同一轮（当前 trace）里，相同知识库和相同检索参数的成功结果会复用，不再重复嵌入和召回。
+ * 结果只放在这一轮的 trace 上，轮结束清空。调用方仍只传入该专家自己有权的库，缓存不会把别人的库带出来。
  * 本类不做权限之外的越权判断（如部门级过滤）；一期按 KB 可见性放行。
  */
 @Service
@@ -126,11 +128,18 @@ public class RagRetrievalAppService {
         if (query == null || query.isBlank()) {
             return List.of();
         }
-        SearchQuery sq = RetrievalConfigResolver.resolve(kb.getRetrievalConfig(), overridesJson,
-                topKOverride, kb.getId(), query.trim(), kb.getTenantId());
-        // Agent 侧配了重排就整体接管：开关与模型一起以 Agent 为准，避免出现「开了没模型 / 有模型没开」的半截状态
-        if (agentRerankModelId != null && agentRerankModelId > 0) {
-            sq.setRerankEnabled(true);
+        SearchQuery sq = resolveQuery(kb, query, topKOverride, overridesJson, agentRerankModelId);
+        // 同一轮、同一库、同一组检索参数：直接交还已查过的命中，不再嵌入、不再打向量库。
+        // 未授权的库进不了这里——调用方只传入该专家自己校验过的库。
+        SameTurnRetrievalMemo memo = SameTurnRetrievalMemo.current();
+        SameTurnRetrievalMemo.Key memoKey = memo == null || kb.getId() == null
+                ? null : SameTurnRetrievalMemo.key(kb, sq, agentRerankModelId, deferAgentRerank);
+        if (memoKey != null) {
+            List<SearchResult> reused = memo.find(memoKey);
+            if (reused != null) {
+                log.info("[RAG] 同轮复用知识库检索 kbId={}", kb.getId());
+                return reused;
+            }
         }
         // 检索子步只写 obs，不改算法；无 trace 时所有 step 都是空操作
         RagObsSpans.Session obs = RagObsSpans.currentOrInactive();
@@ -221,7 +230,35 @@ public class RagRetrievalAppService {
 
         // 6) 可选 Rerank：失败只记日志并保留原序，不让整次检索失败
         //    Agent 级重排在多库场景下延后到合并之后统一做一次，避免 N 次出站
-        return maybeRerank(kb, sq, hydrated, agentRerankModelId, deferAgentRerank);
+        List<SearchResult> done = maybeRerank(kb, sq, hydrated, agentRerankModelId, deferAgentRerank);
+        if (memoKey != null) {
+            // 只记成功返回。异常在上面已经抛出，不会把失败当成可复用的空结果
+            memo.save(memoKey, done);
+        }
+        return done;
+    }
+
+    /**
+     * 解析检索参数，并把 Agent 级重排开关套上去。
+     * <p>
+     * 单库检索和多库复用键都走这里，避免两处各写一遍「有模型就强制开启重排」。
+     *
+     * @param kb                 知识库
+     * @param query              检索句；调用方已保证非空
+     * @param topKOverride       覆盖条数，≤0 用配置默认
+     * @param overridesJson      该库的覆盖项；可空
+     * @param agentRerankModelId Agent 重排实例；可空
+     * @return 已夹紧的参数
+     */
+    private static SearchQuery resolveQuery(RagKnowledgeBase kb, String query, int topKOverride,
+                                            String overridesJson, Long agentRerankModelId) {
+        SearchQuery sq = RetrievalConfigResolver.resolve(kb.getRetrievalConfig(), overridesJson,
+                topKOverride, kb.getId(), query.trim(), kb.getTenantId());
+        // Agent 侧配了重排就整体接管：开关与模型一起以 Agent 为准，避免出现「开了没模型 / 有模型没开」的半截状态
+        if (agentRerankModelId != null && agentRerankModelId > 0) {
+            sq.setRerankEnabled(true);
+        }
+        return sq;
     }
 
     /**
@@ -444,6 +481,23 @@ public class RagRetrievalAppService {
         if (kbs == null || kbs.isEmpty() || query == null || query.isBlank()) {
             return List.of();
         }
+        // 整次多库调用的键按各库参数组成。命中则连合并后的重排都不再出站。
+        // 库不同、查询不同、覆盖项或条数不同，键就不同，不会把两次该分开的检索并成一次。
+        // 没有本轮 trace 时不组键，检索仍按原顺序逐库出站。
+        SameTurnRetrievalMemo memo = SameTurnRetrievalMemo.current();
+        List<SameTurnRetrievalMemo.Key> callKey = null;
+        if (memo != null) {
+            List<SameTurnRetrievalMemo.Key> callKeys = callKeys(kbs, query, topKOverride, overrides,
+                    agentRerankModelId);
+            if (callKeys != null) {
+                callKey = SameTurnRetrievalMemo.callKey(callKeys);
+                List<SearchResult> reused = memo.findCall(callKey);
+                if (reused != null) {
+                    log.info("[RAG] 同轮复用多库检索 kbCount={}", callKey.size());
+                    return reused;
+                }
+            }
+        }
         // run 级改写步骤：运行时不执行改写，按各库开关聚合出唯一的 skip 原因
         emitRewriteSkip(kbs, query, overrides, topKOverride);
         List<SearchResult> all = new ArrayList<>();
@@ -472,22 +526,69 @@ public class RagRetrievalAppService {
         List<SearchResult> merged = clipTotal(all);
         // Agent 级重排在合并后统一做一次：同一批候选内比分才有意义，出站次数也固定为 1 次
         if (agentRerankModelId == null || agentRerankModelId <= 0) {
+            rememberCall(memo, callKey, merged, succeeded, kbs.size());
             return merged;
         }
         if (rerank == null) {
             RagObsSpans.currentOrInactive().skip(RagObsSpans.RERANK, null, query.trim(),
                     topKOverride > 0 ? Integer.valueOf(topKOverride) : null, "rerank_client_missing",
                     "跳过：精排客户端不可用");
+            rememberCall(memo, callKey, merged, succeeded, kbs.size());
             return merged;
         }
         // 合并后为空时各库的 maybeRerank 已记 no_candidates，这里不再重复
         if (merged.isEmpty()) {
+            rememberCall(memo, callKey, merged, succeeded, kbs.size());
             return merged;
         }
         SearchQuery probe = new SearchQuery();
         probe.setQuery(query.trim());
         probe.setTopK(Math.max(1, topKOverride > 0 ? topKOverride : RetrievalConfigResolver.DEFAULT_TOP_K));
-        return rerankHits(agentRerankModelId, probe, merged, null);
+        List<SearchResult> ranked = rerankHits(agentRerankModelId, probe, merged, null);
+        rememberCall(memo, callKey, ranked, succeeded, kbs.size());
+        return ranked;
+    }
+
+    /**
+     * 为一次多库调用预计算各库的复用键。任一库没有 id 就不做整次复用，单库成功仍可按库复用。
+     *
+     * @param kbs                本次要查的库（已经过调用方的授权过滤）
+     * @param query              检索句
+     * @param topKOverride       覆盖条数
+     * @param overrides          各库覆盖项；可空
+     * @param agentRerankModelId Agent 重排实例；可空
+     * @return 与库列表等长的键；无法整次复用时为 null
+     */
+    private static List<SameTurnRetrievalMemo.Key> callKeys(List<RagKnowledgeBase> kbs, String query,
+                                                            int topKOverride, Map<Long, String> overrides,
+                                                            Long agentRerankModelId) {
+        List<SameTurnRetrievalMemo.Key> keys = new ArrayList<>(kbs.size());
+        for (RagKnowledgeBase kb : kbs) {
+            if (kb == null || kb.getId() == null) {
+                return null;
+            }
+            String override = overrides == null ? null : overrides.get(kb.getId());
+            // 与 retrieveInternal 同一套解析；多库路径的 Agent 重排固定延后
+            SearchQuery sq = resolveQuery(kb, query, topKOverride, override, agentRerankModelId);
+            keys.add(SameTurnRetrievalMemo.key(kb, sq, agentRerankModelId, true));
+        }
+        return keys;
+    }
+
+    /**
+     * 每个库都成功时才记下整次结果。有库失败则不记，下一次仍会重试失败的那一库。
+     *
+     * @param memo      本轮表；没有 trace 时为 null
+     * @param callKey   整次调用的键；无法整次复用时为 null
+     * @param hits      最终命中
+     * @param succeeded 成功的库数
+     * @param total     本次库数
+     */
+    private static void rememberCall(SameTurnRetrievalMemo memo, List<SameTurnRetrievalMemo.Key> callKey,
+                                     List<SearchResult> hits, int succeeded, int total) {
+        if (memo != null && callKey != null && succeeded == total) {
+            memo.saveCall(callKey, hits);
+        }
     }
 
     /**
