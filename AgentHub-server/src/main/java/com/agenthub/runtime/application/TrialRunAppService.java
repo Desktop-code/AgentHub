@@ -46,7 +46,9 @@ import com.agenthub.runtime.domain.service.PromptInjectionHolder;
 import com.agenthub.runtime.domain.service.SessionTitleTexts;
 import com.agenthub.runtime.domain.service.MeterTurnHolder;
 import com.agenthub.runtime.domain.service.TrialFailure;
+import com.agenthub.runtime.domain.service.SessionCancelFace;
 import com.agenthub.runtime.domain.service.TrialSendGate;
+import com.agenthub.runtime.domain.service.TurnStillOpen;
 import com.agenthub.runtime.domain.service.TrialTurnOutcome;
 import com.agenthub.runtime.domain.service.TrialProgress;
 import com.agenthub.runtime.domain.service.TrialTexts;
@@ -351,7 +353,7 @@ public class TrialRunAppService {
     private MessageResp continueChoice(Long sessionId, String optionId, TrialProgress progress) {
         RunSession session = access.require(sessionId);
         // 先做只读校验再占单飞：选项不合法时不该在会话上留下任何痕迹
-        TrialSendGate.assertSendable(session);
+        assertSendable(session);
         ChoiceAnchor anchor = requireChoice(sessionId, optionId);
         Long stickyAgentId = session.getStickyAgentId();
         if (stickyAgentId == null) {
@@ -613,7 +615,7 @@ public class TrialRunAppService {
      */
     public MessageResp approvePlan(Long sessionId) {
         RunSession session = access.require(sessionId);
-        TrialSendGate.assertSendable(session);
+        assertSendable(session);
         long userId = operatorContext.requireUserId();
         PendingPlan pending = pendingPlans.take(sessionId, userId)
                 .orElseThrow(() -> new BizException(ErrorCode.BAD_REQUEST, "没有待批准的计划（可能已过期，请重新提问）"));
@@ -816,8 +818,8 @@ public class TrialRunAppService {
     private MessageResp executeTurn(Long sessionId, String content, List<String> images, TrialProgress progress,
                                     String idemKey) {
         RunSession session = access.require(sessionId);
-        // 仅取消（及已删除由 access 挡）不可再发。历史 SUCCESS 不挡；空闲不再写成 SUCCESS。
-        TrialSendGate.assertSendable(session);
+        // 仅用户取消和没写完就被打断的一轮不可再发。已经写完却被启动收口标成取消的，按仍可继续。
+        assertSendable(session);
         // 幂等闸门放在归属校验之后：别人的会话不该在幂等表里留下占位行
         TrialIdemGuard guard = idempotency.begin(sessionId, idemKey, content, images);
         if (guard.hasReplay()) {
@@ -1431,6 +1433,23 @@ public class TrialRunAppService {
      * @param advance true 表示这是新的一轮（用户刚发问）；批准/取消同一轮时传 false，
      *                否则 user 事件那一轮已被计过一次，这里会把轮次算两遍
      */
+    /**
+     * 发送前的取消门禁。已经写完的会话即使库里是 CANCELLED 也放行，不回写这一行。
+     *
+     * @param session 当前会话
+     * @throws BizException 用户取消，或系统打断了未写完的一轮
+     */
+    private void assertSendable(RunSession session) {
+        boolean open = false;
+        if (session != null && session.getId() != null
+                && RunStatus.CANCELLED.name().equals(session.getStatus())
+                && !SessionCancelFace.userCancelled(session)) {
+            // 用户取消不必再读事件；其余取消行要看最后一轮写没写完
+            open = TurnStillOpen.of(events.listClosureMarks(List.of(session.getId())));
+        }
+        TrialSendGate.assertSendable(session, open);
+    }
+
     private void recordTurn(RunSession session, String userText, String errorSummary, boolean advance) {
         TrialTurnOutcome.keepOpen(session);
         if (advance) {
