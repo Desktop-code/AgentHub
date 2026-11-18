@@ -16,6 +16,7 @@
  */
 
 import { onBeforeUnmount, watch, type Ref } from 'vue'
+import { tracePollingAllowed } from '@/composables/tracePollingGate'
 
 /** 运行中默认刷新间隔：与试跑续订同一量级，够看出子一开跑就出现条 */
 const DEFAULT_POLL_MS = 2000
@@ -44,6 +45,11 @@ export interface ObsTracePollingOptions {
   pollMs?: number
   /** 结束后补拍延迟，默认 900ms */
   settleMs?: number
+  /**
+   * 页签是否在前台。缺省视为一直在前台（试跑抽屉 / MA 运行页不传）。
+   * 工作台 KeepAlive 失活时为 false：只停表，不清空已有 span。
+   */
+  pageActive?: Ref<boolean>
 }
 
 /** 引擎对外能力。 */
@@ -69,7 +75,12 @@ export function useObsTracePolling(options: ObsTracePollingOptions): ObsTracePol
   let timer: number | undefined
   let settleTimer: number | undefined
 
-  /** 停轮询与收尾补拍。切会话、本轮结束、组件卸载都要调 */
+  /** 页签在前台。未传 pageActive 的调用方保持原行为，一直允许开表。 */
+  function pageIsActive(): boolean {
+    return options.pageActive == null || options.pageActive.value !== false
+  }
+
+  /** 停轮询与收尾补拍。切会话、本轮结束、失活、组件卸载都要调 */
   function stopTimer() {
     if (timer != null) {
       window.clearInterval(timer)
@@ -103,9 +114,9 @@ export function useObsTracePolling(options: ObsTracePollingOptions): ObsTracePol
     await options.load(id, () => mine === token, showLoading)
   }
 
-  /** 本轮在跑时开轮询：子一开跑就能看到条，不必等整轮结束 */
+  /** 本轮在跑且页签在前台时才开轮询。失活或已结束直接返回，避免后台空打。 */
   function startPolling() {
-    if (!options.active.value || !options.usable.value || timer != null) {
+    if (!tracePollingAllowed(pageIsActive(), options.active.value) || !options.usable.value || timer != null) {
       return
     }
     timer = window.setInterval(() => void run(false), pollMs)
@@ -116,6 +127,10 @@ export function useObsTracePolling(options: ObsTracePollingOptions): ObsTracePol
     () => [options.sessionId.value, options.usable.value] as const,
     ([id, ok]) => {
       stopTimer()
+      // 失活期间换会话也不拉、也不清空：切回来还要看到离开前的明细
+      if (!pageIsActive()) {
+        return
+      }
       invalidate()
       if (id == null || !ok) {
         return
@@ -129,6 +144,10 @@ export function useObsTracePolling(options: ObsTracePollingOptions): ObsTracePol
   // 本轮结束的那一刻补一拍，等 trace 收尾落库；再停轮询
   watch(options.active, (running) => {
     stopTimer()
+    // 页签已经切走：不要补拍，也不要再挂 settle 定时器
+    if (!pageIsActive()) {
+      return
+    }
     if (options.sessionId.value == null || !options.usable.value) {
       invalidate()
       return
@@ -140,6 +159,25 @@ export function useObsTracePolling(options: ObsTracePollingOptions): ObsTracePol
     }
     settleTimer = window.setTimeout(() => void run(false), settleMs)
   })
+
+  /*
+   * 对齐评测页：失活只停表，不清视图。
+   * 激活且本轮仍在跑时先补一拍再开表；已经结束则不动。
+   * 不使用 immediate：挂载时 pageActive 本来就是 true，不该当成「刚切回来」。
+   */
+  if (options.pageActive) {
+    watch(options.pageActive, (active) => {
+      if (!active) {
+        stopTimer()
+        return
+      }
+      if (!options.active.value || options.sessionId.value == null || !options.usable.value) {
+        return
+      }
+      void run(false)
+      startPolling()
+    })
+  }
 
   onBeforeUnmount(stopTimer)
 

@@ -93,6 +93,30 @@ export function inspectCardMode(running: boolean): InspectCardMode {
   return running ? INSPECT_MODE_COMPACT : INSPECT_MODE_FULL
 }
 
+/**
+ * 执行明细的 250ms 时钟是否该走。
+ *
+ * <p>只决定要不要推进 `inspectNow`。不改浮层开合：失活时浮层可以仍开着，
+ * 但不再随后台 tick 重算紧凑卡和留观。
+ *
+ * @param input.pageActive 页签是否在前台
+ * @param input.detailOpen 浮层当前是否打开（原样读，本函数不写）
+ * @param input.compact    当前形态是否为紧凑卡
+ * @param input.settling   是否还在收尾留观（需要时钟才能期满）
+ * @return true 才允许挂 250ms 定时器
+ */
+export function inspectClockNeeded(input: {
+  pageActive: boolean
+  detailOpen: boolean
+  compact: boolean
+  settling: boolean
+}): boolean {
+  if (!input.pageActive) {
+    return false
+  }
+  return (input.detailOpen && input.compact) || input.settling
+}
+
 /* ===== 运行中紧凑卡的状态行 ===== */
 
 /** 一个参与者在紧凑卡里的一行 */

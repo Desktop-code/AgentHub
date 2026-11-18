@@ -912,18 +912,69 @@ export function processSteps(blocks: AssistantBlock[]): ProcessStep[] {
 }
 
 /**
+ * 调试皮肤把「没有参与者身份、又没被任何泳道接住」的推理和工具收成的那一条标题。
+ *
+ * <p>只给 {@link lanesForDebugSkin} 使用。工作台投影不读它，因此不会多出一张匿名卡。
+ */
+export const DEBUG_THINK_TITLE = '思考过程'
+
+/**
  * 多路由按子 Agent 分块；单路由仍一块。
  * 一条事件里用分号拼起来的多段「路由到」，仍按段切开。
  *
  * <p>参与者卡只从带身份的 begin / 路由行建立。一个 begin id 全程只有一条泳道。
  * 思考和工具只追加到这条已有泳道上；begin 还没到的增量按 id 暂存，等这条泳道出现再并进去。
- * 没有 begin 的块不按名字开卡。
+ * 没有 begin 的块不按名字开卡。没有身份的推理 / 工具也不在这里收成匿名「执行」泳道。
  *
  * <p>「方案结论：」之后的增量不进任何参与者泳道。它们属于这一条汇总记录，
  * 不写回方案卡（否则同一段正文会出现两次），也不按块上的名字再开一张。
+ *
+ * <p>单 Agent 调试皮肤要看见这些被丢掉的过程，走 {@link lanesForDebugSkin}，不要放宽本函数。
  */
 export function processLanes(blocks: AssistantBlock[]): ProcessLane[] {
+  return projectProcessLanes(blocks).lanes
+}
+
+/**
+ * 调试皮肤的思考泳道。所属域：runtime（前端投影）。
+ *
+ * <p>工作台继续用 {@link processLanes}：无身份过程不建卡。
+ * 调试皮肤的「思考过程」折叠只认泳道是否非空，单 Agent 又没有 begin 帧，
+ * 所以这里在严格投影之后，把被丢掉的无身份推理和工具收成一条，标题固定为
+ * {@link DEBUG_THINK_TITLE}。已挂到某位参与者身上的步骤不重复收。
+ *
+ * @param blocks 一轮助手块（含终答；终答不会进这条泳道）
+ * @return 严格泳道；若确有被丢掉的过程，末尾再加一条「思考过程」
+ */
+export function lanesForDebugSkin(blocks: AssistantBlock[]): ProcessLane[] {
+  const projected = projectProcessLanes(blocks)
+  const steps: ProcessStep[] = []
+  for (const block of projected.dropped) {
+    appendBlockSteps(steps, block)
+  }
+  if (!steps.length) {
+    return projected.lanes
+  }
+  return [
+    ...projected.lanes,
+    {
+      kind: 'note',
+      title: DEBUG_THINK_TITLE,
+      steps
+    }
+  ]
+}
+
+/**
+ * 与 {@link processLanes} 同一次扫描。`dropped` 只记录没有身份、且没有当前参与者可挂的推理 / 工具。
+ * 调用方不得把这份列表再塞回工作台建卡。
+ *
+ * @param blocks 一轮里会进入思考时间线的块来源
+ * @return 严格泳道，以及被严格规则丢掉的过程块（保持到达顺序）
+ */
+function projectProcessLanes(blocks: AssistantBlock[]): { lanes: ProcessLane[]; dropped: AssistantBlock[] } {
   const lanes: ProcessLane[] = []
+  const dropped: AssistantBlock[] = []
   let current: ProcessLane | undefined
   // 身份 → 泳道。思考 / 工具按参与者 id 归位，不按「最后一条 route 文案」认人。
   const byParticipant = new Map<string, ProcessLane>()
@@ -1009,6 +1060,8 @@ export function processLanes(blocks: AssistantBlock[]): ProcessLane[] {
      * 也不按块上的名字再开泳道。
      */
     if (conclusionPhase) {
+      // 汇总之后的过程不进参与者泳道；调试皮肤稍后从 dropped 收成一条思考过程
+      dropped.push(block)
       continue
     }
     const id = (block.participantId || '').trim()
@@ -1026,14 +1079,16 @@ export function processLanes(blocks: AssistantBlock[]): ProcessLane[] {
       continue
     }
     // 没有身份的过程事件不建卡。只有当前已经是某位参与者时才顺进去，避免挂错人之后又造一张。
+    // 丢掉的块交给调试皮肤，不在这里补匿名「执行」泳道。
     if (!current || current.kind !== 'agent') {
+      dropped.push(block)
       continue
     }
     appendBlockSteps(current.steps, block)
   }
   // 全程没有 begin 接住的过程：不按名字开卡，只留在最前给入口思考认领
   promoteUnbegunEntry(lanes, heldSteps)
-  return lanes
+  return { lanes, dropped }
 }
 
 /**

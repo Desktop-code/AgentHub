@@ -3,7 +3,7 @@
     工作台是独立入口（无 Agent / 方案归属），状态与请求在 useWorkbenchChat；
     本组件只做分支，调试三态（page / drawer / ma）的模板与行为完全不动。
   -->
-  <WorkbenchChat v-if="variant === 'workbench'" />
+  <WorkbenchChat v-if="variant === 'workbench'" :page-active="pageActive" />
   <div v-else class="trial" :class="variant">
     <section v-if="variant === 'page'" class="picker-bar">
       <el-select v-model="pickedId" filterable placeholder="选择启用中的 Agent" class="agent-select">
@@ -249,8 +249,13 @@ const props = withDefaults(
      * 有它时不再按 agentId 建会话/拉列表，改走方案入口；与 agentId 互斥，优先 maId。
      */
     maId?: number
+    /**
+     * 宿主页签是否在前台。工作台是 KeepAlive 缓存根的子组件，收不到 onDeactivated，
+     * 由 `views/workspace` 传入。缺省 true：抽屉 / 多智能体运行页保持原行为。
+     */
+    pageActive?: boolean
   }>(),
-  { variant: 'drawer' }
+  { variant: 'drawer', pageActive: true }
 )
 
 const user = useUserStore()
@@ -407,7 +412,13 @@ const routerTraceActive = computed(() => sending.value || resuming.value)
  */
 const maEnabled = computed(() => props.variant === 'ma' && shown.value.runMode === 'ROUTER')
 const laneSessionId = computed(() => (props.variant === 'ma' ? null : routerSessionId.value))
-const { view: routerTrace, reload: reloadRouterTrace } = useRouterLane(laneSessionId, routerTraceActive)
+/** 传给编排卡轮询：失活时停表，不改试跑抽屉（默认一直为 true）。 */
+const lanePageActive = computed(() => props.pageActive !== false)
+const { view: routerTrace, reload: reloadRouterTrace } = useRouterLane(
+  laneSessionId,
+  routerTraceActive,
+  lanePageActive
+)
 const {
   traces: maTraces,
   canView: maCanView,

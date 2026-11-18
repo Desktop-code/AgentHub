@@ -22,11 +22,17 @@ import type { RouterTraceView } from '@/types/runtime'
 /**
  * 按会话轮询编排追踪，产出对话流内卡片所需的数据。
  *
- * @param sessionId 试跑会话主键；临时草稿 / 非 Router 传 null，传 null 时自动清空
- * @param active    本轮是否还在跑（sending / resuming），决定是否开轮询
+ * @param sessionId  试跑会话主键；临时草稿 / 非 Router 传 null，传 null 时自动清空
+ * @param active     本轮是否还在跑（sending / resuming），决定是否开轮询
+ * @param pageActive 页签是否在前台。工作台 KeepAlive 失活时传 false，只停轮询、不清 span。
+ *                   缺省表示一直在前台（试跑抽屉不传）。
  * @return view 为 null 表示无权限，调用方据此整卡不渲染；reload 供「刷新」按钮手动重拉
  */
-export function useRouterLane(sessionId: Ref<number | null>, active: Ref<boolean>) {
+export function useRouterLane(
+  sessionId: Ref<number | null>,
+  active: Ref<boolean>,
+  pageActive?: Ref<boolean>
+) {
   const user = useUserStore()
   /** 两个权限都查同一条 trace 的步骤；缺一个就整卡不渲染，避免半截数据 */
   const canView = computed(() => user.hasPerm('obs:trace:list') && user.hasPerm('obs:span:list'))
@@ -118,7 +124,8 @@ export function useRouterLane(sessionId: Ref<number | null>, active: Ref<boolean
     active,
     usable: canView,
     load,
-    clear: reset
+    clear: reset,
+    pageActive
   })
 
   return {

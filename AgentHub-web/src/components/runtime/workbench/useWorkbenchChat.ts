@@ -15,9 +15,11 @@
  *   <li><b>@ 换线</b>：候选只读本会话快照方案启用项；选定走 PUT sticky + 一次性 force；
  *       未 @ 仍自动匹配；草稿首条 create→PUT→发，不先建空会话。</li>
  *   <li>续订与快照复用 trialStream / trialMessages 的既有能力，不另写一套时间线解析。</li>
+ *   <li><b>页签失活</b>：KeepAlive 不卸载本树。`pageActive=false` 时停续订并 abort 本轮 SSE，
+ *       不当成发送失败，也不清消息。再次激活且本轮未结束才续订。</li>
  * </ul>
  */
-import { computed, onBeforeUnmount, ref } from 'vue'
+import { computed, onBeforeUnmount, ref, watch, type Ref } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import {
   approveWorkbenchPlan,
@@ -87,6 +89,7 @@ import {
 import { groupSessionsForWorkbench, parseSessionTime } from '@/components/runtime/trial/sessionGroup'
 import { rowShowsSpinner, sessionStillRunning, shouldResumeTurn } from '@/components/runtime/sessionProgress'
 import { friendlyWorkbenchError } from '@/utils/workbenchFriendlyError'
+import { isStreamAbort, shouldResumeAfterReturn } from '@/components/runtime/workbench/workbenchLeave'
 import { workbenchRouteBadge } from '@/utils/workbenchRouteBadge'
 import type { SessionGroup } from '@/components/runtime/trial/sessionGroup'
 import type { ChatTurn, TrialEvent, TrialPlanView, TrialSession } from '@/types/runtime'
@@ -114,8 +117,13 @@ const RESUME_EMPTY_MS = 45_000
 /** 首轮标题补拉的延迟点（毫秒）；命中即停，不做常驻轮询。 */
 const TITLE_REFRESH_DELAYS = [3000, 8000] as const
 
-/** 工作台对话的完整状态与动作。 */
-export function useWorkbenchChat() {
+/**
+ * 工作台对话的完整状态与动作。
+ *
+ * @param pageActive 页签是否在前台。false 时停续订并中断 SSE；true 且本轮未结束再续上。
+ *                   空闲已结束时调用方只会把值拨回 true，本函数不会清消息。
+ */
+export function useWorkbenchChat(pageActive: Ref<boolean>) {
   const config = ref<WorkbenchConfig>()
   const configLoading = ref(false)
   const session = ref<TrialSession>()
@@ -169,6 +177,8 @@ export function useWorkbenchChat() {
    * 此时旧收尾绝不能再回写 turns、也不能把自己那轮的流式状态当成新一轮的清掉。
    */
   let runSeq = 0
+  /** 当前在途 SSE。失活时 abort；没有在途流时为空。 */
+  let streamAbort: AbortController | undefined
 
   /** 就绪：只有 ready=true 才允许新建与发送。 */
   const ready = computed(() => config.value?.ready === true)
@@ -817,6 +827,9 @@ export function useWorkbenchChat() {
     turns.value = [...turns.value, assistantTurn(`wb-a-${Date.now()}`, 'streaming')]
     const live = turns.value[turns.value.length - 1]
     const controller = new AbortController()
+    streamAbort = controller
+    /** 失活 abort 不当失败；finally 里据此跳过 finishLive，保留气泡。 */
+    let pausedByLeave = false
     let sessionId: number | undefined
     const touchSnapshot = () => {
       if (sessionId != null) {
@@ -940,16 +953,28 @@ export function useWorkbenchChat() {
         await refreshHistoryHead()
       }
     } catch (error) {
+      if (isStreamAbort(error)) {
+        // 页签失活中断本轮 SSE：不当成发送失败，时间线留在原处，回来再续
+        pausedByLeave = true
+        return
+      }
       live.status = 'error'
       live.phase = 'error'
       pageError.value = messageOf(error, '发送失败')
     } finally {
+      if (streamAbort === controller) {
+        streamAbort = undefined
+      }
       // 已被新一轮接管时不能收尾：finishLive / sending 都是新一轮正在用的状态
       if (runId === runSeq) {
-        if (sessionId != null) {
+        if (!pausedByLeave && sessionId != null) {
           finishLive(sessionId)
         }
         sending.value = false
+        // 中断发生时人已经切回来：立刻续，不等下一次激活
+        if (pausedByLeave && pageActive.value) {
+          void resumeOpenTurn()
+        }
       }
     }
   }
@@ -997,6 +1022,8 @@ export function useWorkbenchChat() {
     turns.value = [...turns.value, { ...assistantTurn(`wb-a-${Date.now()}`, 'streaming'), continuation: true }]
     const live = turns.value[turns.value.length - 1]
     const controller = new AbortController()
+    streamAbort = controller
+    let pausedByLeave = false
     const touchSnapshot = () => saveSnapshot(sessionId)
     beginLive(sessionId, turns.value)
     const stream = createRunHandlers(live, touchSnapshot)
@@ -1024,13 +1051,25 @@ export function useWorkbenchChat() {
         await refreshHistoryHead()
       }
     } catch (error) {
+      if (isStreamAbort(error)) {
+        pausedByLeave = true
+        return
+      }
       live.status = 'error'
       live.phase = 'error'
       pageError.value = messageOf(error, '续作失败')
     } finally {
+      if (streamAbort === controller) {
+        streamAbort = undefined
+      }
       if (runId === runSeq) {
-        finishLive(sessionId)
+        if (!pausedByLeave) {
+          finishLive(sessionId)
+        }
         sending.value = false
+        if (pausedByLeave && pageActive.value) {
+          void resumeOpenTurn()
+        }
       }
     }
   }
@@ -1613,10 +1652,13 @@ export function useWorkbenchChat() {
     scheduleResume(id, token, startTime)
   }
 
-  /** 排下一次续订轮询；令牌失配直接退出。 */
+  /** 排下一次续订轮询；令牌失配或页签已失活直接退出，不再挂表。 */
   function scheduleResume(id: number, token: number, startTime: number) {
+    if (!pageActive.value) {
+      return
+    }
     pollTimer = window.setTimeout(async () => {
-      if (token !== pollToken) {
+      if (token !== pollToken || !pageActive.value) {
         return
       }
       if (Date.now() - startTime > RESUME_MAX_MS) {
@@ -1626,7 +1668,7 @@ export function useWorkbenchChat() {
       }
       try {
         const { live, events } = await fetchResumeEvents(id)
-        if (token !== pollToken) {
+        if (token !== pollToken || !pageActive.value) {
           return
         }
         if (live) {
@@ -1664,6 +1706,10 @@ export function useWorkbenchChat() {
     }
     resumeSignature = signature
     if (!events.length) {
+      // 本地已经有用户气泡时不能换成空占位，否则失活后续回来消息会被清掉
+      if (turns.value.some((turn) => turn.role === 'user')) {
+        return
+      }
       const placeholder = assistantTurn('wb-live-tail', 'streaming')
       placeholder.phase = 'planning'
       turns.value = [placeholder]
@@ -1986,6 +2032,75 @@ export function useWorkbenchChat() {
     const raw = error instanceof Error && error.message ? error.message : fallback
     return friendlyWorkbenchError(raw)
   }
+
+  /**
+   * 页签失活：停续订并中断在途 SSE。
+   * 不调用 resetConversation，页签与已有消息都留着。
+   */
+  function pauseForPageLeave() {
+    stopResume()
+    streamAbort?.abort()
+  }
+
+  /**
+   * 页签重新激活：本轮还没结束才拉一次事件并续订。
+   * 已经结束或本来就空闲则直接返回，不清右栏。
+   */
+  async function resumeOpenTurn() {
+    if (!pageActive.value || sending.value) {
+      return
+    }
+    const current = session.value
+    if (!current || isTempSession(current)) {
+      return
+    }
+    const assistantStreaming = turns.value.some(
+      (turn) => turn.role === 'assistant' && turn.status === 'streaming'
+    )
+    if (
+      !shouldResumeAfterReturn({
+        assistantStreaming,
+        turnRunning: isTurnRunning(current.id)
+      })
+    ) {
+      return
+    }
+    try {
+      const { live, events } = await fetchResumeEvents(current.id)
+      // 等待期间又切走，或用户已经发出新的一轮：这次结果作废
+      if (!pageActive.value || sending.value || session.value?.id !== current.id) {
+        return
+      }
+      if (live || shouldResume(current.id, events)) {
+        // keepCurrent：第一拍不拍平本地气泡
+        beginResume(current.id, events, true, live)
+        return
+      }
+      // 离开期间服务端已经跑完：对齐终态，不再挂轮询
+      if (events.length) {
+        turns.value = mergeTurnsAfterRun(turns.value, turnsFromEvents(events))
+      } else {
+        for (const turn of turns.value) {
+          if (turn.role === 'assistant' && turn.status === 'streaming') {
+            turn.status = 'done'
+            turn.phase = 'done'
+          }
+        }
+      }
+      finishLive(current.id)
+    } catch {
+      // 补取失败保留现有气泡，不起轮询，避免回来之后每 2 秒刷同一条错误
+    }
+  }
+
+  // 对齐评测 onDeactivated / 工作流 pageActive：不在这里 immediate，避免首屏被当成「切回来」
+  watch(pageActive, (active) => {
+    if (!active) {
+      pauseForPageLeave()
+      return
+    }
+    void resumeOpenTurn()
+  })
 
   onBeforeUnmount(() => {
     stopResume()

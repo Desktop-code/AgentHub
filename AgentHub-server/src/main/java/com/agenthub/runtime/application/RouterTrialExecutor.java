@@ -107,6 +107,14 @@ public class RouterTrialExecutor {
     private static final int COMPETE_ANSWER_LIMIT = 3000;
 
     /**
+     * 判路由系统提示里的用户原文槽。
+     * <p>
+     * ROUTER 模板的 {@code {{user_query}}} 在装配时先占上这个槽，同一轮各问只替换槽里的问句，
+     * 不再为每一问重跑 L1 与种子契约的组装。槽值不会出现在候选名单和调度规则里。
+     */
+    private static final String JUDGE_USER_SLOT = "\u0001agenthub-user-query\u0001";
+
+    /**
      * 历史迁移生成的方案编码前缀（见 `sql/temp/data-migrate-ma-def-from-router.sql`）。
      *
      * <p>这类方案是「旧 ROUTER Agent 的包装副本」。它若被当成子候选，同一轮就会出现
@@ -1989,6 +1997,9 @@ public class RouterTrialExecutor {
      * <p>强制目标若已被停用 / 删除（候选不再出现），不伪造命中：回落正常判路由，
      * 由上层写一条「手动换线目标已失效」的可见说明。
      *
+     * <p>单问在关键字未命中之后、判定模型之前做多项交付覆盖。覆盖已经能定线就不再打模型，
+     * 避免先打一次再把结果作废。点名、关键字、手动换线仍不打模型。
+     *
      * @param hint 线路提示；可空
      * @param progress 可空的思考出口：判定模型的真实推理经它推出，前端归到入口 / 方案块
      * @return 命中意图 + 是否走了手动换线 + 强制目标是否失效
@@ -2045,6 +2056,12 @@ public class RouterTrialExecutor {
             }
             return new RoutedChoice(intents, false, forceMissed);
         }
+        // 关键字未命中时，多项交付覆盖先于判定模型：已经能定线就不再打一次再作废。
+        // 顺序与逐问路径一致，不改提示词，也不按某一类模板另写特例。
+        RoutedChoice covered = entryCoveringChoice(spec, userText, candidates, forceMissed);
+        if (covered != null) {
+            return covered;
+        }
         Optional<Long> parentModel = resolveRouterModel(parent, spec);
         if (parentModel.isEmpty()) {
             Candidate first = candidates.get(0);
@@ -2090,10 +2107,6 @@ public class RouterTrialExecutor {
                     }
                 }
                 if (!intents.isEmpty()) {
-                    RoutedChoice covered = entryCoveringChoice(spec, userText, candidates, forceMissed);
-                    if (covered != null) {
-                        return covered;
-                    }
                     return new RoutedChoice(intents, false, forceMissed);
                 }
             }
@@ -2152,11 +2165,13 @@ public class RouterTrialExecutor {
         // 多项交付覆盖要读每个方案的启用成员，逐问重复查库没有意义：本轮取一次
         Map<Long, List<EntrySchemePreference.MemberDuty>> duties = isEntryRouter(spec)
                 ? entryMemberDuties(candidates) : Map.of();
+        // 同一轮各问共用一份已装配的 ROUTER 前缀；第一次真正打模型时才装配，点名/关键字/覆盖不触发
+        TurnJudgePrompt sharedPrompt = new TurnJudgePrompt();
         Map<String, RoutedIntent> byKey = new LinkedHashMap<>();
         for (int i = 0; i < parts.size(); i++) {
             EntryQuestionSplitter.Question question = parts.get(i);
             RoutedIntent one = routeOneQuestion(parent, spec, parentLimits, runtime, question, candidates,
-                    duties, userId, sessionId, deadlineNanos, progress);
+                    duties, userId, sessionId, deadlineNanos, progress, sharedPrompt);
             String key = one.candidate().route().getRouteKey();
             String normalized = key == null || key.isBlank() ? "q-" + i : key.trim().toLowerCase();
             RoutedIntent existing = byKey.get(normalized);
@@ -2186,6 +2201,7 @@ public class RouterTrialExecutor {
      *
      * @param question     切出来的一问（text 用于判定，subQuery 用于执行）
      * @param duties       方案 → 启用成员职责；可空
+     * @param sharedPrompt 本轮多次判定共用的系统提示；只在真正打模型时装配一次
      * @return 该问命中的目标；永不为空（最后兜底第一条候选）
      */
     private RoutedIntent routeOneQuestion(AgentDef parent, MaRunSpec spec, EffectiveLimits parentLimits,
@@ -2193,7 +2209,7 @@ public class RouterTrialExecutor {
                                           List<Candidate> candidates,
                                           Map<Long, List<EntrySchemePreference.MemberDuty>> duties,
                                           long userId, long sessionId, long deadlineNanos,
-                                          TrialProgress progress) {
+                                          TrialProgress progress, TurnJudgePrompt sharedPrompt) {
         String text = question.text() == null ? "" : question.text().trim();
         String query = question.subQuery() == null || question.subQuery().isBlank() ? text : question.subQuery();
         // 1) 这一问点名了某个方案：只把这一问交给它，不再牵连其它问题
@@ -2232,9 +2248,11 @@ public class RouterTrialExecutor {
                 long remainingMs = Math.max(1000L, (deadlineNanos - System.nanoTime()) / 1_000_000L);
                 EffectiveLimits judgeLimits = parentLimits.withTimeoutMs(
                         Math.min(parentLimits.timeoutMs(), remainingMs));
+                // 系统提示复用本轮已装配的前缀，用户侧只送这一问
                 String reply = judgeReply(
                         MeterScope.console(rootId(parent), parentModel.get(), sessionId, userId),
-                        judgePrompt(parent, candidates, runtime, text, null, spec), text, judgeLimits, progress);
+                        sharedPrompt.forQuestion(parent, candidates, runtime, null, spec, text),
+                        text, judgeLimits, progress);
                 List<String> keys = candidates.stream()
                         .map(item -> item.route().getRouteKey())
                         .filter(key -> key != null && !key.isBlank())
@@ -2665,24 +2683,44 @@ public class RouterTrialExecutor {
      * @param parent           编排根（取用途模板前缀）
      * @param candidates       可用候选
      * @param runtime          运行配置（多意图开关 / 上限）
-     * @param userText         用户原问（模板占位符）
+     * @param userText         用户原问（填进模板里的用户原文槽；调度规则与候选名单不随它变化）
      * @param hint             线路提示；可空
      * @param spec             方案执行来源；可空（旧口径没有方案）
      * @return 完整提示词
      */
     private String judgePrompt(AgentDef parent, List<Candidate> candidates, AgentRuntimeConfig runtime,
                                String userText, RouteHint hint, MaRunSpec spec) {
+        return assembleJudgePrompt(parent, candidates, runtime, hint, spec).forQuestion(userText);
+    }
+
+    /**
+     * 装配一轮判路由的系统提示，用户原文先占槽。
+     * <p>
+     * L1、种子契约、网关规则和候选名单只在这里生成一次。同一轮的多问通过
+     * {@link TurnJudgePrompt} 复用这份结果，各问只替换槽里的问句。
+     * 粘性说明仍由 {@code hint} 决定，多问路径传入空 hint，与原先逐问不带粘性一致。
+     *
+     * @param parent     编排根
+     * @param candidates 可用候选
+     * @param runtime    运行配置
+     * @param hint       线路提示；可空
+     * @param spec       方案执行来源；可空
+     * @return 带用户原文槽的系统提示
+     */
+    private SharedJudgePrompt assembleJudgePrompt(AgentDef parent, List<Candidate> candidates,
+                                                  AgentRuntimeConfig runtime, RouteHint hint, MaRunSpec spec) {
         StringBuilder prompt = new StringBuilder();
-        // ROUTER 用途模板可能自带 {{user_query}}；传进去让模板侧占位符有值，避免严格模式失败。
+        // ROUTER 用途模板可能自带 {{user_query}}。先放入槽，避免严格模式因缺变量失败；
+        // 真正的问句在 forQuestion 时替换，同一轮不重复装配。
         // 有方案时走 assembleRouter：模板引用与追加要求来自默认接待页（ma_def.config_json），
         // 与专家人设的 agent_def 列分开，改 Router 不会动到需求拆解等专家。
         String assembled;
         if (spec != null) {
             SystemPromptAssembler.Assembled routerPrompt =
-                    prompts.assembleRouter(rootName(parent, spec), runtime, userText);
+                    prompts.assembleRouter(rootName(parent, spec), runtime, JUDGE_USER_SLOT);
             assembled = routerPrompt == null ? null : routerPrompt.text();
         } else {
-            assembled = prompts.build(parent, userText);
+            assembled = prompts.build(parent, JUDGE_USER_SLOT);
         }
         if (assembled != null && !assembled.isBlank()) {
             prompt.append(assembled).append("\n\n");
@@ -2767,7 +2805,69 @@ public class RouterTrialExecutor {
                     .append("5) 用户这一句同时包含多项交付，且某个方案的简介或成员能覆盖这些交付时，只派给该方案，"
                             + "由方案再分发；只涉及一项时可以直接派给对应专家。闲聊仍按第 2 条。\n");
         }
-        return prompt.toString();
+        return new SharedJudgePrompt(prompt.toString());
+    }
+
+    /**
+     * 一轮判路由已经装配好的系统提示。所属域：runtime。
+     * <p>
+     * 用户原文只占 {@link #JUDGE_USER_SLOT}。同一轮各问替换这个槽，不再重跑 L1 与种子契约。
+     * 替换值不再回扫，问句里即使带有槽字符也不会被当成占位符。
+     */
+    private static final class SharedJudgePrompt {
+
+        /** 已拼好的系统提示，其中用户原文仍是槽 */
+        private final String text;
+
+        /**
+         * @param text 带用户原文槽的系统提示；空按空串
+         */
+        private SharedJudgePrompt(String text) {
+            this.text = text == null ? "" : text;
+        }
+
+        /**
+         * 把槽换成这一问的用户文本。
+         *
+         * @param userText 这一问的用户文本；空则按空串填槽
+         * @return 可直接送给判定模型的系统提示
+         */
+        private String forQuestion(String userText) {
+            String value = userText == null ? "" : userText;
+            // 槽出现几次就换几次（模板与追加区都可能引用用户原文）；换进去的问句不再回扫
+            return text.replace(JUDGE_USER_SLOT, value);
+        }
+    }
+
+    /**
+     * 同一轮多次判定共用的系统提示。所属域：runtime。
+     * <p>
+     * 第一次真正打模型时才装配。点名、关键字、覆盖都不触发，避免没打模型也去装一整份 ROUTER。
+     * 多问路径固定传入空的线路提示，粘性说明与原先逐问不带粘性一致。
+     */
+    private final class TurnJudgePrompt {
+
+        /** 本轮已装配的前缀；未打过模型时为空 */
+        private SharedJudgePrompt cached;
+
+        /**
+         * 取这一问的系统提示。同一轮内前缀只装配一次。
+         *
+         * @param parent     编排根
+         * @param candidates 可用候选
+         * @param runtime    运行配置
+         * @param hint       线路提示；多问路径固定为空
+         * @param spec       方案执行来源
+         * @param userText   这一问的用户文本
+         * @return 系统提示
+         */
+        private String forQuestion(AgentDef parent, List<Candidate> candidates, AgentRuntimeConfig runtime,
+                                   RouteHint hint, MaRunSpec spec, String userText) {
+            if (cached == null) {
+                cached = assembleJudgePrompt(parent, candidates, runtime, hint, spec);
+            }
+            return cached.forQuestion(userText);
+        }
     }
 
     /**

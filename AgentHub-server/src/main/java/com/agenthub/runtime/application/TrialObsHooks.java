@@ -46,6 +46,8 @@ public class TrialObsHooks {
      * @param scope 本轮 trace，可空
      */
     public void finishOk(ObsTraceScope scope) {
+        // 轮结束先丢掉本轮旁路（检索复用等），再收口 trace
+        clearTurnSlots(scope);
         if (scope != null) {
             recorder.finish(scope, ObsStatus.OK, null);
         }
@@ -80,6 +82,7 @@ public class TrialObsHooks {
         if (scope == null) {
             return;
         }
+        clearTurnSlots(scope);
         // attrs 只在真有 cause 时才写：为空时 ObsAttrs.withCause 返回 null，不会污染既有 attrs
         recorder.finish(scope, ObsStatus.ERROR, reason, finishReason,
                 ObsAttrs.withCause(null, CauseDigest.of(cause)));
@@ -87,9 +90,22 @@ public class TrialObsHooks {
 
     /**
      * 请求结束时丢掉线程上的 trace，避免线程池串到下一轮。
+     * 本轮检索复用一并清掉，池线程即使还拿着旧 scope 也看不到上一轮的结果。
      */
     public void clear() {
+        clearTurnSlots(ObsTraceHolder.current());
         ObsTraceHolder.clear();
+    }
+
+    /**
+     * 本轮旁路数据随 trace 一起失效。scope 为空则什么都不做。
+     *
+     * @param scope 本轮 trace；可空
+     */
+    private static void clearTurnSlots(ObsTraceScope scope) {
+        if (scope != null) {
+            scope.clearTurnSlots();
+        }
     }
 
     /**

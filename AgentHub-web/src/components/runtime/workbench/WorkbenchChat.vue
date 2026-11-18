@@ -120,6 +120,7 @@
           :blocked-hint="blockedHint"
           :can-approve="canSend"
           :approving="approving"
+          :page-active="pageActive"
           :vision-enabled="false"
           :asr-enabled="false"
           :tts-enabled="false"
@@ -206,6 +207,7 @@ import {
   INSPECT_MODE_COMPACT,
   inspectButtonStyle,
   inspectCardMode,
+  inspectClockNeeded,
   inspectCompactMeta,
   inspectCompactTitle,
   inspectLiveTasks,
@@ -232,6 +234,20 @@ const QUICK_PROMPTS = [
   '请介绍一下你能协助处理哪些类型的请求',
   '帮我看看当前有什么需要优先处理的事项'
 ]
+
+const props = withDefaults(
+  defineProps<{
+    /**
+     * 页签是否在前台。由工作台缓存根传入。
+     * false：停思考时钟、续订、追踪轮询并中断 SSE；不关执行明细、不清消息。
+     */
+    pageActive?: boolean
+  }>(),
+  { pageActive: true }
+)
+
+/** 给子树和 composable 的稳定引用；缺省或未传都视为在前台。 */
+const pageActive = computed(() => props.pageActive !== false)
 
 const user = useUserStore()
 
@@ -280,13 +296,13 @@ const {
   sessionTitle,
   sessionSubtitle,
   sessionTooltip
-} = useWorkbenchChat()
+} = useWorkbenchChat(pageActive)
 
 const detailOpen = ref(false)
 /** 左栏历史会话是否展开；收起后主区自动占满，状态与页面同生命周期（KeepAlive 下不丢） */
 const sessionsVisible = ref(true)
 const traceActive = computed(() => sending.value || resuming.value)
-const { view: routerTrace, reload: reloadRouterTrace } = useRouterLane(traceSessionId, traceActive)
+const { view: routerTrace, reload: reloadRouterTrace } = useRouterLane(traceSessionId, traceActive, pageActive)
 const canInspect = computed(() => routerTrace.value != null)
 
 /**
@@ -344,7 +360,13 @@ const inspectMode = computed(() =>
  * 只按形态判断会让 `settledHold` 永远停在 true，浮层永不收起。
  */
 watch(
-  () => (detailOpen.value && inspectMode.value === INSPECT_MODE_COMPACT) || settledAt.value != null,
+  () =>
+    inspectClockNeeded({
+      pageActive: pageActive.value !== false,
+      detailOpen: detailOpen.value,
+      compact: inspectMode.value === INSPECT_MODE_COMPACT,
+      settling: settledAt.value != null
+    }),
   (need) => {
     stopInspectTicker()
     if (!need) {
