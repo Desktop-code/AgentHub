@@ -31,6 +31,9 @@
 --      - TrialBindingLoader#findChatModel 只读 agent_model_bind 的 CHAT 槽，
 --        不会因为平台有 CHAT 实例就借给 Agent；缺绑定报「Agent 没有可用的对话模型」；
 --      - 模型 Key 只能界面加密保存，SQL 造不出实例 → 没有实例时本段整段跳过。
+--   G. 内置工具 browserUse 的说明文案（与当前会话能力对齐）
+--      - tool_item 行仍由 sql/data-init.sql 种子；能力增强后的 description 在本文件幂等写回，
+--        避免把运行期工具说明塞进 sys / 平台基础种子。
 --
 -- 【本文件不装什么（都在测试脚本或界面）】
 --   * 三个示例专家（知识问答 / 文稿起草 / 需求拆解）→ sql/data-init-test-tmp.sql
@@ -573,9 +576,23 @@ WHERE @chat_model_id IS NOT NULL
   );
 
 -- =============================================================================
--- G. 自检（只读；不进任何业务表）
+-- G. 内置工具 browserUse 说明（与 BrowserTool.DESCRIPTION 同一句）
 -- =============================================================================
--- G.1 提示词：每个生效用途应有 2 段；MEMORY 两段都应锁定（locked_segments = 2）
+-- sql/data-init.sql 只负责插入 tool_item 行；能力增强后的说明属于运行必需的非 sys 配置，
+-- 在此幂等写回。可重复执行；不改 name / title / input_schema_json / status。
+-- -----------------------------------------------------------------------------
+UPDATE `tool_item` i
+INNER JOIN `tool_source` s ON s.`id` = i.`source_id` AND s.`type` = 'BUILTIN' AND s.`deleted` = 0
+SET i.`description` = '在同一浏览器会话里打开公网页面，并可继续填表、点击、截图、读取标题和可见文本。不能自动识别验证码，也不能代为登录；遇到验证码会交回截图或提示。仅允许公网 http/https，禁止内网。',
+    i.`update_time` = NOW(),
+    i.`updated_by` = @operator
+WHERE i.`name` = 'browserUse'
+  AND i.`deleted` = 0;
+
+-- =============================================================================
+-- H. 自检（只读；不进任何业务表）
+-- =============================================================================
+-- H.1 提示词：每个生效用途应有 2 段；MEMORY 两段都应锁定（locked_segments = 2）
 SELECT t.`purpose`, t.`template_key`, t.`version`, t.`is_active`,
        (SELECT COUNT(*) FROM `prompt_template_segment` s
          WHERE s.`template_id` = t.`id` AND s.`deleted` = 0) AS segments,
@@ -585,7 +602,7 @@ FROM `prompt_template` t
 WHERE t.`deleted` = 0 AND t.`locale` = 'zh-CN' AND t.`is_active` = 1
 ORDER BY FIELD(t.`purpose`, 'CHAT', 'ROUTER', 'REWRITE', 'SUMMARY', 'MEMORY'), t.`id`;
 
--- G.2 默认智能助手：chat_binds 应为 1（为 0 说明还没配 CHAT 实例，去界面配好后重跑本文件）
+-- H.2 默认智能助手：chat_binds 应为 1（为 0 说明还没配 CHAT 实例，去界面配好后重跑本文件）
 SELECT a.`code`, a.`name`, a.`status`, a.`run_mode`,
        a.`prompt_template_id`, a.`template_version`, a.`allow_orchestrated`,
        (SELECT COUNT(*)
@@ -604,7 +621,7 @@ SELECT a.`code`, a.`name`, a.`status`, a.`run_mode`,
 FROM `agent_def` a
 WHERE a.`deleted` = 0 AND a.`code` = 'reception_assistant';
 
--- G.3 入口方案与候选：应有一条 ENTRY_ROUTER，且至少一条启用候选
+-- H.3 入口方案与候选：应有一条 ENTRY_ROUTER，且至少一条启用候选
 SELECT `id`, `tenant_id`, `code`, `name`, `template`, `enabled`, `is_reception_default`
 FROM `ma_def`
 WHERE `tenant_id` = @tenant AND `template` = 'ENTRY_ROUTER'
@@ -619,13 +636,13 @@ LEFT JOIN `workflow_def` w ON w.`id` = c.`workflow_def_id`
 WHERE c.`ma_id` = @reception_ma_id
 ORDER BY c.`sort_no` ASC, c.`id` ASC;
 
--- G.4 两个权限码
+-- H.4 两个权限码
 SELECT `id`, `parent_id`, `type`, `name`, `permission`, `visible`
 FROM `sys_menu`
 WHERE `deleted` = 0 AND `permission` IN ('ma:def:reception', 'runtime:chat:use')
 ORDER BY `id`;
 
--- G.5 缺口诊断：一张表看清「运行还差哪一步」
+-- H.5 缺口诊断：一张表看清「运行还差哪一步」
 SELECT
   @chat_prompt_id AS chat_prompt_id,
   @chat_model_id AS bound_chat_instance_id,
@@ -649,7 +666,7 @@ SELECT
 
 -- =============================================================================
 -- 执行完的人工动作（SQL 不代做）
---   1) 若 G.5 提示没有 CHAT 实例：界面配模型 → 重跑本文件（幂等补绑定）
+--   1) 若 H.5 提示没有 CHAT 实例：界面配模型 → 重跑本文件（幂等补绑定）
 --   2) 工作台新建会话，先与接待助手说一句话，确认不报「Agent 没有可用的对话模型」
 --   3) 需要示例专家 / Skill / 工作流做演示或测试：另跑 sql/data-init-test-tmp.sql（可选，非必需）
 -- =============================================================================

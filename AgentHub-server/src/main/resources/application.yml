@@ -133,6 +133,11 @@ agenthub:
     # 单次 run 允许预建的 node_run 条数。
     max-node-runs-per-run: 500
   runtime:
+    # browserUse 无头 Chrome。一次工具调用结束不关浏览器，同一试跑会话里的同一位专家接着操作。
+    # 空闲超过 browser-session-idle，或专家调用 close，才销毁。单次启动/导航/点选共用 browser-timeout。
+    browser-timeout: 30s
+    browser-session-idle: 5m
+    browser-session-max: 8
     # 发消息幂等（幂等刀1 · I1）。客户端用 Header Idempotency-Key 传业务幂等键；
     # 同会话 + 同键 + 同内容只真正跑一次，重复请求返回首次结果的等价响应。
     # Redis 只是快路径，最终兜底是 agent_run_idempotency 的 (session_id, idem_key) 唯一键。
@@ -496,3 +501,4 @@ logging:
       total-size-cap: 3GB
   level:
     com.agenthub: info
+
