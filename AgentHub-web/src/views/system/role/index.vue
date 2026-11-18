@@ -37,7 +37,13 @@
         <el-table-column prop="name" label="名称" min-width="180" show-overflow-tooltip align="center" />
         <el-table-column prop="dataScopeLabel" label="数据范围" min-width="160" align="center" />
         <el-table-column label="状态" min-width="100" align="center">
-          <template #default="{ row }">{{ row.status === 1 ? '正常' : '停用' }}</template>
+          <template #default="{ row }">
+            <StatusSwitch
+              :status="row.status"
+              :disabled="!user.hasPerm('system:role:edit')"
+              :commit="(status) => commitRoleStatus(row, status)"
+            />
+          </template>
         </el-table-column>
         <el-table-column label="操作" min-width="280" align="center">
           <template #default="{ row }">
@@ -68,12 +74,6 @@
           </el-select>
         </el-form-item>
         <el-form-item label="排序"><el-input-number v-model="editor.form.sort" :min="0" /></el-form-item>
-        <el-form-item label="状态">
-          <el-radio-group v-model="editor.form.status">
-            <el-radio :value="1">正常</el-radio>
-            <el-radio :value="0">停用</el-radio>
-          </el-radio-group>
-        </el-form-item>
         <el-form-item label="备注"><el-input v-model="editor.form.remark" type="textarea" /></el-form-item>
       </el-form>
       <template #footer>
@@ -124,6 +124,7 @@ defineOptions({ name: 'SystemRole' })
 /**
  * 角色管理。所属域：admin。
  * 数据范围：1 本人，2 本部门，3 本部门及以下，4 全部，5 自定义。筛选条布局与用户管理一致。
+ * 启停在列表开关上完成，新建默认启用；表单不再提供状态。
  */
 import { computed, nextTick, onMounted, reactive, ref } from 'vue'
 import { Plus, RefreshRight, Search } from '@element-plus/icons-vue'
@@ -131,6 +132,7 @@ import { ElMessage, ElMessageBox, type FormInstance, type FormRules, type ElTree
 import { assignRoleMenus, createRole, deleteRole, getRole, pageRoles, updateRole, updateRoleScope } from '@/api/role'
 import { menuTree } from '@/api/menu'
 import { deptTree } from '@/api/dept'
+import StatusSwitch from '@/components/admin/StatusSwitch.vue'
 import PageHeader from '@/components/PageHeader.vue'
 import TablePager from '@/components/TablePager.vue'
 import { useListIndexColumn } from '@/composables/listIndex'
@@ -204,6 +206,24 @@ function onReset() {
   query.name = ''
   query.current = 1
   void load()
+}
+
+/**
+ * 列表开关启停。编码创建后不变，但仍要带上，后端校验要求编码非空。
+ *
+ * @param row    当前角色
+ * @param status 1 正常，0 停用
+ */
+async function commitRoleStatus(row: RoleRow, status: number) {
+  const { data } = await updateRole(row.id, {
+    code: row.code,
+    name: row.name,
+    dataScope: row.dataScope,
+    sort: row.sort,
+    status,
+    remark: row.remark || ''
+  })
+  row.status = data.data?.status ?? status
 }
 
 function openCreate() {

@@ -676,6 +676,7 @@ async function onAccountCommand(command: string | number) {
 .shell.is-editor-focus .main {
   padding: 8px 10px;
   scrollbar-gutter: auto;
+  --ah-main-pad-y: 18px;
 }
 
 .nav {
@@ -914,6 +915,8 @@ async function onAccountCommand(command: string | number) {
   /* 弹窗锁滚另见 styles/index.css */
   padding: 16px 16px 20px;
   background: #f5f7fa;
+  /* 上下留白之和。工作流画布按它扣高度，避免写死 200px 后底部空一截 */
+  --ah-main-pad-y: 36px;
 }
 
 /*

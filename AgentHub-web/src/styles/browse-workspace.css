@@ -188,15 +188,28 @@
   min-height: 0;
 }
 
-.browse-workspace .rail-toolbar {
+/*
+ * 左栏工具条：视图切换独占一行，搜索独占下一行并吃满左栏宽度。
+ * Agent 页根节点是 .page，模型 / 工具 / Skill 在 .browse-workspace 里，同一套规则，不各写一份。
+ */
+.browse-workspace .rail-toolbar,
+.page .rail-toolbar {
   display: flex;
   flex: none;
-  align-items: center;
+  flex-direction: column;
+  align-items: stretch;
   gap: 8px;
 }
 
-.browse-workspace .rail-search {
-  flex: 1;
+.browse-workspace .rail-toolbar .view-toggle,
+.page .rail-toolbar .view-toggle {
+  align-self: flex-start;
+}
+
+.browse-workspace .rail-search,
+.page .rail .rail-search {
+  flex: none;
+  width: 100%;
   min-width: 0;
 }
 

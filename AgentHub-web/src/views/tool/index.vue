@@ -288,7 +288,7 @@
                 </div>
               </div>
               <!-- 与用户管理一致：输入 220 / 下拉 160；查询、重置、新建工具项跟在后 -->
-              <div class="filter-bar">
+              <div class="filter-bar filter-bar--keep-row">
                 <el-form class="filter-form" inline @submit.prevent="searchItems">
                   <el-form-item label="关键词">
                     <el-input
@@ -331,7 +331,7 @@
                   </el-form-item>
                 </el-form>
               </div>
-              <!-- 五列内容都短：等分宽度、表头与单元格居中 -->
+              <!-- 描述列读工具项已有 description，内置和 MCP 同一张表；空值显示「暂无说明」 -->
               <el-table
                 v-loading="itemLoading"
                 class="item-table"
@@ -339,10 +339,15 @@
                 empty-text="没有工具项"
                 table-layout="fixed"
               >
-                <!-- 内容列都短：等分宽度、表头与单元格居中；最左序号列固定窄宽 -->
+                <!-- 最左序号列固定窄宽；描述比名称长，多给一倍最小宽 -->
                 <el-table-column v-bind="indexColumnProps" />
                 <el-table-column prop="name" label="名称" min-width="1" align="center" header-align="center" show-overflow-tooltip />
                 <el-table-column prop="title" label="展示名" min-width="1" align="center" header-align="center" show-overflow-tooltip />
+                <el-table-column label="描述" min-width="2" align="left" header-align="center" show-overflow-tooltip>
+                  <template #default="{ row }">
+                    <span class="item-desc">{{ itemDescription(row) }}</span>
+                  </template>
+                </el-table-column>
                 <el-table-column label="来源类型" min-width="1" align="center" header-align="center">
                   <template #default="{ row }">
                     <el-tag size="small" effect="plain">{{ row.sourceType || '-' }}</el-tag>
@@ -832,6 +837,17 @@ async function onSync(row?: ToolSource) {
   }
 }
 
+/**
+ * 工具项说明。MCP 同步下来的 description 和内置工具已有说明共用这一列，不另写文案。
+ *
+ * @param row 当前行
+ * @return 去掉首尾空白后的说明；没有内容时为「暂无说明」
+ */
+function itemDescription(row: ToolItemRow): string {
+  const text = (row.description || '').trim()
+  return text || '暂无说明'
+}
+
 function openItem(row?: ToolItemRow) {
   itemDialog.editing = row || null
   itemDialog.open = true
@@ -1078,6 +1094,15 @@ onMounted(async () => {
 
 .item-table {
   width: 100%;
+}
+
+.item-desc {
+  display: inline-block;
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  vertical-align: bottom;
 }
 
 .pager {

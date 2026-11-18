@@ -37,7 +37,13 @@
           <template #default="{ row }">{{ row.agentIds?.join(', ') || '—' }}</template>
         </el-table-column>
         <el-table-column label="状态" min-width="90" align="center">
-          <template #default="{ row }">{{ row.status === 1 ? '启用' : '停用' }}</template>
+          <template #default="{ row }">
+            <StatusSwitch
+              :status="row.status"
+              :disabled="!user.hasPerm('system:app:edit')"
+              :commit="(status) => commitAppStatus(row, status)"
+            />
+          </template>
         </el-table-column>
         <el-table-column label="操作" min-width="280" align="center">
           <template #default="{ row }">
@@ -71,12 +77,6 @@
           />
         </el-form-item>
         <el-form-item label="备注"><el-input v-model="editor.form.remark" /></el-form-item>
-        <el-form-item label="状态">
-          <el-radio-group v-model="editor.form.status">
-            <el-radio :value="1">启用</el-radio>
-            <el-radio :value="0">停用</el-radio>
-          </el-radio-group>
-        </el-form-item>
       </el-form>
       <template #footer>
         <!-- 编辑态未改任何字段时取消 / 保存都不可点；新增态恒可点 -->
@@ -133,6 +133,7 @@ defineOptions({ name: 'SystemApp' })
 /**
  * 调用方应用。所属域：admin。
  * 密钥只在创建或重置后的弹窗里出现一次；新建入口在页头 #extra，筛选条只留查询/重置。
+ * 启停在列表开关上完成，新建默认启用；表单不再提供状态。
  */
 import { computed, onMounted, reactive, ref } from 'vue'
 import { Plus, RefreshRight, Search } from '@element-plus/icons-vue'
@@ -140,6 +141,7 @@ import { ElMessage, ElMessageBox } from 'element-plus'
 import { createApp, deleteApp, grantAppAgents, pageApps, resetAppSecret, updateApp } from '@/api/app'
 import { deptTree } from '@/api/dept'
 import { listAppWorkflowGrants, listPublishedWorkflows, saveAppWorkflowGrants } from '@/api/workflow'
+import StatusSwitch from '@/components/admin/StatusSwitch.vue'
 import PageHeader from '@/components/PageHeader.vue'
 import TablePager from '@/components/TablePager.vue'
 import { useListIndexColumn } from '@/composables/listIndex'
@@ -203,6 +205,22 @@ function onReset() {
   query.name = ''
   query.current = 1
   void load()
+}
+
+/**
+ * 列表开关启停。带上名称、部门和备注，避免更新接口把资料清掉。
+ *
+ * @param row    当前应用
+ * @param status 1 启用，0 停用
+ */
+async function commitAppStatus(row: AppRow, status: number) {
+  const { data } = await updateApp(row.id, {
+    name: row.name,
+    deptId: row.deptId ?? null,
+    status,
+    remark: row.remark || ''
+  })
+  row.status = data.data?.status ?? status
 }
 
 function openCreate() {
