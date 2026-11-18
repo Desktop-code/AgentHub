@@ -1,10 +1,16 @@
-# 本机 / 部署环境配置模板。所属域：运维配置，不是业务代码。
+# 本机 jar 直跑时的可选配置模板。所属域：运维配置，不是业务代码。
 #
-# 用法：复制为 AgentHub-server/config/application-local.yml（该目录不入库、也不打进 jar），
-# 或在部署环境用环境变量注入，二选一。
+# 用法（二选一，不要写进 src/main/resources）：
+# 1) 本机 jar：复制为 AgentHub-server/config/application-local.yml（该目录不入库、也不打进 jar）
+# 2) Docker Compose：优先用仓库根目录 .env 注入；一般不必准备本文件。
+#    若仍要文件覆盖，把填好的副本放到 secrets/application-local.yml，
+#    并在 docker-compose.yml 的 server.volumes 取消对应挂载注释（缺文件时不要挂，否则起不来）。
 #
 # 为什么不在 src/main/resources：那份目录会整体打进 jar 与 Docker 镜像，
 # 一旦把主密钥和库密码写进去，等于随制品一起分发。
+#
+# Compose 容器内数据源用户名已被环境变量固定为 agenthub，口令来自 MYSQL_PASSWORD；
+# 本机直连本机 MySQL 时才需要下面的 username/password（常见为 root 或本地账号）。
 spring:
   datasource:
     username: root
@@ -18,6 +24,7 @@ agenthub:
     # root-path: ./workspace-test
   crypto:
     # openssl rand -hex 32 的结果。这是主密钥，不是厂商 sk。
+    # Compose 下一键路径用 .env 的 AGENTHUB_SECRET_KEY，不必写在这里。
     secret-key: 请替换为 64 位 hex
     # 主密钥轮换过渡期使用：旧密钥填这里，只解密不加密。
     # 启动后迁移任务会把旧密文重写成新密钥，完成后清空此项即可。

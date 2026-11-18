@@ -2,8 +2,10 @@ services:
   mysql:
     image: mysql:5.7
     command:
+      # 与 sql/agenthub.sql 表级 COLLATE utf8mb4_general_ci 对齐；勿用 unicode_ci，
+      # 否则 MYSQL_DATABASE / 临时表继承库默认后，与 general_ci 列 JOIN 会报 1267。
       - --character-set-server=utf8mb4
-      - --collation-server=utf8mb4_unicode_ci
+      - --collation-server=utf8mb4_general_ci
       - --character-set-client-handshake=FALSE
     environment:
       MYSQL_DATABASE: agenthub
@@ -11,8 +13,10 @@ services:
       MYSQL_PASSWORD: ${MYSQL_PASSWORD}
       MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD}
     volumes:
+      # 空 mysql_data 卷首次启动按文件名顺序执行；已有数据卷不会重跑入口脚本
       - ./sql/agenthub.sql:/docker-entrypoint-initdb.d/01-agenthub.sql:ro
       - ./sql/data-init.sql:/docker-entrypoint-initdb.d/02-data-init.sql:ro
+      - ./sql/data-init-agent.sql:/docker-entrypoint-initdb.d/03-data-init-agent.sql:ro
       - mysql_data:/var/lib/mysql
     # 默认不对外暴露 3306；本机需要连库时再取消注释
     # ports: ["3307:3306"]
@@ -48,7 +52,7 @@ services:
       retries: 3
 
   minio:
-    image: minio/minio:RELEASE.2023-03-20T20-16-18Z
+    image: milvusdb/minio:RELEASE.2024-05-28T17-19-04Z
     environment:
       # MinIO 自己的 AK/SK，与业务无关；默认值为官方示例口令，仅供本机开发。
       # 生产必须用环境变量注入，禁止把真实口令写进本文件。
@@ -105,24 +109,28 @@ services:
       mysql: { condition: service_healthy }
       redis: { condition: service_started }
     environment:
-      # 只放非敏感项。主密钥与库密码用只读文件挂载，避免出现在 docker inspect / 进程环境变量里。
+      # 启动必需项一律从 .env 注入，不再强制挂载 secrets/application-local.yml。
+      # 容器内业务库用户固定为 agenthub，口令与 mysql 服务的 MYSQL_PASSWORD 同一变量。
       SPRING_DATASOURCE_URL: jdbc:mysql://mysql:3306/agenthub?useUnicode=true&characterEncoding=utf8&serverTimezone=Asia/Shanghai
       SPRING_DATASOURCE_USERNAME: agenthub
+      SPRING_DATASOURCE_PASSWORD: ${MYSQL_PASSWORD}
       SPRING_DATA_REDIS_HOST: redis
+      # 主密钥：空值时后端启动失败（SecretStore 硬闸）。勿把真实值写进镜像或本文件。
+      AGENTHUB_SECRET_KEY: ${AGENTHUB_SECRET_KEY}
       # 容器内按服务名连 Milvus（覆盖 application.yml 的 127.0.0.1 默认值）。
       # 故意不写进 depends_on：Milvus 未就绪时后端仍应能启动，只让 RAG 相关接口报不可用。
       AGENTHUB_MILVUS_URI: http://milvus:19530
       AGENTHUB_RESET_PASSWORD: ${AGENTHUB_RESET_PASSWORD:-admin123}
-      # 会话级文件工具的落盘根目录。容器内必须指向挂载卷，否则容器重建就把试跑产物清空。
+      # 会话级文件工具的落盘根目录。容器内必须指向挂载卷，否则容器重建就把运行产物清空。
       AGENTHUB_WORKSPACE_ROOT_PATH: /app/workspace
     volumes:
-      # 外部配置目录优先级高于 jar 内配置；文件在宿主机上，不进镜像。
-      # 参考 AgentHub-server/src/main/resources/application-local.yml.example 准备本文件。
-      - ./secrets/application-local.yml:/app/config/application-local.yml:ro
+      # 可选覆盖：若宿主机有 ./secrets/application-local.yml，可取消下一行注释以覆盖同名配置。
+      # 缺文件时不要启用该挂载，否则会起不来；一键启动只靠上面的环境变量即可。
+      # - ./secrets/application-local.yml:/app/config/application-local.yml:ro
       # RAG 原文落盘（agenthub.rag.storage.dir 相对工作目录 ./data/rag → /app/data/rag）。
       # 不挂卷则容器重建即丢原文，导致切片无法回溯；卷名见文末 volumes。
       - rag_storage:/app/data/rag
-      # 试跑会话工作区（agenthub.workspace.root-path → /app/workspace）。
+      # 运行会话工作区（agenthub.workspace.root-path → /app/workspace）。
       # 不挂卷则容器重建即丢，Agent 上一轮落盘的文件下一轮读不到。
       - workspace_storage:/app/workspace
     ports: ["8081:8080"]
@@ -131,11 +139,10 @@ services:
     build: ./AgentHub-web
     depends_on: [server]
     ports:
-      - "8088:80"
+      # 仅对外 HTTPS；证书在容器启动时按需自签并写入 web_certs 卷，重启复用
       - "8443:443"
     volumes:
-      # 证书与私钥放宿主机的 secrets/certs（已 gitignore），只读挂载，不进镜像
-      - ./secrets/certs:/etc/nginx/certs:ro
+      - web_certs:/etc/nginx/certs
 
 volumes:
   mysql_data:
@@ -145,5 +152,7 @@ volumes:
   milvus_data:
   # RAG 原文（/app/data/rag）。与向量库分开：向量在 milvus_data，原文在这里
   rag_storage:
-  # 试跑会话工作区（/app/workspace）。纯临时产物，不需要备份；删卷等于清空所有会话文件
+  # 运行会话工作区（/app/workspace）。纯临时产物，不需要备份；删卷等于清空所有会话文件
   workspace_storage:
+  # 前端 Nginx TLS 证书（自签，不进镜像、不进仓库）
+  web_certs:

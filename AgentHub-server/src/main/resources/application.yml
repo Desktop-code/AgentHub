@@ -478,7 +478,7 @@ agenthub:
       - http://127.0.0.1:5173
       - http://localhost:5175
       - http://127.0.0.1:5175
-      - http://localhost:8088
+      # Compose 前端仅映射 8443（HTTPS）；同源反代时浏览器不走跨域，白名单留给直连排查
       - https://localhost:8443
       - https://127.0.0.1:8443
 
@@ -496,4 +496,3 @@ logging:
       total-size-cap: 3GB
   level:
     com.agenthub: info
-

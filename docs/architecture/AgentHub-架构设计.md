@@ -561,7 +561,7 @@ flowchart TB
 ```mermaid
 flowchart LR
   subgraph host["一套可运行环境"]
-    WEB["前端容器 Nginx<br/>对外 8088 与 8443"]
+    WEB["前端容器 Nginx<br/>对外 HTTPS 8443"]
     SRV["后端容器<br/>容器内 8080"]
     DB[("MySQL 5.7")]
     RD[("Redis 7")]
@@ -582,14 +582,16 @@ flowchart LR
 
 | 组成 | 说明 |
 |------|------|
-| 后端 | 单 jar，容器内 8080；宿主机直跑默认 8080，compose 映射到 8081 避免冲突 |
-| 前端 | 静态产物进 Nginx，反代 `/api/` 到后端；容器内 80 只做跳转，实际访问 8443 |
-| MySQL | 库名 `agenthub`；compose 默认不暴露宿主端口 |
+| 后端 | 单 jar，容器内 8080；宿主机直跑默认 8080，compose 映射到 8081 避免冲突；Compose 启动必需项由 `.env` 注入（库口令、主密钥、重置口令、数据源、Redis、Milvus URI、工作区路径），不强制挂载 `secrets/application-local.yml` |
+| 前端 | 静态产物进 Nginx，反代 `/api/` 到后端；只对外映射 `8443→443`；缺证书时容器内自签并写入 `web_certs` 卷，重启复用，不进镜像 |
+| MySQL | 库名 `agenthub`；compose 默认不暴露宿主端口；业务用户 `agenthub`，口令与 `.env` 的 `MYSQL_PASSWORD` 一致 |
 | Redis | 记忆窗口、短期记忆、提示词缓存 |
 | Milvus | 知识库与记忆向量；依赖 etcd 与 MinIO；未就绪时应用照常启动，只有建库、重建、检索报「不可用」 |
 | 评测软评分 | 可选本机 Python 进程，未启动只是软评分跳过 |
 
-**新库初始化**：按顺序执行三份正式脚本——`sql/agenthub.sql`（只建表，已吸收全部结构增量，含 `DROP TABLE IF EXISTS`，只用于新库或整库重建）→ `sql/data-init.sql`（sys 与平台基础，只跑一次）→ `sql/data-init-agent.sql`（运行必需的非 sys 配置，按业务键判存在，可重复执行）。`sql/data-init-test-tmp.sql` 只是可选的测试 / 演示配置（示例专家、Skill、工作流等），不是新库必跑，也不进仓。用 Compose 起全新数据卷时，MySQL 首次启动只自动执行前两份，第三份需手工补；已有数据卷不会自动执行任何脚本。模型密钥、知识库文档与 `workflow_release` 仍不进任何 SQL，只能在界面配置或发布产生。正式仓库的初始化入口只有这三份脚本，不再以其他增量脚本作为新库初始化入口；已有数据的库不要重跑 `agenthub.sql`。存量库升级先对照这份建表脚本补缺的表与列，对应的增量脚本以后单独出。
+**新库初始化**：按顺序执行三份正式脚本——`sql/agenthub.sql`（只建表，已吸收全部结构增量，含 `DROP TABLE IF EXISTS`，只用于新库或整库重建）→ `sql/data-init.sql`（sys 与平台基础，只跑一次）→ `sql/data-init-agent.sql`（运行必需的非 sys 配置，按业务键判存在，可重复执行）。`sql/data-init-test-tmp.sql` 只是可选的测试 / 演示配置（示例专家、Skill、工作流等），不是新库必跑，也不进仓。用 Compose 起**全新** `mysql_data` 卷时，MySQL 首次启动会按 `docker-entrypoint-initdb.d` 顺序自动执行上述三份；**已有数据卷不会自动执行任何脚本**。若旧卷缺第三份，在已运行的库上单独执行 `sql/data-init-agent.sql` 即可，不要删卷或 `docker compose down -v`。模型密钥、知识库文档与 `workflow_release` 仍不进任何 SQL，只能在界面配置或发布产生。正式仓库的初始化入口只有这三份脚本，不再以其他增量脚本作为新库初始化入口；已有数据的库不要重跑 `agenthub.sql`。存量库升级先对照这份建表脚本补缺的表与列，对应的增量脚本以后单独出。
+
+一键入口：复制 `.env.example` 为 `.env` 并按该文件顶部注释填写 → `docker compose up -d --build`。控制台 `https://localhost:8443`（自签证书需信任一次）；账号 `admin`，口令口径见 `.env.example`。
 
 后端不依赖 Milvus 启动，这是有意的：只做非检索功能的环境不需要起向量库。主实例端口以编排为准，排查问题时不要另起旁路实例。
 

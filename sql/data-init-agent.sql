@@ -50,7 +50,9 @@
 --   重跑会补一条新的启用绑定——这是为了「别再报没有对话模型」，见 F 节注释。
 -- =============================================================================
 
-SET NAMES utf8mb4;
+-- 字符集 / 排序规则与 sql/agenthub.sql、Compose collation-server 对齐，
+-- 避免临时表继承库默认后与 prompt_* 等 general_ci 列 JOIN 报 ERROR 1267。
+SET NAMES utf8mb4 COLLATE utf8mb4_general_ci;
 USE agenthub;
 
 -- 一期租户由配置提供（默认 1）；部署到别处时改这一行
@@ -84,9 +86,9 @@ SET @operator := COALESCE((
 -- A.0 本次种子覆盖的用途清单（改用途只改这一处）
 DROP TEMPORARY TABLE IF EXISTS tmp_ai_prompt_purpose;
 CREATE TEMPORARY TABLE tmp_ai_prompt_purpose (
-  purpose VARCHAR(32) NOT NULL,
+  purpose VARCHAR(32) CHARACTER SET utf8mb4 COLLATE utf8mb4_general_ci NOT NULL,
   PRIMARY KEY (purpose)
-) ENGINE = InnoDB;
+) ENGINE = InnoDB DEFAULT CHARSET = utf8mb4 COLLATE = utf8mb4_general_ci;
 
 INSERT INTO tmp_ai_prompt_purpose (purpose) VALUES
   ('CHAT'), ('ROUTER'), ('REWRITE'), ('SUMMARY'), ('MEMORY');
@@ -233,9 +235,9 @@ WHERE t.deleted = 0
 -- A.4.1 先熄灭本脚本已备好同名键的用途下、其它 key 的生效行
 DROP TEMPORARY TABLE IF EXISTS tmp_ai_prompt_seeded;
 CREATE TEMPORARY TABLE tmp_ai_prompt_seeded (
-  purpose VARCHAR(32) NOT NULL,
+  purpose VARCHAR(32) CHARACTER SET utf8mb4 COLLATE utf8mb4_general_ci NOT NULL,
   PRIMARY KEY (purpose)
-) ENGINE = InnoDB;
+) ENGINE = InnoDB DEFAULT CHARSET = utf8mb4 COLLATE = utf8mb4_general_ci;
 
 INSERT INTO tmp_ai_prompt_seeded (purpose)
 SELECT DISTINCT t.purpose
