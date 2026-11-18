@@ -1863,18 +1863,6 @@ function onTrial(payload: { agentId: number; name: string; runMode: string }) {
   max-height: none;
 }
 
-.rail-toolbar {
-  display: flex;
-  flex: none;
-  align-items: center;
-  gap: 8px;
-}
-
-.rail-search {
-  flex: 1;
-  min-width: 0;
-}
-
 .rail-list {
   display: flex;
   flex: 1;

@@ -125,7 +125,7 @@
       </Transition>
 
       <!-- 中：VueFlow 画布 -->
-      <div class="wf-canvas" @dragover.prevent @drop.prevent="onDrop">
+      <div ref="canvasHost" class="wf-canvas" @dragover.prevent @drop.prevent="onDrop">
         <el-alert
           v-if="canvasError"
           :title="canvasError"
@@ -152,6 +152,8 @@
           @node-click="onNodeClick"
           @edge-click="onEdgeClick"
           @pane-click="onPaneClick"
+          @move-end="onCanvasMoveEnd"
+          @nodes-initialized="onNodesInitialized"
           @error="onVueFlowError"
         >
           <Background :gap="16" color="#e5e7eb" />
@@ -1294,6 +1296,70 @@ function fitCanvas() {
   void fitView({ padding: 0.2, maxZoom: 1.1, duration: 250 }).catch(() => false)
 }
 
+/** 画布容器。高度落到真实布局后再适配，避免按 0 高把节点钉在顶部 */
+const canvasHost = ref<HTMLElement | null>(null)
+/** 正在程序化适配视口，这次 move-end 不算用户拖拽 */
+let centering = false
+/** 已经在等高度并适配，避免 nodes-initialized 和载入各打一次叠在一起 */
+let placeQueued = false
+/** 用户拖动或缩放过后，不再自动把节点拽回中部 */
+let userMovedCanvas = false
+
+/**
+ * 用户拖动画布或改了缩放。自动居中只服务默认视野。
+ */
+function onCanvasMoveEnd() {
+  if (!centering) {
+    userMovedCanvas = true
+  }
+}
+
+/**
+ * 节点量完尺寸后补一次居中。载入时若先适配过，这里用真实节点盒再放一次。
+ */
+function onNodesInitialized() {
+  if (userMovedCanvas) {
+    return
+  }
+  void placeNodesInView()
+}
+
+/**
+ * 把当前节点放进可视区域中部。
+ * 等容器有真实高度再 fitView：高度还是 0 时适配会失败，节点就停在坐标原点附近，底下空一大片。
+ */
+async function placeNodesInView() {
+  if (placeQueued) {
+    return
+  }
+  placeQueued = true
+  centering = true
+  try {
+    await nextTick()
+    const host = canvasHost.value
+    for (let i = 0; i < 10; i += 1) {
+      if (host && host.clientHeight > 160) {
+        break
+      }
+      await new Promise<void>((resolve) => requestAnimationFrame(() => resolve()))
+    }
+    await fitView({ padding: 0.22, maxZoom: 1.1, duration: 0 }).catch(() => false)
+  } finally {
+    await nextTick()
+    await new Promise<void>((resolve) => requestAnimationFrame(() => resolve()))
+    centering = false
+    placeQueued = false
+  }
+}
+
+/** 专注模式改变画布高度。用户还没拖过时，按新高度把节点重新放到中部 */
+watch(focusMode, () => {
+  if (userMovedCanvas) {
+    return
+  }
+  void placeNodesInView()
+})
+
 /** 工具下拉文案：停用也展示，避免用户以为工具消失 */
 function toolLabel(item: ToolItemRow): string {
   const name = item.title ? `${item.title}（${item.name}）` : item.name
@@ -1314,6 +1380,8 @@ async function loadAll() {
   loading.value = true
   loadError.value = ''
   canvasError.value = ''
+  // 重新载入视为新的默认视野，允许再次把节点放到可视区域中部
+  userMovedCanvas = false
   try {
     const [defResp, draftResp] = await Promise.all([getWorkflowDef(id), getWorkflowDraft(id)])
     def.value = defResp.data.data
@@ -1330,8 +1398,8 @@ async function loadAll() {
     validatedSignature.value = ''
     baseline.value = graphSignature(buildGraph())
     await nextTick()
-    // 首屏自适应；viewpoint 不强制回放，避免旧视口把节点推到屏幕外
-    await fitView({ padding: 0.2, maxZoom: 1.1 }).catch(() => false)
+    // 不回放旧 viewport：按当前画布高度把节点放到可视区域中部
+    await placeNodesInView()
   } catch {
     loadError.value = '工作流加载失败：请确认存在、属于当前租户且草稿完好'
   } finally {
@@ -2027,14 +2095,14 @@ onActivated(() => {
 .wf-page {
   display: flex;
   flex-direction: column;
-  /* 顶栏 + 页签 + 主区留白之外的可视高度；画布区自行滚动 */
-  height: calc(100vh - 200px);
-  min-height: 520px;
+  /* 页签 40px + 主区上下留白（--ah-main-pad-y）。旧的 100vh-200px 会在底栏下空出一截 */
+  height: calc(100vh - 40px - var(--ah-main-pad-y, 36px));
+  min-height: 0;
 }
 
-/* 专注模式：页签条与主区留白已被壳层收起，页面直接吃满剩余高度 */
+/* 专注模式：页签条已隐藏，只扣主区留白 */
 .wf-page.is-focus {
-  height: calc(100vh - 72px);
+  height: calc(100vh - var(--ah-main-pad-y, 18px));
   min-height: 0;
 }
 
@@ -2366,7 +2434,10 @@ onActivated(() => {
 .wf-canvas {
   position: relative;
   flex: 1;
+  align-self: stretch;
   min-width: 0;
+  min-height: 0;
+  height: auto;
   overflow: hidden;
   border: 1px solid var(--ah-border, #e5e7eb);
   border-radius: 12px;

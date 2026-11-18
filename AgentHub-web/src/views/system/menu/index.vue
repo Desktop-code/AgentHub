@@ -10,11 +10,15 @@
       </template>
     </PageHeader>
     <el-card class="table-card" shadow="never">
+      <!-- lazy：表格只挂当前层。受控 expand-row-keys 会在每次展开时按整棵树重建，这里不绑 -->
       <el-table
+        ref="tableRef"
         v-loading="loading"
-        :data="rows"
+        :data="tableRows"
         row-key="id"
-        :expand-row-keys="expandedKeys"
+        lazy
+        :load="loadChildren"
+        :tree-props="{ children: 'children', hasChildren: 'hasChildren' }"
         empty-text="没有菜单"
         @expand-change="onExpandChange"
       >
@@ -26,6 +30,15 @@
         <el-table-column prop="path" label="路由" min-width="160" align="center" />
         <el-table-column prop="permission" label="权限码" min-width="180" align="center" />
         <el-table-column prop="sort" label="排序" min-width="80" align="center" />
+        <el-table-column label="状态" min-width="90" align="center">
+          <template #default="{ row }">
+            <StatusSwitch
+              :status="row.status"
+              :disabled="!user.hasPerm('system:menu:edit')"
+              :commit="(status) => commitMenuStatus(row, status)"
+            />
+          </template>
+        </el-table-column>
         <el-table-column label="操作" min-width="220" align="center">
           <template #default="{ row }">
             <el-button v-if="user.hasPerm('system:menu:add')" link type="primary" @click="openCreate(row.id)">新增</el-button>
@@ -74,12 +87,6 @@
             <el-radio :value="0">隐藏</el-radio>
           </el-radio-group>
         </el-form-item>
-        <el-form-item label="状态">
-          <el-radio-group v-model="editor.form.status">
-            <el-radio :value="1">正常</el-radio>
-            <el-radio :value="0">停用</el-radio>
-          </el-radio-group>
-        </el-form-item>
       </el-form>
       <template #footer>
         <!-- 编辑态未改任何字段时取消 / 保存都不可点；新增态恒可点 -->
@@ -97,14 +104,18 @@ defineOptions({ name: 'SystemMenu' })
  * 菜单树管理。所属域：admin。
  * 类型：1 可折叠目录、2 菜单、3 按钮、4 无折叠分组。
  * 默认不展开；增删改后只刷新数据，保留当前展开行。
+ * 表格按层懒加载：整棵树一次取回，展开只渲染下一层，避免每次点击重建全部按钮行。
+ * 启停在列表开关上完成，新建默认启用；表单不再提供状态。
  * 上级用树形下拉（含「顶级」根选项）以便回显；编辑时自己与子孙禁选，避免把节点挂到自己的下级。
  */
 import { computed, onMounted, reactive, ref } from 'vue'
 import { Plus } from '@element-plus/icons-vue'
-import { ElMessage, ElMessageBox } from 'element-plus'
+import { ElMessage, ElMessageBox, type TableInstance } from 'element-plus'
 import { createMenu, deleteMenu, menuTree, updateMenu } from '@/api/menu'
+import StatusSwitch from '@/components/admin/StatusSwitch.vue'
 import PageHeader from '@/components/PageHeader.vue'
 import MenuIconPicker from '@/components/menu/MenuIconPicker.vue'
+import { patchTreeNode, useLazyTreeTable } from '@/composables/lazyTreeTable'
 import { useObjectDirty } from '@/composables/useFormDirty'
 import { useUserStore } from '@/stores/user'
 import type { MenuRow } from '@/types'
@@ -116,9 +127,17 @@ const ROOT_OPTION_ID = -1
 
 const user = useUserStore()
 const loading = ref(false)
-const rows = ref<MenuRow[]>([])
-/** 受控展开键（与 row-key=id 同型）；刷新树时不清空，避免改完冲掉展开状态。 */
-const expandedKeys = ref<number[]>([])
+/** 完整树在 source，表格只挂已展开层 */
+const {
+  source: menuSource,
+  tableRows,
+  replace: replaceMenuTree,
+  loadChildren,
+  onExpandChange,
+  forgetExpanded,
+  restore: restoreMenuTree
+} = useLazyTreeTable<MenuRow>()
+const tableRef = ref<TableInstance>()
 const editor = reactive({ open: false, form: emptyForm(0) })
 
 /**
@@ -139,12 +158,12 @@ const isButtonType = computed(() => Number(editor.form.type) === 3)
 const parentOptions = computed(() => {
   const blocked = new Set<number>()
   if (editor.form.id) {
-    const self = findNode(rows.value, editor.form.id)
+    const self = findNode(menuSource.value, editor.form.id)
     if (self) {
       markSubtree(self, blocked)
     }
   }
-  return [{ id: ROOT_OPTION_ID, name: '顶级（根目录）', disabled: false, children: toOptions(rows.value, blocked) }]
+  return [{ id: ROOT_OPTION_ID, name: '顶级（根目录）', disabled: false, children: toOptions(menuSource.value, blocked) }]
 })
 
 /**
@@ -220,31 +239,43 @@ function typeLabel(type: number) {
   return '菜单'
 }
 
-/** 仅替换树数据，不改 expandedKeys。 */
+/** 只换树数据。展开记录留在 tree 里，刷新后按层还原。 */
 async function load() {
   loading.value = true
   try {
-    rows.value = (await menuTree()).data.data
+    replaceMenuTree((await menuTree()).data.data || [])
   } finally {
     loading.value = false
   }
+  await restoreMenuTree(tableRef.value)
 }
 
 /**
- * 记录用户手动展开/收起，供下次刷新后还原。
+ * 列表开关启停。带上当前行的其余字段，避免更新接口把路由、权限码写成空。
  *
- * @param row 当前行
- * @param expanded 是否展开
+ * @param row    表格行（懒加载副本）
+ * @param status 1 启用，0 停用
  */
-function onExpandChange(row: MenuRow, expanded: boolean) {
-  const key = row.id
-  if (expanded) {
-    if (!expandedKeys.value.includes(key)) {
-      expandedKeys.value = [...expandedKeys.value, key]
-    }
-    return
-  }
-  expandedKeys.value = expandedKeys.value.filter((item) => item !== key)
+async function commitMenuStatus(row: MenuRow, status: number) {
+  const { data } = await updateMenu(row.id, {
+    parentId: row.parentId ?? 0,
+    type: Number(row.type),
+    name: row.name,
+    path: row.path ?? null,
+    component: row.component ?? null,
+    redirect: row.redirect ?? null,
+    permission: row.permission ?? null,
+    icon: row.icon ?? null,
+    sort: row.sort ?? 0,
+    visible: row.visible ?? 1,
+    status,
+    openType: row.openType ?? 0
+  })
+  const saved = data.data?.status ?? status
+  row.status = saved
+  patchTreeNode(menuSource.value, row.id, (node) => {
+    node.status = saved
+  })
 }
 
 /**
@@ -313,8 +344,8 @@ async function save() {
 async function onDelete(row: MenuRow) {
   await ElMessageBox.confirm(`删除「${row.name}」？`, '删除')
   await deleteMenu(row.id)
-  // 已删除节点从展开键里摘掉，其余展开状态保留
-  expandedKeys.value = expandedKeys.value.filter((item) => item !== row.id)
+  // 已删除节点从展开记录里摘掉，其余展开状态保留
+  forgetExpanded(row.id)
   await load()
 }
 

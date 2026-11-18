@@ -10,11 +10,15 @@
       </template>
     </PageHeader>
     <el-card class="table-card" shadow="never">
+      <!-- 与菜单树同一套懒加载：只渲染已展开层，刷新后按记录还原 -->
       <el-table
+        ref="tableRef"
         v-loading="loading"
-        :data="rows"
+        :data="tableRows"
         row-key="id"
-        :expand-row-keys="expandedKeys"
+        lazy
+        :load="loadChildren"
+        :tree-props="{ children: 'children', hasChildren: 'hasChildren' }"
         empty-text="没有部门"
         @expand-change="onExpandChange"
       >
@@ -24,7 +28,13 @@
         <el-table-column prop="phone" label="电话" min-width="140" align="center" />
         <el-table-column prop="sort" label="排序" min-width="80" align="center" />
         <el-table-column label="状态" min-width="90" align="center">
-          <template #default="{ row }">{{ row.status === 1 ? '正常' : '停用' }}</template>
+          <template #default="{ row }">
+            <StatusSwitch
+              :status="row.status"
+              :disabled="!user.hasPerm('system:dept:edit')"
+              :commit="(status) => commitDeptStatus(row, status)"
+            />
+          </template>
         </el-table-column>
         <el-table-column label="操作" min-width="220" align="center">
           <template #default="{ row }">
@@ -53,12 +63,6 @@
         <el-form-item label="名称"><el-input v-model="editor.form.name" /></el-form-item>
         <el-form-item label="电话"><el-input v-model="editor.form.phone" /></el-form-item>
         <el-form-item label="排序"><el-input-number v-model="editor.form.sort" :min="0" /></el-form-item>
-        <el-form-item label="状态">
-          <el-radio-group v-model="editor.form.status">
-            <el-radio :value="1">正常</el-radio>
-            <el-radio :value="0">停用</el-radio>
-          </el-radio-group>
-        </el-form-item>
       </el-form>
       <template #footer>
         <!-- 编辑态未改任何字段时取消 / 保存都不可点；新增态恒可点 -->
@@ -76,12 +80,15 @@ defineOptions({ name: 'SystemDept' })
  * 部门树。所属域：admin。
  * path 由后端按主键前缀维护（顶层从虚拟根 0 开始，逗号分隔，如 0,1,3），这里只展示。
  * 新增/修改都提供「上级」树形下拉并可回显；默认不展开，增删改后只刷新数据并保留展开行。
+ * 树表与菜单共用懒加载投影。启停在列表开关上完成，新建默认启用。
  */
 import { computed, onMounted, reactive, ref } from 'vue'
 import { Plus } from '@element-plus/icons-vue'
-import { ElMessage, ElMessageBox } from 'element-plus'
+import { ElMessage, ElMessageBox, type TableInstance } from 'element-plus'
 import { createDept, deleteDept, deptTree, updateDept } from '@/api/dept'
+import StatusSwitch from '@/components/admin/StatusSwitch.vue'
 import PageHeader from '@/components/PageHeader.vue'
+import { patchTreeNode, useLazyTreeTable } from '@/composables/lazyTreeTable'
 import { useObjectDirty } from '@/composables/useFormDirty'
 import { useUserStore } from '@/stores/user'
 import type { DeptRow } from '@/types'
@@ -91,9 +98,17 @@ const ROOT_OPTION_ID = -1
 
 const user = useUserStore()
 const loading = ref(false)
-const rows = ref<DeptRow[]>([])
-/** 受控展开键（与 row-key=id 同型）；刷新树时不清空。 */
-const expandedKeys = ref<number[]>([])
+/** 完整树在 source，表格只挂已展开层 */
+const {
+  source: deptSource,
+  tableRows,
+  replace: replaceDeptTree,
+  loadChildren,
+  onExpandChange,
+  forgetExpanded,
+  restore: restoreDeptTree
+} = useLazyTreeTable<DeptRow>()
+const tableRef = ref<TableInstance>()
 const editor = reactive({
   open: false,
   form: { id: 0, parentId: ROOT_OPTION_ID, name: '', phone: '', sort: 0, status: 1 }
@@ -114,12 +129,12 @@ const canSaveDept = computed(() => !editor.form.id || editorDirty.isDirty.value)
 const parentOptions = computed(() => {
   const blocked = new Set<number>()
   if (editor.form.id) {
-    const self = findNode(rows.value, editor.form.id)
+    const self = findNode(deptSource.value, editor.form.id)
     if (self) {
       markSubtree(self, blocked)
     }
   }
-  return [{ id: ROOT_OPTION_ID, name: '顶级（无上级）', disabled: false, children: toOptions(rows.value, blocked) }]
+  return [{ id: ROOT_OPTION_ID, name: '顶级（无上级）', disabled: false, children: toOptions(deptSource.value, blocked) }]
 })
 
 /**
@@ -171,31 +186,37 @@ function toOptions(nodes: DeptRow[], blocked: Set<number>): Array<Record<string,
   }))
 }
 
-/** 仅替换树数据，不改 expandedKeys。 */
+/** 只换树数据。展开记录留在 tree 里，刷新后按层还原。 */
 async function load() {
   loading.value = true
   try {
-    rows.value = (await deptTree()).data.data
+    replaceDeptTree((await deptTree()).data.data || [])
   } finally {
     loading.value = false
   }
+  await restoreDeptTree(tableRef.value)
 }
 
 /**
- * 记录用户手动展开/收起。
+ * 列表开关启停。带上当前部门资料，避免更新接口清掉上级或电话。
  *
- * @param row 当前行
- * @param expanded 是否展开
+ * @param row    表格行
+ * @param status 1 正常，0 停用
  */
-function onExpandChange(row: DeptRow, expanded: boolean) {
-  const key = row.id
-  if (expanded) {
-    if (!expandedKeys.value.includes(key)) {
-      expandedKeys.value = [...expandedKeys.value, key]
-    }
-    return
-  }
-  expandedKeys.value = expandedKeys.value.filter((item) => item !== key)
+async function commitDeptStatus(row: DeptRow, status: number) {
+  const { data } = await updateDept(row.id, {
+    parentId: row.parentId ?? 0,
+    name: row.name,
+    sort: row.sort ?? 0,
+    leaderUserId: row.leaderUserId ?? null,
+    phone: row.phone ?? null,
+    status
+  })
+  const saved = data.data?.status ?? status
+  row.status = saved
+  patchTreeNode(deptSource.value, row.id, (node) => {
+    node.status = saved
+  })
 }
 
 /**
@@ -258,7 +279,7 @@ async function save() {
 async function onDelete(row: DeptRow) {
   await ElMessageBox.confirm(`删除部门「${row.name}」？`, '删除')
   await deleteDept(row.id)
-  expandedKeys.value = expandedKeys.value.filter((item) => item !== row.id)
+  forgetExpanded(row.id)
   await load()
 }
 

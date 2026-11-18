@@ -45,7 +45,11 @@
         </el-table-column>
         <el-table-column label="状态" min-width="100" align="center">
           <template #default="{ row }">
-            <el-tag :type="row.status === 1 ? 'success' : 'info'">{{ row.status === 1 ? '正常' : '停用' }}</el-tag>
+            <StatusSwitch
+              :status="row.status"
+              :disabled="!user.hasPerm('system:user:edit')"
+              :commit="(status) => commitUserStatus(row, status)"
+            />
           </template>
         </el-table-column>
         <el-table-column label="操作" min-width="280" align="center">
@@ -89,12 +93,6 @@
         <el-form-item label="手机">
           <el-input v-model="editor.form.phone" />
         </el-form-item>
-        <el-form-item label="状态">
-          <el-radio-group v-model="editor.form.status">
-            <el-radio :value="1">正常</el-radio>
-            <el-radio :value="0">停用</el-radio>
-          </el-radio-group>
-        </el-form-item>
         <el-form-item v-if="!editor.id" label="角色">
           <el-select v-model="editor.form.roleIds" multiple style="width: 100%">
             <el-option v-for="role in roles" :key="role.id" :label="role.name" :value="role.id" />
@@ -126,7 +124,7 @@ defineOptions({ name: 'SystemUser' })
 /**
  * 用户管理。所属域：admin。
  * 查询淡蓝 + 放大镜；重置白底描边 + 刷新图标；新建在页头 #extra + Plus。
- * 新增不传密码，初始口令见 README。
+ * 新增不传密码，初始口令见 README。新建默认启用；启停只在列表开关上做。
  */
 import { computed, onMounted, reactive, ref } from 'vue'
 import { Plus, RefreshRight, Search } from '@element-plus/icons-vue'
@@ -134,6 +132,7 @@ import { ElMessage, ElMessageBox } from 'element-plus'
 import { assignUserRoles, createUser, deleteUser, pageUsers, resetUserPassword, updateUser } from '@/api/user'
 import { pageRoles } from '@/api/role'
 import { deptTree } from '@/api/dept'
+import StatusSwitch from '@/components/admin/StatusSwitch.vue'
 import PageHeader from '@/components/PageHeader.vue'
 import TablePager from '@/components/TablePager.vue'
 import { useListIndexColumn } from '@/composables/listIndex'
@@ -202,6 +201,23 @@ function onReset() {
   query.status = undefined
   query.current = 1
   void load()
+}
+
+/**
+ * 列表开关启停。带上当前资料，避免更新接口把昵称、部门写成空。
+ *
+ * @param row    当前用户
+ * @param status 1 正常，0 停用
+ */
+async function commitUserStatus(row: UserRow, status: number) {
+  const { data } = await updateUser(row.id, {
+    deptId: row.deptId ?? null,
+    nickname: row.nickname || null,
+    email: row.email || null,
+    phone: row.phone || null,
+    status
+  })
+  row.status = data.data?.status ?? status
 }
 
 function openCreate() {

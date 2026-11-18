@@ -211,6 +211,39 @@ body.el-popup-parent--hidden .main {
   padding: 0 14px;
 }
 
+/*
+ * 窄详情区（工具项筛选）：关键词 / 类型 / 状态与查询、重置、新建保持同一行。
+ * 输入可缩到仍能打字的宽度，按钮不参与收缩；窄到放不下时整行横向滚动，不把按钮单独挤到下一行。
+ */
+.filter-bar.filter-bar--keep-row {
+  overflow-x: auto;
+}
+
+.filter-bar.filter-bar--keep-row .filter-form {
+  flex-wrap: nowrap;
+}
+
+.filter-bar.filter-bar--keep-row .el-form-item {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+.filter-bar.filter-bar--keep-row .el-form-item:last-child {
+  flex: none;
+}
+
+.filter-bar.filter-bar--keep-row .filter-input {
+  width: 100%;
+  min-width: 140px;
+  max-width: 220px;
+}
+
+.filter-bar.filter-bar--keep-row .filter-select {
+  width: 100%;
+  min-width: 120px;
+  max-width: 160px;
+}
+
 /* 筛选操作按钮：查询淡蓝 / 重置白底描边 / 新建 primary，三者同尺寸 */
 .btn-icon {
   margin-right: 4px;
