@@ -1,4 +1,4 @@
-﻿﻿# AgentHub
+﻿# AgentHub
 
 **可独立部署的企业 Agent 中台。** 用配置把模型、工具、知识库、提示词、记忆、技能装成可运行的 Agent，再用统一的「对话」入口和运行、观测把它们用起来。
 
@@ -43,7 +43,9 @@ Agent 管理：只放单兵，ReAct 与 Plan-Execute 两种执行方式。
 
 ## 快速开始
 
-### 1. 克隆与准备环境变量
+本机 / 单机推荐 **Docker Compose 一键**拉起 MySQL、Redis、Milvus 链路、后端与前端。需要本机已安装 Docker（含 Compose 插件）。
+
+### 1. 克隆并配置 `.env`
 
 ```bash
 git clone https://github.com/Desktop-code/AgentHub.git
@@ -51,58 +53,35 @@ cd AgentHub
 cp .env.example .env
 ```
 
-`.env` 不进仓库，按注释填库口令与主密钥。需要 JDK 17、Maven 3.8+、Node.js 20+。
+具体填写步骤见 **`.env.example` 顶部注释**（库口令、主密钥、重置口令、MinIO 等）。不要把真实 `.env` 提交进仓库。
 
-### 2. 起依赖
+### 2. 启动
+
+按 `.env.example` 配好 `.env` 后执行：
 
 ```bash
-docker compose up -d mysql redis
+docker compose up -d --build
 ```
 
-需要知识库时再加向量库链路（etcd 与 MinIO 是 Milvus 的依赖）：
+### 3. 访问
+
+- 地址：`https://localhost:8443`（自签证书需浏览器信任一次）
+- 账号：`admin`（口令见 `.env.example` 对 `AGENTHUB_RESET_PASSWORD` 的说明）
+
+空的 `mysql_data` 卷首次启动会按顺序自动导入 `sql/agenthub.sql` → `sql/data-init.sql` → `sql/data-init-agent.sql`。已有卷不会重跑入口脚本；若旧卷缺第三份，对已运行的库单独执行 `sql/data-init-agent.sql`，不要 `docker compose down -v`。
+
+不必先准备 `secrets/application-local.yml` 或证书目录。
+
+### 备选：本机 jar + 前端开发服务
+
+需要本机 JDK 17、Maven 3.8+、Node.js 20+。可用 Compose 只起依赖：`docker compose up -d mysql redis`（知识库再加 `etcd minio milvus`），再按 `.env.example` 与 `application-local.yml.example` 配好本机参数后：
 
 ```bash
-docker compose up -d etcd minio milvus
-```
-
-### 3. 导入数据库
-
-新库按顺序导入三份脚本：
-
-```bash
-mysql -uroot -p -e "CREATE DATABASE IF NOT EXISTS agenthub DEFAULT CHARACTER SET utf8mb4 COLLATE utf8mb4_general_ci;"
-mysql -uroot -p agenthub < sql/agenthub.sql
-mysql -uroot -p agenthub < sql/data-init.sql
-mysql -uroot -p agenthub < sql/data-init-agent.sql
-```
-
-1. `sql/agenthub.sql`：建表，含全部结构增量。**只用于新库**，含 `DROP TABLE IF EXISTS`，勿在有数据的库上重跑。
-2. `sql/data-init.sql`：部门、用户、角色、菜单、内置工具、平台约束与模板头。
-3. `sql/data-init-agent.sql`：提示词段落、平台默认智能助手、入口 Router 默认方案与候选、工作台权限码。
-
-### 4. 本机配置
-
-```bash
-cp AgentHub-server/src/main/resources/application-local.yml.example \
-   AgentHub-server/config/application-local.yml
-```
-
-至少填主密钥与库账号口令，用知识库时再补向量库地址。`AgentHub-server/config/` 不进仓库；也可以改用环境变量注入。
-
-### 5. 启动
-
-```bash
-cd AgentHub-server && mvn -DskipTests package
-java -jar target/agenthub-server.jar
-```
-
-```bash
+cd AgentHub-server && mvn -DskipTests package && java -jar target/agenthub-server.jar
 cd AgentHub-web && npm install && npm run dev
 ```
 
-控制台 `http://localhost:5173`，后端默认 `8080`。
-
-默认账号 `admin`，初始口令由配置项 `AGENTHUB_RESET_PASSWORD`（或 `agenthub.security.reset-password`）提供，仅开发用，生产必须改。
+控制台 `http://localhost:5173`，后端默认 `8080`。本机直跑时新库需自行按顺序导入上述三份 SQL。
 
 ## 文档
 

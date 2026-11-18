@@ -122,18 +122,15 @@ Sa-Token 单栈鉴权、菜单与按钮级权限码、部门路径前缀数据�
 
 ### 1. 环境
 
-- JDK 17（Maven 前把 `JAVA_HOME` 指向 17）
-- Maven 3.8+
-- Node.js 20+ 与 npm
-- MySQL 5.7+、Redis；需要知识库时再加 Milvus 2.5+
-- Docker 与 Docker Compose（可选，但用 Compose 起依赖最省事）
+- **推荐**：Docker 与 Docker Compose（本机 / 单机一键拉起依赖 + 后端 + 前端）
+- 备选本机直跑：JDK 17（Maven 前把 `JAVA_HOME` 指向 17）、Maven 3.8+、Node.js 20+ 与 npm；MySQL 5.7+、Redis；需要知识库时再加 Milvus 2.5+
 
-### 2. 起依赖
+### 2. Docker 一键启动
 
-- 复制环境变量模板 `.env.example` 为 `.env`，按注释填库口令与主密钥；`.env` 不进仓库。
-- 起基础依赖：`docker compose up -d mysql redis`。
-- 需要知识库时再加向量库链路：`docker compose up -d etcd minio milvus`。
-- Milvus 首次启动要建元数据并预热，健康检查带预热期；后端不依赖它启动，未就绪时只有建库、重建、检索会报「知识库不可用」。
+- 复制 `.env.example` 为 `.env`，**具体填写步骤只看 `.env.example` 顶部注释**（库口令、主密钥、重置口令、MinIO）；`.env` 不进仓库。
+- 配好合法 `.env` 后：`docker compose up -d --build`。不要用 `down -v` 清卷。
+- 会拉起 MySQL、Redis、etcd、MinIO、Milvus、后端、前端。Milvus 首次启动要建元数据并预热；后端不依赖它启动，未就绪时只有建库、重建、检索会报「知识库不可用」。
+- 控制台：`https://localhost:8443`（自签证书需信任一次）。账号 `admin`；口令口径见 `.env.example`。不强制挂载 `secrets/application-local.yml`，不必事先准备证书目录。
 
 ### 3. 导入数据库
 
@@ -146,24 +143,23 @@ Sa-Token 单栈鉴权、菜单与按钮级权限码、部门路径前缀数据�
 | 3 | `sql/data-init-agent.sql` | 运行必需的非 sys 配置：提示词 L2 段落、平台默认智能助手、入口 Router 默认方案与候选、工作台权限码 |
 
 - 全量脚本 `sql/agenthub.sql` 含 `DROP TABLE IF EXISTS`：只用于新库，已有数据的库重复执行会清空数据。
-- 三份脚本都只跑一次，均非幂等；已初始化的库不要重跑。
-- 用 Compose 起全新数据卷时，MySQL 容器首次启动会自动执行第 1、2 份（见 `docker-compose.yml` 的 `docker-entrypoint-initdb.d` 挂载）；确认成功后再手动补第 3 份。已有数据卷不会自动执行任何脚本，需按上表顺序手工导入。
+- `data-init.sql` 只跑一次（非幂等）；`data-init-agent.sql` 按业务键判存在，可单独补跑。
+- 用 Compose 起**全新** `mysql_data` 卷时，MySQL 容器首次启动会自动按顺序执行上述三份（见 `docker-compose.yml` 的 `docker-entrypoint-initdb.d`）。**已有数据卷不会自动执行任何脚本**；若旧卷缺第三份，对已运行的库单独执行 `sql/data-init-agent.sql`，不要删卷或 `docker compose down -v`。
 - 存量库升级：按当期增量脚本逐条补齐，不要重跑全量脚本，也不要删除既有表。
 - `sql/data-init-test-tmp.sql` 仅用于测试与演示（示例专家、示例 Skill、示例工作流等），不是新库必跑，且不进仓库。
 
-### 4. 配置本机参数
+### 4. 配置参数
 
-- 复制 `AgentHub-server/src/main/resources/application-local.yml.example` 为 `AgentHub-server/config/application-local.yml`，它会被自动加载；也可以改用环境变量注入。
-- 至少给出：主密钥、库账号口令；使用知识库时再补向量库地址。主密钥可用系统自带的安全随机方式生成 32 字节（或 `openssl rand -hex 32`）。
-- `AgentHub-server/config/` 与 `secrets/` 都不进仓库；用 Compose 起后端时，外部配置挂在 `secrets/` 下。
-- 本地配置不要写进 `src/main/resources`：那份目录会整体打进 jar 与镜像，主密钥和库密码会随制品分发。
+- **Compose**：以根目录 `.env` 为准（填法见 `.env.example` 注释）；一般不必准备 `application-local.yml`。可选覆盖：把文件放到 `secrets/application-local.yml` 并取消 compose 里对应挂载注释（缺文件时不要挂）。
+- **本机 jar**：复制 `AgentHub-server/src/main/resources/application-local.yml.example` 为 `AgentHub-server/config/application-local.yml`；至少给出主密钥与库账号口令（生成方式见 `.env.example` 对主密钥的说明）。
+- `AgentHub-server/config/` 与 `secrets/` 都不进仓库。本地配置不要写进 `src/main/resources`，否则会随 jar / 镜像分发。
 
-### 5. 启动
+### 5. 备选：本机 jar + 前端开发服务
 
-- 后端：在 `AgentHub-server` 目录打包并运行生成的 jar，产物名为 `target/agenthub-server.jar`。
+- 可用 Compose 只起依赖：`docker compose up -d mysql redis`（知识库再加 `etcd minio milvus`）。
+- 后端：在 `AgentHub-server` 目录打包并运行 `target/agenthub-server.jar`。
 - 前端：在 `AgentHub-web` 目录安装依赖后跑开发服务。
-- 控制台默认 `http://localhost:5173`，后端默认 `http://localhost:8080`，接口文档挂在后端。
-- 开发环境默认账号 `admin`，初始口令由配置项 `AGENTHUB_RESET_PASSWORD`（或 `agenthub.security.reset-password`）提供，仅开发用，生产必须改。
+- 控制台默认 `http://localhost:5173`，后端默认 `http://localhost:8080`。本机直跑时新库需自行导入三份 SQL。
 
 ### 6. 第一次登录后按顺序配
 
@@ -176,7 +172,7 @@ Sa-Token 单栈鉴权、菜单与按钮级权限码、部门路径前缀数据�
 | 后端（直跑 jar） | `8080` | 前端接口默认指向这里 |
 | 前端开发服务 | `5173` | 已在后端跨域白名单 |
 | Compose 后端 | `8081` → 容器 `8080` | 与本机 jar 同时跑时避免冲突 |
-| Compose 前端 | `8088` → `80`、`8443` → `443` | 容器内 80 只做跳转，实际访问 `8443` |
+| Compose 前端 | `8443` → `443` | 仅 HTTPS；证书卷内自签 |
 | Redis | `6380` → 容器 `6379` | 记忆窗口、短期记忆、提示词缓存 |
 | Milvus | `19530`、`9091` | 前者 gRPC，后者健康检查与指标 |
 | MySQL | 默认不暴露 | 需要时再开宿主映射 |
