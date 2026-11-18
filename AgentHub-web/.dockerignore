@@ -2,7 +2,8 @@
 #
 # 为什么需要：Dockerfile 用 `COPY . .` 把整个目录送进镜像层再 npm run build；
 # 若不排除 node_modules 与 dist，会覆盖容器内 npm ci 的依赖并显著拖慢构建。
-# 注意：src / public / index.html / vite.config.ts / tsconfig* / nginx.conf 必须保留。
+# 注意：src / public / index.html / vite.config.ts / tsconfig* / nginx.conf /
+# docker-entrypoint.sh 必须保留（运行时自签证书入口）。
 
 # 依赖与构建产物（容器内重新安装与构建）
 node_modules/
