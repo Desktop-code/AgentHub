@@ -61,12 +61,14 @@
       </section>
     </div>
 
-    <!-- 输入区：与试跑一致，Enter 发送、Shift+Enter 换行；本页不做图片上传 -->
+    <!-- 输入区：与对话页同一高度和容器，Enter 发送、Shift+Enter 换行；本页不做图片上传 -->
     <div class="ma-flow__composer">
       <el-input
         v-model="text"
         type="textarea"
-        :rows="3"
+        :rows="2"
+        :autosize="{ minRows: 2, maxRows: 10 }"
+        resize="none"
         maxlength="8000"
         placeholder="输入问题，Enter 发送，Shift+Enter 换行"
         :disabled="!canSend || sending"
@@ -432,16 +434,43 @@ function submit() {
   font-weight: 600;
 }
 
+/* 与对话页输入条同一套：浅底圆角，正文两行起，发送在容器内右下 */
 .ma-flow__composer {
   flex: none;
-  margin-top: 10px;
+  margin-top: 12px;
+  padding: 12px 14px 10px;
+  border: 1px solid transparent;
+  border-radius: 16px;
+  background: #f5f7fa;
+  box-sizing: border-box;
+}
+
+.ma-flow__composer:focus-within {
+  background: #fff;
+  border-color: var(--ah-primary, #635bff);
+  box-shadow: 0 0 0 3px rgba(99, 91, 255, 0.22);
+}
+
+.ma-flow__composer :deep(.el-textarea__inner) {
+  background: transparent !important;
+  box-shadow: none !important;
+  border-color: transparent !important;
+  resize: none;
+  padding: 6px 0;
+  min-height: 56px;
+  line-height: 1.7;
 }
 
 .ma-flow__bar {
   display: flex;
   align-items: center;
   justify-content: space-between;
+  gap: 8px;
   margin-top: 8px;
+}
+
+.ma-flow__bar :deep(.el-button) {
+  flex: none;
 }
 
 .ma-flow__hint {
