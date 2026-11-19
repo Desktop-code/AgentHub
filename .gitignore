@@ -6,6 +6,10 @@
 **/data/avatars/
 # Agent 自定义形象落盘 ./data/agent-avatars（不进仓，与用户头像分目录）
 **/data/agent-avatars/
+# 对话附图落盘 ./data/trial-images（不进仓）
+**/data/trial-images/
+# 对话非图片附件落盘 ./data/trial-files（不进仓）
+**/data/trial-files/
 /AgentHub-server/data/
 
 # ========== IDE 与编辑器 ==========

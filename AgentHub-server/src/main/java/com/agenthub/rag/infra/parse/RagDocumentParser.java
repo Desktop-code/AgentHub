@@ -12,6 +12,7 @@ import org.springframework.util.StringUtils;
 
 import java.io.ByteArrayInputStream;
 import java.nio.charset.StandardCharsets;
+import java.util.List;
 import java.util.Locale;
 import java.util.Optional;
 
@@ -108,6 +109,48 @@ public class RagDocumentParser {
             case "png", "jpg", "jpeg", "gif", "webp" -> parseImage(bytes, RagUploadTypes.mimeOf(ext));
             default -> throw new IllegalArgumentException("不支持的文件格式：" + ext);
         };
+    }
+
+    /**
+     * 对话附件用的本地正文。不走 MinerU，也不把非图片文件送进视觉 OCR。
+     *
+     * <p>pdf 请改用 {@link #readPdfPageTexts}，按页决定要不要视觉兜底。
+     * {@code .doc} / {@code .ppt} 现有解析器不支持，异常文案可直接展示。
+     *
+     * @param fileName 原始文件名
+     * @param bytes    文件字节
+     * @return 正文
+     * @throws IllegalArgumentException 格式不能读或文件损坏
+     */
+    public String readLocalDocument(String fileName, byte[] bytes) {
+        String ext = RagUploadTypes.extensionOf(fileName);
+        if ("docx".equals(ext)) {
+            return parseDocx(bytes);
+        }
+        return RagLocalTexts.document(fileName, bytes);
+    }
+
+    /**
+     * PDF 逐页文字层。空白页保留位置。不做 OCR。
+     *
+     * @param bytes PDF 字节
+     * @return 每页文字
+     * @throws IllegalArgumentException 文件损坏或没有页面
+     */
+    public List<String> readPdfPageTexts(byte[] bytes) {
+        return RagLocalTexts.pdfPages(bytes);
+    }
+
+    /**
+     * 把抽不出字的一页渲染成 PNG。有文字的页不要调用。
+     *
+     * @param bytes      PDF 字节
+     * @param pageNumber 页码，从 1 开始
+     * @return PNG 字节
+     * @throws IllegalArgumentException 渲染失败
+     */
+    public byte[] renderPdfPagePng(byte[] bytes, int pageNumber) {
+        return RagLocalTexts.renderPdfPage(bytes, pageNumber);
     }
 
     private boolean shouldTryMinerU(String fileName) {

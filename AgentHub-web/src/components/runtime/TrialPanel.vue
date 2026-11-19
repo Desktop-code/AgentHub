@@ -110,6 +110,7 @@
           :tts-enabled="ttsEnabled"
           :router-trace="routerTrace"
           @send="send"
+          @stop="stopRun"
           @approve="approvePlan"
           @reject="rejectPlan"
           @refresh-router="reloadRouterTrace"
@@ -165,6 +166,7 @@ import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import {
   approveTrialPlan,
+  cancelTrialSession,
   clearTrialSession,
   createMaTrialSession,
   createTrialSession,
@@ -184,12 +186,14 @@ import {
   type TrialChildPlanPendingChunk
 } from '@/api/runtime'
 import ChatPanel from '@/components/runtime/ChatPanel.vue'
+import { pendingAttachments } from '@/components/runtime/userMessageImages'
 import RouterExecutionCard from '@/components/runtime/RouterExecutionCard.vue'
 import MaRunFlow from '@/components/runtime/ma/MaRunFlow.vue'
 import MaRunChain from '@/components/runtime/ma/MaRunChain.vue'
 import { buildMaRunGroups } from '@/components/runtime/ma/maRunView'
 import {
   advancePlanState,
+  appendError,
   appendFile,
   appendRoute,
   appendText,
@@ -275,6 +279,10 @@ const history = ref<TrialSession[]>([])
 const knownSessions = ref<Map<number, TrialSession>>(new Map())
 const pageError = ref('')
 const sending = ref(false)
+/** 用户已点停止。本轮后续增量不再把状态条拉回「工具执行中」 */
+const userHalted = ref(false)
+/** 点停止前的阶段，接口拒绝时还原，避免一律写成工具执行 */
+let haltedPhase = 'tool'
 const historyLoading = ref(false)
 /**
  * 历史会话分页状态。所属域：runtime（前端列表）。
@@ -1725,8 +1733,12 @@ function applyResumeEvents(id: number, events: TrialEvent[], live = false) {
   }
   turns.value = attachRouterTrace(turnsFromEvents(events))
   // live 的 assistant 是流式中间态，hasOpenTurn 会误判成已收尾，故用显式标志
-  if (live || hasOpenTurn(events)) {
+  if (!userHalted.value && (live || hasOpenTurn(events))) {
     turns.value = attachRouterTrace(markLiveTail(turns.value, events))
+  }
+  // 用户已经点了停止：轮询不能把末尾再标回进行中
+  if (userHalted.value) {
+    markHaltedTail()
   }
   // 续订期间数组会被整体替换；同步回模块级登记项，
   // 否则「切走再切回」拿到的还是旧的、已废弃的数组
@@ -1871,13 +1883,71 @@ function stopResume() {
 }
 
 /**
+ * 把当前助手轮收成「已中断」。顶部的「工具执行中」只认 streaming，这里改掉状态它就会消失。
+ */
+function markHaltedTail() {
+  for (let i = turns.value.length - 1; i >= 0; i -= 1) {
+    const turn = turns.value[i]
+    if (!turn || turn.role !== 'assistant') {
+      continue
+    }
+    haltedPhase = turn.phase || 'tool'
+    turn.status = 'error'
+    turn.phase = 'error'
+    appendError(turn, '已中断')
+    return
+  }
+}
+
+/**
+ * 停掉正在执行的这一轮。复用会话取消接口：后端在执行中改为中断，不把会话收成不可再发。
+ */
+async function stopRun() {
+  const current = session.value
+  if (!current || isTempSession(current) || userHalted.value) {
+    return
+  }
+  userHalted.value = true
+  markHaltedTail()
+  try {
+    await cancelTrialSession(current.id)
+  } catch (error) {
+    // 接口没接上：撤回本地的「已中断」，让进行中的这一轮继续显示
+    userHalted.value = false
+    undoHaltedTail()
+    pageError.value = error instanceof Error ? error.message : '停止失败'
+  }
+}
+
+/** 停止请求被拒绝时，去掉刚加上的「已中断」，把末尾助手轮放回进行中。 */
+function undoHaltedTail() {
+  for (let i = turns.value.length - 1; i >= 0; i -= 1) {
+    const turn = turns.value[i]
+    if (!turn || turn.role !== 'assistant') {
+      continue
+    }
+    turn.blocks = turn.blocks.filter((block) => !(block.kind === 'error' && block.text === '已中断'))
+    turn.status = 'streaming'
+    turn.phase = haltedPhase === 'error' ? 'tool' : haltedPhase
+    return
+  }
+}
+
+/**
  * SSE 边跑边追加（route 进思考时间线；reasoning / assistant 分进思考与终答）。
  * 临时「新对话」或无 session 时：首问才 create，再用返回 id 转正左栏条目；结束后用落库事件再铺一遍。
  *
  * @param content 用户输入
  * @param images  图片 data URI 数组，可空。后端先 OCR 再喂主模型
+ * @param files   非图片文件，可空。不进视觉模型
+ * @param order   图和文件的添加顺序，可空
  */
-async function send(content: string, images?: string[]) {
+async function send(
+  content: string,
+  images?: string[],
+  files?: { name: string; size: number; dataUrl: string }[],
+  order?: Array<'image' | 'file'>
+) {
   if (sending.value || (!session.value && !draftReady.value)) {
     return
   }
@@ -1885,6 +1955,7 @@ async function send(content: string, images?: string[]) {
     return
   }
   sending.value = true
+  userHalted.value = false
   pageError.value = ''
   // 本轮业务幂等键：一次点击生成一次。网络重试 / 浏览器重放同一个请求时复用该键，
   // 服务端据此保证「只插一条用户消息、只跑一轮模型、只记一条流水」。
@@ -1896,7 +1967,17 @@ async function send(content: string, images?: string[]) {
   stopPolling()
   turns.value = [
     ...turns.value,
-    { key: `local-u-${Date.now()}`, role: 'user', text: content, blocks: [], phase: 'done', status: 'done', startTime: 0 }
+    {
+      key: `local-u-${Date.now()}`,
+      role: 'user',
+      text: content,
+      images: images?.length ? [...images] : undefined,
+      attachments: pendingAttachments(images, files, order),
+      blocks: [],
+      phase: 'done',
+      status: 'done',
+      startTime: 0
+    }
   ]
   // 取数组里的响应式代理再改，裸对象上的增量不会驱动思考/终答边收边渲
   turns.value = [...turns.value, assistantTurn(`local-a-${Date.now()}`, 'streaming')]
@@ -1948,6 +2029,9 @@ async function send(content: string, images?: string[]) {
     beginLive(sessionId, turns.value)
     await streamTrialMessage(sessionId, content, {
       onPhase: (phase) => {
+        if (userHalted.value) {
+          return
+        }
         live.phase = phase
       },
       onRoute: (summary) => {
@@ -1967,7 +2051,10 @@ async function send(content: string, images?: string[]) {
         touchSnapshot()
       },
       onTool: (tool) => {
-        live.phase = 'tool'
+        // 已点停止后不再把状态条拉回「工具执行中」，但这条工具结果仍留在过程里
+        if (!userHalted.value) {
+          live.phase = 'tool'
+        }
         appendTool(live, tool.line, tool.result)
         touchSnapshot()
       },
@@ -2016,6 +2103,9 @@ async function send(content: string, images?: string[]) {
         touchSnapshot()
       },
       onAssistant: (text) => {
+        if (userHalted.value) {
+          return
+        }
         if (live.phase !== 'done') {
           live.phase = 'answering'
         }
@@ -2024,8 +2114,14 @@ async function send(content: string, images?: string[]) {
       },
       onDone: (payload) => {
         persisted = true
-        live.status = payload.status === 'FAILED' ? 'error' : 'done'
-        live.phase = payload.status === 'FAILED' ? 'error' : 'done'
+        if (userHalted.value || payload.errorSummary === '已中断') {
+          live.status = 'error'
+          live.phase = 'error'
+          appendError(live, '已中断')
+        } else {
+          live.status = payload.status === 'FAILED' ? 'error' : 'done'
+          live.phase = payload.status === 'FAILED' ? 'error' : 'done'
+        }
         // 停在待批准：不是失败，也不该显示「思考中」，等用户点批准或取消
         if (payload.planPending) {
           live.planPending = true
@@ -2036,13 +2132,20 @@ async function send(content: string, images?: string[]) {
         childPending.value = null
       },
       onError: (message) => {
+        if (userHalted.value) {
+          live.status = 'error'
+          live.phase = 'error'
+          appendError(live, '已中断')
+          childPending.value = null
+          return
+        }
         live.status = 'error'
         live.phase = 'error'
         pageError.value = message
         // 连接断了就再也收不到批准结果，留着按钮只会点出「已失效」
         childPending.value = null
       }
-    }, controller.signal, images, idempotencyKey)
+    }, controller.signal, images, idempotencyKey, files, order)
     // 落库成功后再用事件覆盖，避免把未入库的失败卡片刷掉。
     // done 到达时服务端已经写了轮次；先改掉创建接口带回的 0，防止紧接着的「新会话」把本条当空壳删掉
     if (persisted && session.value && session.value.id === sessionId) {

@@ -310,6 +310,8 @@ export interface TrialStreamHandlers {
  * @param signal 关闭抽屉时可中止读取
  * @param images 图片 data URI 数组，可空。与 content 一起提交；后端先做 OCR 再喂主模型
  * @param idempotencyKey 业务幂等键，可空。带上后同会话同键重复提交只真正跑一次
+ * @param files 非图片文件，可空。不进视觉模型
+ * @param attachmentOrder 图和文件的添加顺序，仅在有文件时需要
  */
 export async function streamTrialMessage(
   id: number,
@@ -317,9 +319,21 @@ export async function streamTrialMessage(
   handlers: TrialStreamHandlers,
   signal?: AbortSignal,
   images?: string[],
-  idempotencyKey?: string
+  idempotencyKey?: string,
+  files?: { name: string; dataUrl: string }[],
+  attachmentOrder?: Array<'image' | 'file'>
 ) {
-  return streamSessionMessage('/api/runtime/trial', id, content, handlers, signal, images, idempotencyKey)
+  return streamSessionMessage(
+    '/api/runtime/trial',
+    id,
+    content,
+    handlers,
+    signal,
+    images,
+    idempotencyKey,
+    files,
+    attachmentOrder
+  )
 }
 
 /**
@@ -335,6 +349,8 @@ export async function streamTrialMessage(
  * @param signal         中止信号，可空
  * @param images         图片 data URI 数组，可空
  * @param idempotencyKey 业务幂等键，可空
+ * @param files          非图片文件，可空。不传这个键时后端不落文件
+ * @param attachmentOrder 添加顺序，仅在有文件时带上
  */
 export async function streamSessionMessage(
   prefix: string,
@@ -343,12 +359,24 @@ export async function streamSessionMessage(
   handlers: TrialStreamHandlers,
   signal?: AbortSignal,
   images?: string[],
-  idempotencyKey?: string
+  idempotencyKey?: string,
+  files?: { name: string; dataUrl: string }[],
+  attachmentOrder?: Array<'image' | 'file'>
 ) {
+  // 图片、文件都按需出现：空数组不带键，避免纯文字被误判成带附件
+  const body: Record<string, unknown> = { content }
+  if (images && images.length) {
+    body.images = images
+  }
+  if (files && files.length) {
+    body.files = files.map((file) => ({ name: file.name, dataUrl: file.dataUrl }))
+    if (attachmentOrder && attachmentOrder.length) {
+      body.attachmentOrder = attachmentOrder
+    }
+  }
   return streamSessionEndpoint(
     `${prefix}/sessions/${id}/messages/stream`,
-    // images 不传时不带这个键：后端据此完全不走 OCR 分支
-    images && images.length ? { content, images } : { content },
+    body,
     handlers,
     signal,
     idempotencyKey
@@ -680,7 +708,7 @@ export function getPendingTrialPlan(id: number) {
   return request.get<Result<TrialPlanView | null>>(`/api/runtime/trial/sessions/${id}/plan/pending`)
 }
 
-/** 取消尚未完成的会话。执行中的一轮不会被打断。 */
+/** 取消尚未完成的会话。这一轮还在执行时改为中断运行，会话可继续发送。 */
 export function cancelTrialSession(id: number) {
   return request.post<Result<TrialSession>>(`/api/runtime/trial/sessions/${id}/cancel`)
 }

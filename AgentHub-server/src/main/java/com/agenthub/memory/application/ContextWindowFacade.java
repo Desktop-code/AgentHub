@@ -143,7 +143,8 @@ public class ContextWindowFacade {
         }
         // 热窗口缺失：只从事件回放，不触发摘要、不保存；摘要槽仍是同一份 Redis 值（可能为空）
         WindowState replayed = new WindowState();
-        replayed.setTurns(new ArrayList<>(events.replay(sessionId)));
+        // 模型回放带附件正文；长期记忆抽取仍走 replay()，不读这份旁路
+        replayed.setTurns(new ArrayList<>(events.replayForModel(sessionId)));
         try {
             replayed.setSummary(store.readSummary(sessionId));
         } catch (RuntimeException ex) {
@@ -179,7 +180,7 @@ public class ContextWindowFacade {
             throw window(ex, "Redis 不可用，上下文窗口读取失败");
         }
         WindowState replayed = new WindowState();
-        replayed.setTurns(new ArrayList<>(events.replay(sessionId)));
+        replayed.setTurns(new ArrayList<>(events.replayForModel(sessionId)));
         try {
             replayed.setSummary(store.readSummary(sessionId));
         } catch (RuntimeException ex) {

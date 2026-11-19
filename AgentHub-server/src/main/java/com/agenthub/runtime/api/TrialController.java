@@ -182,7 +182,8 @@ public class TrialController {
     public Result<MessageResp> send(@PathVariable Long id, @Valid @RequestBody MessageReq req,
                                     @RequestHeader(value = TrialMessageIdempotency.HEADER, required = false)
                                     String idempotencyKey) {
-        return Result.ok(runs.send(id, req.getContent().trim(), req.getImages(), idempotencyKey));
+        return Result.ok(runs.send(id, req.trimmedContent(), req.getImages(), req.filePayloads(),
+                req.getAttachmentOrder(), idempotencyKey));
     }
 
     /**
@@ -208,7 +209,8 @@ public class TrialController {
         TrialChunkWriter writer = new TrialChunkWriter(response, json, sseBatch);
         writer.bindSession(id);
         try {
-            runs.stream(id, req.getContent().trim(), req.getImages(), writer, writer, idempotencyKey);
+            runs.stream(id, req.trimmedContent(), req.getImages(), req.filePayloads(),
+                    req.getAttachmentOrder(), writer, writer, idempotencyKey);
         } finally {
             // 兜底：业务侧任何路径没写结束帧（异常、线程中断、上游直接断），这里补一帧再关连接。
             // 内部有 CAS，重复调用不会产生第二帧。

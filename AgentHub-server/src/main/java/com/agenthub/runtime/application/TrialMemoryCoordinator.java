@@ -72,8 +72,25 @@ public class TrialMemoryCoordinator {
      * @throws TrialFailure Redis 或滚动摘要失败
      */
     public String prepareUser(RunSession session, String userText) {
+        return prepareUser(session, userText, userText);
+    }
+
+    /**
+     * 准备用户侧上下文，并允许「写进窗口的文本」和「显式记住看的原话」分开。
+     *
+     * <p>附件正文要留在窗口里，下一轮专家才读得到；显式记住仍只看用户打的字，
+     * 避免文件里出现「记住」就被当成一条偏好。
+     *
+     * @param session    当前会话
+     * @param windowText 写入窗口并拼进【当前用户】的文本，可含附件正文
+     * @param memoryText 显式记住用的用户原话；空则不把附件正文送进记住通道
+     * @return 含摘要、近轮、短期记忆和当前用户话的文本
+     * @throws TrialFailure Redis 或滚动摘要失败
+     */
+    public String prepareUser(RunSession session, String windowText, String memoryText) {
         MemoryPolicy policy = policies.effective(session.getAgentId());
         long userId = session.getUserId() == null ? 0L : session.getUserId();
+        String remembered = memoryText == null ? windowText : memoryText;
         try {
             // 用户再次开口 = 本会话进入新一轮：清掉上一次空闲批抽的终态标记
             // （DONE / FAILED / SKIPPED 任一都可能存在），让本次聊完再次空闲时表中无行、可以再抽一次。
@@ -86,10 +103,10 @@ public class TrialMemoryCoordinator {
             // 显式记住：主线程只做正则+开关判定，命中后投递到 memory 池即返回。
             // 这里绝不能再同步调抽取——那会 block 最长 60s，把本轮首字延迟整段吃掉（N6 红线）。
             // 刚抽出的偏好本轮不注入，下一轮 recallDurable 才读到，属预期行为。
-            explicitMemory.dispatch(policy, session.getAgentId(), userId, session.getId(), userText);
-            WindowState state = windows.onUser(policy, session.getAgentId(), userId, session.getId(), userText);
+            explicitMemory.dispatch(policy, session.getAgentId(), userId, session.getId(), remembered);
+            WindowState state = windows.onUser(policy, session.getAgentId(), userId, session.getId(), windowText);
             List<MemoryItem> shorts = recall.shorts(policy, session.getAgentId(), session.getId());
-            return windows.renderUser(state, userText, shorts);
+            return windows.renderUser(state, windowText, shorts);
         } catch (BizException ex) {
             // 该文案会写成 ERROR 事件（用户可见）：只保留业务短句，Redis 地址一类细节不进用户面
             throw new TrialFailure(UserFacingText.safeMessage(ex, "本轮暂时无法继续，请稍后再试。"));

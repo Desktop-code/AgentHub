@@ -85,6 +85,14 @@ agenthub:
     # Agent 自定义形象落盘根目录；与用户头像目录分开，URL 前缀 /uploads/agent-avatars/
     storage:
       dir: ${AGENTHUB_AGENT_AVATAR_DIR:./data/agent-avatars}
+  trial-image:
+    # 对话附图落盘根目录；URL 前缀 /uploads/trial-images/，文件名含 UUID，不进 git
+    storage:
+      dir: ${AGENTHUB_TRIAL_IMAGE_DIR:./data/trial-images}
+  trial-file:
+    # 对话非图片附件落盘根目录；URL 前缀 /uploads/trial-files/，与附图分开，不进 git
+    storage:
+      dir: ${AGENTHUB_TRIAL_FILE_DIR:./data/trial-files}
   workspace:
     # 会话级文件工具（workspaceWriteFile / ReadFile / ListFiles）的落盘根目录，每个会话在其下建一级子目录。
     # 默认 ./workspace-test：相对路径按进程工作目录解析（项目内），本地开发可直接查看落盘文件，该目录已 gitignore。

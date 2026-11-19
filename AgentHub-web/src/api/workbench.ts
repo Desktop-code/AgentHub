@@ -79,6 +79,8 @@ export function listWorkbenchLiveEvents(id: number) {
  * @param signal         关闭页面时的中止信号
  * @param images         图片 data URI 数组，可空
  * @param idempotencyKey 业务幂等键，可空
+ * @param files          非图片文件，可空
+ * @param attachmentOrder 添加顺序，可空
  */
 export async function streamWorkbenchMessage(
   id: number,
@@ -86,9 +88,21 @@ export async function streamWorkbenchMessage(
   handlers: TrialStreamHandlers,
   signal?: AbortSignal,
   images?: string[],
-  idempotencyKey?: string
+  idempotencyKey?: string,
+  files?: { name: string; dataUrl: string }[],
+  attachmentOrder?: Array<'image' | 'file'>
 ) {
-  return streamSessionMessage(PREFIX, id, content, handlers, signal, images, idempotencyKey)
+  return streamSessionMessage(
+    PREFIX,
+    id,
+    content,
+    handlers,
+    signal,
+    images,
+    idempotencyKey,
+    files,
+    attachmentOrder
+  )
 }
 
 /**

@@ -280,6 +280,21 @@ export interface ChatTurn {
   key: string
   role: 'user' | 'assistant'
   text: string
+  /**
+   * 用户消息附图，按发送顺序。相对地址或 data URI。
+   * 助手轮不使用。刷新后由用户事件摘要还原，不另请求。
+   */
+  images?: string[]
+  /**
+   * 用户消息附件，按添加顺序，图和文件混排。相对地址或 data URI。
+   * 刷新后由用户事件摘要还原。没有这个字段时仍用 images 画纯图片。
+   */
+  attachments?: Array<{
+    kind: 'image' | 'file'
+    url: string
+    name?: string
+    size?: number
+  }>
   blocks: AssistantBlock[]
   phase: string
   status: 'streaming' | 'done' | 'error'
