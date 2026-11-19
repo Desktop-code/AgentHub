@@ -27,6 +27,7 @@ import com.agenthub.runtime.domain.model.TrialTurn;
 import com.agenthub.runtime.domain.model.WorkflowRunView;
 import com.agenthub.runtime.domain.service.CauseDigest;
 import com.agenthub.runtime.domain.service.ChildSubQueryInput;
+import com.agenthub.runtime.domain.service.EntryMaterialHolder;
 import com.agenthub.runtime.domain.service.FixedSequenceContext;
 import com.agenthub.runtime.domain.service.LimitHitReasons;
 import com.agenthub.runtime.domain.service.PromptInjectionHolder;
@@ -204,14 +205,17 @@ public class ChildRunner {
         List<Future<ChildOutcome>> futures = new ArrayList<>(intents.size());
         // 并行子跑池线程：ThreadLocal 不跨线程继承，必须由提交线程把同一块草稿板带进 worker
         ScratchBoard scratch = ScratchContext.board();
+        // 本轮素材同理：worker 读不到根线程的 EntryMaterialHolder，必须在提交前取快照显式带进去
+        String material = EntryMaterialHolder.current();
         try {
             Thread submitter = Thread.currentThread();
             for (RoutedIntent intent : intents) {
                 futures.add(routerTaskExecutor.submit(
                         () -> ScratchContext.callAs(scratch, scratchOwner(intent), () ->
-                                runOneChild(parent, intent, modelUser, userText, userId, sessionId,
-                                        deadlineNanos, progress, trace, childParent, true, isolateChild,
-                                        submitter, null))));
+                                EntryMaterialHolder.callAs(material, () ->
+                                        runOneChild(parent, intent, modelUser, userText, userId, sessionId,
+                                                deadlineNanos, progress, trace, childParent, true, isolateChild,
+                                                submitter, null)))));
             }
             List<ChildOutcome> outcomes = new ArrayList<>(intents.size());
             for (int i = 0; i < futures.size(); i++) {
@@ -298,12 +302,16 @@ public class ChildRunner {
              */
             int nestedDepth = MaNestedContext.depth();
             String nestedParentKey = MaNestedContext.parentKey();
+            // 与草稿板同理：素材也是根线程的 ThreadLocal，泳道线程必须显式带进去
+            String material = EntryMaterialHolder.current();
             Thread submitter = Thread.currentThread();
             for (RoutedIntent intent : intents) {
                 futures.add(lane.submit(() -> MaNestedContext.callAt(nestedDepth, nestedParentKey, () ->
                         ScratchContext.callAs(scratch, scratchOwner(intent), () ->
-                                runOneChild(parent, intent, modelUser, userText, userId, sessionId, deadlineNanos,
-                                        progress, trace, childParent, true, isolateChild, submitter, null)))));
+                                EntryMaterialHolder.callAs(material, () ->
+                                        runOneChild(parent, intent, modelUser, userText, userId, sessionId,
+                                                deadlineNanos, progress, trace, childParent, true, isolateChild,
+                                                submitter, null))))));
             }
             List<ChildOutcome> outcomes = new ArrayList<>(intents.size());
             for (int i = 0; i < futures.size(); i++) {
@@ -489,10 +497,14 @@ public class ChildRunner {
         try {
             RouterClock.assertBefore(deadlineNanos);
             Candidate hit = intent.candidate();
+            // 本轮入口预处理素材（识图 / 抽字 / 转写）。没有预处理的轮次为空串，下面各处的行为与原来逐字一致
+            String material = EntryMaterialHolder.current();
             // 多意图：仅 sub_query；单意图：可保留父历史前缀。span 展示一律只用 sub_query
+            // 素材单独传进去：sub_query 常是判路由写的一句概述，不能让票面跟着被替换掉
             ChildSubQueryInput.Result childInput = modelTextOverride != null
-                    ? new ChildSubQueryInput.Result(modelTextOverride, intent.subQuery(), false)
-                    : ChildSubQueryInput.resolve(modelUser, userText, intent.subQuery(), isolateChild);
+                    ? new ChildSubQueryInput.Result(
+                            ChildSubQueryInput.matchText(modelTextOverride, material), intent.subQuery(), false)
+                    : ChildSubQueryInput.resolve(modelUser, userText, intent.subQuery(), isolateChild, material);
             // 串行交接已经把「子问 + 前置结论」拼进 modelTextOverride。
             // 方案 / 工作流目标不走 ReAct 的 modelText，必须把这份文本当成它们的用户问题，否则下一位方案仍只看见原问。
             // 多意图 / 一条消息多问时（isolateChild=true）每个目标只吃自己的子问：
@@ -590,16 +602,21 @@ public class ChildRunner {
                 turn = planned.turn();
                 notices = planned.notices();
             } else {
-                // 记忆段在装配时进链（工具目录之前）；召回用本子查询文本，失败自动回落 MySQL
+                // 记忆段在装配时进链（工具目录之前）；召回用「子问 + 素材」，失败自动回落 MySQL。
+                // 只喂子问会漏掉票面里的关键词：判路由常把「这张发票什么时候到期」写成「确认用户诉求」，
+                // 拿概述去召回想不起「差旅报销」这类偏好。这里只改匹配用的文本，不改抽取与落库口径。
+                String matchText = ChildSubQueryInput.matchText(childInput.displaySubQuery(), material);
                 TrialMemoryCoordinator.Augmented recalled = memory.recallDurable(
-                        memorySession(rootId(parent), userId, sessionId), childInput.displaySubQuery());
+                        memorySession(rootId(parent), userId, sessionId), matchText);
                 /*
                  * 只有真正允许出选项块时才走四参重载：多意图 / 串行交接 / 嵌套内层保持原三参调用，
                  * 提示词与既有行为逐字一致（也让既有单测的装配桩继续命中，不必为这条开关改测）。
+                 * 第二个入参同时是 Skill 触发词的匹配文本（TrialPromptFactory.skillsOf），
+                 * 因此这里传「子问 + 素材」：票面里命中的触发词才能硬注入对应 Skill。
                  */
                 TrialPlan plan = leafChoice
-                        ? loader.loadReact(hit.agent(), childInput.displaySubQuery(), recalled.memoryBlock(), true)
-                        : loader.loadReact(hit.agent(), childInput.displaySubQuery(), recalled.memoryBlock());
+                        ? loader.loadReact(hit.agent(), matchText, recalled.memoryBlock(), true)
+                        : loader.loadReact(hit.agent(), matchText, recalled.memoryBlock());
                 plan.setToolArgsFacts(recalled.injectedFacts());
                 memory.publishInjection(plan);
                 long remainingMs = Math.max(1000L, (deadlineNanos - System.nanoTime()) / 1_000_000L);
