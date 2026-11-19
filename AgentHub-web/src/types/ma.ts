@@ -61,6 +61,10 @@ export interface MaRuntimeConfig {
   maJudgeModelInstanceId?: number | null
   /** 判路由模型兼容别名；执行以 id 为准，本字段只回显 */
   maJudgeModel?: string | null
+  /** 入口预处理识图 / 扫描 PDF 页用的 VISION 实例；未绑定时带图明确失败 */
+  maVisionModelInstanceId?: number | null
+  /** 入口预处理语音转写用的 ASR 实例；未绑定时带录音明确失败 */
+  maAsrModelInstanceId?: number | null
   /**
    * ROUTER 提示词：钉住的已发布模板主键 / 版本。
    *

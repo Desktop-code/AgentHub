@@ -57,6 +57,10 @@ export function turnFeedSignature(turn: ChatTurn, entry: string, candidates: str
      * 工作流卡片是**状态快照**：正文长度不变但节点状态在推进；运行中正文还会按节点增量变长。
      * 两者都不进签名时，页面会停在第一拍、或看不到新到的文字。
      */
+    if (block.preprocess) {
+      // 抽字从「进行中」到「已回传」时正文长度可能不变，状态必须进签名，否则回放停在旧卡片
+      signature += `|pp:${block.preprocess.status}:${(block.preprocess.text || '').length}`
+    }
     if (block.workflow) {
       signature += `|wf:${block.workflow.name}:${block.workflow.status}:`
         + `${block.workflow.nodes.map((node) => node.status).join(',')}:${(block.workflow.answer || '').length}`

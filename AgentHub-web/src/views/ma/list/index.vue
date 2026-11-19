@@ -331,6 +331,64 @@
               :can-edit="canEdit"
               @edit-prompt="promptOpen = true"
             />
+            <section v-if="isEntryScheme" class="form-block">
+              <h3 class="form-block__title">入口预处理模型</h3>
+              <p class="entry-model-lead">
+                识图、扫描 PDF 页和语音转写只用这里绑定的模型。未绑定就带对应附件发送时，预处理步骤会明确失败，不会去借业务专家的模型。
+              </p>
+              <el-form-item>
+                <template #label>
+                  <span class="label-with-tip">
+                    视觉模型
+                    <el-tooltip placement="top" content="只列启用中、用途为 VISION 的实例。首页和 MA 运行入口发图或扫描件时用它。">
+                      <el-icon class="tip-icon"><QuestionFilled /></el-icon>
+                    </el-tooltip>
+                  </span>
+                </template>
+                <el-select
+                  v-model="form.config.maVisionModelInstanceId"
+                  class="full-width"
+                  clearable
+                  filterable
+                  :disabled="!canEdit"
+                  :loading="entryModelsLoading"
+                  placeholder="未绑定：带图或扫描件时预处理失败"
+                >
+                  <el-option
+                    v-for="item in visionModels"
+                    :key="item.id"
+                    :label="entryModelLabel(item)"
+                    :value="item.id"
+                  />
+                </el-select>
+              </el-form-item>
+              <el-form-item>
+                <template #label>
+                  <span class="label-with-tip">
+                    语音识别
+                    <el-tooltip placement="top" content="只列启用中、用途为 ASR 的实例。录音作为本轮附件发出后，预处理用它转写。">
+                      <el-icon class="tip-icon"><QuestionFilled /></el-icon>
+                    </el-tooltip>
+                  </span>
+                </template>
+                <el-select
+                  v-model="form.config.maAsrModelInstanceId"
+                  class="full-width"
+                  clearable
+                  filterable
+                  :disabled="!canEdit"
+                  :loading="entryModelsLoading"
+                  placeholder="未绑定：带录音时预处理失败"
+                >
+                  <el-option
+                    v-for="item in asrModels"
+                    :key="item.id"
+                    :label="entryModelLabel(item)"
+                    :value="item.id"
+                  />
+                </el-select>
+              </el-form-item>
+            </section>
             <section v-else class="form-block form-block--first">
               <h3 class="form-block__title">模型配置</h3>
               <p class="form-block__note">
@@ -552,7 +610,9 @@ import {
   createMaDef,
   deleteMaDef,
   getMaDef,
+  listMaAsrModels,
   listMaJudgeModels,
+  listMaVisionModels,
   pageMaDefs,
   updateMaDef
 } from '@/api/ma'
@@ -741,6 +801,8 @@ function defaultConfig(): MaRuntimeConfig {
     competeStrategy: 'JUDGE_PICK',
     // 判路由模型默认不显式绑定：走平台 ROUTER / CHAT 能力槽回落；提示词默认不钉模板
     maJudgeModelInstanceId: null,
+    maVisionModelInstanceId: null,
+    maAsrModelInstanceId: null,
     maJudgePromptTemplateId: null,
     maJudgePromptTemplateVersion: null,
     maJudgePromptOverride: {},
@@ -833,6 +895,10 @@ const promptOpen = ref(false)
 const judgeModels = ref<MaJudgeModelOption[]>([])
 const judgeModelsLoading = ref(false)
 let judgeModelsLoaded = false
+const visionModels = ref<MaJudgeModelOption[]>([])
+const asrModels = ref<MaJudgeModelOption[]>([])
+const entryModelsLoading = ref(false)
+let entryModelsLoaded = false
 /**
  * 入口方案的跨方案 / 工作流候选下拉。
  *
@@ -878,6 +944,39 @@ async function loadJudgeModels() {
   } finally {
     judgeModelsLoading.value = false
   }
+}
+
+/**
+ * 懒加载入口预处理 VISION / ASR 下拉。
+ *
+ * <p>只在打开入口方案抽屉时拉；失败不缓存，下次打开可重试。
+ */
+async function loadEntryModels() {
+  if (entryModelsLoaded || !canView.value) return
+  entryModelsLoading.value = true
+  try {
+    const [vision, asr] = await Promise.all([listMaVisionModels(), listMaAsrModels()])
+    visionModels.value = vision.data.data || []
+    asrModels.value = asr.data.data || []
+    entryModelsLoaded = true
+  } catch {
+    // 拦截器已给出中文错误；下拉留空，仍可保存其它配置
+  } finally {
+    entryModelsLoading.value = false
+  }
+}
+
+/**
+ * 入口预处理模型下拉展示名。
+ *
+ * @param item 实例
+ * @return 名称（带模型标识）
+ */
+function entryModelLabel(item: MaJudgeModelOption): string {
+  const name = (item.displayName || item.modelId || '').trim() || `实例 ${item.id}`
+  return item.modelId && item.displayName && item.displayName !== item.modelId
+    ? `${item.displayName}（${item.modelId}）`
+    : name
 }
 
 /**
@@ -971,6 +1070,8 @@ function editableSnapshot(state: MaFormState = form) {
       competeStrategy: state.config.competeStrategy,
       // 判路由模型与提示词四个字段都要进脏检查：只改模型 / 只换模板也算有改动
       maJudgeModelInstanceId: state.config.maJudgeModelInstanceId ?? null,
+      maVisionModelInstanceId: state.config.maVisionModelInstanceId ?? null,
+      maAsrModelInstanceId: state.config.maAsrModelInstanceId ?? null,
       maJudgePromptTemplateId: state.config.maJudgePromptTemplateId ?? null,
       maJudgePromptTemplateVersion: state.config.maJudgePromptTemplateVersion ?? null,
       maJudgePromptOverride: { ...(state.config.maJudgePromptOverride || {}) },
@@ -1133,6 +1234,7 @@ async function openCreate() {
   drawerVisible.value = true
   // 判路由模型下拉非阻塞加载：失败也不影响填写基本信息
   void loadJudgeModels()
+  void loadEntryModels()
   await markFormBaseline()
 }
 
@@ -1174,6 +1276,7 @@ async function openEdit(row: MaDefRow, tab?: unknown) {
   drawerVisible.value = true
   // 判路由模型下拉非阻塞加载：只读用户也能看当前绑定值
   void loadJudgeModels()
+  void loadEntryModels()
   await markFormBaseline()
 }
 
@@ -1798,6 +1901,13 @@ watch(
   margin: -4px 0 0;
   /* 与 el-form 的 label-width 对齐（132px），说明文字才对得上控件左边线 */
   padding-left: 132px;
+  color: var(--ah-text-muted, #9ca3af);
+  font-size: 12px;
+  line-height: 1.6;
+}
+
+.entry-model-lead {
+  margin: -4px 0 16px;
   color: var(--ah-text-muted, #9ca3af);
   font-size: 12px;
   line-height: 1.6;

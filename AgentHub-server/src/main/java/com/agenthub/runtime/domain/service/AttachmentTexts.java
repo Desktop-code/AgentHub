@@ -15,6 +15,9 @@ public final class AttachmentTexts {
     /** 模型侧段落标题。和图片 OCR 的「图片内容提取结果」分开，避免把文档当成另一张图 */
     public static final String HEADER = "【附件正文】";
 
+    /** 录音转写段落。转写视为本轮用户表述，和手打文字一起进意图，不写进解析说明 */
+    public static final String SPEECH_HEADER = "【语音转写】";
+
     /** 单页去掉空白后少于此值，视为几乎没有可复制文字 */
     public static final int MIN_PAGE_CHARS = 8;
 
@@ -82,6 +85,27 @@ public final class AttachmentTexts {
             return new Composed(block, truncated);
         }
         return new Composed(question + "\n\n" + block, truncated);
+    }
+
+    /**
+     * 把手打文字和语音转写拼成本轮用户表述。
+     *
+     * <p>有字有录音：原话在前、转写在后，两边都不丢。只有录音：转写就是本轮原话。
+     *
+     * @param spoken     用户打的字，可空
+     * @param transcript 语音转写，可空
+     * @return 拼好的用户表述；两边都空则空串
+     */
+    public static String spokenWithTranscript(String spoken, String transcript) {
+        String typed = spoken == null ? "" : spoken.trim();
+        String speech = transcript == null ? "" : transcript.trim();
+        if (speech.isEmpty()) {
+            return typed;
+        }
+        if (typed.isEmpty()) {
+            return speech;
+        }
+        return typed + "\n\n" + SPEECH_HEADER + "\n" + speech;
     }
 
     /**

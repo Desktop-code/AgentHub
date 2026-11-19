@@ -18,8 +18,14 @@
         <!-- 运行中给转圈，一眼看出这一步还没结束；完成后换成状态文字 -->
         <el-icon v-if="card.status === 'running'" class="ma-card__spin is-loading"><Loading /></el-icon>
         <span class="ma-card__state" :class="`is-${card.status}`">{{ statusText }}</span>
-        <span v-if="timeText" class="ma-card__time">{{ timeText }}</span>
+        <span v-if="card.kind !== 'preprocess' && timeText" class="ma-card__time">{{ timeText }}</span>
       </header>
+      <!-- 入口预处理在路由摘要之前：一行标题 + 横排前段，过长再展开。与首页同一份投影 -->
+      <PreprocessResultBox
+        v-if="card.preprocess"
+        :title="card.preprocess.title"
+        :items="card.preprocess.items || []"
+      />
       <!-- 只有路由卡与结论卡有摘要；子 Agent 卡保持一行，扫读不中断 -->
       <p v-if="card.summary" class="ma-card__summary" :title="card.summary">{{ card.summary }}</p>
     </div>
@@ -37,6 +43,7 @@ import { computed, onBeforeUnmount, ref, watch } from 'vue'
 import { Loading } from '@element-plus/icons-vue'
 import type { MaRunCard } from '@/components/runtime/ma/maRunView'
 import { formatDuration } from '@/components/runtime/ma/maRunView'
+import PreprocessResultBox from '@/components/runtime/PreprocessResultBox.vue'
 
 const props = defineProps<{
   /** 卡片数据；状态变化由父层原地替换对象 */
@@ -102,7 +109,7 @@ const liveDuration = computed(() => {
 /** 状态文案：每张卡都必须能一眼看出「在跑 / 完成 / 失败」 */
 const statusText = computed(() => {
   if (props.card.status === 'running') {
-    return '运行中'
+    return props.card.kind === 'preprocess' ? '识别中' : '运行中'
   }
   if (props.card.status === 'error') {
     return '失败'
@@ -211,6 +218,39 @@ const timeText = computed(() => {
   font-size: 11px;
   font-variant-numeric: tabular-nums;
   white-space: nowrap;
+}
+
+/* 入口预处理：在路由摘要之前。横排段落，默认前段，不按单字竖排 */
+.ma-card__preprocess {
+  margin-top: 6px;
+}
+
+.ma-card__preprocess-title {
+  margin: 0;
+  color: var(--ah-text, #1f2430);
+  font-size: 12px;
+  font-weight: 600;
+  line-height: 1.5;
+}
+
+.ma-card__preprocess-body {
+  margin: 4px 0 0;
+  color: var(--ah-text-secondary, #6b7280);
+  font-size: 12px;
+  line-height: 1.55;
+  white-space: pre-wrap;
+  word-break: break-word;
+  writing-mode: horizontal-tb;
+}
+
+.ma-card__preprocess-more {
+  margin-top: 2px;
+  padding: 0;
+  border: none;
+  background: transparent;
+  color: #635bff;
+  font-size: 12px;
+  cursor: pointer;
 }
 
 /* 摘要：12px、最多 3 行；超出省略，长返回不会把协作流撑成文档 */

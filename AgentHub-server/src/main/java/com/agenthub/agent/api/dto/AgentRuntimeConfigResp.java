@@ -58,6 +58,12 @@ public class AgentRuntimeConfigResp {
     /** 判路由模型兼容别名（模型名）；只作回显，执行以 id 为准 */
     private String maJudgeModel;
 
+    /** 入口预处理视觉模型实例；未绑为空 */
+    private Long maVisionModelInstanceId;
+
+    /** 入口预处理语音识别模型实例；未绑为空 */
+    private Long maAsrModelInstanceId;
+
     /**
      * ROUTER 提示词：钉住的已发布模板主键；未钉时为空。
      * <p>与 {@code maJudgePromptTemplateVersion} 成对生效；用途固定 ROUTER。

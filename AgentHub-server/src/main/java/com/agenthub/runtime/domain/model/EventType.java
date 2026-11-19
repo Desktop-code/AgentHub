@@ -20,6 +20,12 @@ public enum EventType {
      * 用户才能判断是识别错了还是主模型答错了。
      */
     VISION("vision"),
+    /**
+     * 入口 Router 在意图分流前的附件预处理。
+     * 正文是 {@code PreprocessJson}：进行中标明识图 / 抽文件 / 转写，完成后回显摘要。
+     * 没有附件时不写，避免空步骤。
+     */
+    PREPROCESS("preprocess"),
     /** Router 选中了哪个子 Agent */
     ROUTE("route"),
     /**

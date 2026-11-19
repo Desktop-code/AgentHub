@@ -9,6 +9,7 @@ import type {
   TrialEvent,
   TrialFileView,
   TrialPlanView,
+  TrialPreprocessView,
   TrialStepView,
   TrialWorkflowNodeView,
   TrialWorkflowView
@@ -242,6 +243,9 @@ function phaseOfTail(type?: string) {
   if (type === 'vision') {
     // 图片文字已提取、主模型还没开始：状态条应显示「识别图片文字」而不是「规划中」
     return 'vision'
+  }
+  if (type === 'preprocess') {
+    return 'preprocess'
   }
   if (type === 'reasoning' || type === 'route') {
     return 'reasoning'
@@ -510,6 +514,348 @@ export function appendVision(turn: ChatTurn, text: string) {
   }
   // 识别结果排在所有块之前：它是本轮的事实素材，读起来应当在思考与终答之前
   turn.blocks.unshift({ id: nextBlockId(turn), kind: 'vision', text: body })
+}
+
+/**
+ * 入口预处理步骤。每轮只有一块，进行中 / 完成 / 失败原位覆盖，刷新后仍是同一份快照。
+ *
+ * @param turn 目标助手轮
+ * @param view 预处理快照
+ */
+export function appendPreprocess(turn: ChatTurn, view: TrialPreprocessView) {
+  if (!view) {
+    return
+  }
+  const text = preprocessDisplayText(view)
+  const existing = turn.blocks.find((block) => block.kind === 'preprocess')
+  if (existing) {
+    existing.text = text
+    existing.preprocess = view
+    return
+  }
+  turn.blocks.unshift({ id: nextBlockId(turn), kind: 'preprocess', text, preprocess: view })
+}
+
+/**
+ * 过程里回显的短句：进行中用 hint，完成后用识别正文或摘要。
+ *
+ * <p>这是块上的原文，给回放解析用。对话框里的可读排版走 {@link presentPreprocess}，
+ * 不把 PDF 抽出来的单字换行原样铺开。
+ *
+ * @param view 预处理快照
+ * @return 展示文本
+ */
+export function preprocessDisplayText(view: TrialPreprocessView): string {
+  if (view.status === 'running') {
+    return (view.hint || '正在识别').trim()
+  }
+  return (view.text || view.summary || '').trim()
+}
+
+/** 回传摘要默认露出的前段字数。整份正文仍可展开，不一次铺满对话框 */
+const PREPROCESS_PREVIEW_CHARS = 280
+
+/** 默认露出的行数。和字数一起卡，长票面只留前段 */
+const PREPROCESS_PREVIEW_LINES = 6
+
+/**
+ * 入口预处理在对话框里的样子。直播和回放都读这一份，不按页面各写一套。
+ *
+ * <p>title 是一行状态（正在抽字 / 已抽字并回传）。preview 是收起时的前段，
+ * full 是横排后的全文。原文仍留在块上，这里只改给人看的换行。
+ */
+/** 识别框里的一条。按附件名排列，正文默认折叠 */
+export interface PreprocessItem {
+  /** 附件名，或图片序号、语音 */
+  name: string
+  /** 横排后的识别正文 */
+  body: string
+}
+
+export interface PreprocessPresentation {
+  /** 一行标题：正在抽字 / 已抽字并回传 / 已识图并回传 / 已转写并回传 / 失败 */
+  title: string
+  /** 收起时的前段；进行中为空 */
+  preview: string
+  /** 横排后的全文；进行中为空 */
+  full: string
+  /** 按附件拆开的条目。同一个框里按这个顺序排 */
+  items: PreprocessItem[]
+  /** 前段短于全文时才出现展开 */
+  expandable: boolean
+  /** 失败：正文是错误说明，不按抽字排版 */
+  failed: boolean
+  /** 还在抽字 / 识图 / 转写 */
+  running: boolean
+}
+
+/**
+ * 把预处理快照收成对话框里的一行标题 + 可展开前段。
+ *
+ * <p>只改展示。发给意图模型的原文、落库正文都不经过这里。
+ * 没有快照时返回空，调用方不画空步骤。
+ *
+ * @param view 预处理快照；空则不展示
+ * @return 展示结构；进行中只有标题
+ */
+export function presentPreprocess(view?: TrialPreprocessView | null): PreprocessPresentation | undefined {
+  if (!view) {
+    return undefined
+  }
+  const running = view.status === 'running'
+  const failed = view.status === 'failed'
+  const title = preprocessTitleOf(view)
+  if (running) {
+    return { title, preview: '', full: '', items: [], expandable: false, failed: false, running: true }
+  }
+  const raw = failed ? (view.summary || view.text || '').trim() : (view.text || view.summary || '').trim()
+  const full = failed ? raw : reflowExtractedText(raw)
+  const preview = clipPreprocessPreview(full)
+  const items = failed
+    ? (full ? [{ name: '识别失败', body: full }] : [])
+    : splitPreprocessItems(raw)
+  return {
+    title,
+    preview,
+    full,
+    items,
+    expandable: preview !== full,
+    failed,
+    running: false
+  }
+}
+
+/**
+ * 一行标题。任务类型决定用抽字 / 识图 / 转写哪一句，不把摘要整段当标题。
+ *
+ * @param view 预处理快照
+ * @return 标题
+ */
+function preprocessTitleOf(view: TrialPreprocessView): string {
+  if (view.status === 'running') {
+    return (view.hint || '正在识别附件').trim()
+  }
+  if (view.status === 'failed') {
+    return '附件识别失败'
+  }
+  const tasks = Array.isArray(view.tasks) ? view.tasks : []
+  const file = tasks.includes('file')
+  const vision = tasks.includes('vision')
+  const speech = tasks.includes('speech')
+  if (file && !vision && !speech) {
+    return '已抽字并回传'
+  }
+  if (vision && !file && !speech) {
+    return '已识图并回传'
+  }
+  if (speech && !file && !vision) {
+    return '已转写并回传'
+  }
+  if (tasks.length) {
+    return '已识别并回传'
+  }
+  const summary = view.summary || ''
+  if (summary.startsWith('已抽字')) {
+    return '已抽字并回传'
+  }
+  if (summary.startsWith('已识图')) {
+    return '已识图并回传'
+  }
+  if (summary.startsWith('已转写')) {
+    return '已转写并回传'
+  }
+  return '已识别并回传'
+}
+
+/**
+ * 把抽字碎片收成横排段落。
+ *
+ * <p>PDF 常把「备注销售方」抽成一行一字。这里把连续单字行拼回一句话，
+ * 空行仍作段落。机器头【附件正文】不进预览，标题已经说明这是回传。
+ *
+ * @param raw 识别原文
+ * @return 横排后的正文
+ */
+export function reflowExtractedText(raw: string): string {
+  const lines = (raw || '').replace(/\r\n/g, '\n').split('\n')
+  const out: string[] = []
+  let singles: string[] = []
+  const flush = () => {
+    if (!singles.length) {
+      return
+    }
+    out.push(singles.join(''))
+    singles = []
+  }
+  for (const line of lines) {
+    const trimmed = line.trim()
+    if (!trimmed) {
+      flush()
+      if (out.length && out[out.length - 1] !== '') {
+        out.push('')
+      }
+      continue
+    }
+    if (trimmed === '【附件正文】' || trimmed === '【语音转写】' || trimmed === '【图片文字】') {
+      flush()
+      continue
+    }
+    // 一个字一行是抽字碎片，先攒起来再横排；正常句子原样留
+    if ([...trimmed].length === 1) {
+      singles.push(trimmed)
+      continue
+    }
+    flush()
+    out.push(trimmed)
+  }
+  flush()
+  return out.join('\n').replace(/\n{3,}/g, '\n\n').trim()
+}
+
+/**
+ * 把回传正文拆成按附件名排列的条目。
+ *
+ * <p>只认「文件「名」」、[图N内容] 和【语音转写】。这些标记前面的手打文字不进识别框。
+ * 没有标记时收成一条，避免整段铺开。正文经过横排，不保留单字换行。
+ *
+ * @param raw 预处理原文
+ * @return 按出现顺序的条目；空原文为空数组
+ */
+export function splitPreprocessItems(raw: string): PreprocessItem[] {
+  const text = (raw || '').replace(/\r\n/g, '\n')
+  const marks: { index: number; end: number; name: string }[] = []
+  const fileRe = /文件「([^」]+)」：/g
+  let match: RegExpExecArray | null
+  while ((match = fileRe.exec(text))) {
+    marks.push({
+      index: match.index,
+      end: match.index + match[0].length,
+      name: match[1].trim() || '未命名文件'
+    })
+  }
+  const imageRe = /\[图(\d+)内容\]:\s*/g
+  while ((match = imageRe.exec(text))) {
+    marks.push({
+      index: match.index,
+      end: match.index + match[0].length,
+      name: `图片${match[1]}`
+    })
+  }
+  const speechAt = text.indexOf('【语音转写】')
+  if (speechAt >= 0) {
+    marks.push({ index: speechAt, end: speechAt + '【语音转写】'.length, name: '语音' })
+  }
+  marks.sort((left, right) => left.index - right.index)
+  if (!marks.length) {
+    const body = reflowExtractedText(text)
+    return body ? [{ name: '识别结果', body }] : []
+  }
+  const items: PreprocessItem[] = []
+  for (let i = 0; i < marks.length; i += 1) {
+    const stop = i + 1 < marks.length ? marks[i + 1].index : text.length
+    const body = reflowExtractedText(text.slice(marks[i].end, stop))
+    items.push({ name: marks[i].name, body })
+  }
+  return items
+}
+
+/**
+ * 按用户发送顺序重排识别条目。直播和回放都拿用户消息上的附件清单，不另记一份顺序。
+ *
+ * <p>文件按名字对上；图片按出现次序对上「图片N」；录音对上「语音」。
+ * 对不上的条目留在后面，不丢掉。
+ *
+ * @param items       从正文拆出的条目
+ * @param attachments 本轮用户附件，按发送顺序
+ * @return 排好的条目
+ */
+export function orderPreprocessItems(
+  items: PreprocessItem[],
+  attachments: { kind: string; name?: string }[]
+): PreprocessItem[] {
+  const source = Array.isArray(items) ? items : []
+  const list = Array.isArray(attachments) ? attachments : []
+  if (!source.length || !list.length) {
+    return source
+  }
+  const pool = source.slice()
+  const take = (match: (item: PreprocessItem) => boolean) => {
+    const index = pool.findIndex(match)
+    if (index < 0) {
+      return undefined
+    }
+    return pool.splice(index, 1)[0]
+  }
+  const ordered: PreprocessItem[] = []
+  let imageSeq = 0
+  for (const attachment of list) {
+    const name = (attachment.name || '').trim()
+    if (attachment.kind === 'image') {
+      imageSeq += 1
+      const hit = take((item) => item.name === `图片${imageSeq}` || (!!name && item.name === name))
+      if (hit) {
+        ordered.push(name ? { ...hit, name } : hit)
+      }
+      continue
+    }
+    const ext = name.includes('.') ? name.slice(name.lastIndexOf('.') + 1).toLowerCase() : ''
+    const audio = ['webm', 'wav', 'mp3', 'm4a', 'ogg', 'opus'].includes(ext)
+    const hit = audio
+      ? take((item) => item.name === name || item.name === '语音')
+      : take((item) => item.name === name)
+    if (hit) {
+      ordered.push(name ? { ...hit, name } : hit)
+    }
+  }
+  return [...ordered, ...pool]
+}
+
+/**
+ * 把预处理挂到已有的入口卡上，不另起一张。
+ *
+ * <p>首页网关卡、MA 路由卡都走这里：先识别回传，再在同一张卡上留意图摘要。
+ * 还没有入口卡时不造壳，调用方自己决定要不要补一张入口卡。
+ *
+ * @param cards     已有卡片
+ * @param view      预处理快照；没有则原样返回
+ * @param entryKind 入口卡的 kind（gateway / router）
+ * @return 挂好的卡片，以及给人看的投影；shown 为空表示本轮没有预处理
+ */
+export function attachPreprocessToCard<T extends { kind: string; preprocess?: PreprocessPresentation }>(
+  cards: T[],
+  view: TrialPreprocessView | null | undefined,
+  entryKind: string
+): { cards: T[]; shown?: PreprocessPresentation } {
+  const shown = presentPreprocess(view)
+  if (!shown) {
+    return { cards }
+  }
+  const index = cards.findIndex((card) => card.kind === entryKind)
+  if (index < 0) {
+    return { cards, shown }
+  }
+  const next = cards.slice()
+  next[index] = { ...next[index], preprocess: shown }
+  return { cards: next, shown }
+}
+
+/**
+ * 前段截取。超行或超字才截，并补省略号，和全文区分开以便出现「展开」。
+ *
+ * @param full 横排全文
+ * @return 默认露出的前段
+ */
+function clipPreprocessPreview(full: string): string {
+  if (!full) {
+    return ''
+  }
+  const lines = full.split('\n')
+  const head = lines.slice(0, PREPROCESS_PREVIEW_LINES).join('\n')
+  if (lines.length <= PREPROCESS_PREVIEW_LINES && head.length <= PREPROCESS_PREVIEW_CHARS) {
+    return full
+  }
+  const cut = head.length > PREPROCESS_PREVIEW_CHARS ? head.slice(0, PREPROCESS_PREVIEW_CHARS) : head
+  return `${cut.replace(/\n+$/, '')}…`
 }
 
 /** 工具按一次调用一块。参数行和结果分开。 */
@@ -1670,7 +2016,7 @@ export function turnSections(blocks: AssistantBlock[]): TurnSections {
       errors.push(block.text)
       continue
     }
-    if (block.kind === 'vision') {
+    if (block.kind === 'vision' || block.kind === 'preprocess') {
       // 识别结果是本轮素材，不属于任何执行步；由模板在卡片顶部单独渲染，这里直接跳过桶分配
       continue
     }
@@ -1946,6 +2292,14 @@ function blockFromEvent(item: TrialEvent): AssistantBlock | undefined {
     const text = displayText(item)
     return text ? { kind: 'vision', text } : undefined
   }
+  if (item.eventType === 'preprocess') {
+    const view = parsePreprocessEvent(item.contentText)
+    if (view) {
+      return { kind: 'preprocess', text: preprocessDisplayText(view), preprocess: view }
+    }
+    const fallback = (item.summary || '').trim()
+    return fallback ? { kind: 'preprocess', text: fallback } : undefined
+  }
   if (item.eventType === 'route') {
     const text = displayText(item)
     return text ? { kind: 'route', text } : undefined
@@ -2096,6 +2450,40 @@ function displayText(item: TrialEvent): string {
  * @param raw 事件正文 JSON，可空
  * @return 归一化视图；空正文 / 半截 JSON / 缺名字与编码时为 undefined
  */
+/**
+ * 解析入口预处理事件正文（与 SSE `preprocess` 帧同一形状）。
+ *
+ * @param raw 事件正文 JSON，可空
+ * @return 快照；半截 JSON 放弃，不让回放整轮失败
+ */
+export function parsePreprocessEvent(raw: string | undefined): TrialPreprocessView | undefined {
+  const text = (raw || '').trim()
+  if (!text || text.charAt(0) !== '{') {
+    return undefined
+  }
+  try {
+    const node = JSON.parse(text) as {
+      status?: unknown
+      tasks?: unknown
+      hint?: unknown
+      summary?: unknown
+      text?: unknown
+    }
+    const tasks = Array.isArray(node.tasks)
+      ? node.tasks.filter((item): item is string => typeof item === 'string' && item.trim().length > 0)
+      : []
+    return {
+      status: typeof node.status === 'string' && node.status.trim() ? node.status.trim() : 'running',
+      tasks,
+      hint: typeof node.hint === 'string' ? node.hint : '',
+      summary: typeof node.summary === 'string' ? node.summary : '',
+      text: typeof node.text === 'string' ? node.text : ''
+    }
+  } catch {
+    return undefined
+  }
+}
+
 export function parseWorkflowEvent(raw: string | undefined): TrialWorkflowView | undefined {
   const text = (raw || '').trim()
   if (!text) {

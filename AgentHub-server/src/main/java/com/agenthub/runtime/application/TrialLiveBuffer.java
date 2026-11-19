@@ -7,11 +7,13 @@ import com.agenthub.runtime.domain.model.EventType;
 import com.agenthub.runtime.domain.model.GeneratedFile;
 import com.agenthub.runtime.domain.model.ParticipantView;
 import com.agenthub.runtime.domain.model.PlanView;
+import com.agenthub.runtime.domain.model.PreprocessView;
 import com.agenthub.runtime.domain.model.StepView;
 import com.agenthub.runtime.domain.model.WorkflowRunView;
 import com.agenthub.runtime.domain.service.GeneratedFileMarker;
 import com.agenthub.runtime.domain.service.ParticipantJson;
 import com.agenthub.runtime.domain.service.PlanJson;
+import com.agenthub.runtime.domain.service.PreprocessJson;
 import com.agenthub.runtime.domain.service.TrialProgress;
 import com.agenthub.runtime.domain.service.TrialTexts;
 import com.agenthub.runtime.domain.service.WorkbenchChoiceJson;
@@ -260,6 +262,12 @@ public class TrialLiveBuffer {
             }
 
             @Override
+            public void preprocess(PreprocessView view) {
+                recorder.preprocess(view);
+                delegate.preprocess(view);
+            }
+
+            @Override
             public void plan(PlanView plan) {
                 recorder.plan(plan);
                 delegate.plan(plan);
@@ -342,6 +350,22 @@ public class TrialLiveBuffer {
                 }
             }
             append(EventType.WORKFLOW, summary, content, null);
+        }
+
+        /**
+         * 入口预处理只留最新一份：进行中 → 完成 / 失败是同一块快照，追加会让刷新看到两段互相矛盾的状态。
+         *
+         * @param summary 人话摘要
+         * @param content 视图 JSON
+         */
+        private synchronized void replacePreprocess(String summary, String content) {
+            for (int i = events.size() - 1; i >= 0; i -= 1) {
+                if (EventType.PREPROCESS.code().equals(events.get(i).getEventType())) {
+                    events.remove(i);
+                    break;
+                }
+            }
+            append(EventType.PREPROCESS, summary, content, null);
         }
 
         /**
@@ -466,6 +490,19 @@ public class TrialLiveBuffer {
         public void vision(String text) {
             // 识别结果是整段素材而不是增量：直接追加一条完整事件，避免与相邻的 reasoning 续写混在一起
             turn.append(EventType.VISION, TrialTexts.content(text, LIVE_TEXT_LIMIT), null);
+        }
+
+        /**
+         * 入口预处理：同一轮只保留最新快照，刷新后与直播终态一致。
+         */
+        @Override
+        public void preprocess(PreprocessView view) {
+            String payload = PreprocessJson.payload(view);
+            if (payload.isEmpty()) {
+                return;
+            }
+            turn.replacePreprocess(PreprocessJson.summaryOf(view),
+                    TrialTexts.content(payload, LIVE_TEXT_LIMIT));
         }
 
         /**

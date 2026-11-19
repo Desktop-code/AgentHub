@@ -261,6 +261,19 @@ public class AgentRuntimeConfig {
     private String maJudgeModel;
 
     /**
+     * 入口预处理识图 / 扫描 PDF 页用的 VISION 实例（{@code model_instance.id}）。
+     * <p>只给对话入口（{@link #TEMPLATE_ENTRY_ROUTER}）使用；未绑定时带图或扫描件明确失败，
+     * 不回落到业务专家或知识库入库那条 YAML Key。普通方案保存时原样保留，执行侧不读。
+     */
+    private Long maVisionModelInstanceId;
+
+    /**
+     * 入口预处理语音转写用的 ASR 实例（{@code model_instance.id}）。
+     * <p>只给对话入口使用；未绑定时带录音明确失败，不静默跳过、不借用专家槽。
+     */
+    private Long maAsrModelInstanceId;
+
+    /**
      * Router 判路由提示词引用的 ROUTER 用途模板主键（默认接待页可配）。
      * <p>与 {@link #maJudgePromptTemplateVersion} 必须成对出现：有 id 无 version 视为未钉死，
      * 执行侧按 purpose 取当前生效版。只影响 ROUTER 网关，不影响任何专家的人设模板。
@@ -842,6 +855,9 @@ public class AgentRuntimeConfig {
         // 判路由模型：只做原样透传，是否可用在开跑时按实例启停与凭证校验，避免保存即锁死
         out.setMaJudgeModelInstanceId(source.getMaJudgeModelInstanceId());
         out.setMaJudgeModel(source.getMaJudgeModel() == null ? null : source.getMaJudgeModel().trim());
+        // 入口 VISION / ASR：同样原样透传，开跑时再校验；未绑就是未绑，禁止用 YAML Key 顶上
+        out.setMaVisionModelInstanceId(source.getMaVisionModelInstanceId());
+        out.setMaAsrModelInstanceId(source.getMaAsrModelInstanceId());
         // ROUTER 提示词引用：id + version 成对才生效；只给一半时丢弃，避免执行侧读到「半钉死」状态
         Long promptTemplateId = source.getMaJudgePromptTemplateId();
         Integer promptTemplateVersion = source.getMaJudgePromptTemplateVersion();

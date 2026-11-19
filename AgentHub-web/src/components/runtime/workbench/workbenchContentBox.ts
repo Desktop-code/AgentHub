@@ -9,6 +9,12 @@
 /** 中间过程内容框最多显示几行：超过就在框内滚动，不再往页面上铺 */
 export const BOX_MAX_LINES = 4
 
+/**
+ * 含表格、且默认展开的结果框最高约占一屏。
+ * 中间过程即使有表仍先收四行；只有本轮最后一份和综答才直接用这个高度。
+ */
+export const RESULT_TABLE_MAX_HEIGHT = '70vh'
+
 /** 中间过程判定需要的字段（与 ParticipantCard 的展示相关字段同形） */
 export interface ContentBoxShape {
   /** gateway＝入口块（名称读配置）；actor＝专家 / 方案；conclusion＝方案带结论 */
@@ -57,6 +63,101 @@ export function isMidProcessBox(card: ContentBoxShape, streaming: boolean): bool
  */
 export function isUnlimitedAnswerBox(card: ContentBoxShape): boolean {
   return card.kind === 'conclusion'
+}
+
+/** 结果正文的限高口径：普通文本四行；含表则整表进入可滚动结果框 */
+export type AnswerClamp = 'lines' | 'table'
+
+/**
+ * 正文是否含一张已经成形的表（GFM 管道表或裸 HTML 表）。
+ *
+ * <p>只认表头 + 分隔行，或围栏外的 `&lt;table`。代码块里的示例表不算，
+ * 避免一段普通说明因为围栏示例被拉成整屏滚动。半张还没写出分隔行的表仍按普通文本，
+ * 分隔行一到就整段改走表格口径，直播与回放读的是同一份正文。
+ *
+ * @param source 结果正文原文（Markdown）
+ * @return true 表示这里有一张不该被四行裁切的表
+ */
+export function answerContainsMarkdownTable(source: string): boolean {
+  if (!source || !source.trim()) {
+    return false
+  }
+  const lines = source.replace(/\uFF5C/g, '|').split(/\r?\n/)
+  let inFence = false
+  for (let i = 0; i < lines.length; i += 1) {
+    const line = lines[i]
+    if (/^\s*```/.test(line)) {
+      inFence = !inFence
+      continue
+    }
+    if (inFence) {
+      continue
+    }
+    if (/<table\b/i.test(line)) {
+      return true
+    }
+    if (!line.includes('|')) {
+      continue
+    }
+    let delimAt = i + 1
+    let blanks = 0
+    while (delimAt < lines.length && !lines[delimAt].trim() && blanks < 2) {
+      delimAt += 1
+      blanks += 1
+    }
+    if (delimAt < lines.length && isTableDelimiterLine(lines[delimAt])) {
+      return true
+    }
+  }
+  return false
+}
+
+/**
+ * 这段结果正文里有没有表。有表不等于默认铺开。
+ *
+ * <p>中间过程仍按四行收，见 {@link tableFoldedByDefault}。
+ * 只有本轮最后一份（投影 {@code isFinal}）和综答，才默认整表放进结果框，
+ * 最高 {@link RESULT_TABLE_MAX_HEIGHT}。
+ *
+ * @param source 结果正文原文
+ * @return `table` 表示正文里有成形的表
+ */
+export function answerClampOf(source: string): AnswerClamp {
+  return answerContainsMarkdownTable(source) ? 'table' : 'lines'
+}
+
+/**
+ * 含表的这一张，默认要不要仍收成四行。
+ *
+ * <p>口径跟投影的终态标记走，不看专家名字：
+ * 直播中每一张都还不是终局；整轮结束后只有 {@code isFinal} 那一张放开。
+ * 综答（方案汇总）本来就不收四行。单 Agent 跑完后自己就是最后一张，
+ * 所以独立对话里的表不会被收回四行。方案框里的子专家不是最后一张，有表也先收四行。
+ *
+ * @param card      内容框所属的参与者（含投影打上的 isFinal）
+ * @param streaming 本轮是否仍在流式输出
+ * @return true 表示先按四行收，点开后再看全表
+ */
+export function tableFoldedByDefault(card: ContentBoxShape, streaming: boolean): boolean {
+  if (isUnlimitedAnswerBox(card)) {
+    return false
+  }
+  return isMidProcessBox(card, streaming)
+}
+
+/**
+ * GFM 分隔行：至少一格 `---`，允许对齐冒号。
+ *
+ * @param line 候选行
+ * @return true 表示这是表分隔行
+ */
+function isTableDelimiterLine(line: string): boolean {
+  const trimmed = line.trim()
+  if (!trimmed.includes('-') || !trimmed.includes('|')) {
+    return false
+  }
+  const cells = trimmed.replace(/^\|/, '').replace(/\|$/, '').split('|')
+  return cells.length > 0 && cells.every((cell) => /^\s*:?-{3,}:?\s*$/.test(cell))
 }
 
 /**

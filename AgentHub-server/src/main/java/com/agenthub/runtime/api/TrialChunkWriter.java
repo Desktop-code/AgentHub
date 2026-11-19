@@ -11,9 +11,11 @@ import com.agenthub.runtime.domain.model.GeneratedFile;
 import com.agenthub.runtime.domain.model.ParticipantView;
 import com.agenthub.runtime.domain.model.PlanStep;
 import com.agenthub.runtime.domain.model.PlanView;
+import com.agenthub.runtime.domain.model.PreprocessView;
 import com.agenthub.runtime.domain.model.StepView;
 import com.agenthub.runtime.domain.model.WorkflowRunView;
 import com.agenthub.runtime.domain.service.GeneratedFileMarker;
+import com.agenthub.runtime.domain.service.PreprocessJson;
 import com.agenthub.runtime.domain.service.WorkflowRunJson;
 import com.agenthub.runtime.domain.service.ParticipantJson;
 import com.agenthub.runtime.domain.service.TrialProgress;
@@ -311,6 +313,18 @@ public final class TrialChunkWriter implements TrialProgress, TrialStreamEnd {
         String body = TrialTexts.redact(text);
         if (!body.isEmpty()) {
             writer.emitLegacy("vision", body);
+        }
+    }
+
+    /**
+     * 入口预处理步骤。走独立事件名 preprocess，载荷是对象（与落库 PREPROCESS 正文同形）。
+     * 进行中 / 完成 / 失败都原位更新同一块，不要先收成字符串再出站。
+     */
+    @Override
+    public void preprocess(PreprocessView view) {
+        Map<String, Object> payload = PreprocessJson.frame(view);
+        if (!payload.isEmpty()) {
+            writer.emitLegacy("preprocess", payload);
         }
     }
 
