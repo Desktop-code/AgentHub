@@ -47,6 +47,24 @@ export function listMaJudgeModels() {
 }
 
 /**
+ * 入口预处理视觉模型下拉：启用中、用途为 VISION 的实例。
+ *
+ * @return 可选实例
+ */
+export function listMaVisionModels() {
+  return request.get<Result<MaJudgeModelOption[]>>('/api/agent/multi-agents/vision-models')
+}
+
+/**
+ * 入口预处理语音识别模型下拉：启用中、用途为 ASR 的实例。
+ *
+ * @return 可选实例
+ */
+export function listMaAsrModels() {
+  return request.get<Result<MaJudgeModelOption[]>>('/api/agent/multi-agents/asr-models')
+}
+
+/**
  * 按 ROUTER 反查绑定中的启用方案；没有返回 data=null。
  *
  * @param agentId ROUTER 主键
