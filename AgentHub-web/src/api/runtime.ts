@@ -10,6 +10,7 @@ import type {
   TrialEvent,
   TrialMessageResult,
   TrialPlanView,
+  TrialPreprocessView,
   TrialSession
 } from '@/types/runtime'
 
@@ -276,6 +277,8 @@ export interface TrialStreamHandlers {
   onAssistant?: (text: string) => void
   /** 图片文字提取结果，整段下发一次；进时间线的「图片文字」块 */
   onVision?: (text: string) => void
+  /** 入口预处理步骤；进行中 / 完成 / 失败原位更新同一块 */
+  onPreprocess?: (view: TrialPreprocessView) => void
   /** 计划生成或状态推进（结构化） */
   onPlan?: (plan: TrialPlanChunk) => void
   /** 计划单步进度 */
@@ -636,6 +639,8 @@ function dispatchFrame(frame: string, handlers: TrialStreamHandlers, batcher?: T
   } else if (event === 'vision' && typeof data === 'string') {
     // 识别结果是整段文本（非增量）：由调用方整块插入时间线
     handlers.onVision?.(data)
+  } else if (event === 'preprocess' && data && typeof data === 'object') {
+    handlers.onPreprocess?.(data as TrialPreprocessView)
   } else if (event === 'tool' && data && typeof data === 'object') {
     const row = data as TrialToolChunk
     handlers.onTool?.(row)

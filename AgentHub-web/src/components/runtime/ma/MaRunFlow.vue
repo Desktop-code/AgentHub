@@ -22,8 +22,17 @@
         :class="{ 'is-selected': group.key === selectedKey }"
       >
         <!-- 1) 用户问题：与对话页一致，靠右气泡；点它即把右栏切到本轮 -->
-        <div class="ma-turn__ask" @click="emit('select', group.key)">
-          <div class="ma-turn__bubble" :title="group.question">{{ group.question }}</div>
+        <div
+          v-if="group.question || userAttachments(group).length"
+          class="ma-turn__ask"
+          @click="emit('select', group.key)"
+        >
+          <div class="ma-turn__stack">
+            <UserAttachmentStrip v-if="userAttachments(group).length" :items="userAttachments(group)" />
+            <div v-if="group.question" class="ma-turn__bubble" :title="group.question">
+              <span>{{ group.question }}</span>
+            </div>
+          </div>
         </div>
 
         <!-- 连接断开：只能等落库，如实提示，不假装还在收增量 -->
@@ -40,7 +49,11 @@
 
         <!-- 3) 模型回答：正文直接用 Markdown 给到用户，与对话页同一套渲染 -->
         <div v-if="group.answer" class="ma-turn__answer" @click="emit('select', group.key)">
-          <div class="md answer" v-html="markdown(group)" />
+          <div
+            class="md answer"
+            :class="{ 'is-table-scroll': answerClampOf(group.answer) === 'table' }"
+            v-html="markdown(group)"
+          />
           <span v-if="group.status === 'running'" class="ma-turn__caret">|</span>
         </div>
         <p
@@ -61,26 +74,23 @@
       </section>
     </div>
 
-    <!-- 输入区：与对话页同一高度和容器，Enter 发送、Shift+Enter 换行；本页不做图片上传 -->
-    <div class="ma-flow__composer">
-      <el-input
-        v-model="text"
-        type="textarea"
-        :rows="2"
-        :autosize="{ minRows: 2, maxRows: 10 }"
-        resize="none"
-        maxlength="8000"
-        placeholder="输入问题，Enter 发送，Shift+Enter 换行"
-        :disabled="!canSend || sending"
-        @keydown.enter.exact.prevent="submit"
-      />
-      <div class="ma-flow__bar">
-        <span class="ma-flow__hint">{{ sessionReady ? '' : blockedHint || '请先新建会话或从左侧选择' }}</span>
-        <el-button v-if="canSend" type="primary" :loading="sending" :disabled="!sessionReady" @click="submit">
-          发送
-        </el-button>
-      </div>
-    </div>
+    <!-- 输入条复用 ChatPanel 待发列表：附件、拖入、粘贴、麦克风与首页同一份代码 -->
+    <ChatPanel
+      class="ma-flow__composer-panel"
+      skin="workbench"
+      composer-only
+      entry-composer
+      :turns="[]"
+      :sending="sending"
+      :can-send="canSend"
+      :session-ready="sessionReady"
+      :blocked-hint="blockedHint"
+      :detached="detached"
+      :vision-enabled="false"
+      :asr-enabled="false"
+      :tts-enabled="false"
+      @send="onSend"
+    />
   </div>
 </template>
 
@@ -96,12 +106,16 @@
  * - 思考段只显示执行过程（含运行中状态），汇总算在路由卡上，不单出结论卡；
  * - 回答段与 Agent 管理页对话同一套 Markdown 渲染，正文直接给用户；
  * - 新内容到达时只在「用户仍在看最后一轮」的情况下自动滚到底，避免打断回看；
- * - 输入为空、无权限或正在发送时不提交。
+ * - 输入条复用 ChatPanel，不另起第三套待发列表。
  */
 import { computed, nextTick, onMounted, ref, watch } from 'vue'
 import type { MaRunGroup } from '@/components/runtime/ma/maRunView'
 import MaRunCard from '@/components/runtime/ma/MaRunCard.vue'
+import ChatPanel from '@/components/runtime/ChatPanel.vue'
+import UserAttachmentStrip from '@/components/runtime/UserAttachmentStrip.vue'
+import { type OutgoingFile, type UserAttachmentView } from '@/components/runtime/userMessageImages'
 import { renderMarkdownMemo } from '@/utils/simpleMarkdown'
+import { answerClampOf } from '@/components/runtime/workbench/workbenchContentBox'
 
 const props = defineProps<{
   /** 全部运行轮次，按提问顺序 */
@@ -123,11 +137,10 @@ const props = defineProps<{
 const emit = defineEmits<{
   /** 选中某一轮：右栏跟随切换 */
   select: [key: string]
-  /** 发送用户输入 */
-  send: [content: string]
+  /** 发送用户输入；附件与首页同一协议 */
+  send: [content: string, images?: string[], files?: OutgoingFile[], order?: Array<'image' | 'file'>]
 }>()
 
-const text = ref('')
 const scroller = ref<HTMLElement>()
 
 /** 最后一轮 key：决定新内容到达时是否自动跟随滚动 */
@@ -193,14 +206,30 @@ onMounted(() => {
   void nextTick().then(scrollToBottom)
 })
 
-/** 提交输入：空内容、无权限、未就绪或发送中都直接忽略 */
-function submit() {
-  const content = text.value.trim()
-  if (!content || !props.canSend || !props.sessionReady || props.sending) {
-    return
+/**
+ * 本轮用户气泡附件。只发文件时没有文字，附件仍要能看见。
+ *
+ * @param group 运行轮次
+ * @return 图和文件
+ */
+function userAttachments(group: MaRunGroup): UserAttachmentView[] {
+  const turn = group.userTurn
+  if (turn?.attachments?.length) {
+    return turn.attachments
   }
-  emit('send', content)
-  text.value = ''
+  return (turn?.images || []).map((url) => ({ kind: 'image' as const, url }))
+}
+
+/**
+ * 转发 ChatPanel 的发送。空内容但有附件也要发出去。
+ */
+function onSend(
+  content: string,
+  images?: string[],
+  files?: OutgoingFile[],
+  order?: Array<'image' | 'file'>
+) {
+  emit('send', content, images, files, order)
 }
 </script>
 
@@ -249,8 +278,18 @@ function submit() {
   cursor: pointer;
 }
 
-.ma-turn__bubble {
+.ma-turn__stack {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: 8px;
   max-width: 78%;
+}
+
+.ma-turn__bubble {
+  /* 与对话页同一套：短句按内容撑开成一行，上限是外层 78%，不再套第二层百分比。 */
+  width: fit-content;
+  max-width: 100%;
   padding: 10px 12px;
   background: #efeefe;
   border-radius: 12px;
@@ -258,7 +297,37 @@ function submit() {
   font-size: 13px;
   line-height: 1.55;
   white-space: pre-wrap;
-  word-break: break-word;
+  word-break: normal;
+  overflow-wrap: break-word;
+}
+
+.ma-turn__files {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.ma-turn__files + span {
+  display: block;
+  margin-top: 8px;
+}
+
+.ma-turn__image {
+  max-width: 220px;
+  max-height: 160px;
+  border-radius: 8px;
+}
+
+.ma-turn__file {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 8px 10px;
+  border-radius: 8px;
+  background: #fff;
+  color: inherit;
+  text-decoration: none;
 }
 
 /* 选中态：只加一层极浅描边，不动气泡配色，保持「普通对话」的观感 */
@@ -292,6 +361,14 @@ function submit() {
   position: relative;
   margin-top: 12px;
   cursor: pointer;
+}
+
+/* 与对话页同一口径：含表时最高约一屏，在回答框内滚动，短回答不设限 */
+.md.answer.is-table-scroll {
+  max-height: 70vh;
+  overflow: auto;
+  overscroll-behavior: contain;
+  scrollbar-width: thin;
 }
 
 .ma-turn__caret {
@@ -434,47 +511,9 @@ function submit() {
   font-weight: 600;
 }
 
-/* 与对话页输入条同一套：浅底圆角，正文两行起，发送在容器内右下 */
-.ma-flow__composer {
+.ma-flow__composer-panel {
   flex: none;
+  width: 100%;
   margin-top: 12px;
-  padding: 12px 14px 10px;
-  border: 1px solid transparent;
-  border-radius: 16px;
-  background: #f5f7fa;
-  box-sizing: border-box;
-}
-
-.ma-flow__composer:focus-within {
-  background: #fff;
-  border-color: var(--ah-primary, #635bff);
-  box-shadow: 0 0 0 3px rgba(99, 91, 255, 0.22);
-}
-
-.ma-flow__composer :deep(.el-textarea__inner) {
-  background: transparent !important;
-  box-shadow: none !important;
-  border-color: transparent !important;
-  resize: none;
-  padding: 6px 0;
-  min-height: 56px;
-  line-height: 1.7;
-}
-
-.ma-flow__bar {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 8px;
-  margin-top: 8px;
-}
-
-.ma-flow__bar :deep(.el-button) {
-  flex: none;
-}
-
-.ma-flow__hint {
-  color: var(--ah-text-muted);
-  font-size: 12px;
 }
 </style>

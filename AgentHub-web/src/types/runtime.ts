@@ -65,6 +65,18 @@ export interface TrialMessageResult {
   events: TrialEvent[]
 }
 
+/**
+ * 入口预处理步骤快照。与后端 {@code PreprocessView} / SSE `preprocess` 同形。
+ * 直播、内存快照、落库回放共用这一份，前端不要另拼。
+ */
+export interface TrialPreprocessView {
+  status: string
+  tasks: string[]
+  hint?: string
+  summary?: string
+  text?: string
+}
+
 /** 助手卡片里的一块。没有引擎中间步时不会出现 reasoning。 */
 export interface AssistantBlock {
   /**
@@ -85,6 +97,11 @@ export interface AssistantBlock {
     | 'system'
     | 'error'
     | 'vision'
+    /**
+     * 入口 Router 在意图前的附件预处理（识图 / 抽文件 / 转写）。
+     * 结构化视图在 {@link AssistantBlock.preprocess}；没有附件时不会出现。
+     */
+    | 'preprocess'
     | 'file'
     /**
      * 结构化选项块（后端 CHOICE 事件 / SSE `choice` 帧）。
@@ -106,6 +123,8 @@ export interface AssistantBlock {
      */
     | 'ROUTER_TRACE'
   text: string
+  /** 入口预处理快照；仅 kind='preprocess' */
+  preprocess?: TrialPreprocessView
   /** 工具结果。和调用行相同或为空时不展示 */
   detail?: string
   /**

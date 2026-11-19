@@ -17,7 +17,7 @@
  * 任何一块都不复制其它步骤的事件或正文。
  */
 import type { AssistantBlock, TrialChoiceOption, TrialChoiceView, TrialFileView, TrialWorkflowView } from '@/types/runtime'
-import type { ProcessStep } from '@/components/runtime/trialMessages'
+import { attachPreprocessToCard, type PreprocessPresentation, type ProcessStep } from '../trialMessages.ts'
 import { parentIndexByBegin } from './beginParent.ts'
 import { parseRouteParticipant } from './workbenchRouteText.ts'
 import {
@@ -202,6 +202,12 @@ export interface ParticipantCard {
    * 终答文本也在卡片的产物区里，不再重复进气泡。
    */
   workflow?: TrialWorkflowView
+  /**
+   * 入口预处理回传。只挂在网关卡上，画在判定句之前。
+   *
+   * <p>直播与回放都从同一块 preprocess 投影，不再在入口卡片外面另顶一块。
+   */
+  preprocess?: PreprocessPresentation
   /** 形象；入口块走 lookOf(配置名)，与专家同一套兜底 */
   look?: ExpertLookView
   /** 还没有结论、仍在生成 */
@@ -470,7 +476,8 @@ export function buildParticipantFeed(input: ThinkTimelineInput & { blocks: Assis
      * <p>断点续作轮不会走到这里（`expectEntry=false`）：那种轮次本来就没有入口判定。
      */
     if (awaitingEntryIdentity(input, blocks)) {
-      return []
+      // 判定身份还没到，但抽字已经开始：先给入口一张只有预处理的卡，不把识别顶在网关外面
+      return withEntryPreprocess([], blocks, input.entryName, input.lookOf)
     }
     const steps = withoutSchemeShells(
       buildThinkTimeline({
@@ -487,7 +494,7 @@ export function buildParticipantFeed(input: ThinkTimelineInput & { blocks: Assis
       })
     )
     if (!steps.length) {
-      return []
+      return withEntryPreprocess([], blocks, input.entryName, input.lookOf)
     }
     // 「方案块 = 分流空壳」只在它下面真挂子专家时成立；没有子专家说明它自己就是作答方
     const schemeWithChildren = schemesWithChildren(steps)
@@ -509,9 +516,14 @@ export function buildParticipantFeed(input: ThinkTimelineInput & { blocks: Assis
     // 没有判定句也没有思考的入口块不画：只有头像和名字、框里没字的块就是个空壳。
     // 反过来，判定还在跑时它**只有**思考（没有判定句），必须留着，否则入口思考看不见。
     // 工作流占位块同理：本轮已收尾却仍没收到卡片快照（工作流根本没起来），占位也不再留。
-    const withGateway = cards.filter(
+    // 预处理先挂到入口卡上，再决定要不要留这张卡：只有预处理、还没有判定句时也要留
+    const withPreprocess = withEntryPreprocess(cards, blocks, input.entryName, input.lookOf)
+    const withGateway = withPreprocess.filter(
       (card) =>
-        (card.kind !== 'gateway' || card.lines.length > 0 || card.steps.length > 0) &&
+        (card.kind !== 'gateway' ||
+          card.lines.length > 0 ||
+          card.steps.length > 0 ||
+          !!card.preprocess) &&
         (input.streaming || !(card.roleLabel === WORKFLOW_ROLE_LABEL && !card.workflow))
     )
     // 方案是否真分了子专家：只看已经出现的子专家泳道，不从拼接稿标题补人
@@ -544,6 +556,56 @@ export function buildParticipantFeed(input: ThinkTimelineInput & { blocks: Assis
     console.warn('[工作台消息流] 本轮分块投影失败，已回退到逐块渲染', error)
     return []
   }
+}
+
+/**
+ * 把入口预处理挂进网关卡，画在判定句之前。
+ *
+ * <p>已经有网关卡就挂上去，不另起一张。还没有任何参与者时（抽字先于意图），
+ * 先出一张只有预处理的入口卡，名字用入口配置名。旁边已经有专家卡却没有网关时不补空壳，
+ * 避免断点续作被认成又走了一遍入口。
+ *
+ * @param cards     已经投影出的参与者；可以是空
+ * @param blocks    本轮原始块，从中取 preprocess
+ * @param entryName 入口展示名
+ * @param lookOf    入口头像，与正式网关卡同一套
+ * @return 挂好预处理的卡片；没有预处理块时原样返回
+ */
+export function withEntryPreprocess(
+  cards: ParticipantCard[],
+  blocks: AssistantBlock[],
+  entryName?: string,
+  lookOf?: (name: string) => ExpertLookView
+): ParticipantCard[] {
+  const block = (Array.isArray(blocks) ? blocks : []).find((item) => item?.kind === 'preprocess' && item.preprocess)
+  const folded = attachPreprocessToCard(cards, block?.preprocess, 'gateway')
+  if (!folded.shown) {
+    return cards
+  }
+  if (folded.cards !== cards) {
+    return folded.cards
+  }
+  const shown = folded.shown
+  // 旁边已经有别的参与者时不凭空补入口，只在「还没人开始」时用预处理把入口卡支起来
+  if (cards.length) {
+    return cards
+  }
+  const title = (entryName || '').trim() || '智能网关'
+  return [
+    {
+      key: 'entry-preprocess',
+      kind: 'gateway',
+      title,
+      lines: [],
+      steps: [],
+      answer: '',
+      errors: [],
+      files: [],
+      pending: shown.running,
+      preprocess: shown,
+      look: lookOf?.(title)
+    }
+  ]
 }
 
 /**

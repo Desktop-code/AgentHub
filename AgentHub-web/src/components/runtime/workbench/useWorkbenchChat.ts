@@ -59,6 +59,7 @@ import {
   appendToolStart,
   appendWorkflow,
   completeTool,
+  appendPreprocess,
   appendVision,
   assistantTurn,
   formatRelativeTime,
@@ -1169,6 +1170,13 @@ export function useWorkbenchChat(pageActive: Ref<boolean>) {
       onVision: (text) => {
         live.phase = 'vision'
         appendVision(live, text)
+        touchSnapshot()
+      },
+      onPreprocess: (view) => {
+        live.phase = view.status === 'running'
+          ? (view.hint && view.hint.includes('转写') ? 'speech' : 'preprocess')
+          : 'preprocess'
+        appendPreprocess(live, view)
         touchSnapshot()
       },
       onTool: (tool) => {

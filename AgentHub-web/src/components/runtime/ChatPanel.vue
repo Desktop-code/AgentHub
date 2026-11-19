@@ -1,6 +1,6 @@
 <template>
-  <div class="chat" :class="{ 'is-workbench': isWorkbench }">
-    <div ref="scroller" class="messages" @scroll.passive="onScroll">
+  <div class="chat" :class="{ 'is-workbench': isWorkbench, 'is-composer-only': composerOnly }">
+    <div v-if="!composerOnly" ref="scroller" class="messages" @scroll.passive="onScroll">
       <!--
         进行态粘在滚动容器顶，内容变长时仍可见；结束后整条不渲染。
         工作台不再用它当「思考中」占位：进行态只看各参与者自己的思考框 / 内容框（含光标）；
@@ -42,39 +42,12 @@
         <!-- 用户气泡：登录用户头像（或首字兜底）；与 Agent 形象分开 -->
         <template v-if="row.turn.role === 'user'">
           <div class="speak-row is-user">
-            <div class="bubble">
-              <!-- 附件在文字上方；没有文字时只留附件。图片可点开，文件可打开或下载。 -->
-              <div v-if="attachmentItems(row.turn).length" class="bubble-images">
-                <template v-for="(item, index) in attachmentItems(row.turn)" :key="`${row.turn.key}-att-${index}`">
-                  <el-image
-                    v-if="item.kind === 'image'"
-                    class="bubble-image"
-                    :src="resolveUserImageUrl(item.url)"
-                    :preview-src-list="imagePreviewList(row.turn)"
-                    :initial-index="imageIndexOf(row.turn, index)"
-                    fit="contain"
-                    preview-teleported
-                    :alt="`图片 ${imageIndexOf(row.turn, index) + 1}`"
-                  >
-                    <template #error>
-                      <div class="bubble-image-error">图片加载失败</div>
-                    </template>
-                  </el-image>
-                  <div v-else-if="!item.url" class="bubble-file-error">{{ item.name || '文件加载失败' }}</div>
-                  <a
-                    v-else
-                    class="bubble-file"
-                    :href="resolveUserImageUrl(item.url)"
-                    target="_blank"
-                    rel="noopener noreferrer"
-                    :download="item.name || '文件'"
-                  >
-                    <span class="bubble-file-name">{{ item.name || '未命名文件' }}</span>
-                    <span class="bubble-file-size">{{ formatFileSize(item.size ?? -1) }}</span>
-                  </a>
-                </template>
+            <div class="user-stack">
+              <!-- 附件在文字气泡外面。没打字时不画气泡，避免空的紫色框。 -->
+              <UserAttachmentStrip v-if="attachmentItems(row.turn).length" :items="attachmentItems(row.turn)" />
+              <div v-if="row.turn.text" class="bubble">
+                <div class="bubble-text">{{ row.turn.text }}</div>
               </div>
-              <div v-if="row.turn.text" class="bubble-text">{{ row.turn.text }}</div>
             </div>
             <div
               class="msg-avatar is-user"
@@ -348,6 +321,15 @@
                   </div>
                 </div>
                 <div class="wb-actor-main">
+                  <!--
+                    入口预处理收在网关过程里、判定句之前。直播与回放都读卡片上的同一份投影，
+                    不再在网关卡片上方另顶一块。正文横排，默认只露前段。
+                  -->
+                  <PreprocessResultBox
+                    v-if="card.kind === 'gateway' && card.preprocess"
+                    :title="card.preprocess.title"
+                    :items="gatewayPreprocessItems(row.turn, card)"
+                  />
                   <!--
                     有子卡或汇总时，外框就是这一张方案。思考、工具、正文留在框的上半，
                     专家卡和汇总画在框内，不再跟方案并排，也不把专家名单再写一遍当正文。
@@ -670,20 +652,12 @@
 
           <!-- 块列表：key 必须用数据层分配的稳定 id，禁止用数组下标（视觉块是 unshift 到队首的） -->
           <template v-for="(block, index) in row.turn.blocks" :key="blockKey(block, index)">
-            <!-- 图片文字提取结果：本轮素材，排在思考与终答之前，可折叠 -->
-            <div v-if="block.kind === 'vision'" class="vision-block">
-              <button
-                type="button"
-                class="think-toggle"
-                :aria-expanded="isOpen(row.turn, VISION_KEY, false)"
-                :aria-label="isOpen(row.turn, VISION_KEY, false) ? '收起图片文字' : '展开图片文字'"
-                @click.stop.prevent="toggle(row.turn, VISION_KEY, false)"
-              >
-                <span class="section-label">图片文字</span>
-                <span class="chevron" :class="{ open: isOpen(row.turn, VISION_KEY, false) }" aria-hidden="true" />
-              </button>
-              <pre v-show="isOpen(row.turn, VISION_KEY, false)" class="vision-body">{{ block.text }}</pre>
-            </div>
+            <!-- 图片文字提取结果：本轮素材，排在思考与终答之前，可折叠。入口预处理不走这里，收在网关卡内 -->
+            <PreprocessResultBox
+              v-if="block.kind === 'vision' && !isWorkbench"
+              title="图片文字"
+              :items="visionItems(block.text)"
+            />
             <template v-else-if="block.kind === 'assistant' && showLooseAssistant(isWorkbench, participantFeedHasActor(row.turn)) && index === finalAnswerIndex(row.turn.blocks)">
               <!-- 工作台不走这条：正文只出现在参与者卡里。调试皮肤在还没有参与者卡时仍显示原文 -->
               <!-- 终答标题只在这一轮结束后出现。进行中的最后一段先出正文，不提前挂「最终回答」 -->
@@ -719,6 +693,7 @@
               </div>
               <div
                 class="md answer"
+                :class="{ 'is-table-scroll': answerClampOf(block.text) === 'table' }"
                 v-html="markdown(blockSlot(block, index), displayAnswer(block.text), row.turn.status === 'streaming')"
               />
               <span
@@ -764,29 +739,13 @@
       @drop="onComposerDrop"
     >
       <!-- 待发附件：图片缩略图和文件行在同一份列表里，发送前可逐个移除 -->
-      <div v-if="attachments.length" class="thumbs">
-        <div
-          v-for="(item, index) in attachments"
-          :key="item.id"
-          class="thumb"
-          :class="{ 'is-file': item.kind === 'file' }"
-        >
-          <img v-if="item.kind === 'image'" :src="item.dataUrl" :alt="item.name" />
-          <div v-else class="file-chip-body">
-            <span class="file-chip-name">{{ item.name }}</span>
-            <span class="file-chip-size">{{ formatFileSize(item.size) }}</span>
-          </div>
-          <button
-            type="button"
-            class="thumb-remove"
-            :aria-label="`移除 ${item.name}`"
-            :disabled="sending"
-            @click="removeAttachment(index)"
-          >
-            ×
-          </button>
-        </div>
-      </div>
+      <UserAttachmentStrip
+        v-if="attachments.length"
+        removable
+        :disabled="sending"
+        :items="pendingViews"
+        @remove="removeAttachment"
+      />
       <!-- @ 提及片：与正文分离，不进 {query} -->
       <div v-if="isWorkbench && selectedRoute?.agentName" class="mention-chip-row">
         <span class="mention-chip">
@@ -876,7 +835,7 @@
               <el-icon><Close /></el-icon>
             </button>
           </el-tooltip>
-          <el-tooltip v-if="showImageBtn && !isWorkbench" :content="uploadHint" placement="top">
+          <el-tooltip v-if="showImageBtn && (!isWorkbench || entryComposer)" :content="uploadHint" placement="top">
             <button
               type="button"
               class="voice-icon-btn attach-btn"
@@ -904,12 +863,14 @@
           <input
             ref="filePicker"
             type="file"
-            accept="image/png,image/jpeg,image/webp,image/gif,.pdf,.txt,.csv,.xlsx,.xls,.docx,.doc,.pptx,.ppt,.zip"
+            accept="image/png,image/jpeg,image/webp,image/gif,.pdf,.txt,.csv,.xlsx,.xls,.docx,.doc,.pptx,.ppt,.zip,.webm,.wav,.mp3,.m4a,.ogg"
             multiple
             class="file-input"
             @change="onFilesPicked"
           />
-          <!-- 工作台徽标：只有本次 @ 才写「已指定××」；未指定一律「自动匹配专家」，不替代 @ -->
+          <!--
+            对话入口「自动匹配专家」徽标暂不显示。
+            @ 指定线路仍用上方提及片，不靠这行文案。
           <span
             v-if="isWorkbench && gatewayBadge"
             class="gateway-badge"
@@ -917,6 +878,7 @@
           >
             ⚡ {{ gatewayBadge }}
           </span>
+          -->
           <span class="hint">{{ sessionReady ? '' : blockedHint || '请先新建会话或从左侧选择' }}</span>
         </div>
         <el-button
@@ -979,8 +941,9 @@ import {
   isPlanFlow,
   lanesForDebugSkin,
   planStateText,
-  formatFileSize,
+  orderPreprocessItems,
   processLanes,
+  splitPreprocessItems,
   stepStateText,
   turnSections
 } from '@/components/runtime/trialMessages'
@@ -988,11 +951,12 @@ import {
   classifyUserFile,
   clipboardAttachments,
   MAX_FILE_BYTES,
-  MAX_USER_FILES,
-  resolveUserImageUrl,
+  MAX_USER_ATTACHMENTS,
   type OutgoingFile,
   type UserAttachmentView
 } from '@/components/runtime/userMessageImages'
+import UserAttachmentStrip from '@/components/runtime/UserAttachmentStrip.vue'
+import PreprocessResultBox from '@/components/runtime/PreprocessResultBox.vue'
 import type { TurnSections } from '@/components/runtime/trialMessages'
 import ProcessTimeline from '@/components/runtime/ProcessTimeline.vue'
 import { buildParticipantFeed, feedWaitsForEntry, isFinishedStatusShell, showLooseAssistant, visitParticipantCards } from '@/components/runtime/workbench/workbenchParticipantFeed'
@@ -1015,6 +979,8 @@ import {
   foldOpenOf,
   formatThoughtElapsed,
   isUnlimitedAnswerBox,
+  answerClampOf,
+  tableFoldedByDefault,
   nextFoldValue
 } from '@/components/runtime/workbench/workbenchContentBox'
 import { liveStepHintOf } from '@/components/runtime/workbench/workbenchStepHint'
@@ -1116,6 +1082,16 @@ const props = defineProps<{
    * 缺省时投影层才退回内置兜底，正常页面一定传。
    */
   entryName?: string
+  /**
+   * 入口 Router 输入条（首页综合对话 / MA 运行入口）。
+   * 为 true 时始终展示附件和麦克风；录音作为本轮附件发出，识别发生在预处理步骤。
+   * 管理端已选专家对话不要开这个开关。
+   */
+  entryComposer?: boolean
+  /**
+   * 只保留输入条。MA 运行页中栏卡片自己画，复用这一份待发列表，不另起第三套。
+   */
+  composerOnly?: boolean
   /** 工作台空状态快捷提问；点卡片即填入并发送 */
   quickPrompts?: string[]
   /** 工作台输入区网关徽标文案，如「自动匹配专家」 */
@@ -1446,15 +1422,10 @@ interface Attachment {
 /** 单张图片的字节上限。与后端 VisionOcrTexts.MAX_IMAGE_CHARS 的量级对齐（约 6MB） */
 const MAX_IMAGE_BYTES = 6 * 1024 * 1024
 
-/** 单轮图片张数上限。与后端 VisionOcrTexts.MAX_IMAGES 一致，前后端不要各写一个数 */
-const MAX_IMAGES = 4
-
 /** 非计划流程里「思考过程」的折叠键后缀。 */
 const THINK_KEY = 'think'
 /** 计划阶段思考的折叠键后缀。 */
 const PHASE_KEY = 'plan-phase'
-/** 图片文字提取结果的折叠键后缀。默认收起，不抢终答的位置。 */
-const VISION_KEY = 'vision'
 
 /**
  * 点批准：把该轮的 planId 交给外层。外层负责调接口并在成功后刷新时间线。
@@ -1521,8 +1492,16 @@ let attachmentSeq = 0
 /** 语音转写进行中：按钮转圈，避免用户连点重复上传 */
 const transcribing = ref(false)
 
-/** 听写是否可用：必须已绑定 ASR 模型且落到具体 Agent。未绑定时不做任何浏览器识别回退 */
-const canRecord = computed(() => props.asrEnabled === true && !!props.agentId && !props.sending && !transcribing.value)
+/** 听写是否可用。入口允许未绑 ASR 也录音，失败写在预处理步骤上。 */
+const canRecord = computed(() => {
+  if (props.sending || transcribing.value) {
+    return false
+  }
+  if (props.entryComposer === true) {
+    return true
+  }
+  return props.asrEnabled === true && !!props.agentId
+})
 
 const {
   recording: voiceRecording,
@@ -1539,15 +1518,30 @@ const {
   onError: (message) => ElMessage.warning(message)
 })
 
-/** 工作台：未落地的语音入口不摆；录音中仍要显示以便结束/取消 */
+/** 入口始终摆麦克风；管理端工作台未绑 ASR 时仍隐藏，避免伪装可用 */
 const showMicBtn = computed(
-  () => !isWorkbench.value || props.asrEnabled === true || voiceRecording.value
+  () =>
+    props.entryComposer === true ||
+    !isWorkbench.value ||
+    props.asrEnabled === true ||
+    voiceRecording.value
 )
-/** 工作台：未落地的图片入口不摆，避免伪装成可用 */
-const showImageBtn = computed(() => !isWorkbench.value || props.visionEnabled === true)
+/** 入口始终摆附件；管理端工作台未绑视觉时仍隐藏图片入口 */
+const showImageBtn = computed(
+  () => props.entryComposer === true || !isWorkbench.value || props.visionEnabled === true
+)
 
 /** 「说话」按钮的 Hover 说明。图标按钮没有可见文字，状态与原因全部靠它交代 */
 const recordHint = computed(() => {
+  if (props.entryComposer === true) {
+    if (voiceRecording.value) {
+      return `录音中 ${voiceSeconds.value}s，点击结束并作为附件发送`
+    }
+    if (props.asrEnabled !== true) {
+      return '入口未绑定语音识别模型时仍可录音发送，过程里会说明失败原因'
+    }
+    return '点击开始录音，再点一次结束；录音作为本轮附件发出，过程里可见转写'
+  }
   if (!props.agentId) {
     return '当前会话没有 Agent，无法使用语音输入'
   }
@@ -1586,6 +1580,11 @@ async function toggleRecording() {
  * @param audio 整段录音
  */
 async function handleRecorded(audio: Blob) {
+  if (props.entryComposer === true) {
+    const file = new File([audio], recordingFileName(audio), { type: audio.type || 'audio/webm' })
+    await addImageFiles([file])
+    return
+  }
   const agentId = props.agentId
   if (!agentId) {
     return
@@ -1882,6 +1881,7 @@ function hasParticipantEvidence(blocks: AssistantBlock[]): boolean {
   return blocks.some(
     (block) =>
       block?.kind === 'route' ||
+      block?.kind === 'preprocess' ||
       block?.kind === 'reasoning' ||
       block?.kind === 'tool' ||
       block?.kind === 'assistant' ||
@@ -2867,7 +2867,8 @@ function measureMidBoxOverflow() {
     if (turn.role !== 'assistant') {
       continue
     }
-    for (const card of participantFeedOf(turn)) {
+    // 方案框里的子卡不在根列表上。不顺着框往下量，中间过程就没有展开箭头。
+    for (const card of visitParticipantCards(participantFeedOf(turn))) {
       const key = `${turn.key}:${card.key}`
       const el = answerTextEls.get(key)
       // 最终结果不限高；没有正文节点也不给展开按钮
@@ -3052,7 +3053,8 @@ function actorBoxMidProcess(turn: ChatTurn, card: ParticipantCard): boolean {
 /**
  * 这段正文是否按四行截断。
  *
- * <p>入口、专家、分流停在四行里滚。综答（方案汇总）不截断，流式时正文往下长。
+ * <p>入口、专家、分流的普通正文停在四行里滚。方案框里的中间过程即使带表也先收四行，
+ * 点开后再整表放进结果框。本轮最后一份（投影 isFinal）和综答里的表不收四行。
  * 用户点了展开之后，限高类名去掉，这里对仍限高的块返回 true，好让收回箭头留在页面上。
  *
  * @param turn 本轮助手消息（签名与调用处对齐，限高不看整轮状态）
@@ -3064,8 +3066,12 @@ function bodyTextLimited(turn: ChatTurn, card: ParticipantCard): boolean {
   if (!text.trim()) {
     return false
   }
-  // 综答随流式全文往下长。入口、专家、分流仍停在四行里滚。
+  // 综答随流式全文往下长。入口、专家、分流的普通正文仍停在四行里滚。
   if (isUnlimitedAnswerBox(card)) {
+    return false
+  }
+  // 有表时只放开本轮最后一份。中间过程仍限四行，避免方案框里的子结果整表铺开。
+  if (answerClampOf(text) === 'table' && !tableFoldedByDefault(card, turn.status === 'streaming')) {
     return false
   }
   return true
@@ -3081,8 +3087,12 @@ function bodyTextLimited(turn: ChatTurn, card: ParticipantCard): boolean {
 function bodyTextClass(turn: ChatTurn, card: ParticipantCard): Record<string, boolean> {
   const key = `${turn.key}:${card.key}`
   const expanded = midBoxExpanded[key] === true
+  const text = card.workflow ? wfAnswerOf(card) : (card.answer || '')
+  const limited = bodyTextLimited(turn, card) && !expanded
+  // 中间过程的表先走四行；展开后，以及本轮最后一份，才进框内滚动，两套类名不要叠在一起。
   return {
-    'is-clamped': bodyTextLimited(turn, card) && !expanded
+    'is-clamped': limited,
+    'is-table-scroll': answerClampOf(text) === 'table' && !limited
   }
 }
 
@@ -3387,19 +3397,26 @@ watch(
   }
 )
 
-/** 待发列表里的图片张数、文件个数分开计，互不占额度 */
-const imageCount = computed(() => attachments.value.filter((item) => item.kind === 'image').length)
-const fileCount = computed(() => attachments.value.filter((item) => item.kind === 'file').length)
-
-/** 图标按钮：发送中不可再选；图片和文件都到上限时也不可再选。没有视觉模型仍可加文件。 */
-const canUploadNow = computed(
-  () => !props.sending && (imageCount.value < MAX_IMAGES || fileCount.value < MAX_USER_FILES)
+/** 待发附件，图和文件加在一起，和已发送用同一条附件条 */
+const pendingViews = computed<UserAttachmentView[]>(() =>
+  attachments.value.map((item) => ({
+    kind: item.kind,
+    url: item.dataUrl,
+    name: item.name,
+    size: item.size
+  }))
 )
+
+/** 图标按钮：发送中不可再选；到 9 个上限时也不可再选。没有视觉模型仍可加文件。 */
+const canUploadNow = computed(() => !props.sending && attachments.value.length < MAX_USER_ATTACHMENTS)
 
 /** 按钮旁的说明。没有视觉模型时说清楚图片不会加入，文件仍然可以。 */
 const uploadHint = computed(() => {
-  if (imageCount.value >= MAX_IMAGES && fileCount.value >= MAX_USER_FILES) {
-    return `一次最多 ${MAX_IMAGES} 张图片、${MAX_USER_FILES} 个文件`
+  if (attachments.value.length >= MAX_USER_ATTACHMENTS) {
+    return `一次最多 ${MAX_USER_ATTACHMENTS} 个附件`
+  }
+  if (props.entryComposer === true) {
+    return '可添加图片、文档或录音，单个文件不超过 12MB'
   }
   if (props.visionEnabled !== true) {
     return '未配置视觉模型，图片不会加入；文档仍可添加'
@@ -3670,6 +3687,12 @@ function phaseLabel(phase?: string) {
   if (phase === 'planning') {
     return '任务规划中'
   }
+  if (phase === 'preprocess') {
+    return '正在识别附件'
+  }
+  if (phase === 'speech') {
+    return '正在转写语音'
+  }
   if (phase === 'vision') {
     return '识别图片文字'
   }
@@ -3686,6 +3709,48 @@ function phaseLabel(phase?: string) {
     return '失败'
   }
   return ''
+}
+
+/**
+ * 网关卡里的识别条目。按这一轮用户附件的发送顺序排，和回放同一份拆分。
+ *
+ * @param turn 助手轮
+ * @param card 入口卡
+ * @return 识别框条目；没有预处理时为空
+ */
+function gatewayPreprocessItems(turn: ChatTurn, card: ParticipantCard) {
+  const shown = card.preprocess
+  if (!shown) {
+    return []
+  }
+  return orderPreprocessItems(shown.items || [], attachmentsBefore(turn))
+}
+
+/**
+ * 管理端图片文字预览。按图序拆开，默认由识别框折叠。入口页不走这里。
+ *
+ * @param text 视觉事件正文
+ * @return 识别框条目
+ */
+function visionItems(text?: string) {
+  return splitPreprocessItems(text || '')
+}
+
+/**
+ * 这条助手轮前面最近的用户附件。识别框用它排顺序，不另存一份。
+ *
+ * @param turn 助手轮
+ * @return 用户附件
+ */
+function attachmentsBefore(turn: ChatTurn): UserAttachmentView[] {
+  const list = rows.value
+  const index = list.findIndex((row) => row.turn.key === turn.key)
+  for (let i = index - 1; i >= 0; i -= 1) {
+    if (list[i].turn.role === 'user') {
+      return attachmentItems(list[i].turn)
+    }
+  }
+  return []
 }
 
 /**
@@ -3956,7 +4021,9 @@ function submit() {
   const content = text.value.trim()
   // 未绑定视觉模型时图片不提交：后端会直接拒。文件不走视觉，没有视觉模型也可以发。
   const sendingItems = attachments.value.filter(
-    (item) => item.kind === 'file' || (item.kind === 'image' && props.visionEnabled === true)
+    (item) =>
+      item.kind === 'file' ||
+      (item.kind === 'image' && (props.visionEnabled === true || props.entryComposer === true))
   )
   const images = sendingItems.filter((item) => item.kind === 'image').map((item) => item.dataUrl)
   const files: OutgoingFile[] = sendingItems
@@ -3988,8 +4055,7 @@ async function addImageFiles(files: File[]) {
     return
   }
   let warnedImage = false
-  let droppedImages = 0
-  let droppedFiles = 0
+  let droppedByCap = 0
   for (const file of files) {
     const kind = classifyUserFile(file)
     const name = file.name || '未命名文件'
@@ -4002,19 +4068,19 @@ async function addImageFiles(files: File[]) {
       continue
     }
     if (kind === 'unsupported') {
-      ElMessage.warning(`${name} 不支持。仅支持 pdf、txt、csv、xlsx、xls、docx、doc、pptx、ppt、zip`)
+      ElMessage.warning(`${name} 不支持。仅支持 pdf、txt、csv、xlsx、xls、docx、doc、pptx、ppt、zip 以及录音`)
       continue
     }
     if (kind === 'image') {
-      if (props.visionEnabled !== true) {
+      if (props.visionEnabled !== true && props.entryComposer !== true) {
         if (!warnedImage) {
           ElMessage.warning('未配置视觉模型，图片未加入')
           warnedImage = true
         }
         continue
       }
-      if (imageCount.value >= MAX_IMAGES) {
-        droppedImages += 1
+      if (attachments.value.length >= MAX_USER_ATTACHMENTS) {
+        droppedByCap += 1
         continue
       }
       if (!file.type.startsWith('image/') && !['png', 'jpg', 'jpeg', 'webp', 'gif'].includes(extensionOfName(name))) {
@@ -4036,8 +4102,8 @@ async function addImageFiles(files: File[]) {
       }
       continue
     }
-    if (fileCount.value >= MAX_USER_FILES) {
-      droppedFiles += 1
+    if (attachments.value.length >= MAX_USER_ATTACHMENTS) {
+      droppedByCap += 1
       continue
     }
     if (file.size > MAX_FILE_BYTES) {
@@ -4055,11 +4121,8 @@ async function addImageFiles(files: File[]) {
       ElMessage.warning(`${name} 读取失败`)
     }
   }
-  if (droppedImages > 0) {
-    ElMessage.info(`已达 ${MAX_IMAGES} 张图片上限，其余图片未加入`)
-  }
-  if (droppedFiles > 0) {
-    ElMessage.info(`已达 ${MAX_USER_FILES} 个文件上限，其余文件未加入`)
+  if (droppedByCap > 0) {
+    ElMessage.info(`一次最多 ${MAX_USER_ATTACHMENTS} 个附件，其余未加入`)
   }
 }
 
@@ -4217,13 +4280,7 @@ function filesFromDrop(data: DataTransfer | null): { files: File[]; directories:
 }
 
 /**
- * 预览大图用的地址列表，与气泡里的顺序一致。
- *
- * @param turn 用户轮
- * @return 可直接作为 img src 的地址
- */
-/**
- * 气泡里按添加顺序画的附件。旧的纯图片消息只有 images，这里补成同一份列表。
+ * 按添加顺序画的附件。旧的纯图片消息只有 images，这里补成同一份列表。
  *
  * @param turn 用户轮
  * @return 图和文件
@@ -4233,36 +4290,6 @@ function attachmentItems(turn: ChatTurn): UserAttachmentView[] {
     return turn.attachments
   }
   return (turn.images || []).map((url) => ({ kind: 'image' as const, url }))
-}
-
-/**
- * 预览大图用的地址列表，只含图片，顺序与气泡里的图片一致。
- *
- * @param turn 用户轮
- * @return 可直接作为 img src 的地址
- */
-function imagePreviewList(turn: ChatTurn): string[] {
-  return attachmentItems(turn)
-    .filter((item) => item.kind === 'image')
-    .map((item) => resolveUserImageUrl(item.url))
-}
-
-/**
- * el-image 的预览下标只数图片，不能把文件行算进去。
- *
- * @param turn  用户轮
- * @param index 在混排列表中的位置
- * @return 这张图在图片列表中的下标
- */
-function imageIndexOf(turn: ChatTurn, index: number): number {
-  const items = attachmentItems(turn)
-  let cursor = 0
-  for (let i = 0; i < index; i += 1) {
-    if (items[i]?.kind === 'image') {
-      cursor += 1
-    }
-  }
-  return cursor
 }
 
 /** 点附件：走原生文件选择器，图片和允许的文档同一次选出，不另开上传接口 */
@@ -4326,6 +4353,19 @@ function removeAttachment(index: number) {
 /* 工作台：消息流与输入框同一中轴（大屏绝对居中） */
 .chat.is-workbench {
   align-items: center;
+}
+
+/* MA 运行页只复用输入条：不占满中栏高度，待发列表仍是这一份 */
+.chat.is-composer-only {
+  flex: none;
+  height: auto;
+  align-items: stretch;
+}
+
+.chat.is-composer-only .composer,
+.chat.is-workbench.is-composer-only .composer {
+  max-width: none;
+  margin-top: 0;
 }
 
 .messages {
@@ -4411,6 +4451,15 @@ function removeAttachment(index: number) {
   justify-content: flex-end;
 }
 
+/* 附件在上、文字气泡在下。没有文字时只留附件条，不套空气泡 */
+.user-stack {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: 8px;
+  max-width: 78%;
+}
+
 .speak-row.is-assistant {
   justify-content: flex-start;
 }
@@ -4461,12 +4510,16 @@ function removeAttachment(index: number) {
 }
 
 .bubble {
-  max-width: 78%;
+  /* 宽度跟文字走，上限是外层 user-stack 的 78%。再套一层百分比会把「差旅」收成一个字宽。 */
+  width: fit-content;
+  max-width: 100%;
   padding: 10px 12px;
   border-radius: 12px;
   background: #efeefe;
   line-height: 1.55;
   white-space: pre-wrap;
+  word-break: normal;
+  overflow-wrap: break-word;
 }
 
 .bubble-images {
@@ -4523,7 +4576,8 @@ function removeAttachment(index: number) {
   padding: 8px 10px;
   border-radius: 8px;
   background: #fff;
-  color: inherit;
+  /* 用户气泡是紫底白字；附件名必须用深色，否则只剩右侧文件大小 */
+  color: #1f2937;
   text-decoration: none;
 }
 
@@ -4607,6 +4661,18 @@ function removeAttachment(index: number) {
   max-height: calc(4 * 1.6em);
   overflow-x: hidden;
   overflow-y: auto;
+  overscroll-behavior: contain;
+  scrollbar-width: thin;
+}
+
+/*
+ * 含表格且已经展开（或本来就是本轮最后一份）的结果：不套四行。
+ * 表头和每一行都在这块里；超过约一屏时只在结果框内滚动。
+ * 中间过程默认仍是上面的四行，点开后才加上这个类。
+ */
+.md.answer.is-table-scroll {
+  max-height: 70vh;
+  overflow: auto;
   overscroll-behavior: contain;
   scrollbar-width: thin;
 }
@@ -6228,6 +6294,39 @@ function removeAttachment(index: number) {
 /* 图片文字：与「思考过程」同构，默认收起，正文用等宽便于比对识别结果 */
 .vision-block {
   margin-top: 8px;
+}
+
+/* 入口预处理：在网关过程内部、判定句之前。横排段落，默认只露前段 */
+.wb-preprocess {
+  margin: 0 0 8px;
+}
+
+.wb-preprocess-title {
+  margin: 0;
+  color: var(--ah-text, #1f2937);
+  font-size: 13px;
+  font-weight: 600;
+  line-height: 1.5;
+}
+
+.wb-preprocess-body {
+  margin: 6px 0 0;
+  color: var(--ah-text-secondary, #4b5563);
+  font-size: 13px;
+  line-height: 1.6;
+  white-space: pre-wrap;
+  word-break: break-word;
+  writing-mode: horizontal-tb;
+}
+
+.wb-preprocess-more {
+  margin-top: 4px;
+  padding: 0;
+  border: none;
+  background: transparent;
+  color: var(--ah-primary, #635bff);
+  font-size: 12px;
+  cursor: pointer;
 }
 
 .vision-body {

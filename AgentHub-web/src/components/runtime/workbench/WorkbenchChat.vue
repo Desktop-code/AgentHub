@@ -121,6 +121,7 @@
           :can-approve="canSend"
           :approving="approving"
           :page-active="pageActive"
+          entry-composer
           :vision-enabled="false"
           :asr-enabled="false"
           :tts-enabled="false"

@@ -13,7 +13,12 @@
 import type { ObsSpan } from '@/types/obs'
 import type { AssistantBlock, ChatTurn } from '@/types/runtime'
 import type { TimelineCardStatus } from '@/components/runtime/routerTimeline'
-import { processLanes } from '@/components/runtime/trialMessages'
+import {
+  attachPreprocessToCard,
+  orderPreprocessItems,
+  processLanes,
+  type PreprocessPresentation
+} from '@/components/runtime/trialMessages'
 import { looksLikeRouteMachineJson } from '@/components/runtime/workbench/workbenchMessageMeta'
 import {
   LANE_TEMPLATE_COMPETE,
@@ -47,7 +52,7 @@ export interface MaTurnTrace {
 }
 
 /** 中栏卡片类型：路由（含汇总）/ 业务子 Agent；正文统一进下方「模型回答」 */
-export type MaCardKind = 'router' | 'agent'
+export type MaCardKind = 'router' | 'agent' | 'preprocess'
 
 /**
  * 中栏一张协作卡。
@@ -69,6 +74,11 @@ export interface MaRunCard {
   durationMs: number
   /** 左侧 4px 色条颜色；与右栏图例、日志节点颜色一致 */
   color: string
+  /**
+   * 入口预处理。只挂在路由卡上，画在命中/派发摘要之前。
+   * 与首页网关卡读同一份 presentPreprocess，不另起一张识别卡。
+   */
+  preprocess?: PreprocessPresentation
 }
 
 /** 一轮运行：一条用户提问 + 其后的协作卡 */
@@ -138,6 +148,8 @@ export interface MaDetailLine {
 
 /** Router 固定紫色，与右栏 Legend / 时间线保持同一语义 */
 export const MA_ROUTER_COLOR = '#635BFF'
+/** 预处理步骤色：与路由紫区分，避免被认成业务专家 */
+export const MA_PREPROCESS_COLOR = '#8B7CFF'
 /** LLM 节点固定橙色（右栏 Legend） */
 export const MA_LLM_COLOR = '#F79009'
 /** Tool 节点固定绿色（右栏 Legend） */
@@ -328,6 +340,8 @@ function answerOf(turn?: ChatTurn): string {  if (!turn) {
 /** 阶段码转中文；只给「还没有卡片」的进行中轮次占位 */
 function phaseText(phase?: string): string {
   if (phase === 'planning') return '任务规划中'
+  if (phase === 'preprocess') return '正在识别附件'
+  if (phase === 'speech') return '正在转写语音'
   if (phase === 'vision') return '识别图片文字'
   if (phase === 'reasoning') return '思考中'
   if (phase === 'tool') return '工具执行中'
@@ -637,7 +651,46 @@ function fallbackRouterSummary(names: string[], blocks: AssistantBlock[]): strin
   return `命中：${scope}`
 }
 
-/** 没有 obs 数据时：用落库 / 流式块兜底，仍不展示思维链与工具正文 */
+/**
+ * 把入口预处理挂进路由卡，画在命中摘要之前。
+ *
+ * <p>不另起一张识别卡。还没有路由卡时补一张只含预处理的路由卡，
+ * 抽字先于意图时也落在入口过程里。没有预处理块则原样返回。
+ *
+ * @param group 本轮
+ * @param cards 已归纳的协作卡
+ * @return 挂好预处理的卡片
+ */
+function withPreprocessCard(group: MaRunGroup, cards: MaRunCard[]): MaRunCard[] {
+  const block = (group.assistant?.blocks || []).find((item) => item.kind === 'preprocess')
+  const folded = attachPreprocessToCard(cards, block?.preprocess, 'router')
+  if (!folded.shown) {
+    return cards
+  }
+  // 和首页同一套拆分：按本轮用户附件的发送顺序排进路由卡
+  const shown = {
+    ...folded.shown,
+    items: orderPreprocessItems(folded.shown.items || [], group.userTurn?.attachments || [])
+  }
+  if (folded.cards !== cards) {
+    return folded.cards.map((card) => (card.preprocess ? { ...card, preprocess: shown } : card))
+  }
+  const status: TimelineCardStatus = shown.failed ? 'error' : shown.running ? 'running' : 'success'
+  return [
+    {
+      key: `${group.key}:entry`,
+      kind: 'router',
+      title: '路由',
+      status,
+      summary: '',
+      durationMs: 0,
+      color: MA_ROUTER_COLOR,
+      preprocess: shown
+    },
+    ...cards
+  ]
+}
+
 function cardsFromBlocks(group: MaRunGroup, now: number): MaRunCard[] {
   const turn = group.assistant
   if (!turn) {
@@ -885,7 +938,7 @@ export function buildMaRunGroups(turns: ChatTurn[], traces: MaTurnTrace[]): MaRu
       current = {
         key: `user-${turn.key}`,
         index: groups.length,
-        question: (turn.text || '').trim() || '（未填写问题）',
+        question: (turn.text || '').trim(),
         userTurn: turn,
         cards: [],
         status: 'done',
@@ -923,6 +976,8 @@ export function buildMaRunGroups(turns: ChatTurn[], traces: MaTurnTrace[]): MaRu
     if (!group.cards.length) {
       group.cards = cardsFromBlocks(group, now)
     }
+    // 预处理没有 obs span：挂进路由卡、位于命中摘要之前，不另起一张识别卡
+    group.cards = withPreprocessCard(group, group.cards)
     group.status = groupStatus(group)
     group.durationMs = groupDuration(group, now)
     // 颜色以卡片为准：右栏图例与日志都读这一份，左右两栏不会出现同角色不同色

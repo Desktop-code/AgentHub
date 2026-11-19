@@ -197,6 +197,7 @@ import {
   appendFile,
   appendRoute,
   appendText,
+  appendPreprocess,
   appendTool,
   appendVision,
   assistantTurn,
@@ -2048,6 +2049,13 @@ async function send(
         // 识别结果是本轮素材：紧跟用户气泡出现，先于任何思考与终答
         live.phase = 'vision'
         appendVision(live, text)
+        touchSnapshot()
+      },
+      onPreprocess: (view) => {
+        live.phase = view.status === 'running'
+          ? (view.hint && view.hint.includes('转写') ? 'speech' : 'preprocess')
+          : 'preprocess'
+        appendPreprocess(live, view)
         touchSnapshot()
       },
       onTool: (tool) => {

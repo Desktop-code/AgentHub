@@ -14,11 +14,37 @@ const FILE_PREFIX = 'ahfile:'
 /** 单文件解码后上限，对齐 multipart 12MB */
 export const MAX_FILE_BYTES = 12 * 1024 * 1024
 
-/** 单轮非图片文件个数，与后端 UserMessageFiles.MAX_FILES 一致 */
-export const MAX_USER_FILES = 4
+/**
+ * 一轮附件总数，与后端 UserMessageFiles.MAX_ATTACHMENTS 一致。
+ * 图片和文件加在一起算，待发、拖入、粘贴、发送都用这一数。
+ */
+export const MAX_USER_ATTACHMENTS = 9
 
-/** 允许的文档扩展名。可执行文件不在这里。 */
-const DOC_EXT = new Set(['pdf', 'txt', 'csv', 'xlsx', 'xls', 'docx', 'doc', 'pptx', 'ppt', 'zip'])
+/** 已发送和待发默认直接露出的个数，其余折叠 */
+export const ATTACHMENT_PREVIEW_COUNT = 3
+
+/** 单轮非图片文件个数。与附件总数同一上限，合计另卡在 MAX_USER_ATTACHMENTS */
+export const MAX_USER_FILES = MAX_USER_ATTACHMENTS
+
+/** 允许的文档扩展名。可执行文件不在这里。录音也走文件通道，入口预处理再转写。 */
+const DOC_EXT = new Set([
+  'pdf',
+  'txt',
+  'csv',
+  'xlsx',
+  'xls',
+  'docx',
+  'doc',
+  'pptx',
+  'ppt',
+  'zip',
+  'webm',
+  'wav',
+  'mp3',
+  'm4a',
+  'ogg',
+  'opus'
+])
 
 /** 明确拒绝的可执行扩展名 */
 const BLOCKED_EXT = new Set(['exe', 'msi', 'bat', 'cmd', 'ps1', 'dll'])
@@ -255,19 +281,22 @@ function imagesOf(summary?: string | null): string[] {
     return []
   }
   const count = Number(raw.slice(PREFIX.length, countColon))
-  if (!Number.isInteger(count) || count < 1 || count > 4) {
+  if (!Number.isInteger(count) || count < 1 || count > MAX_USER_ATTACHMENTS) {
     return []
   }
-  const parts = raw.slice(countColon + 1).split('|')
-  if (parts.length !== count) {
+  const unpacked = unpackManifest(raw.slice(countColon + 1))
+  if (unpacked.parts.length !== count) {
     return []
   }
-  for (const part of parts) {
-    if (!part.startsWith('/uploads/trial-images/') && !/^https?:\/\//i.test(part)) {
+  const urls: string[] = []
+  for (const part of unpacked.parts) {
+    const url = expandStored(part, unpacked.session, '/uploads/trial-images/')
+    if (!url.startsWith('/uploads/trial-images/') && !/^https?:\/\//i.test(url)) {
       return []
     }
+    urls.push(url)
   }
-  return parts
+  return urls
 }
 
 /**
@@ -282,16 +311,16 @@ function attachmentsOf(summary: string): UserAttachmentView[] {
     return []
   }
   const count = Number(summary.slice(FILE_PREFIX.length, countColon))
-  if (!Number.isInteger(count) || count < 1 || count > 8) {
+  if (!Number.isInteger(count) || count < 1 || count > MAX_USER_ATTACHMENTS) {
     return []
   }
-  const parts = summary.slice(countColon + 1).split('|')
-  if (parts.length !== count) {
+  const unpacked = unpackManifest(summary.slice(countColon + 1))
+  if (unpacked.parts.length !== count) {
     return []
   }
   const items: UserAttachmentView[] = []
-  for (const part of parts) {
-    const item = oneAttachment(part)
+  for (const part of unpacked.parts) {
+    const item = oneAttachment(part, unpacked.session)
     if (!item) {
       return []
     }
@@ -301,12 +330,65 @@ function attachmentsOf(summary: string): UserAttachmentView[] {
 }
 
 /**
+ * 默认露出前 3 个。展开后全部可见。待发和已发送共用这一刀，不按页面各写。
+ *
+ * @param items    附件
+ * @param expanded 是否展开其余
+ * @return shown 当前要画的；rest 是被折叠的个数
+ */
+export function previewAttachments<T>(items: T[], expanded: boolean): { shown: T[]; rest: number } {
+  const list = Array.isArray(items) ? items : []
+  if (expanded || list.length <= ATTACHMENT_PREVIEW_COUNT) {
+    return { shown: list, rest: 0 }
+  }
+  return {
+    shown: list.slice(0, ATTACHMENT_PREVIEW_COUNT),
+    rest: list.length - ATTACHMENT_PREVIEW_COUNT
+  }
+}
+
+/**
+ * 新清单在条数后多写一次会话号，旧清单直接是条目。
+ *
+ * @param rest 条数冒号后面的内容
+ * @return 会话号和条目
+ */
+function unpackManifest(rest: string): { session: string; parts: string[] } {
+  const compact = /^(\d+):([\s\S]*)$/.exec(rest)
+  if (compact) {
+    return { session: compact[1], parts: compact[2] ? compact[2].split('|') : [] }
+  }
+  return { session: '', parts: rest ? rest.split('|') : [] }
+}
+
+/**
+ * 短文件名配会话号拼回地址。完整地址原样返回。
+ *
+ * @param location 短名或完整地址
+ * @param session  会话号，旧清单为空
+ * @param prefix   目录前缀
+ * @return 可打开的地址
+ */
+function expandStored(location: string, session: string, prefix: string): string {
+  if (!location) {
+    return ''
+  }
+  if (location.startsWith('/') || /^https?:\/\//i.test(location)) {
+    return location
+  }
+  if (!session || location.includes('/')) {
+    return location
+  }
+  return `${prefix}${session}/${location}`
+}
+
+/**
  * @param part 一条 i,地址 或 f,名字,字节,地址
  * @return 认不出时 null
  */
-function oneAttachment(part: string): UserAttachmentView | null {
+function oneAttachment(part: string, session = ''): UserAttachmentView | null {
   if (part.startsWith('i,')) {
-    const url = part.slice(2)
+    const url = expandStored(part.slice(2), session, '/uploads/trial-images/')
     if (!url.startsWith('/uploads/trial-images/') && !/^https?:\/\//i.test(url)) {
       return null
     }
@@ -320,7 +402,7 @@ function oneAttachment(part: string): UserAttachmentView | null {
     return null
   }
   const size = Number(fields[2])
-  const url = fields[3]
+  const url = expandStored(fields[3], session, '/uploads/trial-files/')
   const name = unescapeName(fields[1])
   if (!name || !Number.isFinite(size) || size < 0) {
     return null
