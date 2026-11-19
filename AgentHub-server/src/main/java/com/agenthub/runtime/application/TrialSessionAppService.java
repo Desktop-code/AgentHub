@@ -350,16 +350,22 @@ public class TrialSessionAppService {
     }
 
     /**
-     * 同步试跑进行中不能取消模型请求，只拒绝并提示等待。
+     * 这一轮还在执行时，走中断：停掉模型和工具，会话保持可继续发送。
+     * 没在执行的 RUNNING 会话仍按原取消入口收成 CANCELLED。
      *
      * @param id 会话主键
-     * @return 取消后的会话
+     * @return 中断或取消后的会话
      */
     @Transactional
     public SessionResp cancel(Long id) {
         RunSession session = access.require(id);
         if (flight.running(id)) {
-            // 含「根停在等待子计划批准」：本轮请求线程仍活着，按根取消纪律不许取消，等用户批准/拒绝
+            // 含「根停在等待子计划批准」：请求线程还在，但没有登记成可中断的模型/工具循环时仍拒绝
+            if (react.interrupt(id)) {
+                operLogWriter.write("runtime", "cancel", "agent_run_session", String.valueOf(id),
+                        "中断运行 " + id);
+                return toResp(sessions.findById(id).orElseThrow());
+            }
             throw new BizException(ErrorCode.BAD_REQUEST, "本轮正在执行，请等待结束后再取消");
         }
         if (!RunStatus.RUNNING.name().equals(session.getStatus())) {

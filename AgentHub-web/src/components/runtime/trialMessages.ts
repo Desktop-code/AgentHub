@@ -13,6 +13,7 @@ import type {
   TrialWorkflowNodeView,
   TrialWorkflowView
 } from '@/types/runtime'
+import { readUserMessage } from './userMessageImages.ts'
 import { renderSimpleMarkdown } from '../../utils/simpleMarkdown.ts'
 import { nextBlockId } from './trialTimeline.ts'
 import {
@@ -33,11 +34,12 @@ export function turnsFromEvents(events: TrialEvent[]): ChatTurn[] {
   let active: ReplaySpeaker | undefined
   for (const item of ordered) {
     if (item.eventType === 'user') {
-      const text = displayText(item)
+      // 附图在摘要清单里，正文仍是原话。只发图时正文为空，气泡仍要留下。
+      const message = readUserMessage(item.contentText, item.summary)
       assistant = undefined
       active = undefined
-      if (text) {
-        turns.push(userTurn(item.id, text))
+      if (message.text || message.images.length || message.attachments.length) {
+        turns.push(userTurn(item.id, message.text, message.images, message.attachments))
       }
       continue
     }
@@ -312,6 +314,23 @@ export function assistantTurn(key: string, status: ChatTurn['status']): ChatTurn
     status,
     startTime: Date.now()
   }
+}
+
+/**
+ * 记下这一轮的结束说明。同一句不重复插。
+ *
+ * @param turn 助手轮
+ * @param text 给人看的结束说明，例如「已中断」
+ */
+export function appendError(turn: ChatTurn, text: string) {
+  const message = (text || '').trim()
+  if (!message) {
+    return
+  }
+  if (turn.blocks.some((block) => block.kind === 'error' && block.text === message)) {
+    return
+  }
+  turn.blocks.push({ id: nextBlockId(turn), kind: 'error', text: message })
 }
 
 /** 连续的思考或回答拼进同一块，避免每个 token 一块。 */
@@ -946,6 +965,52 @@ export function processLanes(blocks: AssistantBlock[]): ProcessLane[] {
  * @param blocks 一轮助手块（含终答；终答不会进这条泳道）
  * @return 严格泳道；若确有被丢掉的过程，末尾再加一条「思考过程」
  */
+/**
+ * 调试皮肤里，哪一块才是这一轮的终答。
+ * 后面还有工具或推理的助手正文是中途说明，下标为 -1，表示现在还没有终答。
+ *
+ * @param blocks 一轮助手块
+ * @return 终答块下标；没有则 -1
+ */
+export function finalAnswerIndex(blocks: AssistantBlock[]): number {
+  let last = -1
+  for (let i = 0; i < blocks.length; i += 1) {
+    if (blocks[i].kind === 'assistant' && (blocks[i].text || '').trim()) {
+      last = i
+    }
+  }
+  if (last < 0) {
+    return -1
+  }
+  for (let i = last + 1; i < blocks.length; i += 1) {
+    const kind = blocks[i].kind
+    if (kind === 'tool' || kind === 'reasoning' || kind === 'step') {
+      return -1
+    }
+  }
+  return last
+}
+
+/**
+ * 调试皮肤把工具前的助手正文收进思考。终答那一块保持原样，避免同一段既在推理里又当终稿。
+ * 工作台不走这里。
+ *
+ * @param blocks 一轮助手块
+ * @return 给思考泳道用的块；没有中途说明时返回原数组
+ */
+export function foldInterimAnswers(blocks: AssistantBlock[]): AssistantBlock[] {
+  const finalIndex = finalAnswerIndex(blocks)
+  let changed = false
+  const next = blocks.map((block, index) => {
+    if (block.kind === 'assistant' && index !== finalIndex) {
+      changed = true
+      return { ...block, kind: 'reasoning' as const }
+    }
+    return block
+  })
+  return changed ? next : blocks
+}
+
 export function lanesForDebugSkin(blocks: AssistantBlock[]): ProcessLane[] {
   const projected = projectProcessLanes(blocks)
   const steps: ProcessStep[] = []
@@ -1784,11 +1849,24 @@ export function hasRouterTrace(turn: ChatTurn): boolean {
   return turn.role === 'assistant' && turn.blocks.some((block) => block.kind === 'ROUTER_TRACE')
 }
 
-function userTurn(id: number, text: string): ChatTurn {
+/**
+ * @param id          用户事件 id，用来生成稳定 key
+ * @param text        气泡文字，只发图或只发文件时为空串
+ * @param images      按发送顺序的图片地址，可空
+ * @param attachments 图和文件的添加顺序，可空
+ */
+function userTurn(
+  id: number,
+  text: string,
+  images: string[] = [],
+  attachments: ChatTurn['attachments'] = []
+): ChatTurn {
   return {
     key: `u-${id}`,
     role: 'user',
     text,
+    images: images.length ? images : undefined,
+    attachments: attachments.length ? attachments : undefined,
     blocks: [],
     phase: 'done',
     status: 'done',

@@ -71,9 +71,31 @@ public class TrialLiveBuffer {
      * @param visionNote 图片文字提取结果，可空
      */
     public void begin(Long sessionId, int seq, String userText, String visionNote) {
+        begin(sessionId, seq, userText, null, visionNote);
+    }
+
+    /**
+     * 开始一轮，并带上用户附图清单。
+     *
+     * <p>刷新时内存快照会按序号盖住已落库事件。用户事件的摘要若只有正文，
+     * 这一拍会把附图清单冲掉，所以快照必须带同一份清单。
+     *
+     * @param sessionId    会话主键
+     * @param seq          本轮用户事件的序号
+     * @param userText     用户原文，只发图时为空串
+     * @param imageSummary 附图清单，无图时 null
+     * @param visionNote   图片文字提取结果，可空
+     */
+    public void begin(Long sessionId, int seq, String userText, String imageSummary, String visionNote) {
         LiveTurn turn = new LiveTurn(sessionId);
         turn.nextSeq = seq;
-        turn.append(EventType.USER, TrialTexts.content(userText, LIVE_TEXT_LIMIT), seq);
+        String body = TrialTexts.content(userText, LIVE_TEXT_LIMIT);
+        if (imageSummary != null && !imageSummary.isBlank()) {
+            // 只发图时正文为空：清单在摘要里，回放靠它把图找回来
+            turn.append(EventType.USER, imageSummary, body, seq);
+        } else if (!body.isBlank()) {
+            turn.append(EventType.USER, body, seq);
+        }
         if (visionNote != null && !visionNote.isBlank()) {
             turn.append(EventType.VISION, TrialTexts.content(visionNote, LIVE_TEXT_LIMIT), null);
         }

@@ -20,6 +20,7 @@
  * </ul>
  */
 import { computed, onBeforeUnmount, ref, watch, type Ref } from 'vue'
+import { pendingAttachments } from '@/components/runtime/userMessageImages'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import {
   approveWorkbenchPlan,
@@ -807,8 +808,15 @@ export function useWorkbenchChat(pageActive: Ref<boolean>) {
    *
    * @param content 用户输入
    * @param images  图片 data URI 数组，可空
+   * @param files   非图片文件，可空。与管理端对话共用输入框时一并带上，不另改工作台其它逻辑
+   * @param order   图和文件的添加顺序，可空
    */
-  async function send(content: string, images?: string[]) {
+  async function send(
+    content: string,
+    images?: string[],
+    files?: { name: string; size: number; dataUrl: string }[],
+    order?: Array<'image' | 'file'>
+  ) {
     if (sending.value || !canSend.value) {
       return
     }
@@ -822,7 +830,17 @@ export function useWorkbenchChat(pageActive: Ref<boolean>) {
     stopPolling()
     turns.value = [
       ...turns.value,
-      { key: `wb-u-${Date.now()}`, role: 'user', text: content, blocks: [], phase: 'done', status: 'done', startTime: 0 }
+      {
+        key: `wb-u-${Date.now()}`,
+        role: 'user',
+        text: content,
+        images: images?.length ? [...images] : undefined,
+        attachments: pendingAttachments(images, files, order),
+        blocks: [],
+        phase: 'done',
+        status: 'done',
+        startTime: 0
+      }
     ]
     turns.value = [...turns.value, assistantTurn(`wb-a-${Date.now()}`, 'streaming')]
     const live = turns.value[turns.value.length - 1]
@@ -910,7 +928,9 @@ export function useWorkbenchChat(pageActive: Ref<boolean>) {
         stream.handlers,
         controller.signal,
         images,
-        idempotencyKey
+        idempotencyKey,
+        files,
+        order
       )
       const persisted = stream.state.persisted
       /*

@@ -27,18 +27,27 @@ import java.util.List;
 
 /**
  * 把 AgentScope 事件收成可落库的一轮结果。所属域：runtime 的 infra。
- * 只有 ThinkingBlock 才记 reasoning。普通正文即使像思考，也只进助手回复。
- * 工具入参会收下并脱敏。模型没给思考块时，结果里不会有 reasoning。
+ * ThinkingBlock 记 reasoning。工具调用之前的普通正文也记 reasoning：那是为了继续调工具说的中途说明，不是终稿。
+ * 只有最后一次工具之后留下的正文才是终答，并且整轮只推一次。
+ * 工具入参会收下并脱敏。
  */
 public final class TrialEventCollector {
 
     private final TrialTraceAccumulator traces = new TrialTraceAccumulator();
     private final TrialProgress progress;
     private final RunBudget budget;
+    /**
+     * true：工具前的正文先记下，遇到工具再归入推理，终答只在收尾推一次。
+     * false：无工具的单轮调用，正文仍按增量直接当终答推，避免汇总整段闪现。
+     */
+    private final boolean narrationBeforeTool;
     /** 构造时取走当前 trace。工具事件若换线程，仍写到同一次调用上 */
     private final TrialSpanSink obsSpans = TrialSpanSink.capture();
-    private final StringBuilder textDeltas = new StringBuilder();
+    /** 最近一次工具之后的正文。后面若又调工具，整段改记 reasoning，不进终答 */
+    private final StringBuilder pendingText = new StringBuilder();
     private final List<String> messageThinking = new ArrayList<>();
+    /** 已经归进推理的最后一段中途说明。终态消息若原样再带一次，不能再当成终答 */
+    private String lastFlushedNarration = "";
     private String assistantText;
     private Integer promptTokens;
     private Integer completionTokens;
@@ -49,23 +58,35 @@ public final class TrialEventCollector {
      * 单测和同步收集用，不推增量。
      */
     public TrialEventCollector() {
-        this(null, null);
+        this(null, null, true);
     }
 
     /**
      * @param progress 边收边推。可空，空则只在结束时返回整轮
      */
     public TrialEventCollector(TrialProgress progress) {
-        this(progress, null);
+        this(progress, null, true);
     }
 
     /**
+     * 无工具单轮：正文增量直接当终答推。ReAct 多轮要走 {@link #TrialEventCollector(TrialProgress, RunBudget, boolean)}。
+     *
      * @param progress 边收边推。可空
      * @param budget   可空；有则把超轮事件记成撞限
      */
     public TrialEventCollector(TrialProgress progress, RunBudget budget) {
+        this(progress, budget, false);
+    }
+
+    /**
+     * @param progress            边收边推。可空
+     * @param budget              可空；有则把超轮事件记成撞限
+     * @param narrationBeforeTool true 时工具前正文归入推理，终答只在收尾出现一次
+     */
+    public TrialEventCollector(TrialProgress progress, RunBudget budget, boolean narrationBeforeTool) {
         this.progress = progress;
         this.budget = budget;
+        this.narrationBeforeTool = narrationBeforeTool;
     }
 
     /**
@@ -115,10 +136,12 @@ public final class TrialEventCollector {
 
     /**
      * 收尾。流里没推过的最终思考和正文在这里补一次，避免只有整包结果时前端空白。
+     * 终答只取最后一次工具之后的正文，中途说明留在推理里。
      *
      * @return 助手正文、token、按顺序的思考和工具
      */
     public TrialTurn finish() {
+        settleAnswer();
         boolean streamedReasoning = traces.hasReasoning();
         TrialTurn turn = toTurn();
         if (progress == null) {
@@ -140,17 +163,21 @@ public final class TrialEventCollector {
         return turn;
     }
 
+    /**
+     * 撞限或中断收尾前调用：还没跟工具的那段正文归入推理，避免被当成终答。
+     * 已经归过的段落不会再推一遍。
+     */
+    public void keepPendingAsReasoning() {
+        flushPendingAsReasoning();
+    }
+
     private TrialTurn toTurn() {
         // 流式思考优先。只有流里完全没有思考时，才采用最终消息上的 ThinkingBlock
         if (!traces.hasReasoning()) {
             traces.prependReasoningIfAbsent(messageThinking);
         }
         TrialTurn turn = new TrialTurn();
-        String text = assistantText;
-        if (text == null || text.isBlank()) {
-            text = textDeltas.toString();
-        }
-        turn.setAssistantText(text == null ? "" : text);
+        turn.setAssistantText(assistantText == null ? "" : assistantText);
         turn.setPromptTokens(promptTokens);
         turn.setCompletionTokens(completionTokens);
         // 落库时间线与 SSE 同截时用；obs 读 traces 原文
@@ -173,6 +200,8 @@ public final class TrialEventCollector {
 
     private void toolStart(AgentEvent event) {
         if (event instanceof ToolCallStartEvent start) {
+            // 工具前的正文是中途说明：先落进推理，再记这次工具，顺序与页面一致
+            flushPendingAsReasoning();
             traces.onToolStart(start.getToolCallId(), start.getToolCallName());
             /*
              * 平台内部工具（选项提交）对用户不可见：连「正在调用」胶囊都不画，
@@ -256,13 +285,57 @@ public final class TrialEventCollector {
     }
 
     private void textDelta(AgentEvent event) {
-        if (event instanceof TextBlockDeltaEvent delta && delta.getDelta() != null && !delta.getDelta().isEmpty()) {
-            textDeltas.append(delta.getDelta());
+        if (!(event instanceof TextBlockDeltaEvent delta) || delta.getDelta() == null || delta.getDelta().isEmpty()) {
+            return;
+        }
+        // 无工具单轮：正文就是终答，按增量推，避免整段到结束才闪出来
+        if (!narrationBeforeTool) {
+            pendingText.append(delta.getDelta());
             streamedAssistant = true;
             if (progress != null) {
                 progress.phase("answering");
                 progress.assistant(delta.getDelta());
             }
+            return;
+        }
+        // 先别当终答推。这段后面若接着调工具，会整段改记推理；只有跑完仍留着的才是终稿
+        if (progress != null && pendingText.isEmpty()) {
+            progress.phase("reasoning");
+        }
+        pendingText.append(delta.getDelta());
+    }
+
+    /**
+     * 终答只保留「最后一次工具之后」的正文。
+     * 引擎在结束消息里若把已经归进推理的中途说明再带一遍，这里丢掉，避免同一段出现两次。
+     */
+    private void settleAnswer() {
+        String pending = pendingText.toString();
+        pendingText.setLength(0);
+        if (!pending.isBlank()) {
+            assistantText = pending;
+            return;
+        }
+        if (assistantText != null && !assistantText.isBlank() && assistantText.equals(lastFlushedNarration)) {
+            assistantText = "";
+        }
+    }
+
+    /**
+     * 把尚未定性的正文整段记成推理，并清空缓冲。空白不产生步骤。
+     */
+    private void flushPendingAsReasoning() {
+        String text = pendingText.toString();
+        pendingText.setLength(0);
+        if (text.isBlank()) {
+            return;
+        }
+        lastFlushedNarration = text;
+        traces.onThinkingDelta(text);
+        traces.onThinkingEnd();
+        if (progress != null) {
+            progress.phase("reasoning");
+            progress.reasoning(text);
         }
     }
 
@@ -307,7 +380,10 @@ public final class TrialEventCollector {
             return;
         }
         Msg msg = result.getResult();
-        assistantText = msg.getTextContent();
+        // 仅在没有流式正文时兜底。有增量时以最后一次工具之后的缓冲为准，避免整段历史被当成终答
+        if (pendingText.isEmpty() && (assistantText == null || assistantText.isBlank())) {
+            assistantText = msg.getTextContent();
+        }
         applyUsage(msg.getChatUsage() != null ? msg.getChatUsage() : msg.getUsage());
         messageThinking.clear();
         messageThinking.addAll(thinkingBlocks(msg));

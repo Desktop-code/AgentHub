@@ -1,6 +1,7 @@
 package com.agenthub.runtime.infra.agentscope;
 
 import com.agenthub.rag.application.RagToolContext;
+import com.agenthub.runtime.application.TurnInterrupt;
 import com.agenthub.runtime.domain.model.EffectiveLimits;
 import com.agenthub.runtime.domain.model.AgentChoice;
 import com.agenthub.runtime.domain.model.ChoiceCapture;
@@ -25,6 +26,10 @@ import com.agenthub.runtime.infra.agentscope.builtin.MaScratchTool;
 import io.agentscope.core.ReActAgent;
 import io.agentscope.core.agent.RuntimeContext;
 import io.agentscope.core.event.AgentEvent;
+import io.agentscope.core.hook.Hook;
+import io.agentscope.core.hook.HookEvent;
+import io.agentscope.core.hook.PreActingEvent;
+import io.agentscope.core.hook.PreReasoningEvent;
 import io.agentscope.core.message.ContentBlock;
 import io.agentscope.core.message.Msg;
 import io.agentscope.core.message.ThinkingBlock;
@@ -36,6 +41,7 @@ import io.agentscope.core.tool.Toolkit;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.stereotype.Component;
+import reactor.core.publisher.Mono;
 
 import java.time.Duration;
 import java.util.HashSet;
@@ -46,7 +52,7 @@ import java.util.Set;
 /**
  * 用 AgentScope ReActAgent 跑一轮。所属域：runtime 的 infra。
  * 推理循环在引擎内部。这里只装配模型、工具和系统提示，并按生效限制拦截。
- * 思考只来自 ThinkingBlock；模型没返回思考块时不写 reasoning。
+ * 思考来自 ThinkingBlock；工具调用前的普通正文也归入推理，终答只在本轮结束时给出一次。
  * Skill 正文由装配器拼进 system prompt：库里是 skill_def.content_md，不是目录型 SKILL.md，
  * 因此不走 AgentScope SkillRepository。
  * 系统提示必须已经由 SystemPromptAssembler 带上平台前缀，这里不再用另一句默认提示替换空段。
@@ -70,6 +76,8 @@ public class ReActTrialExecutor {
     private final TrialProperties trialProperties;
     /** 结构化选项的后端兜底：模型没调 {@code agenthub_choice} 时把终答再收一次 */
     private final WorkbenchChoiceCollector choiceCollector;
+    /** 用户点停止时打断本轮，并收掉还在操作页面的浏览器 */
+    private final TurnInterrupt turnInterrupt;
 
     /**
      * @param models         打开模型并按轮记账
@@ -83,13 +91,14 @@ public class ReActTrialExecutor {
      * @param offload        超长工具结果落盘（阈值见 {@link TrialProperties}）
      * @param trialProperties 试跑参数（句柄化阈值与摘要长度）
      * @param choiceCollector 结构化选项兜底整理（失败只降级成「没有 chips」）
+     * @param turnInterrupt   手动中断登记；执行期间绑定当前线程
      */
     public ReActTrialExecutor(MeteredModelOpener models, InMemoryAgentStateStore states,
                               BuiltinToolkitAssembler tools, McpToolkitAssembler mcpTools,
                               AssembledPromptGuard prompts, RuntimeLimitResolver limitResolver,
                               FactKeyCanonicalizer factKeys, RequiredArgProperties requiredArgs,
                               ToolResultOffloadStore offload, TrialProperties trialProperties,
-                              WorkbenchChoiceCollector choiceCollector) {
+                              WorkbenchChoiceCollector choiceCollector, TurnInterrupt turnInterrupt) {
         this.models = models;
         this.states = states;
         this.tools = tools;
@@ -101,6 +110,17 @@ public class ReActTrialExecutor {
         this.offload = offload;
         this.trialProperties = trialProperties;
         this.choiceCollector = choiceCollector;
+        this.turnInterrupt = turnInterrupt;
+    }
+
+    /**
+     * 停掉这个会话正在执行的一轮。没在跑时返回 false，取消接口保持原来的拒绝文案。
+     *
+     * @param sessionId 运行会话
+     * @return 已记下中断
+     */
+    public boolean interrupt(long sessionId) {
+        return turnInterrupt.cancel(sessionId);
     }
 
     /**
@@ -227,12 +247,15 @@ public class ReActTrialExecutor {
         // RAG 检索工具只能从上下文取 Agent：@Tool 方法签名里没有 agentId。
         // 必须在 finally 清掉，否则线程池会把上一个 Agent 的身份带到下一次试跑（跨库串数据）。
         RagToolContext.bind(plan.getAgentId());
+        // 停止按钮按这个会话找到本线程。必须在进入模型循环前登记，工具等待中才能被打断
+        turnInterrupt.bind(sessionId);
         try (ReActAgent agent = ReActAgent.builder()
                 .name(agentName(plan))
                 .sysPrompt(prompt)
                 .model(model)
                 .toolkit(toolkit)
                 .maxIters(Math.max(limits.maxRounds(), 1))
+                .hook(cancelHook(sessionId))
                 .stateStore(states)
                 .modelExecutionConfig(modelExec)
                 .toolExecutionConfig(toolExec)
@@ -242,12 +265,20 @@ public class ReActTrialExecutor {
                     .userId(Long.toString(userId))
                     .sessionId("trial-" + sessionId + "-agent-" + plan.getAgentId() + "-" + System.nanoTime())
                     .build();
-            TrialEventCollector collector = new TrialEventCollector(progress, budget);
+            TrialEventCollector collector = new TrialEventCollector(progress, budget, true);
             List<AgentEvent> events = agent.streamEvents(List.of(new UserMessage(userText)), context)
-                    .doOnNext(collector::accept)
+                    .doOnNext(event -> {
+                        throwIfCancelled(sessionId);
+                        collector.accept(event);
+                    })
                     .collectList()
                     .block(wall.plusSeconds(2));
+            throwIfCancelled(sessionId);
             budget.assertNotTimedOut();
+            // 撞限前的中途说明留在推理里，不进入终答
+            if (budget.isMaxRoundsHit()) {
+                collector.keepPendingAsReasoning();
+            }
             budget.assertRoundsOk();
             if (events == null || events.isEmpty()) {
                 throw new TrialFailure("模型没有返回结果");
@@ -258,6 +289,7 @@ public class ReActTrialExecutor {
             budget.assertRoundsOk();
             // 文本假 tool_call 且无真工具结果：失败收束，禁止半截当成功
             TextToolCallGuard.assertNoOrphanTextToolCall(turn);
+            throwIfCancelled(sessionId);
             if (turn.getAssistantText() == null || turn.getAssistantText().isBlank()) {
                 throw new TrialFailure("模型没有返回文本");
             }
@@ -265,11 +297,16 @@ public class ReActTrialExecutor {
             settleChoice(plan, turn, userId, sessionId, progress);
             return turn;
         } catch (TrialFailure ex) {
-            // 已映射的失败：只有挂了 cause 才有排障价值（视觉/工具出站被包成人话），
-            // 纯业务拒绝（未绑模型、撞限文案）不再重复刷栈
-            logIfCaused("ReAct 执行失败（已映射） agentId=" + plan.getAgentId(), ex);
+            // 用户停止不按执行失败刷栈；其它已映射失败仍只在挂了 cause 时打栈
+            if (!"cancelled".equals(ex.getFinishReason())) {
+                logIfCaused("ReAct 执行失败（已映射） agentId=" + plan.getAgentId(), ex);
+            }
             throw ex;
         } catch (RuntimeException ex) {
+            TrialFailure cancelled = cancelledFailure(sessionId, ex);
+            if (cancelled != null) {
+                throw cancelled;
+            }
             // 带 Throwable 打全栈：上层只会看到「模型调用失败」一类人话，真实 cause 只在这里可见
             log.warn("ReAct 执行失败 agentId={} type={} root={} cause={}",
                     plan.getAgentId(), ex.getClass().getSimpleName(), rootType(ex), CauseDigest.of(ex), ex);
@@ -287,9 +324,64 @@ public class ReActTrialExecutor {
             // 但把原始异常挂成 cause，日志与追踪才能看到真正的失败点
             throw new TrialFailure(ModelCallErrors.describe(ex), LimitHitReasons.ERROR, ex);
         } finally {
+            turnInterrupt.clear(sessionId);
             // 必须清：线程池复用会把上一个 Agent 的 id 带到下一轮，导致 RAG 工具查错库
             RagToolContext.clear();
         }
+    }
+
+    /**
+     * 下一轮模型调用或下一次工具调用开始前停下。已经在跑的那一次由中断登记去关浏览器、打断线程。
+     *
+     * @param sessionId 运行会话
+     */
+    private Hook cancelHook(long sessionId) {
+        return new Hook() {
+            @Override
+            public <T extends HookEvent> Mono<T> onEvent(T event) {
+                if (turnInterrupt.isCancelled(sessionId)
+                        && (event instanceof PreReasoningEvent || event instanceof PreActingEvent)) {
+                    return Mono.error(new TrialFailure("已中断", "cancelled"));
+                }
+                return Mono.just(event);
+            }
+        };
+    }
+
+    /**
+     * 用户已经点了停止时，用「已中断」结束，不写成超时或没返回文本。
+     * 清掉中断标记，避免后面的落库被打断。
+     *
+     * @param sessionId 运行会话
+     */
+    private void throwIfCancelled(long sessionId) {
+        if (!turnInterrupt.isCancelled(sessionId)) {
+            return;
+        }
+        Thread.interrupted();
+        throw new TrialFailure("已中断", "cancelled");
+    }
+
+    /**
+     * 引擎把停止包进运行时异常时，还原成「已中断」。没被停止则返回 null，交给原来的失败映射。
+     *
+     * @param sessionId 运行会话
+     * @param ex        引擎抛出的异常
+     * @return 已中断；否则 null
+     */
+    private TrialFailure cancelledFailure(long sessionId, RuntimeException ex) {
+        if (!turnInterrupt.isCancelled(sessionId) && !turnInterrupt.isCancelledCurrentThread()) {
+            return null;
+        }
+        Thread.interrupted();
+        Throwable cause = ex;
+        while (cause != null) {
+            if (cause instanceof TrialFailure failure && "cancelled".equals(failure.getFinishReason())) {
+                return failure;
+            }
+            cause = cause.getCause();
+        }
+        return new TrialFailure("已中断", "cancelled", ex);
     }
 
     /**
@@ -452,6 +544,7 @@ public class ReActTrialExecutor {
                 Math.max(effective.llmTimeoutMs(), 1000L),
                 Math.max(effective.timeoutMs(), 1000L)));
         ExecutionConfig execution = ExecutionConfig.builder().timeout(timeout).maxAttempts(1).build();
+        Long boundSession = bindScope(scope);
         try (ReActAgent agent = ReActAgent.builder()
                 .name(agentName)
                 .sysPrompt(prompts.require(prompt))
@@ -462,6 +555,9 @@ public class ReActTrialExecutor {
                 .build()) {
             Msg reply = agent.call(userText, RuntimeContext.builder().sessionId("trial-route").build())
                     .block(timeout);
+            if (boundSession != null) {
+                throwIfCancelled(boundSession);
+            }
             if (reply == null) {
                 return "";
             }
@@ -471,6 +567,12 @@ public class ReActTrialExecutor {
             logIfCaused(failLabel + "（已映射）", ex);
             throw ex;
         } catch (RuntimeException ex) {
+            if (boundSession != null) {
+                TrialFailure cancelled = cancelledFailure(boundSession, ex);
+                if (cancelled != null) {
+                    throw cancelled;
+                }
+            }
             // 单轮调用（判路由 / 规划 / 汇总）失败：同样带栈，否则父模型这步只会剩一句人话
             log.warn("{} type={} root={} cause={}", failLabel, ex.getClass().getSimpleName(),
                     rootType(ex), CauseDigest.of(ex), ex);
@@ -478,6 +580,10 @@ public class ReActTrialExecutor {
                 throw new TrialFailure("撞限：timeout（" + timeoutLabel + "）", LimitHitReasons.TIMEOUT, ex);
             }
             throw new TrialFailure(ModelCallErrors.describe(ex), LimitHitReasons.ERROR, ex);
+        } finally {
+            if (boundSession != null) {
+                turnInterrupt.clear(boundSession);
+            }
         }
     }
 
@@ -511,19 +617,26 @@ public class ReActTrialExecutor {
                 Math.max(effective.llmTimeoutMs(), 1000L),
                 Math.max(effective.timeoutMs(), 1000L)));
         ExecutionConfig execution = ExecutionConfig.builder().timeout(timeout).maxAttempts(1).build();
+        Long boundSession = bindScope(scope);
         try (ReActAgent agent = ReActAgent.builder()
                 .name(agentName)
                 .sysPrompt(prompts.require(prompt))
                 .model(model)
                 .toolkit(new Toolkit())
                 .maxIters(1)
+                .hook(boundSession == null ? cancelHook(0) : cancelHook(boundSession))
                 .modelExecutionConfig(execution)
                 .build()) {
             TrialEventCollector collector = new TrialEventCollector(progress, budget);
             List<AgentEvent> events = agent
                     .streamEvents(List.of(new UserMessage(userText)),
                             RuntimeContext.builder().sessionId("trial-route").build())
-                    .doOnNext(collector::accept)
+                    .doOnNext(event -> {
+                        if (boundSession != null) {
+                            throwIfCancelled(boundSession);
+                        }
+                        collector.accept(event);
+                    })
                     .collectList()
                     .block(timeout);
             // 超时由预算统一判定：与 execute 一致，避免只看 block 结果而放过内部已超时
@@ -539,6 +652,12 @@ public class ReActTrialExecutor {
             logIfCaused(failLabel + "（已映射）", ex);
             throw ex;
         } catch (RuntimeException ex) {
+            if (boundSession != null) {
+                TrialFailure cancelled = cancelledFailure(boundSession, ex);
+                if (cancelled != null) {
+                    throw cancelled;
+                }
+            }
             // 与 oneShot 同口径：带栈记录真实的出站失败点
             log.warn("{} type={} root={} cause={}", failLabel, ex.getClass().getSimpleName(),
                     rootType(ex), CauseDigest.of(ex), ex);
@@ -546,7 +665,26 @@ public class ReActTrialExecutor {
                 throw new TrialFailure("撞限：timeout（" + timeoutLabel + "）", LimitHitReasons.TIMEOUT, ex);
             }
             throw new TrialFailure(ModelCallErrors.describe(ex), LimitHitReasons.ERROR, ex);
+        } finally {
+            if (boundSession != null) {
+                turnInterrupt.clear(boundSession);
+            }
         }
+    }
+
+    /**
+     * 有会话号才登记中断。单测或没有会话的调用不占登记。
+     *
+     * @param scope 计量范围，可空
+     * @return 已登记的会话；没登记时为 null
+     */
+    private Long bindScope(MeterScope scope) {
+        Long sessionId = scope == null ? null : scope.sessionId();
+        if (sessionId == null || sessionId <= 0) {
+            return null;
+        }
+        turnInterrupt.bind(sessionId);
+        return sessionId;
     }
 
     /**

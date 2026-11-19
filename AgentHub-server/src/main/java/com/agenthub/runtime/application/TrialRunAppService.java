@@ -47,6 +47,10 @@ import com.agenthub.runtime.domain.service.TrialFailure;
 import com.agenthub.runtime.domain.service.SessionCancelFace;
 import com.agenthub.runtime.domain.service.TrialSendGate;
 import com.agenthub.runtime.domain.service.TurnStillOpen;
+import com.agenthub.runtime.domain.service.UserMessageFiles;
+import com.agenthub.runtime.domain.service.UserMessageImages;
+import com.agenthub.runtime.infra.storage.TrialUserFileStorage;
+import com.agenthub.runtime.infra.storage.TrialUserImageStorage;
 import com.agenthub.runtime.domain.service.TrialTurnOutcome;
 import com.agenthub.runtime.domain.service.TrialProgress;
 import com.agenthub.runtime.domain.service.TrialTexts;
@@ -105,6 +109,12 @@ public class TrialRunAppService {
     private final WorkbenchRouteForceRegistry routeForce;
     /** 一轮没能正常收尾时，把仍是 RUNNING 且没被占用的会话收成取消 */
     private final StaleRunCloser staleRuns;
+    /** 用户附图落盘。无图时不参与。 */
+    private final TrialUserImageStorage userImages;
+    /** 用户非图片附件落盘。无文件时不参与。 */
+    private final TrialUserFileStorage userFiles;
+    /** 管理端对话把附件正文交给模型。工作台不调用。 */
+    private final TrialAttachmentReader attachmentReader;
 
     /**
      * @param sessions        会话
@@ -130,6 +140,9 @@ public class TrialRunAppService {
      * @param idempotency     发消息幂等闸门；无键请求不改变原行为
      * @param routeForce      工作台手动换线的一次性强制标记（进程内，只作用一轮）
      * @param staleRuns      异常逃出时收口遗留 RUNNING；正常成功 / 业务失败不走这里
+     * @param userImages     用户附图落盘；无图时不调用
+     * @param userFiles         用户非图片附件落盘；无文件时不调用
+     * @param attachmentReader  管理端附件正文；工作台不使用
      */
     public TrialRunAppService(RunSessionRepository sessions, RunEventRepository events, AgentDefRepository agents,
                               TrialAccess access, TrialBindingLoader loader, ReActTrialExecutor react,
@@ -140,7 +153,9 @@ public class TrialRunAppService {
                               TrialMemoryCoordinator memory, TrialLiveBuffer live, VisionOcrExecutor vision,
                               SessionTitleGeneratorAppService titleGenerator, MaTrialSpecLoader maSpecs,
                               TrialMessageIdempotency idempotency, ReceptionSchemeResolver reception,
-                              WorkbenchRouteForceRegistry routeForce, StaleRunCloser staleRuns) {
+                              WorkbenchRouteForceRegistry routeForce, StaleRunCloser staleRuns,
+                              TrialUserImageStorage userImages, TrialUserFileStorage userFiles,
+                              TrialAttachmentReader attachmentReader) {
         this.sessions = sessions;
         this.events = events;
         this.agents = agents;
@@ -166,6 +181,9 @@ public class TrialRunAppService {
         this.reception = reception;
         this.routeForce = routeForce;
         this.staleRuns = staleRuns;
+        this.userImages = userImages;
+        this.userFiles = userFiles;
+        this.attachmentReader = attachmentReader;
     }
 
     /**
@@ -231,6 +249,26 @@ public class TrialRunAppService {
     }
 
     /**
+     * 同步跑完一轮（图片、文件和添加顺序一起提交）。
+     *
+     * <p>没有文件时与 {@link #send(Long, String, List, String)} 相同，纯图片仍走 ahimg。
+     * 文件不进入视觉模型；只发文件也不要求绑定视觉模型。
+     *
+     * @param sessionId 会话
+     * @param content   用户输入
+     * @param images    图片，可空
+     * @param files     非图片文件，可空
+     * @param order     添加顺序，元素为 image 或 file，可空
+     * @param idemKey   客户端幂等键，可空
+     * @return 本轮新事件和助手预览，或重放结果
+     * @throws BizException 会话已取消、上一轮未结束、键冲突，或首轮仍在执行
+     */
+    public MessageResp send(Long sessionId, String content, List<String> images,
+                            List<UserMessageFiles.NamedPayload> files, List<String> order, String idemKey) {
+        return executeTurn(sessionId, content, images, files, order, null, idemKey);
+    }
+
+    /**
      * 边跑边推增量，结束后仍按同步路径落库。失败时写 error 事件，不把堆栈推给页面。
      *
      * @param sessionId 会话
@@ -271,9 +309,29 @@ public class TrialRunAppService {
      */
     public void stream(Long sessionId, String content, List<String> images,
                        TrialProgress progress, TrialStreamEnd end, String idemKey) {
+        stream(sessionId, content, images, null, null, progress, end, idemKey);
+    }
+
+    /**
+     * 边跑边推增量（图片、文件和添加顺序一起提交）。
+     *
+     * <p>没有文件时行为与原来的图片流一致。文件只落盘并写进用户事件摘要，不送进视觉模型。
+     *
+     * @param sessionId 会话
+     * @param content   用户输入
+     * @param images    图片，可空
+     * @param files     非图片文件，可空
+     * @param order     添加顺序，可空
+     * @param progress  增量出口，不可空
+     * @param end       结束出口，不可空
+     * @param idemKey   客户端幂等键，可空
+     */
+    public void stream(Long sessionId, String content, List<String> images,
+                       List<UserMessageFiles.NamedPayload> files, List<String> order,
+                       TrialProgress progress, TrialStreamEnd end, String idemKey) {
         try {
             progress.phase("planning");
-            end.done(executeTurn(sessionId, content, images, progress, idemKey));
+            end.done(executeTurn(sessionId, content, images, files, order, progress, idemKey));
         } catch (BizException ex) {
             end.fail(ex.getMessage());
         } catch (TrialFailure ex) {
@@ -518,9 +576,9 @@ public class TrialRunAppService {
             if (!EventType.USER.code().equalsIgnoreCase(row.getEventType())) {
                 continue;
             }
-            String text = row.getContentText();
-            if (text != null && !text.isBlank()) {
-                return text.trim();
+            String text = UserMessageImages.questionText(row.getContentText(), row.getSummary());
+            if (!text.isBlank()) {
+                return text;
             }
         }
         return "";
@@ -815,11 +873,33 @@ public class TrialRunAppService {
      */
     private MessageResp executeTurn(Long sessionId, String content, List<String> images, TrialProgress progress,
                                     String idemKey) {
+        return executeTurn(sessionId, content, images, null, null, progress, idemKey);
+    }
+
+    /**
+     * 一轮发消息的外层闸门：归属校验 → 幂等占位 → 执行 → 回写终态。
+     *
+     * <p>没有文件时，交给幂等闸门的正文与原来逐字相同，避免同键重放被误判成另一条内容。
+     * 有文件时把文件名和 data URI 按长度前缀拼进指纹，换一个文件不能命中上一次的结果。
+     *
+     * @param sessionId 会话
+     * @param content   用户输入
+     * @param images    图片，可空
+     * @param files     非图片文件，可空
+     * @param order     添加顺序，可空
+     * @param progress  增量出口，可空（同步 send）
+     * @param idemKey   客户端幂等键，可空
+     * @return 本轮结果，或命中重放时的等价结果
+     * @throws BizException 会话不可发、幂等键冲突，或首轮仍在执行
+     */
+    private MessageResp executeTurn(Long sessionId, String content, List<String> images,
+                                    List<UserMessageFiles.NamedPayload> files, List<String> order,
+                                    TrialProgress progress, String idemKey) {
         RunSession session = access.require(sessionId);
         // 仅用户取消和没写完就被打断的一轮不可再发。已经写完却被启动收口标成取消的，按仍可继续。
         assertSendable(session);
         // 幂等闸门放在归属校验之后：别人的会话不该在幂等表里留下占位行
-        TrialIdemGuard guard = idempotency.begin(sessionId, idemKey, content, images);
+        TrialIdemGuard guard = idempotency.begin(sessionId, idemKey, fingerprintContent(content, files), images);
         if (guard.hasReplay()) {
             // 同键同内容已跑完：不插消息、不调模型、不写流水，直接返回等价结果
             return guard.replay();
@@ -827,7 +907,7 @@ public class TrialRunAppService {
         // 本轮幂等键进计量上下文：同一轮若被重复执行，账本会拿到同一批 dedupe_key
         MeterTurnHolder.begin(guard.managed() ? guard.idemKey() : null);
         try {
-            MessageResp resp = runTurn(session, content, images, progress);
+            MessageResp resp = runTurn(session, content, images, files, order, progress);
             // 成功与业务失败都是结论，必须落终态；否则同键重试会被判成「进行中」
             idempotency.complete(guard, resp);
             return resp;
@@ -847,10 +927,14 @@ public class TrialRunAppService {
      * @param session  已校验归属的会话（幂等闸门已通过）
      * @param content  用户输入
      * @param images   图片，可空
+     * @param files    非图片文件，可空。不进视觉模型
+     * @param order    图和文件的添加顺序，可空
      * @param progress 增量出口，可空
      * @return 本轮结果
      */
-    private MessageResp runTurn(RunSession session, String content, List<String> images, TrialProgress progress) {
+    private MessageResp runTurn(RunSession session, String content, List<String> images,
+                                List<UserMessageFiles.NamedPayload> files, List<String> order,
+                                TrialProgress progress) {
         Long sessionId = session.getId();
         if (!flight.tryStart(sessionId)) {
             throw new BizException(ErrorCode.BAD_REQUEST, "该会话正在执行");
@@ -870,6 +954,8 @@ public class TrialRunAppService {
         }
         // 正常成功 / 业务失败都算收尾；只有没走到那两支就逃出才把会话收成取消
         boolean settled = false;
+        // 只发图时左栏预览用短标签；失败收口也要看得见，不能写成空预览
+        String titleSeed = content == null ? "" : content;
         try {
             // 新提问即放弃上一条待批准的计划：旧计划基于旧上下文，继续执行会张冠李戴
             pendingPlans.drop(sessionId);
@@ -893,8 +979,12 @@ public class TrialRunAppService {
             if (agent == null && spec == null) {
                 throw new TrialFailure("该会话既没有 Agent 也没有可用的编排方案，无法执行");
             }
+            // 文件先校验：类型不对或清单放不进摘要时，不写事件，也不为了文件去跑视觉模型。
+            // 只发文件没有图片，下面的视觉分支不会进，因此不会被「没有视觉模型」拦住。
+            List<UserMessageFiles.Draft> acceptedFiles = UserMessageFiles.normalize(files);
+            UserMessageFiles.assertFits(sessionId, order, accepted.size(), acceptedFiles);
             // 前置拦截：带图却没有 VISION 槽时，必须在写任何事件之前就用明确文案拒绝，
-            // 否则用户会看到一条莫名其妙的「模型调用失败」
+            // 否则用户会看到一条莫名其妙的「模型调用失败」。文件不参与这次校验。
             String visionNote = null;
             if (!accepted.isEmpty()) {
                 if (progress != null) {
@@ -910,7 +1000,34 @@ public class TrialRunAppService {
             }
             int seq = events.nextSeq(sessionId);
             int userSeq = seq;
-            written.add(writer.append(sessionId, seq++, EventType.USER, content, null, null));
+            // 识别成功后再落盘：失败的轮次不留半截文件。地址写进用户事件摘要，正文仍是原话。
+            // 纯图片继续写 ahimg，已有回看不改口径。一旦带了文件，改写 ahfile，图和文件按添加顺序排。
+            String spoken = content == null ? "" : content;
+            String imageManifest = null;
+            List<UserMessageFiles.Ref> storedFiles = List.of();
+            if (acceptedFiles.isEmpty()) {
+                if (!accepted.isEmpty()) {
+                    imageManifest = UserMessageImages.manifest(userImages.persist(sessionId, accepted));
+                }
+            } else {
+                List<String> imageUrls = accepted.isEmpty()
+                        ? List.of()
+                        : userImages.persist(sessionId, accepted);
+                storedFiles = userFiles.persist(sessionId, acceptedFiles);
+                imageManifest = UserMessageFiles.manifest(order, imageUrls, storedFiles);
+            }
+            // 只发图或只发文件时左栏不能是空白预览；气泡本身不写这个短标签
+            if (spoken.isBlank() && imageManifest != null) {
+                titleSeed = accepted.isEmpty()
+                        ? UserMessageFiles.FILE_ONLY_LABEL
+                        : UserMessageImages.IMAGE_ONLY_LABEL;
+            }
+            // 无附件仍走「摘要=正文」的原入口，避免把纯文本提问改成另一条重载。
+            if (imageManifest == null) {
+                written.add(writer.append(sessionId, seq++, EventType.USER, spoken, null, null));
+            } else {
+                written.add(writer.append(sessionId, seq++, EventType.USER, imageManifest, spoken, null, null));
+            }
             // OCR 作为独立事件下发：时间线上要能看出「这张图提了哪些字」，
             // 否则用户只看到模型答了些什么，无法判断是识别错了还是模型答错了
             if (visionNote != null && !visionNote.isBlank()) {
@@ -921,22 +1038,48 @@ public class TrialRunAppService {
             // 的分支，塞一个非空 progress 进去会改变那条路径的行为，属于不必要的副作用。
             TrialProgress mirrored = progress;
             if (progress != null) {
-                // 快照从用户事件那一序号起，并把识别结果一并带上：
-                // 刷新后 SSE 已断，快照是唯一能看到「本轮依据的图片文字」的来源
-                live.begin(sessionId, userSeq, content, visionNote);
+                // 快照从用户事件那一序号起，附图清单与识别结果都带上：
+                // 刷新后 SSE 已断，快照会按序号盖住已落库的用户事件，清单必须在快照里。
+                live.begin(sessionId, userSeq, spoken, imageManifest, visionNote);
                 mirrored = TrialLiveBuffer.tee(progress, live.recorder(sessionId));
             }
-            TrialTurn turn = run(agent, spec, content, visionNote, session, written, seq, mirrored);
+            // 气泡和事件正文仍是用户原话。管理端把附件正文拼进送给模型的那一版，不铺进气泡。
+            // 工作台保持原口径：只发文件时用短标签，不在这里读正文。
+            String modelContent = spoken;
+            String memoryText = spoken;
+            boolean adminFiles = !acceptedFiles.isEmpty() && !EntryChannel.isWorkbench(session.getEntryChannel());
+            if (adminFiles) {
+                TrialAttachmentReader.Outcome read = attachmentReader.apply(
+                        agent, session, spoken, storedFiles, mirrored);
+                modelContent = read.modelContent();
+                if (!read.notices().isEmpty()) {
+                    written.add(writer.append(sessionId, seq++, EventType.SYSTEM,
+                            String.join("\n", read.notices()), null, null));
+                }
+            } else if (spoken.isBlank() && accepted.isEmpty() && !acceptedFiles.isEmpty()) {
+                modelContent = UserMessageFiles.FILE_ONLY_LABEL;
+                memoryText = modelContent;
+            }
+            if (spoken.isBlank() && accepted.isEmpty() && !acceptedFiles.isEmpty()
+                    && (modelContent == null || modelContent.isBlank())) {
+                modelContent = UserMessageFiles.FILE_ONLY_LABEL;
+            }
+            TrialTurn turn = run(agent, spec, modelContent, memoryText, visionNote, session, written, seq, mirrored);
             obs.finishOk(trace);
-            MessageResp done = succeed(session, turn, written, content);
+            MessageResp done = succeed(session, turn, written, titleSeed);
             settled = true;
             return done;
         } catch (TrialFailure ex) {
-            // TrialFailure 映射处：文案已是人话，挂了 cause 时补一次全栈，
-            // 否则「连通测成功、试跑失败」在控制台仍只剩一句业务短句
-            logTrialFailure("试跑失败", sessionId, ex, ex.getMessage());
+            // 用户点停止：终态是「已中断」，不按失败刷一条试跑失败
+            if ("cancelled".equals(ex.getFinishReason())) {
+                log.info("运行已中断 sessionId={}", sessionId);
+            } else {
+                // TrialFailure 映射处：文案已是人话，挂了 cause 时补一次全栈，
+                // 否则「连通测成功、试跑失败」在控制台仍只剩一句业务短句
+                logTrialFailure("试跑失败", sessionId, ex, ex.getMessage());
+            }
             obs.finishError(trace, ex.getMessage(), ex.getFinishReason(), ex.getCause());
-            MessageResp failed = fail(session, written, ex.getMessage(), content);
+            MessageResp failed = fail(session, written, ex.getMessage(), titleSeed);
             settled = true;
             return failed;
         } catch (RuntimeException ex) {
@@ -944,7 +1087,7 @@ public class TrialRunAppService {
             log.warn("试跑失败 sessionId={} type={} cause={}",
                     sessionId, ex.getClass().getSimpleName(), CauseDigest.of(ex), ex);
             obs.finishError(trace, "试跑失败", null, ex);
-            MessageResp failed = fail(session, written, "试跑失败", content);
+            MessageResp failed = fail(session, written, "试跑失败", titleSeed);
             settled = true;
             return failed;
         } finally {
@@ -991,17 +1134,24 @@ public class TrialRunAppService {
         return text;
     }
 
-    private TrialTurn run(AgentDef agent, MaRunSpec spec, String content, String ocrText, RunSession session,
-                          List<RunEvent> written, int seq, TrialProgress progress) {
+    private TrialTurn run(AgentDef agent, MaRunSpec spec, String content, String memoryText, String ocrText,
+                          RunSession session, List<RunEvent> written, int seq, TrialProgress progress) {
         long userId = session.getUserId();
         // 方案会话（spec 非空）以方案自己为根：没有 Agent 记忆策略，不给它开写窗口
         // （afterAssistant 仍跳过）；但本轮仍要拼会话前文，否则「上一轮问了技术栈、这轮答 1」
         // 会让入口判定与专家都只看得到一句孤立的「1」。只读预览不写 Redis、不做摘要。
         // 历史绑根会话即便还带 agentId 也按此口径。
         boolean schemeTurn = spec != null;
-        String modelUser = schemeTurn || agent == null
-                ? memory.previewUser(session, content)
-                : memory.prepareUser(session, content);
+        // 没有附件时仍走原来的两参准备，显式记住和窗口用同一段原话。
+        // 有附件正文时窗口留下全文，显式记住只看用户打的字。
+        String modelUser;
+        if (schemeTurn || agent == null) {
+            modelUser = memory.previewUser(session, content);
+        } else if (memoryText == null || memoryText.equals(content)) {
+            modelUser = memory.prepareUser(session, content);
+        } else {
+            modelUser = memory.prepareUser(session, content, memoryText);
+        }
         // 兜底：预览拿不到内容时退回本轮原文。宁可少一段前文，也不能把空值送给入口判定与专家
         if (modelUser == null || modelUser.isBlank()) {
             modelUser = content;
@@ -1456,6 +1606,29 @@ public class TrialRunAppService {
 
     private int safeCount(RunSession session) {
         return session.getMessageCount() == null ? 0 : session.getMessageCount();
+    }
+
+    /**
+     * 幂等指纹用的正文。没有文件时原样返回，旧请求的指纹不变。
+     * 有文件时按长度前缀拼上文件名和 data URI，换文件不会命中上一次的重放。
+     *
+     * @param content 用户正文，可空
+     * @param files   非图片文件，可空
+     * @return 交给 {@link TrialMessageIdempotency} 的正文
+     */
+    private static String fingerprintContent(String content, List<UserMessageFiles.NamedPayload> files) {
+        if (files == null || files.isEmpty()) {
+            return content;
+        }
+        StringBuilder text = new StringBuilder(content == null ? "" : content);
+        text.append('\u0000').append(files.size());
+        for (UserMessageFiles.NamedPayload file : files) {
+            String name = file == null || file.name() == null ? "" : file.name();
+            String data = file == null || file.dataUrl() == null ? "" : file.dataUrl();
+            text.append('\u0000').append(name.length()).append(':').append(name);
+            text.append('\u0000').append(data.length()).append(':').append(data);
+        }
+        return text.toString();
     }
 
     /**

@@ -42,7 +42,40 @@
         <!-- 用户气泡：登录用户头像（或首字兜底）；与 Agent 形象分开 -->
         <template v-if="row.turn.role === 'user'">
           <div class="speak-row is-user">
-            <div class="bubble">{{ row.turn.text }}</div>
+            <div class="bubble">
+              <!-- 附件在文字上方；没有文字时只留附件。图片可点开，文件可打开或下载。 -->
+              <div v-if="attachmentItems(row.turn).length" class="bubble-images">
+                <template v-for="(item, index) in attachmentItems(row.turn)" :key="`${row.turn.key}-att-${index}`">
+                  <el-image
+                    v-if="item.kind === 'image'"
+                    class="bubble-image"
+                    :src="resolveUserImageUrl(item.url)"
+                    :preview-src-list="imagePreviewList(row.turn)"
+                    :initial-index="imageIndexOf(row.turn, index)"
+                    fit="contain"
+                    preview-teleported
+                    :alt="`图片 ${imageIndexOf(row.turn, index) + 1}`"
+                  >
+                    <template #error>
+                      <div class="bubble-image-error">图片加载失败</div>
+                    </template>
+                  </el-image>
+                  <div v-else-if="!item.url" class="bubble-file-error">{{ item.name || '文件加载失败' }}</div>
+                  <a
+                    v-else
+                    class="bubble-file"
+                    :href="resolveUserImageUrl(item.url)"
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    :download="item.name || '文件'"
+                  >
+                    <span class="bubble-file-name">{{ item.name || '未命名文件' }}</span>
+                    <span class="bubble-file-size">{{ formatFileSize(item.size ?? -1) }}</span>
+                  </a>
+                </template>
+              </div>
+              <div v-if="row.turn.text" class="bubble-text">{{ row.turn.text }}</div>
+            </div>
             <div
               class="msg-avatar is-user"
               :class="{ 'has-photo': !!userAvatarSrc }"
@@ -179,9 +212,9 @@
           <div v-if="isWorkbench && row.flow.answer" class="msg-name">{{ assistantDisplayName(row.turn) }}</div>
           <div v-if="row.flow.answer" class="answer-block">
             <!-- 工作台：不展示「最终回答」标题与朗读调试图标，终端用户只看正文气泡 -->
-            <div v-if="!isWorkbench" class="answer-head">
+            <div v-if="!isWorkbench && row.turn.status !== 'streaming'" class="answer-head">
               <div class="section-label answer-label">最终回答</div>
-              <div v-if="row.turn.status !== 'streaming'" class="speak-actions">
+              <div class="speak-actions">
                 <el-tooltip :content="speakHintOf(planAnswerKey(row.turn))" placement="top">
                   <button
                     type="button"
@@ -651,13 +684,13 @@
               </button>
               <pre v-show="isOpen(row.turn, VISION_KEY, false)" class="vision-body">{{ block.text }}</pre>
             </div>
-            <template v-else-if="block.kind === 'assistant' && showLooseAssistant(isWorkbench, participantFeedHasActor(row.turn))">
+            <template v-else-if="block.kind === 'assistant' && showLooseAssistant(isWorkbench, participantFeedHasActor(row.turn)) && index === finalAnswerIndex(row.turn.blocks)">
               <!-- 工作台不走这条：正文只出现在参与者卡里。调试皮肤在还没有参与者卡时仍显示原文 -->
+              <!-- 终答标题只在这一轮结束后出现。进行中的最后一段先出正文，不提前挂「最终回答」 -->
               <div class="answer-block">
-              <!-- 工作台：隐藏朗读 ▷ 与「最终回答」黑话标题 -->
-              <div v-if="!isWorkbench" class="answer-head">
+              <div v-if="!isWorkbench && row.turn.status !== 'streaming'" class="answer-head">
                 <div class="section-label answer-label">最终回答</div>
-                <div v-if="row.turn.status !== 'streaming'" class="speak-actions">
+                <div class="speak-actions">
                   <el-tooltip :content="speakHintOf(blockAnswerKey(row.turn, block))" placement="top">
                     <button
                       type="button"
@@ -721,11 +754,28 @@
       </p>
     </div>
 
-    <div class="composer" :class="{ 'has-at-panel': atPanelOpen }">
-      <!-- 已选图片缩略图：带删除角标，发送前可逐个移除 -->
+    <div
+      class="composer"
+      :class="{ 'has-at-panel': atPanelOpen, 'is-drop': fileDragOver }"
+      @paste="onComposerPaste"
+      @dragenter="onComposerDragEnter"
+      @dragover="onComposerDragOver"
+      @dragleave="onComposerDragLeave"
+      @drop="onComposerDrop"
+    >
+      <!-- 待发附件：图片缩略图和文件行在同一份列表里，发送前可逐个移除 -->
       <div v-if="attachments.length" class="thumbs">
-        <div v-for="(item, index) in attachments" :key="item.id" class="thumb">
-          <img :src="item.dataUrl" :alt="item.name" />
+        <div
+          v-for="(item, index) in attachments"
+          :key="item.id"
+          class="thumb"
+          :class="{ 'is-file': item.kind === 'file' }"
+        >
+          <img v-if="item.kind === 'image'" :src="item.dataUrl" :alt="item.name" />
+          <div v-else class="file-chip-body">
+            <span class="file-chip-name">{{ item.name }}</span>
+            <span class="file-chip-size">{{ formatFileSize(item.size) }}</span>
+          </div>
           <button
             type="button"
             class="thumb-remove"
@@ -774,9 +824,9 @@
       <el-input
         v-model="text"
         type="textarea"
-        :rows="isWorkbench ? 2 : 3"
-        :autosize="isWorkbench ? { minRows: 2, maxRows: 10 } : undefined"
-        :resize="isWorkbench ? 'none' : 'vertical'"
+        :rows="2"
+        :autosize="{ minRows: 2, maxRows: 10 }"
+        resize="none"
         maxlength="8000"
         :placeholder="composerPlaceholder"
         :disabled="!canSend || sending"
@@ -826,13 +876,26 @@
               <el-icon><Close /></el-icon>
             </button>
           </el-tooltip>
-          <el-tooltip v-if="showImageBtn" :content="uploadHint" placement="top">
+          <el-tooltip v-if="showImageBtn && !isWorkbench" :content="uploadHint" placement="top">
+            <button
+              type="button"
+              class="voice-icon-btn attach-btn"
+              :class="{ muted: !canUploadNow }"
+              :aria-disabled="!canUploadNow"
+              aria-label="添加附件"
+              @click="pickImages"
+            >
+              <el-icon><Paperclip /></el-icon>
+            </button>
+          </el-tooltip>
+          <!-- 首页只在已开视觉时保留原来的图片入口，不换成管理端的附件按钮 -->
+          <el-tooltip v-else-if="showImageBtn" :content="uploadHint" placement="top">
             <button
               type="button"
               class="voice-icon-btn image-btn"
               :class="{ muted: !canUploadNow }"
               :aria-disabled="!canUploadNow"
-              aria-label="上传图片"
+              aria-label="上传图片或文件"
               @click="pickImages"
             >
               <el-icon><Picture /></el-icon>
@@ -841,7 +904,7 @@
           <input
             ref="filePicker"
             type="file"
-            accept="image/png,image/jpeg,image/webp,image/gif"
+            accept="image/png,image/jpeg,image/webp,image/gif,.pdf,.txt,.csv,.xlsx,.xls,.docx,.doc,.pptx,.ppt,.zip"
             multiple
             class="file-input"
             @change="onFilesPicked"
@@ -856,7 +919,21 @@
           </span>
           <span class="hint">{{ sessionReady ? '' : blockedHint || '请先新建会话或从左侧选择' }}</span>
         </div>
-        <el-button v-if="canSend" type="primary" :loading="sending" :disabled="!sessionReady || sending" @click="submit">
+        <el-button
+          v-if="canSend && sending && !isWorkbench"
+          type="danger"
+          plain
+          @click="requestStop"
+        >
+          停止
+        </el-button>
+        <el-button
+          v-else-if="canSend"
+          type="primary"
+          :loading="sending"
+          :disabled="!sessionReady || sending"
+          @click="submit"
+        >
           发送
         </el-button>
       </div>
@@ -866,7 +943,7 @@
 
 <script setup lang="ts">
 /**
- * 试跑 / 工作台对话区。所属域：runtime。只展示传入的时间线，不自己请求接口。
+ * 运行 / 工作台对话区。所属域：runtime。只展示传入的时间线，不自己请求接口。
  *
  * 两种渲染分支：
  * - 计划执行模式（含 plan / step 块）：顺序钉死为
@@ -880,7 +957,7 @@
  * 折叠默认展开，仅当用户点过标题才收起；终答出现也不自动收起。
  */
 import { computed, onBeforeUnmount, onErrorCaptured, onMounted, onUpdated, reactive, ref, watch } from 'vue'
-import { Microphone, Picture, Headset, VideoPlay, VideoPause, Loading, Close, CopyDocument } from '@element-plus/icons-vue'
+import { Microphone, Paperclip, Picture, Headset, VideoPlay, VideoPause, Loading, Close, CopyDocument } from '@element-plus/icons-vue'
 import type {
   AssistantBlock,
   ChatTurn,
@@ -897,13 +974,25 @@ import { useVoiceRecorder } from '@/composables/voiceRecorder'
 import { useSpeechPlayer } from '@/composables/speechPlayer'
 import {
   hasRouterTrace,
+  finalAnswerIndex,
+  foldInterimAnswers,
   isPlanFlow,
   lanesForDebugSkin,
   planStateText,
+  formatFileSize,
   processLanes,
   stepStateText,
   turnSections
 } from '@/components/runtime/trialMessages'
+import {
+  classifyUserFile,
+  clipboardAttachments,
+  MAX_FILE_BYTES,
+  MAX_USER_FILES,
+  resolveUserImageUrl,
+  type OutgoingFile,
+  type UserAttachmentView
+} from '@/components/runtime/userMessageImages'
 import type { TurnSections } from '@/components/runtime/trialMessages'
 import ProcessTimeline from '@/components/runtime/ProcessTimeline.vue'
 import { buildParticipantFeed, feedWaitsForEntry, isFinishedStatusShell, showLooseAssistant, visitParticipantCards } from '@/components/runtime/workbench/workbenchParticipantFeed'
@@ -1040,7 +1129,7 @@ const props = defineProps<{
 }>()
 
 const emit = defineEmits<{
-  send: [content: string, images?: string[]]
+  send: [content: string, images?: string[], files?: OutgoingFile[], order?: Array<'image' | 'file'>]
   /** 批准待执行计划；携带该轮 planId 便于定位 */
   approve: [planId?: string]
   /** 取消待执行计划 */
@@ -1060,7 +1149,19 @@ const emit = defineEmits<{
    * 不是再发一条普通消息——否则会被入口重新分流到别人身上。
    */
   'choice-selected': [optionId: string, label: string]
+  /** 管理端运行中点停止。工作台不发这个事件 */
+  stop: []
 }>()
+
+/**
+ * 通知外层停掉正在执行的这一轮。连点由外层忽略，这里不把按钮改成不可再点。
+ */
+function requestStop() {
+  if (!props.sending) {
+    return
+  }
+  emit('stop')
+}
 
 /** 是否工作台沉浸皮肤 */
 const isWorkbench = computed(() => props.skin === 'workbench')
@@ -1332,10 +1433,12 @@ const quickPromptList = computed(() =>
       ]
 )
 
-/** 待发送的图片。id 只用于列表 key 与删除定位 */
+/** 待发送的图片或文件。id 只用于列表 key 与删除定位，图和文件共用这一份 */
 interface Attachment {
   id: number
   name: string
+  size: number
+  kind: 'image' | 'file'
   /** data:{mime};base64,…，随发送一起提交给后端 */
   dataUrl: string
 }
@@ -3284,18 +3387,25 @@ watch(
   }
 )
 
-/** 上传按钮是否可用：需要已绑定 VISION 模型，且未超张数上限 */
-const canUpload = computed(() => props.visionEnabled === true && attachments.value.length < MAX_IMAGES)
+/** 待发列表里的图片张数、文件个数分开计，互不占额度 */
+const imageCount = computed(() => attachments.value.filter((item) => item.kind === 'image').length)
+const fileCount = computed(() => attachments.value.filter((item) => item.kind === 'file').length)
 
-/** 图标按钮的实际可用态：除模型与张数外，发送中也不允许再选图（与旧按钮 disabled 口径一致） */
-const canUploadNow = computed(() => canUpload.value && !props.sending)
-
-/** 按钮禁用时的 Hover 说明。已绑定时不弹（由 el-tooltip 的 disabled 控制） */
-const uploadHint = computed(() =>
-  props.visionEnabled === true
-    ? `最多上传 ${MAX_IMAGES} 张图片`
-    : '未配置视觉模型，无法识别图片'
+/** 图标按钮：发送中不可再选；图片和文件都到上限时也不可再选。没有视觉模型仍可加文件。 */
+const canUploadNow = computed(
+  () => !props.sending && (imageCount.value < MAX_IMAGES || fileCount.value < MAX_USER_FILES)
 )
+
+/** 按钮旁的说明。没有视觉模型时说清楚图片不会加入，文件仍然可以。 */
+const uploadHint = computed(() => {
+  if (imageCount.value >= MAX_IMAGES && fileCount.value >= MAX_USER_FILES) {
+    return `一次最多 ${MAX_IMAGES} 张图片、${MAX_USER_FILES} 个文件`
+  }
+  if (props.visionEnabled !== true) {
+    return '未配置视觉模型，图片不会加入；文档仍可添加'
+  }
+  return '可添加图片或文档，单个文件不超过 12MB'
+})
 /** 用户点标题后的折叠覆盖；未写入时用调用方给的默认态。键为「轮 key + 区段后缀」。 */
 const foldOverride = reactive<Record<string, boolean>>({})
 /** 长工具结果是否展开。 */
@@ -3591,7 +3701,7 @@ function lanesOf(item: ChatTurn) {
   if (isWorkbench.value) {
     return processLanes(item.blocks)
   }
-  return lanesForDebugSkin(item.blocks)
+  return lanesForDebugSkin(foldInterimAnswers(item.blocks))
 }
 
 /** 从「路由到 {名}」抽出子 Agent 显示名，供红色强调。 */
@@ -3844,27 +3954,331 @@ function sendQuick(prompt: string) {
 
 function submit() {
   const content = text.value.trim()
-  if (!content || !props.canSend || !props.sessionReady || props.sending) {
+  // 未绑定视觉模型时图片不提交：后端会直接拒。文件不走视觉，没有视觉模型也可以发。
+  const sendingItems = attachments.value.filter(
+    (item) => item.kind === 'file' || (item.kind === 'image' && props.visionEnabled === true)
+  )
+  const images = sendingItems.filter((item) => item.kind === 'image').map((item) => item.dataUrl)
+  const files: OutgoingFile[] = sendingItems
+    .filter((item) => item.kind === 'file')
+    .map((item) => ({ name: item.name, size: item.size, dataUrl: item.dataUrl }))
+  const order = sendingItems.map((item) => item.kind)
+  // 只发图、只发文件，或和文字一起发都可以
+  if ((!content && images.length === 0 && files.length === 0) || !props.canSend || !props.sessionReady || props.sending) {
     return
   }
-  // 未绑定视觉模型时即便有残留图片也不提交：后端会直接拒，不如前端先兜住
-  const images = props.visionEnabled === true ? attachments.value.map((item) => item.dataUrl) : []
-  emit('send', content, images.length ? images : undefined)
+  emit(
+    'send',
+    content,
+    images.length ? images : undefined,
+    files.length ? files : undefined,
+    files.length ? order : undefined
+  )
   text.value = ''
   attachments.value = []
 }
 
-/** 点「图片」：走原生文件选择器，避免 el-upload 额外引入一条上传链路 */
+/**
+ * 把选中或粘贴的文件并进同一份待发列表。图片仍走贴图；文档显示文件名和大小。
+ *
+ * @param files 按用户给出的顺序
+ */
+async function addImageFiles(files: File[]) {
+  if (!files.length) {
+    return
+  }
+  let warnedImage = false
+  let droppedImages = 0
+  let droppedFiles = 0
+  for (const file of files) {
+    const kind = classifyUserFile(file)
+    const name = file.name || '未命名文件'
+    if (kind === 'blocked') {
+      ElMessage.warning(`${name} 是可执行文件，不能发送`)
+      continue
+    }
+    if (kind === 'file' && name.length > 80) {
+      ElMessage.warning(`${name} 文件名过长，请缩短后再发送`)
+      continue
+    }
+    if (kind === 'unsupported') {
+      ElMessage.warning(`${name} 不支持。仅支持 pdf、txt、csv、xlsx、xls、docx、doc、pptx、ppt、zip`)
+      continue
+    }
+    if (kind === 'image') {
+      if (props.visionEnabled !== true) {
+        if (!warnedImage) {
+          ElMessage.warning('未配置视觉模型，图片未加入')
+          warnedImage = true
+        }
+        continue
+      }
+      if (imageCount.value >= MAX_IMAGES) {
+        droppedImages += 1
+        continue
+      }
+      if (!file.type.startsWith('image/') && !['png', 'jpg', 'jpeg', 'webp', 'gif'].includes(extensionOfName(name))) {
+        continue
+      }
+      if (file.size > MAX_IMAGE_BYTES) {
+        ElMessage.warning(`${name} 超过 6MB，请压缩后再上传`)
+        continue
+      }
+      try {
+        const dataUrl = await readAsDataUrl(file)
+        attachmentSeq += 1
+        attachments.value = [
+          ...attachments.value,
+          { id: attachmentSeq, name: file.name || `图片 ${attachmentSeq}`, size: file.size, kind: 'image', dataUrl }
+        ]
+      } catch {
+        ElMessage.warning(`${name} 读取失败`)
+      }
+      continue
+    }
+    if (fileCount.value >= MAX_USER_FILES) {
+      droppedFiles += 1
+      continue
+    }
+    if (file.size > MAX_FILE_BYTES) {
+      ElMessage.warning(`${name} 超过 12MB，请压缩后再上传`)
+      continue
+    }
+    try {
+      const dataUrl = await readAsDataUrl(file)
+      attachmentSeq += 1
+      attachments.value = [
+        ...attachments.value,
+        { id: attachmentSeq, name, size: file.size, kind: 'file', dataUrl }
+      ]
+    } catch {
+      ElMessage.warning(`${name} 读取失败`)
+    }
+  }
+  if (droppedImages > 0) {
+    ElMessage.info(`已达 ${MAX_IMAGES} 张图片上限，其余图片未加入`)
+  }
+  if (droppedFiles > 0) {
+    ElMessage.info(`已达 ${MAX_USER_FILES} 个文件上限，其余文件未加入`)
+  }
+}
+
+/**
+ * 文件名的小写扩展名。空类型的 png 也要能认成图片。
+ *
+ * @param name 文件名
+ * @return 不含点的扩展名；没有点时为空串
+ */
+function extensionOfName(name: string): string {
+  const dot = name.lastIndexOf('.')
+  if (dot < 0 || dot === name.length - 1) {
+    return ''
+  }
+  return name.slice(dot + 1).toLowerCase()
+}
+
+/**
+ * 输入框粘贴。剪贴板是文件时收进待发列表；是图片时仍走贴图；是文字则不拦截。
+ *
+ * @param event 输入框上的粘贴事件
+ */
+function onComposerPaste(event: ClipboardEvent) {
+  const picks = clipboardAttachments(event.clipboardData)
+  if (!picks.length || event.defaultPrevented) {
+    return
+  }
+  event.preventDefault()
+  if (props.sending) {
+    return
+  }
+  void addImageFiles(picks.map((item) => item.file))
+}
+
+/** 拖入高亮。只在拖的是文件时亮，离开输入区就灭 */
+const fileDragOver = ref(false)
+
+/**
+ * 剪贴板和拖入都认 Files。文字拖动不拦截，避免挡住输入框里的选区拖动。
+ *
+ * @param event 拖放事件
+ * @return 载荷里有文件才为 true
+ */
+function dragHasFiles(event: DragEvent): boolean {
+  const types = event.dataTransfer?.types
+  if (!types) {
+    return false
+  }
+  return Array.from(types).includes('Files')
+}
+
+/**
+ * 拖进输入区。子元素之间移动不算离开，避免高亮闪一下。
+ *
+ * @param event 拖入事件
+ */
+function onComposerDragEnter(event: DragEvent) {
+  if (!dragHasFiles(event)) {
+    return
+  }
+  event.preventDefault()
+  fileDragOver.value = true
+}
+
+/**
+ * 必须 preventDefault，浏览器才允许在这块区域松开文件。
+ *
+ * @param event 拖过事件
+ */
+function onComposerDragOver(event: DragEvent) {
+  if (!dragHasFiles(event)) {
+    return
+  }
+  event.preventDefault()
+  if (event.dataTransfer) {
+    event.dataTransfer.dropEffect = 'copy'
+  }
+  fileDragOver.value = true
+}
+
+/**
+ * 指针还在输入区内部（进了文本框或缩略图）时不取消高亮。
+ *
+ * @param event 拖离事件
+ */
+function onComposerDragLeave(event: DragEvent) {
+  const host = event.currentTarget as HTMLElement | null
+  const next = event.relatedTarget as Node | null
+  if (host && next && host.contains(next)) {
+    return
+  }
+  fileDragOver.value = false
+}
+
+/**
+ * 松开后进入与选附件、Ctrl+V 同一份待发列表。文件夹不递归。
+ *
+ * @param event 松开事件
+ */
+function onComposerDrop(event: DragEvent) {
+  fileDragOver.value = false
+  if (!dragHasFiles(event)) {
+    return
+  }
+  event.preventDefault()
+  if (props.sending) {
+    return
+  }
+  const dropped = filesFromDrop(event.dataTransfer)
+  if (dropped.directories > 0) {
+    ElMessage.warning('不支持拖入文件夹，请改为拖入文件')
+  }
+  if (dropped.files.length) {
+    void addImageFiles(dropped.files)
+  }
+}
+
+/** 资源管理器拖入的一项。目录用 webkitGetAsEntry 识别，不能靠文件大小猜 */
+interface DropEntry {
+  isDirectory: boolean
+  isFile: boolean
+}
+
+/**
+ * 按拖入顺序收集文件。目录只计数，不展开。
+ *
+ * @param data 拖放载荷，可空
+ * @return 文件按松开时的顺序；directories 大于 0 表示其中夹了文件夹
+ */
+function filesFromDrop(data: DataTransfer | null): { files: File[]; directories: number } {
+  if (!data) {
+    return { files: [], directories: 0 }
+  }
+  const files: File[] = []
+  let directories = 0
+  const items = data.items
+  if (items && items.length) {
+    for (const item of Array.from(items)) {
+      if (item.kind !== 'file') {
+        continue
+      }
+      const entry = (item as DataTransferItem & { webkitGetAsEntry?: () => DropEntry | null }).webkitGetAsEntry?.()
+      if (entry?.isDirectory) {
+        directories += 1
+        continue
+      }
+      const file = item.getAsFile()
+      if (file) {
+        files.push(file)
+      }
+    }
+    return { files, directories }
+  }
+  return { files: Array.from(data.files || []), directories: 0 }
+}
+
+/**
+ * 预览大图用的地址列表，与气泡里的顺序一致。
+ *
+ * @param turn 用户轮
+ * @return 可直接作为 img src 的地址
+ */
+/**
+ * 气泡里按添加顺序画的附件。旧的纯图片消息只有 images，这里补成同一份列表。
+ *
+ * @param turn 用户轮
+ * @return 图和文件
+ */
+function attachmentItems(turn: ChatTurn): UserAttachmentView[] {
+  if (turn.attachments?.length) {
+    return turn.attachments
+  }
+  return (turn.images || []).map((url) => ({ kind: 'image' as const, url }))
+}
+
+/**
+ * 预览大图用的地址列表，只含图片，顺序与气泡里的图片一致。
+ *
+ * @param turn 用户轮
+ * @return 可直接作为 img src 的地址
+ */
+function imagePreviewList(turn: ChatTurn): string[] {
+  return attachmentItems(turn)
+    .filter((item) => item.kind === 'image')
+    .map((item) => resolveUserImageUrl(item.url))
+}
+
+/**
+ * el-image 的预览下标只数图片，不能把文件行算进去。
+ *
+ * @param turn  用户轮
+ * @param index 在混排列表中的位置
+ * @return 这张图在图片列表中的下标
+ */
+function imageIndexOf(turn: ChatTurn, index: number): number {
+  const items = attachmentItems(turn)
+  let cursor = 0
+  for (let i = 0; i < index; i += 1) {
+    if (items[i]?.kind === 'image') {
+      cursor += 1
+    }
+  }
+  return cursor
+}
+
+/** 点附件：走原生文件选择器，图片和允许的文档同一次选出，不另开上传接口 */
 function pickImages() {
   if (!canUploadNow.value) {
+    if (!props.sending) {
+      ElMessage.warning(uploadHint.value)
+    }
     return
   }
   filePicker.value?.click()
 }
 
 /**
- * 选中文件后转 data URI。逐个读、边读边校验，
- * 单张超限或超张数时立即停止并提示，不把整批都读进内存。
+ * 文件选择器与粘贴共用同一份待发列表。
+ *
  * @param event 原生 input 的 change 事件
  */
 async function onFilesPicked(event: Event) {
@@ -3872,32 +4286,7 @@ async function onFilesPicked(event: Event) {
   const files = Array.from(input.files || [])
   // 立刻清空 value：否则同一个文件再次选择不会触发 change
   input.value = ''
-  if (!files.length) {
-    return
-  }
-  const room = MAX_IMAGES - attachments.value.length
-  if (room <= 0) {
-    ElMessage.warning(`一次最多上传 ${MAX_IMAGES} 张图片`)
-    return
-  }
-  const picked = files.slice(0, room)
-  for (const file of picked) {
-    if (file.size > MAX_IMAGE_BYTES) {
-      ElMessage.warning(`${file.name} 超过 6MB，请压缩后再上传`)
-      continue
-    }
-    try {
-      const dataUrl = await readAsDataUrl(file)
-      attachmentSeq += 1
-      attachments.value = [...attachments.value, { id: attachmentSeq, name: file.name, dataUrl }]
-    } catch {
-      ElMessage.warning(`${file.name} 读取失败`)
-    }
-  }
-  // 多选了仍放不下的部分明确告知，而不是静默丢弃
-  if (files.length > picked.length) {
-    ElMessage.info(`已达 ${MAX_IMAGES} 张上限，其余图片未加入`)
-  }
+  await addImageFiles(files)
 }
 
 /**
@@ -4078,6 +4467,78 @@ function removeAttachment(index: number) {
   background: #efeefe;
   line-height: 1.55;
   white-space: pre-wrap;
+}
+
+.bubble-images {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.bubble-images + .bubble-text {
+  margin-top: 8px;
+}
+
+.bubble-image {
+  width: 220px;
+  max-width: 100%;
+  border-radius: 8px;
+  overflow: hidden;
+  background: #fff;
+  cursor: zoom-in;
+}
+
+.bubble-image :deep(img) {
+  display: block;
+  width: 100%;
+  max-height: 180px;
+  object-fit: contain;
+  background: #f7f8fb;
+}
+
+.bubble-image-error,
+.bubble-file-error {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 220px;
+  max-width: 100%;
+  min-height: 72px;
+  padding: 8px;
+  color: #b45309;
+  background: #fff7ed;
+  font-size: 12px;
+  line-height: 1.4;
+  text-align: center;
+  white-space: normal;
+}
+
+.bubble-file {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  width: 220px;
+  max-width: 100%;
+  padding: 8px 10px;
+  border-radius: 8px;
+  background: #fff;
+  color: inherit;
+  text-decoration: none;
+}
+
+.bubble-file-name {
+  overflow: hidden;
+  font-size: 13px;
+  font-weight: 500;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.bubble-file-size {
+  flex: none;
+  color: #6b7280;
+  font-size: 12px;
 }
 
 .card {
@@ -5123,32 +5584,6 @@ function removeAttachment(index: number) {
   }
 }
 
-.chat.is-workbench .composer {
-  padding: 12px 14px 10px;
-  border: 1px solid transparent;
-  border-radius: 16px;
-  background: #f5f7fa;
-  box-shadow: none;
-  box-sizing: border-box;
-}
-
-/* focus：主题色边框 + 紫色光圈（截图验收硬条件） */
-.chat.is-workbench .composer:focus-within {
-  background: #fff;
-  border-color: var(--ah-primary, #635bff);
-  box-shadow: 0 0 0 3px rgba(99, 91, 255, 0.22);
-}
-
-.chat.is-workbench .composer :deep(.el-textarea__inner) {
-  background: transparent !important;
-  box-shadow: none !important;
-  border-color: transparent !important;
-  /* 工作台输入框是普通文本框：两行起、随内容长高，不出现缩放手柄与内部滚动条 */
-  resize: none;
-  padding: 6px 0;
-  min-height: 56px;
-  line-height: 1.7;
-}
 
 /* 硬核不可用：柔和灰字系统提示，不用刺眼红字 */
 .wb-soft-error {
@@ -5965,10 +6400,38 @@ function removeAttachment(index: number) {
   padding: 4px 8px;
 }
 
+/*
+ * 输入条与首页同一套：浅底圆角容器，正文在上，工具和发送在容器内底行。
+ * 工作台只额外限宽居中，不另画一层面板。
+ */
 .composer {
   position: relative;
   flex: none;
   margin-top: 12px;
+  padding: 12px 14px 10px;
+  border: 1px solid transparent;
+  border-radius: 16px;
+  background: #f5f7fa;
+  box-shadow: none;
+  box-sizing: border-box;
+}
+
+.composer:focus-within,
+.composer.is-drop {
+  background: #fff;
+  border-color: var(--ah-primary, #635bff);
+  box-shadow: 0 0 0 3px rgba(99, 91, 255, 0.22);
+}
+
+.composer :deep(.el-textarea__inner) {
+  background: transparent !important;
+  box-shadow: none !important;
+  border-color: transparent !important;
+  /* 与对话页同一高度：两行起，没有拉高手柄；字多了再一起长高 */
+  resize: none;
+  padding: 6px 0;
+  min-height: 56px;
+  line-height: 1.7;
 }
 
 /* 缩略图行：紧贴在输入框上方，横向排列，超出可横向滚动 */
@@ -6026,11 +6489,47 @@ function removeAttachment(index: number) {
   opacity: 0.5;
 }
 
+.thumb.is-file {
+  width: auto;
+  min-width: 140px;
+  max-width: 220px;
+  height: 64px;
+  padding: 8px 22px 8px 10px;
+  overflow: hidden;
+}
+
+.file-chip-body {
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  min-width: 0;
+  line-height: 1.3;
+}
+
+.file-chip-name {
+  overflow: hidden;
+  color: #1f2937;
+  font-size: 12px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.file-chip-size {
+  margin-top: 2px;
+  color: #6b7280;
+  font-size: 11px;
+}
+
 .composer-bar {
   display: flex;
   align-items: center;
   justify-content: space-between;
+  gap: 8px;
   margin-top: 8px;
+}
+
+.composer-bar :deep(.el-button) {
+  flex: none;
 }
 
 .composer-left {
@@ -6040,7 +6539,7 @@ function removeAttachment(index: number) {
   min-width: 0;
 }
 
-/* 图片按钮与语音按钮共用 .voice-icon-btn 的结构；这里只声明它自己的语义类 */
+/* 附件按钮与语音按钮共用 .voice-icon-btn；回形针只表示「添加附件」，不另做一套图标 */
 
 /*
  * 语音图标按钮（喇叭 / 说话 / 取消）：只放图标，不排文字。

@@ -203,7 +203,8 @@ public class WorkbenchController {
                                     String idempotencyKey) {
         Long checked = chats.requireSession(id);
         chats.assertReceptionReady();
-        return Result.ok(runs.send(checked, req.getContent().trim(), req.getImages(), idempotencyKey));
+        return Result.ok(runs.send(checked, req.trimmedContent(), req.getImages(), req.filePayloads(),
+                req.getAttachmentOrder(), idempotencyKey));
     }
 
     /**
@@ -226,7 +227,8 @@ public class WorkbenchController {
         TrialChunkWriter writer = new TrialChunkWriter(response, json, sseBatch);
         writer.bindSession(checked);
         try {
-            runs.stream(checked, req.getContent().trim(), req.getImages(), writer, writer, idempotencyKey);
+            runs.stream(checked, req.trimmedContent(), req.getImages(), req.filePayloads(),
+                    req.getAttachmentOrder(), writer, writer, idempotencyKey);
         } finally {
             // 与试跑接口同一收尾纪律：任何路径都要补一帧结束，内部 CAS 保证只发一次
             writer.ensureFinished();

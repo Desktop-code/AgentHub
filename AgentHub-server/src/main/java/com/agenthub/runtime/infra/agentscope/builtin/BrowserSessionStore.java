@@ -8,6 +8,7 @@ import org.springframework.stereotype.Component;
 import java.time.Duration;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.concurrent.CancellationException;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ExecutionException;
 import java.util.concurrent.ExecutorService;
@@ -173,6 +174,27 @@ public class BrowserSessionStore {
     }
 
     /**
+     * 中断这一次运行里还开着的浏览器。键是 {@code trial-会话-agent-专家}，按会话前缀收口。
+     * 不等待正在进行的导航结束：取消排队中的操作，并尽快关掉页面，避免无头浏览器在后台继续点。
+     *
+     * @param sessionId 运行会话主键
+     * @return 实际收掉的会话数
+     */
+    public int closeTrial(long sessionId) {
+        String prefix = "trial-" + sessionId + "-agent-";
+        List<Slot> doomed = new ArrayList<>();
+        synchronized (slots) {
+            for (Slot slot : slots.values()) {
+                if (slot.key.startsWith(prefix)) {
+                    doomed.add(detach(slot));
+                }
+            }
+        }
+        doomed.forEach(this::forceStop);
+        return doomed.size();
+    }
+
+    /**
      * 明确关闭。之后同一个键的填表和读取都不再看到旧页面。
      *
      * @param key 会话键
@@ -300,8 +322,12 @@ public class BrowserSessionStore {
             slot.touchedAt = clock.getAsLong();
             return value;
         });
+        slot.inflight = future;
         try {
             return future.get(opTimeout.toMillis() + 1500L, TimeUnit.MILLISECONDS);
+        } catch (CancellationException ex) {
+            // 用户点了停止：这次操作作废，调用方据此结束，不再等操作超时
+            throw new BrowserUseException("打开网页失败：操作被中断");
         } catch (TimeoutException ex) {
             destroy(slot);
             throw new BrowserUseException(BrowserFailures.explain(ex, phase));
@@ -317,7 +343,39 @@ public class BrowserSessionStore {
         } catch (InterruptedException ex) {
             Thread.currentThread().interrupt();
             throw new BrowserUseException("打开网页失败：操作被中断");
+        } finally {
+            if (slot.inflight == future) {
+                slot.inflight = null;
+            }
         }
+    }
+
+    /**
+     * 中断路径：先取消正在等的操作，让工具线程立刻返回，再关页面。
+     * 关页面放到单独的守护线程，避免卡在导航里的关闭把「停止」请求拖住。
+     *
+     * @param slot 已经从会话表摘下的槽
+     */
+    private void forceStop(Slot slot) {
+        slot.closed = true;
+        Future<?> running = slot.inflight;
+        if (running != null) {
+            running.cancel(true);
+        }
+        slot.thread.shutdownNow();
+        BrowserPagePort page = slot.page;
+        if (page == null) {
+            return;
+        }
+        Thread closer = new Thread(() -> {
+            try {
+                page.close();
+            } catch (RuntimeException ignored) {
+                // 页面可能已经随进程退出；停止结果不取决于这次关闭是否抛错
+            }
+        }, "browser-use-stop");
+        closer.setDaemon(true);
+        closer.start();
     }
 
     private void destroy(Slot slot) {
@@ -365,7 +423,10 @@ public class BrowserSessionStore {
     private final class Slot {
         private final String key;
         private final ExecutorService thread;
-        private BrowserPagePort page;
+        /** 当前页。中断从另一条线程读取，必须可见 */
+        private volatile BrowserPagePort page;
+        /** 正在等待的那一次操作。停止时取消它，工具线程不必等到操作超时 */
+        private volatile Future<?> inflight;
         private long touchedAt;
         private volatile boolean closed;
 
