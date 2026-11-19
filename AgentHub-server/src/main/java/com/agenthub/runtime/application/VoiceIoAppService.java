@@ -93,6 +93,22 @@ public class VoiceIoAppService {
     }
 
     /**
+     * 按模型实例转写。入口 Router 没有 Agent 槽，预处理走这一条。
+     *
+     * @param instanceId ASR 实例 id
+     * @param audio      录音字节
+     * @param fileName   上传文件名，给上游认容器
+     * @return 识别文字
+     * @throws BizException 实例不可用、凭证失败或上游失败
+     */
+    public String transcribeByInstance(Long instanceId, byte[] audio, String fileName) {
+        VoiceAudioPolicy.Format format = VoiceAudioPolicy.require(audio, properties.getMaxAudioBytes());
+        SpeechRequest request = requireSpeechInstance(instanceId, ModelCapability.ASR);
+        String name = fileName == null || fileName.isBlank() ? "voice." + format.extension() : fileName.trim();
+        return speech.transcribe(request, audio, name, format.mimeType());
+    }
+
+    /**
      * 整段文字 → 音频。
      *
      * @param agentId Agent；语音模型从该 Agent 的 TTS 槽取
@@ -125,7 +141,23 @@ public class VoiceIoAppService {
                     ? "当前 Agent 未绑定语音识别模型，请前往「模型配置」Tab 绑定 ASR 模型"
                     : "当前 Agent 未绑定语音合成模型");
         }
-        ModelInstance instance = instances.findById(instanceId.get())
+        return requireSpeechInstance(instanceId.get(), purpose);
+    }
+
+    /**
+     * 按实例组装出站参数。入口预处理和 Agent 槽共用这一份校验。
+     *
+     * @param instanceId 模型实例
+     * @param purpose    ASR 或 TTS
+     * @return 已解密 Key 的出站参数
+     */
+    private SpeechRequest requireSpeechInstance(Long instanceId, ModelCapability purpose) {
+        if (instanceId == null || instanceId <= 0) {
+            throw new BizException(ErrorCode.BAD_REQUEST, purpose == ModelCapability.ASR
+                    ? "入口未绑定语音识别模型，请到对话路由的「模型配置」绑定 ASR 模型"
+                    : "未绑定语音合成模型");
+        }
+        ModelInstance instance = instances.findById(instanceId)
                 .filter(item -> RecordStatus.isEnabled(item.getStatus()))
                 .orElseThrow(() -> new BizException(ErrorCode.BAD_REQUEST, "语音模型实例不可用，请检查是否已启用"));
         // 双保险：绑定行用途与实例用途必须一致，避免历史错绑把 CHAT 实例当语音模型用

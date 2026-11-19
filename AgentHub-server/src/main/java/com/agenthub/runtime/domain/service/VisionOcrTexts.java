@@ -28,8 +28,11 @@ public final class VisionOcrTexts {
     public static final String OCR_SYSTEM_PROMPT =
             "请提取这张图片中的所有文字内容，直接输出文字，不要任何多余解释。";
 
-    /** 单轮最多处理的图片数。超过即拒绝：图片是 token 大户，无上限会让一次试跑直接烧掉配额 */
-    public static final int MAX_IMAGES = 4;
+    /**
+     * 单轮图片张数上限，与 {@link UserMessageFiles#MAX_ATTACHMENTS} 同一总数。
+     * 图和文件加在一起不能超过这一数，不按类型各算一份。
+     */
+    public static final int MAX_IMAGES = 9;
 
     /** 单张图片字符串（URL 或 base64 data URI）的最大字符数。约等于 6MB 原图 */
     public static final int MAX_IMAGE_CHARS = 8 * 1024 * 1024;
@@ -39,6 +42,14 @@ public final class VisionOcrTexts {
 
     /** 单张图识别失败时的占位。保留序号，用户能看出是第几张没识别出来 */
     public static final String FAILED_MARK = "（本图识别失败）";
+
+    /**
+     * 识图正文在模型侧的唯一段落标题。
+     *
+     * <p>抽到常量是为了让「判定用的整段提问」和「单独交给专家的素材」用同一个标题：
+     * 两处各写一遍中文字面量，改一处忘另一处就会出现同一份票面两个名字。
+     */
+    public static final String VISION_HEADER = "【图片内容提取结果】";
 
     /** 与 {@code ContextWindowFacade.renderUser} 的落点一致，用于定位「当前用户」段 */
     static final String CURRENT_USER_MARK = "【当前用户】\n";
@@ -98,7 +109,22 @@ public final class VisionOcrTexts {
             return userQuery == null ? "" : userQuery;
         }
         String question = userQuery == null ? "" : userQuery.trim();
-        return "【图片内容提取结果】:\n" + body + "\n\n【用户提问】:\n" + question;
+        return VISION_HEADER + ":\n" + body + "\n\n【用户提问】:\n" + question;
+    }
+
+    /**
+     * 只把识图正文包成素材段，不带「用户提问」。
+     *
+     * <p>与 {@link #composeQuery} 的分工：那个成对拼「素材 + 问题」，供判路由看整段意图；
+     * 这个只出素材，供子专家在 {@code sub_query} 之后单独接住事实。
+     * 两者共用一个标题常量，改格式时不会一处生效一处漏。
+     *
+     * @param ocrText 汇总后的识别结果，空表示没有可用素材
+     * @return 形如 {@code 【图片内容提取结果】:\n[图1内容]: ...}；空输入返回空串
+     */
+    public static String materialBlock(String ocrText) {
+        String body = ocrText == null ? "" : ocrText.trim();
+        return body.isEmpty() ? "" : VISION_HEADER + ":\n" + body;
     }
 
     /**
@@ -125,7 +151,7 @@ public final class VisionOcrTexts {
             kept.add(value);
         }
         if (kept.size() > MAX_IMAGES) {
-            throw new TrialFailure("一次最多上传 " + MAX_IMAGES + " 张图片");
+            throw new TrialFailure("一次最多发送 " + MAX_IMAGES + " 个附件");
         }
         return kept;
     }

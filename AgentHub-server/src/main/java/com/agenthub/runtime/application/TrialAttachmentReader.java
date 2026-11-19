@@ -73,8 +73,25 @@ public class TrialAttachmentReader {
      */
     public Outcome apply(AgentDef agent, RunSession session, String spoken,
                          List<UserMessageFiles.Ref> stored, TrialProgress progress) {
+        return apply(visionId(agent), session, spoken, stored, progress, false);
+    }
+
+    /**
+     * 按指定视觉实例抽文档。入口预处理走这一条：扫描页缺视觉或识别失败直接中断，不猜专家。
+     *
+     * @param visionId               入口或 Agent 已绑定的 VISION 实例；未绑为 null
+     * @param session                当前会话
+     * @param spoken                 用户打的字，可空
+     * @param stored                 已经落盘的文件
+     * @param progress               进度出口，可空
+     * @param failWhenVisionMissing  true 时扫描页必须能认，否则抛 {@link TrialFailure}
+     * @return 送给模型的用户话，以及需要展示给用户的短说明
+     * @throws TrialFailure 入口要求视觉却没绑或识别失败
+     */
+    public Outcome apply(Long visionId, RunSession session, String spoken,
+                         List<UserMessageFiles.Ref> stored, TrialProgress progress,
+                         boolean failWhenVisionMissing) {
         List<UserMessageFiles.Ref> refs = stored == null ? List.of() : stored;
-        Long visionId = visionId(agent);
         int[] visionUsed = new int[1];
         boolean[] announced = new boolean[1];
         List<String> sections = new ArrayList<>();
@@ -83,8 +100,15 @@ public class TrialAttachmentReader {
             if (file == null) {
                 continue;
             }
-            String section = one(file, session, visionId, visionUsed, announced, progress, notices);
-            sections.add(section);
+            if (UserMessageFiles.isAudioName(file.name())) {
+                // 录音不走本地抽字，入口预处理另做转写；管理端已选专家对话只存不读
+                continue;
+            }
+            String section = one(file, session, visionId, visionUsed, announced, progress, notices,
+                    failWhenVisionMissing);
+            if (section != null && !section.isBlank()) {
+                sections.add(section);
+            }
             // 旁路记下这一段：刷新或续问走回放时不再重新认图，口径与当次发送一致
             try {
                 files.writeExcerpt(file.url(), section);
@@ -101,12 +125,16 @@ public class TrialAttachmentReader {
     }
 
     private String one(UserMessageFiles.Ref file, RunSession session, Long visionId, int[] visionUsed,
-                       boolean[] announced, TrialProgress progress, List<String> notices) {
+                       boolean[] announced, TrialProgress progress, List<String> notices,
+                       boolean failWhenVisionMissing) {
         String ext = RagUploadTypes.extensionOf(file.name());
         try {
             if ("pdf".equals(ext)) {
                 byte[] bytes = files.readBytes(file.url());
                 List<String> pages = parser.readPdfPageTexts(bytes);
+                if (failWhenVisionMissing && needsVision(pages) && visionId == null) {
+                    throw new TrialFailure("入口未绑定视觉模型，无法识别扫描件。请到对话路由的「模型配置」绑定视觉模型。");
+                }
                 AttachmentTexts.PdfRead read = AttachmentTexts.readPdf(file.name(), pages, new AttachmentTexts.PageVision() {
                     @Override
                     public boolean available() {
@@ -115,9 +143,24 @@ public class TrialAttachmentReader {
 
                     @Override
                     public String recognize(int pageNumber) {
-                        return recognizePage(bytes, pageNumber, visionId, session, progress, announced);
+                        String text = recognizePage(bytes, pageNumber, visionId, session, progress, announced);
+                        if (failWhenVisionMissing && (text == null || text.isBlank())) {
+                            throw new TrialFailure("入口视觉模型未能识别「" + file.name() + "」第 " + pageNumber
+                                    + " 页，已停止分流。请换一份更清晰的扫描件或检查视觉模型。");
+                        }
+                        return text;
                     }
                 }, visionUsed);
+                if (failWhenVisionMissing) {
+                    for (String notice : read.notices()) {
+                        if (notice != null && notice.contains("未绑定视觉模型")) {
+                            throw new TrialFailure("入口未绑定视觉模型，无法识别扫描件。请到对话路由的「模型配置」绑定视觉模型。");
+                        }
+                        if (notice != null && notice.contains("图片识别失败")) {
+                            throw new TrialFailure(notice + "。已停止分流。");
+                        }
+                    }
+                }
                 notices.addAll(read.notices());
                 log.info("附件正文 sessionId={} file={} ext=pdf pages={}",
                         session == null ? null : session.getId(), file.name(), pages.size());
@@ -138,6 +181,9 @@ public class TrialAttachmentReader {
             log.info("附件正文 sessionId={} file={} ext={} chars={}",
                     session == null ? null : session.getId(), file.name(), ext, text.length());
             return AttachmentTexts.section(file.name(), text);
+        } catch (TrialFailure ex) {
+            // 入口扫描件缺视觉或识别失败：必须中断分流，不能收成「无法读取」后继续猜专家
+            throw ex;
         } catch (RuntimeException ex) {
             String message = userMessage(ex);
             log.warn("附件正文读取失败 sessionId={} file={} ext={} type={}",
@@ -179,6 +225,24 @@ public class TrialAttachmentReader {
                     session.getId(), pageNumber, ex.getClass().getSimpleName());
             return "";
         }
+    }
+
+    /**
+     * 这份 PDF 是否有几乎没字、必须走视觉的页。
+     *
+     * @param pages 按页文字层
+     * @return true 表示至少一页需要识图
+     */
+    private static boolean needsVision(List<String> pages) {
+        if (pages == null || pages.isEmpty()) {
+            return false;
+        }
+        for (String page : pages) {
+            if (!AttachmentTexts.pageHasText(page)) {
+                return true;
+            }
+        }
+        return false;
     }
 
     private Long visionId(AgentDef agent) {

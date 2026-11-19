@@ -197,24 +197,58 @@ public class MaDefAppService {
         Map<Long, MaJudgeModelOptionResp> rows = new HashMap<>();
         for (ModelCapability capability : List.of(ModelCapability.ROUTER, ModelCapability.CHAT,
                 ModelCapability.REWRITE, ModelCapability.SUMMARY, ModelCapability.MEMORY)) {
-            for (ModelInstance instance : modelInstances.listEnabledByCapability(capability.name())) {
-                // 用途白名单再兜一层：兼容历史上把 capability 写成非对话形态的脏行
-                boolean usable = ModelCapability.tryParse(instance.getCapability())
-                        .map(ModelCapability::usesChat)
-                        .orElse(false);
-                if (!usable || rows.containsKey(instance.getId())) {
-                    continue;
+            for (MaJudgeModelOptionResp row : modelsOf(capability)) {
+                if (!rows.containsKey(row.getId())) {
+                    rows.put(row.getId(), row);
                 }
-                MaJudgeModelOptionResp row = new MaJudgeModelOptionResp();
-                row.setId(instance.getId());
-                row.setDisplayName(instance.getDisplayName());
-                row.setModelId(instance.getModelId());
-                row.setCapability(instance.getCapability());
-                row.setStatus(instance.getStatus());
-                rows.put(instance.getId(), row);
             }
         }
         return new ArrayList<>(rows.values());
+    }
+
+    /**
+     * 入口预处理视觉模型下拉：启用中、用途为 VISION 的实例。
+     *
+     * @return 可选实例；没有时为空列表
+     */
+    public List<MaJudgeModelOptionResp> visionModels() {
+        return modelsOf(ModelCapability.VISION);
+    }
+
+    /**
+     * 入口预处理语音识别模型下拉：启用中、用途为 ASR 的实例。
+     *
+     * @return 可选实例；没有时为空列表
+     */
+    public List<MaJudgeModelOptionResp> asrModels() {
+        return modelsOf(ModelCapability.ASR);
+    }
+
+    /**
+     * 按用途列出启用中的实例。页面没有模型中心权限时也要能绑入口视觉 / ASR。
+     *
+     * @param capability 用途
+     * @return 该用途下的启用实例
+     */
+    private List<MaJudgeModelOptionResp> modelsOf(ModelCapability capability) {
+        if (capability == null) {
+            return List.of();
+        }
+        List<MaJudgeModelOptionResp> rows = new ArrayList<>();
+        for (ModelInstance instance : modelInstances.listEnabledByCapability(capability.name())) {
+            ModelCapability actual = ModelCapability.tryParse(instance.getCapability()).orElse(null);
+            if (actual != capability) {
+                continue;
+            }
+            MaJudgeModelOptionResp row = new MaJudgeModelOptionResp();
+            row.setId(instance.getId());
+            row.setDisplayName(instance.getDisplayName());
+            row.setModelId(instance.getModelId());
+            row.setCapability(instance.getCapability());
+            row.setStatus(instance.getStatus());
+            rows.add(row);
+        }
+        return rows;
     }
 
     /**
@@ -473,6 +507,9 @@ public class MaDefAppService {
             // 判路由模型：虚拟根试跑的唯一模型来源，必须允许随方案保存
             config.setMaJudgeModelInstanceId(req.getMaJudgeModelInstanceId());
             config.setMaJudgeModel(req.getMaJudgeModel());
+            // 入口预处理模型：只给 ENTRY_ROUTER 用；普通方案原样存着，执行侧不读
+            config.setMaVisionModelInstanceId(req.getMaVisionModelInstanceId());
+            config.setMaAsrModelInstanceId(req.getMaAsrModelInstanceId());
             // ROUTER 提示词：入口与场景 Router 共用同一套 L3 语义；段落级校验由 applyJudgePrompt 统一做
             config.setMaJudgePromptTemplateId(req.getMaJudgePromptTemplateId());
             config.setMaJudgePromptTemplateVersion(req.getMaJudgePromptTemplateVersion());
@@ -878,6 +915,8 @@ public class MaDefAppService {
         resp.setMaCriticAgentId(config.getMaCriticAgentId());
         resp.setMaJudgeModelInstanceId(config.getMaJudgeModelInstanceId());
         resp.setMaJudgeModel(config.getMaJudgeModel());
+        resp.setMaVisionModelInstanceId(config.getMaVisionModelInstanceId());
+        resp.setMaAsrModelInstanceId(config.getMaAsrModelInstanceId());
         // ROUTER 提示词回显：与专家配提示词同一套转换（含 supported 与 override 解析），页面直接绑定弹窗
         PromptBindingResp prompt = prompts.toResp(PURPOSE_ROUTER, config.getMaJudgePromptTemplateId(),
                 config.getMaJudgePromptTemplateVersion(), config.getMaJudgePromptOverrideJson(),

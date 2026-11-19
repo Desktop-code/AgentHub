@@ -175,6 +175,18 @@ public interface TrialProgress {
     }
 
     /**
+     * 入口预处理步骤。有附件时在意图分流前下发，没有附件时不要调用。
+     *
+     * <p>进行中、完成、失败都走这一条：前端按同一块原位更新，回放只认最后一份落库事件。
+     * 默认空实现：管理端已选专家对话不画这一块。
+     *
+     * @param view 预处理快照；空值忽略
+     */
+    default void preprocess(com.agenthub.runtime.domain.model.PreprocessView view) {
+        // 不走入口预处理的实现可以不关心
+    }
+
+    /**
      * 计划生成或状态变化。前端据此渲染结构化的步骤列表，而不是读一段纯文本。
      * 同一 planId 的多次回调表示状态推进，应原位更新同一张计划卡。
      *

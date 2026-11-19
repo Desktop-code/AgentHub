@@ -90,6 +90,16 @@ public class AgentRuntimeConfigReq {
     private String maJudgeModel;
 
     /**
+     * 入口预处理视觉模型实例。未绑定时带图或扫描件在预处理步骤失败。
+     */
+    private Long maVisionModelInstanceId;
+
+    /**
+     * 入口预处理语音识别（ASR）模型实例。未绑定时带录音在预处理步骤失败。
+     */
+    private Long maAsrModelInstanceId;
+
+    /**
      * ROUTER 提示词：钉住的已发布模板主键。
      * <p>与 {@link #maJudgePromptTemplateVersion} 成对出现；只给一半时服务端按「未配置」处理。
      * 用途固定 ROUTER，由服务端写死，不从请求里取，避免页面把摘要 / 对话模板错绑到判路由上。

@@ -24,6 +24,8 @@ import com.agenthub.runtime.domain.model.EventType;
 import com.agenthub.runtime.domain.model.MaRunSpec;
 import com.agenthub.runtime.domain.model.MeterScope;
 import com.agenthub.runtime.domain.model.PendingPlan;
+import com.agenthub.runtime.domain.model.PreprocessView;
+import com.agenthub.runtime.domain.service.PreprocessJson;
 import com.agenthub.runtime.domain.model.PlanState;
 import com.agenthub.runtime.domain.model.PlanView;
 import com.agenthub.runtime.domain.model.RunEvent;
@@ -39,6 +41,7 @@ import com.agenthub.runtime.domain.repository.RunSessionRepository;
 import com.agenthub.runtime.domain.service.CauseDigest;
 import com.agenthub.runtime.domain.service.ChoiceCaptureHolder;
 import com.agenthub.runtime.domain.service.ChoiceContinue;
+import com.agenthub.runtime.domain.service.EntryMaterialHolder;
 import com.agenthub.runtime.domain.service.LeafChoiceHolder;
 import com.agenthub.runtime.domain.service.PlanJson;
 import com.agenthub.runtime.domain.service.PromptInjectionHolder;
@@ -113,8 +116,10 @@ public class TrialRunAppService {
     private final TrialUserImageStorage userImages;
     /** 用户非图片附件落盘。无文件时不参与。 */
     private final TrialUserFileStorage userFiles;
-    /** 管理端对话把附件正文交给模型。工作台不调用。 */
+    /** 管理端对话把附件正文交给模型。工作台 / 入口不调用。 */
     private final TrialAttachmentReader attachmentReader;
+    /** 入口 Router 意图前预处理。首页与 MA 运行入口共用。 */
+    private final EntryPreprocess entryPreprocess;
 
     /**
      * @param sessions        会话
@@ -142,7 +147,8 @@ public class TrialRunAppService {
      * @param staleRuns      异常逃出时收口遗留 RUNNING；正常成功 / 业务失败不走这里
      * @param userImages     用户附图落盘；无图时不调用
      * @param userFiles         用户非图片附件落盘；无文件时不调用
-     * @param attachmentReader  管理端附件正文；工作台不使用
+     * @param attachmentReader  管理端附件正文；工作台 / 入口不使用
+     * @param entryPreprocess   入口意图前预处理；没有附件时不调用
      */
     public TrialRunAppService(RunSessionRepository sessions, RunEventRepository events, AgentDefRepository agents,
                               TrialAccess access, TrialBindingLoader loader, ReActTrialExecutor react,
@@ -155,7 +161,7 @@ public class TrialRunAppService {
                               TrialMessageIdempotency idempotency, ReceptionSchemeResolver reception,
                               WorkbenchRouteForceRegistry routeForce, StaleRunCloser staleRuns,
                               TrialUserImageStorage userImages, TrialUserFileStorage userFiles,
-                              TrialAttachmentReader attachmentReader) {
+                              TrialAttachmentReader attachmentReader, EntryPreprocess entryPreprocess) {
         this.sessions = sessions;
         this.events = events;
         this.agents = agents;
@@ -184,6 +190,7 @@ public class TrialRunAppService {
         this.userImages = userImages;
         this.userFiles = userFiles;
         this.attachmentReader = attachmentReader;
+        this.entryPreprocess = entryPreprocess;
     }
 
     /**
@@ -941,11 +948,6 @@ public class TrialRunAppService {
         }
         // 图片边界校验放在最外层：超量/超大属于请求本身不合法，应在建 trace、写事件之前就拒掉
         List<String> accepted = VisionOcrTexts.normalize(images);
-        // 虚拟根没有 Agent 视觉槽：明确拒绝，而不是走一条「模型调用失败」的模糊路径
-        if (!accepted.isEmpty() && session.getAgentId() == null) {
-            flight.finish(sessionId);
-            throw new BizException(ErrorCode.BAD_REQUEST, "虚拟根试跑暂不支持图片输入，请改用文字提问");
-        }
         List<RunEvent> written = new ArrayList<>();
         ObsTraceScope trace = null;
         // 结构化选项：只有工作台会话才允许本轮出 chips；调试 / 试跑的口径与接线保持不变
@@ -979,14 +981,24 @@ public class TrialRunAppService {
             if (agent == null && spec == null) {
                 throw new TrialFailure("该会话既没有 Agent 也没有可用的编排方案，无法执行");
             }
+            boolean entryRouter = EntryPreprocess.forEntry(spec);
+            // 非入口的虚拟根没有视觉槽：仍明确拒绝。入口走预处理，失败写在步骤上而不是这里吞掉。
+            if (!accepted.isEmpty() && session.getAgentId() == null && !entryRouter) {
+                throw new TrialFailure("虚拟根试跑暂不支持图片输入，请改用文字提问");
+            }
             // 文件先校验：类型不对或清单放不进摘要时，不写事件，也不为了文件去跑视觉模型。
             // 只发文件没有图片，下面的视觉分支不会进，因此不会被「没有视觉模型」拦住。
             List<UserMessageFiles.Draft> acceptedFiles = UserMessageFiles.normalize(files);
+            // 图和文件各有单列上限，这里再卡合计，避免 9 张图再加 9 个文件
+            if (accepted.size() + acceptedFiles.size() > UserMessageFiles.MAX_ATTACHMENTS) {
+                throw new TrialFailure("一次最多发送 " + UserMessageFiles.MAX_ATTACHMENTS + " 个附件");
+            }
             UserMessageFiles.assertFits(sessionId, order, accepted.size(), acceptedFiles);
             // 前置拦截：带图却没有 VISION 槽时，必须在写任何事件之前就用明确文案拒绝，
             // 否则用户会看到一条莫名其妙的「模型调用失败」。文件不参与这次校验。
+            // 入口不在这里拦：预处理步骤要能看见失败原因。
             String visionNote = null;
-            if (!accepted.isEmpty()) {
+            if (!accepted.isEmpty() && !entryRouter) {
                 if (progress != null) {
                     // OCR 是整轮里最慢的一段（视觉模型首字延迟高）：先推一个阶段，
                     // 否则用户会盯着「任务规划中」不知道后端在做什么
@@ -1044,11 +1056,32 @@ public class TrialRunAppService {
                 mirrored = TrialLiveBuffer.tee(progress, live.recorder(sessionId));
             }
             // 气泡和事件正文仍是用户原话。管理端把附件正文拼进送给模型的那一版，不铺进气泡。
-            // 工作台保持原口径：只发文件时用短标签，不在这里读正文。
+            // 入口（首页 / MA 运行入口）有附件时先预处理，再把识别正文交给意图分流。
             String modelContent = spoken;
             String memoryText = spoken;
-            boolean adminFiles = !acceptedFiles.isEmpty() && !EntryChannel.isWorkbench(session.getEntryChannel());
-            if (adminFiles) {
+            boolean adminFiles = !acceptedFiles.isEmpty() && !entryRouter;
+            if (entryRouter && EntryPreprocess.needed(accepted, storedFiles)) {
+                try {
+                    EntryPreprocess.Result prepared = entryPreprocess.run(
+                            spec, session, spoken, accepted, storedFiles, mirrored);
+                    // 落库正文多带一份 material：跨轮回放要从这里把票面 / 抽字正文拼回用户轮
+                    written.add(writer.append(sessionId, seq++, EventType.PREPROCESS,
+                            PreprocessJson.summaryOf(prepared.view()),
+                            PreprocessJson.payload(prepared.view(), prepared.materialText()), null, null));
+                    modelContent = prepared.intentText();
+                    memoryText = prepared.memoryText();
+                    // 素材要一路跟到被分到的专家：判路由会把 sub_query 写成一句概述，
+                    // 若不在子输入里单独补回，票面 / 抽字正文就随问句一起被替换掉了
+                    EntryMaterialHolder.set(prepared.materialText());
+                    visionNote = null;
+                } catch (TrialFailure ex) {
+                    PreprocessView failed = PreprocessView.failed(List.of(), ex.getMessage());
+                    entryPreprocess.emit(mirrored, failed);
+                    written.add(writer.append(sessionId, seq++, EventType.PREPROCESS,
+                            PreprocessJson.summaryOf(failed), PreprocessJson.payload(failed), null, null));
+                    throw ex;
+                }
+            } else if (adminFiles) {
                 TrialAttachmentReader.Outcome read = attachmentReader.apply(
                         agent, session, spoken, storedFiles, mirrored);
                 modelContent = read.modelContent();
@@ -1094,6 +1127,8 @@ public class TrialRunAppService {
             PromptInjectionHolder.clear();
             // 采集槽必须清：池线程复用会把上一轮的槽带到下一轮，可能凭空多出一次整理出站
             ChoiceCaptureHolder.clear();
+            // 入口素材同理：不清就会把上一轮的票面 / 抽字正文带进下一个人的会话
+            EntryMaterialHolder.clear();
             obs.clear();
             // 整轮结束（无论成败）：内存快照完成使命，权威数据是刚落库的事件
             live.clear(sessionId);

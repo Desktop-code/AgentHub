@@ -28,25 +28,24 @@ public class MessageReq {
 
     /**
      * 随本轮一起提交的图片。空表示纯文本提问。
-     * 上限 4 张与 {@code VisionOcrTexts.MAX_IMAGES} 一致：图片是 token 大户，
-     * 不设限会让一次运行直接烧掉模型配额。
+     * 上限与 {@code UserMessageFiles.MAX_ATTACHMENTS} 一致。图和文件合计也不能超过这一数。
      */
-    @Size(max = 4, message = "一次最多上传 4 张图片")
+    @Size(max = UserMessageFiles.MAX_ATTACHMENTS, message = "一次最多发送 9 个附件")
     private List<String> images;
 
     /**
      * 随本轮一起提交的非图片文件。与图片进同一条消息，不另开上传接口。
-     * 上限 4 个与 {@code UserMessageFiles.MAX_FILES} 一致。
+     * 单列上限与附件总数一致，合计另由 {@link #isWithinAttachmentCap()} 卡住。
      */
     @Valid
-    @Size(max = 4, message = "一次最多上传 4 个文件")
+    @Size(max = UserMessageFiles.MAX_ATTACHMENTS, message = "一次最多发送 9 个附件")
     private List<UserFilePart> files;
 
     /**
      * 图和文件的添加顺序，元素只能是 {@code image} 或 {@code file}。
      * 不传时按图片在前、文件在后。纯图片不需要这个字段，仍走 ahimg。
      */
-    @Size(max = 8, message = "附件过多")
+    @Size(max = UserMessageFiles.MAX_ATTACHMENTS, message = "一次最多发送 9 个附件")
     private List<String> attachmentOrder;
 
     /**
@@ -75,6 +74,28 @@ public class MessageReq {
             }
         }
         return false;
+    }
+
+    /**
+     * 图片和文件加在一起不能超过一轮上限。两边各不满、加起来超过时也要拦住。
+     *
+     * @return 没超过则为 true
+     */
+    @JsonIgnore
+    @AssertTrue(message = "一次最多发送 9 个附件")
+    public boolean isWithinAttachmentCap() {
+        int count = 0;
+        if (images != null) {
+            for (String image : images) {
+                if (image != null && !image.isBlank()) {
+                    count++;
+                }
+            }
+        }
+        if (files != null) {
+            count += files.size();
+        }
+        return count <= UserMessageFiles.MAX_ATTACHMENTS;
     }
 
     /**

@@ -24,8 +24,14 @@ public final class UserMessageFiles {
     /** summary 前缀。后面是条数，以及按添加顺序排列的图或文件。 */
     public static final String PREFIX = "ahfile:";
 
-    /** 单轮文件个数。与图片张数分开计数，避免互相占坑。 */
-    public static final int MAX_FILES = 4;
+    /**
+     * 一轮附件总数（图片 + 文件）。待发、拖入、粘贴和发送都用这一数，
+     * 不按类型各给一份额度。
+     */
+    public static final int MAX_ATTACHMENTS = 9;
+
+    /** 单轮文件个数，与附件总数同一上限。图和文件合计仍不能超过 {@link #MAX_ATTACHMENTS}。 */
+    public static final int MAX_FILES = MAX_ATTACHMENTS;
 
     /**
      * 解码后单文件上限。对齐 {@code spring.servlet.multipart.max-file-size}（12MB），
@@ -43,7 +49,11 @@ public final class UserMessageFiles {
     private static final int STORED_NAME_CHARS = 32;
 
     private static final Set<String> ALLOWED = Set.of(
-            "pdf", "txt", "csv", "xlsx", "xls", "docx", "doc", "pptx", "ppt", "zip");
+            "pdf", "txt", "csv", "xlsx", "xls", "docx", "doc", "pptx", "ppt", "zip",
+            "webm", "wav", "mp3", "m4a", "ogg", "opus");
+
+    /** 录音扩展名。入口预处理转写；管理端已选专家对话只存不抽字。 */
+    private static final Set<String> AUDIO_EXT = Set.of("webm", "wav", "mp3", "m4a", "ogg", "opus");
 
     /** 可执行文件明确拒绝，不给新开口。 */
     private static final Set<String> BLOCKED = Set.of("exe", "msi", "bat", "cmd", "ps1", "dll");
@@ -51,7 +61,8 @@ public final class UserMessageFiles {
     /** 图片扩展名走附图链路，不能当成普通文件绕过视觉校验。 */
     private static final Set<String> IMAGE_EXT = Set.of("png", "jpg", "jpeg", "webp", "gif");
 
-    private static final String TYPE_HINT = "pdf、txt、csv、xlsx、xls、docx、doc、pptx、ppt、zip";
+    private static final String TYPE_HINT =
+            "pdf、txt、csv、xlsx、xls、docx、doc、pptx、ppt、zip、webm、wav、mp3、m4a、ogg";
 
     private UserMessageFiles() {
     }
@@ -97,6 +108,26 @@ public final class UserMessageFiles {
     }
 
     /**
+     * 是否是录音附件。入口预处理据此走 ASR，而不是本地抽字。
+     *
+     * @param extension 小写扩展名，可空
+     * @return true 表示按语音转写
+     */
+    public static boolean isAudio(String extension) {
+        return extension != null && AUDIO_EXT.contains(extension);
+    }
+
+    /**
+     * 从已落盘文件名判断是否录音。
+     *
+     * @param name 展示名，可空
+     * @return true 表示按语音转写
+     */
+    public static boolean isAudioName(String name) {
+        return isAudio(extensionOf(name == null ? "" : name));
+    }
+
+    /**
      * 校验本轮文件。空列表表示这轮没有文件。
      *
      * @param raw 请求里的文件，可空
@@ -139,7 +170,7 @@ public final class UserMessageFiles {
             kept.add(new Draft(name, ext, dataUrl));
         }
         if (kept.size() > MAX_FILES) {
-            throw new TrialFailure("一次最多上传 " + MAX_FILES + " 个文件");
+            throw new TrialFailure("一次最多发送 " + MAX_FILES + " 个附件");
         }
         return List.copyOf(kept);
     }
@@ -184,7 +215,12 @@ public final class UserMessageFiles {
         List<String> images = imageUrls == null ? List.of() : imageUrls;
         List<Ref> stored = files == null ? List.of() : files;
         List<String> tokens = resolveOrder(order, images.size(), stored.size());
+        // 目录前缀只写一次，文件名用落盘短名。9 个附件才能放进 500 字摘要，回放再拼回完整地址
+        String session = sharedSession(images, stored);
         StringBuilder text = new StringBuilder(PREFIX).append(tokens.size()).append(':');
+        if (session != null) {
+            text.append(session).append(':');
+        }
         int imageCursor = 0;
         int fileCursor = 0;
         for (int i = 0; i < tokens.size(); i++) {
@@ -196,14 +232,15 @@ public final class UserMessageFiles {
                 if (!allowedImage(url)) {
                     throw new TrialFailure("图片地址无效");
                 }
-                text.append("i,").append(url);
+                text.append("i,").append(session == null ? url : storedName(url));
                 continue;
             }
             Ref file = stored.get(fileCursor++);
             if (file == null || !allowedFile(file.url()) || file.size() < 0) {
                 throw new TrialFailure("文件地址无效");
             }
-            text.append("f,").append(escape(file.name())).append(',').append(file.size()).append(',').append(file.url());
+            String location = session == null ? file.url() : storedName(file.url());
+            text.append("f,").append(escape(file.name())).append(',').append(file.size()).append(',').append(location);
         }
         String value = text.toString();
         if (value.length() > MANIFEST_LIMIT) {
@@ -232,17 +269,24 @@ public final class UserMessageFiles {
         } catch (NumberFormatException ex) {
             return List.of();
         }
-        if (count < 1 || count > MAX_FILES + VisionOcrTexts.MAX_IMAGES) {
+        if (count < 1 || count > MAX_ATTACHMENTS) {
             return List.of();
         }
         String rest = summary.substring(countColon + 1);
+        // 新清单在条数后多写一次会话号，旧清单仍是 i,/uploads/... 这种完整地址
+        String session = null;
+        int sessionColon = rest.indexOf(':');
+        if (sessionColon > 0 && rest.substring(0, sessionColon).chars().allMatch(Character::isDigit)) {
+            session = rest.substring(0, sessionColon);
+            rest = rest.substring(sessionColon + 1);
+        }
         String[] parts = rest.split("\\|", -1);
         if (parts.length != count) {
             return List.of();
         }
         List<Item> items = new ArrayList<>(parts.length);
         for (String part : parts) {
-            Item item = oneItem(part);
+            Item item = oneItem(part, session);
             if (item == null) {
                 return List.of();
             }
@@ -373,12 +417,13 @@ public final class UserMessageFiles {
     }
 
     /**
-     * @param part 一条 {@code i,地址} 或 {@code f,名字,字节,地址}
+     * @param part    一条 {@code i,地址} 或 {@code f,名字,字节,地址}。短名要配会话号才能拼回地址
+     * @param session 压缩清单里的会话号；旧清单为 null
      * @return 认不出时 null，调用方整单作废
      */
-    private static Item oneItem(String part) {
+    private static Item oneItem(String part, String session) {
         if (part.startsWith("i,")) {
-            String url = part.substring(2);
+            String url = expand(part.substring(2), session, "/uploads/trial-images/");
             if (!allowedImage(url)) {
                 return null;
             }
@@ -398,10 +443,107 @@ public final class UserMessageFiles {
             return null;
         }
         String name = unescape(fields[1]);
-        if (name.isBlank() || size < 0 || !allowedFile(fields[3])) {
+        String url = expand(fields[3], session, "/uploads/trial-files/");
+        if (name.isBlank() || size < 0 || !allowedFile(url)) {
             return null;
         }
-        return new Item("file", name, size, fields[3]);
+        return new Item("file", name, size, url);
+    }
+
+    /**
+     * 图和文件都落在同一个会话目录下时，清单只保留会话号和短文件名。
+     * 对不上（外链、跨会话）就返回 null，调用方改写完整地址。
+     *
+     * @param images 图片地址
+     * @param files  文件引用
+     * @return 会话号；不能压缩时为 null
+     */
+    private static String sharedSession(List<String> images, List<Ref> files) {
+        String session = null;
+        for (String url : images) {
+            String found = sessionOf(url, "/uploads/trial-images/");
+            if (found == null) {
+                return null;
+            }
+            if (session == null) {
+                session = found;
+            } else if (!session.equals(found)) {
+                return null;
+            }
+        }
+        for (Ref file : files) {
+            if (file == null) {
+                return null;
+            }
+            String found = sessionOf(file.url(), "/uploads/trial-files/");
+            if (found == null) {
+                return null;
+            }
+            if (session == null) {
+                session = found;
+            } else if (!session.equals(found)) {
+                return null;
+            }
+        }
+        return session;
+    }
+
+    /**
+     * @param url    落盘地址
+     * @param prefix 目录前缀
+     * @return 会话号；不是这条前缀时为 null
+     */
+    private static String sessionOf(String url, String prefix) {
+        if (url == null || !url.startsWith(prefix)) {
+            return null;
+        }
+        String rest = url.substring(prefix.length());
+        int slash = rest.indexOf('/');
+        if (slash <= 0) {
+            return null;
+        }
+        String session = rest.substring(0, slash);
+        if (session.isEmpty() || !session.chars().allMatch(Character::isDigit)) {
+            return null;
+        }
+        return session;
+    }
+
+    /**
+     * @param url 落盘地址
+     * @return 最后一段文件名；带分隔符的不要，避免拆清单
+     */
+    private static String storedName(String url) {
+        int slash = url.lastIndexOf('/');
+        if (slash < 0 || slash == url.length() - 1) {
+            throw new TrialFailure("文件地址无效");
+        }
+        String name = url.substring(slash + 1);
+        if (name.indexOf('|') >= 0 || name.indexOf(',') >= 0 || name.indexOf(':') >= 0) {
+            throw new TrialFailure("文件地址无效");
+        }
+        return name;
+    }
+
+    /**
+     * 短文件名配会话号拼回对外地址。已经是完整地址的原样返回。
+     *
+     * @param location 短名或完整地址
+     * @param session  会话号，可空
+     * @param prefix   目录前缀
+     * @return 可打开的地址
+     */
+    private static String expand(String location, String session, String prefix) {
+        if (location == null) {
+            return "";
+        }
+        if (location.startsWith("/") || location.startsWith("http://") || location.startsWith("https://")) {
+            return location;
+        }
+        if (session == null || location.isBlank() || location.indexOf('/') >= 0) {
+            return location;
+        }
+        return prefix + session + "/" + location;
     }
 
     /**

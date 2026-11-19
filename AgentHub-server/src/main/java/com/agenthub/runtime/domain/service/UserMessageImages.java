@@ -37,16 +37,21 @@ public final class UserMessageImages {
         if (urls == null || urls.isEmpty()) {
             return null;
         }
+        String session = sharedImageSession(urls);
         StringBuilder text = new StringBuilder(PREFIX).append(urls.size()).append(':');
+        if (session != null) {
+            // 同一会话的图片只留短文件名，9 张才放得进摘要列
+            text.append(session).append(':');
+        }
         for (int i = 0; i < urls.size(); i++) {
             if (i > 0) {
                 text.append('|');
             }
             String url = urls.get(i) == null ? "" : urls.get(i).trim();
-            if (url.isEmpty()) {
+            if (url.isEmpty() || !allowed(url)) {
                 throw new TrialFailure("图片地址无效");
             }
-            text.append(url);
+            text.append(session == null ? url : storedImageName(url));
         }
         String value = text.toString();
         if (value.length() > MANIFEST_LIMIT) {
@@ -83,18 +88,84 @@ public final class UserMessageImages {
         if (rest.isEmpty()) {
             return List.of();
         }
+        String session = null;
+        int sessionColon = rest.indexOf(':');
+        if (sessionColon > 0 && rest.substring(0, sessionColon).chars().allMatch(Character::isDigit)) {
+            session = rest.substring(0, sessionColon);
+            rest = rest.substring(sessionColon + 1);
+        }
         String[] parts = rest.split("\\|", -1);
         if (parts.length != count) {
             return List.of();
         }
         List<String> urls = new ArrayList<>(parts.length);
         for (String part : parts) {
-            if (!allowed(part)) {
+            String url = expandImage(part, session);
+            if (!allowed(url)) {
                 return List.of();
             }
-            urls.add(part);
+            urls.add(url);
         }
         return List.copyOf(urls);
+    }
+
+    /**
+     * 同一会话才压缩。外链或跨会话保持完整地址。
+     *
+     * @param urls 图片地址
+     * @return 会话号；不能压缩时为 null
+     */
+    private static String sharedImageSession(List<String> urls) {
+        String session = null;
+        for (String raw : urls) {
+            String url = raw == null ? "" : raw.trim();
+            String prefix = "/uploads/trial-images/";
+            if (!url.startsWith(prefix)) {
+                return null;
+            }
+            String rest = url.substring(prefix.length());
+            int slash = rest.indexOf('/');
+            if (slash <= 0) {
+                return null;
+            }
+            String found = rest.substring(0, slash);
+            if (found.isEmpty() || !found.chars().allMatch(Character::isDigit)) {
+                return null;
+            }
+            if (session == null) {
+                session = found;
+            } else if (!session.equals(found)) {
+                return null;
+            }
+        }
+        return session;
+    }
+
+    /**
+     * @param url 落盘地址
+     * @return 最后一段
+     */
+    private static String storedImageName(String url) {
+        int slash = url.lastIndexOf('/');
+        if (slash < 0 || slash == url.length() - 1) {
+            throw new TrialFailure("图片地址无效");
+        }
+        return url.substring(slash + 1);
+    }
+
+    /**
+     * @param part    短文件名或完整地址
+     * @param session 会话号，旧清单为 null
+     * @return 可放进 img 的地址
+     */
+    private static String expandImage(String part, String session) {
+        if (part.startsWith("/") || part.startsWith("http://") || part.startsWith("https://")) {
+            return part;
+        }
+        if (session == null || part.isBlank() || part.indexOf('/') >= 0) {
+            return part;
+        }
+        return "/uploads/trial-images/" + session + "/" + part;
     }
 
     /**

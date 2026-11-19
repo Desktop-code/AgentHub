@@ -97,6 +97,28 @@ public class MaDefController {
     }
 
     /**
+     * 入口预处理视觉模型下拉：启用中、用途为 VISION 的实例。
+     *
+     * @return 可选实例列表
+     */
+    @SaCheckPermission(MaPermissions.VIEW)
+    @GetMapping("/vision-models")
+    public Result<List<MaJudgeModelOptionResp>> visionModels() {
+        return Result.ok(service.visionModels());
+    }
+
+    /**
+     * 入口预处理语音识别模型下拉：启用中、用途为 ASR 的实例。
+     *
+     * @return 可选实例列表
+     */
+    @SaCheckPermission(MaPermissions.VIEW)
+    @GetMapping("/asr-models")
+    public Result<List<MaJudgeModelOptionResp>> asrModels() {
+        return Result.ok(service.asrModels());
+    }
+
+    /**
      * 新建方案，候选嵌在请求里整份保存。
      *
      * @param req 方案、配置与候选
