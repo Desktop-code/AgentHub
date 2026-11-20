@@ -6,14 +6,18 @@ import com.agenthub.common.error.ErrorCode;
 import com.agenthub.rag.api.dto.RagChunkResp;
 import com.agenthub.rag.api.dto.RagDocumentResp;
 import com.agenthub.rag.api.dto.RagRechunkReq;
+import com.agenthub.rag.api.dto.RagStageResp;
 import com.agenthub.rag.domain.model.RagChunk;
 import com.agenthub.rag.domain.model.RagDocument;
+import com.agenthub.rag.domain.model.RagIngestStage;
 import com.agenthub.rag.domain.model.RagIngestTask;
 import com.agenthub.rag.domain.model.RagKnowledgeBase;
 import com.agenthub.rag.domain.repository.RagChunkRepository;
+import com.agenthub.rag.domain.repository.RagDocumentParseRepository;
 import com.agenthub.rag.domain.repository.RagDocumentRepository;
 import com.agenthub.rag.domain.repository.RagIngestTaskRepository;
 import com.agenthub.rag.domain.repository.RagKnowledgeBaseRepository;
+import com.agenthub.rag.domain.service.ir.ChunkStrategyKind;
 import org.springframework.stereotype.Service;
 
 import java.util.HashMap;
@@ -34,22 +38,25 @@ public class RagDocumentAppService {
     private final RagDocumentRepository documents;
     private final RagIngestTaskRepository tasks;
     private final RagChunkRepository chunks;
+    private final RagDocumentParseRepository parses;
     private final RagIngestAppService ingest;
 
     /**
      * @param kbs       知识库
      * @param documents 文档
-     * @param tasks     入库任务（回填进度）
+     * @param tasks     入库任务（回填进度与阶段摘要）
      * @param chunks    切片（查看切片）
+     * @param parses    解析文本产物（删文档时级联清理）
      * @param ingest    入库编排
      */
     public RagDocumentAppService(RagKnowledgeBaseRepository kbs, RagDocumentRepository documents,
                                  RagIngestTaskRepository tasks, RagChunkRepository chunks,
-                                 RagIngestAppService ingest) {
+                                 RagDocumentParseRepository parses, RagIngestAppService ingest) {
         this.kbs = kbs;
         this.documents = documents;
         this.tasks = tasks;
         this.chunks = chunks;
+        this.parses = parses;
         this.ingest = ingest;
     }
 
@@ -100,7 +107,8 @@ public class RagDocumentAppService {
     }
 
     /**
-     * 删除文档。
+     * 删除文档。解析文本产物在此一并清掉，避免残留全文；
+     * 切片 / 向量 / 原文件仍由入库用例按既有顺序级联。
      *
      * @param kbId  知识库
      * @param docId 文档
@@ -108,13 +116,14 @@ public class RagDocumentAppService {
     public void remove(Long kbId, Long docId) {
         requireDoc(kbId, docId);
         ingest.remove(docId);
+        parses.deleteByDocId(docId);
     }
 
     /**
      * 查看某文档的全部切片，按序号升序。
      * <p>
-     * 只做只读查询：切片由入库流水线生成，管理端不提供手工改单条切片的能力，
-     * 要调整只能整篇重切，避免切片与向量失配。
+     * 只做只读查询；单条切片的正文/章节路径编辑走
+     * {@link RagDocumentInspectAppService#updateChunk}，且只重写该片向量。
      *
      * @param kbId  知识库
      * @param docId 文档
@@ -176,8 +185,29 @@ public class RagDocumentAppService {
             resp.setStage(task.getStage());
             resp.setProgress(task.getProgress());
             resp.setAttempts(task.getAttempts());
+            resp.setStages(toStageResps(task.getStages()));
         }
         return resp;
+    }
+
+    /**
+     * 任务阶段摘要转响应。成功后阶段条仍要靠这份列表展示，为空时前端显示「未记录」。
+     *
+     * @param stages 任务行里的五步摘要
+     * @return 响应列表；无摘要时为空列表
+     */
+    private List<RagStageResp> toStageResps(List<RagIngestStage> stages) {
+        if (stages == null || stages.isEmpty()) {
+            return List.of();
+        }
+        return stages.stream().map(stage -> {
+            RagStageResp resp = new RagStageResp();
+            resp.setStage(stage.getStage());
+            resp.setStatus(stage.getStatus());
+            resp.setElapsedMs(stage.getElapsedMs());
+            resp.setSummary(stage.getSummary());
+            return resp;
+        }).toList();
     }
 
     /**
@@ -190,6 +220,13 @@ public class RagDocumentAppService {
         RagChunkResp resp = new RagChunkResp();
         resp.setId(chunk.getId());
         resp.setChunkIndex(chunk.getChunkIndex());
+        resp.setParentChunkId(chunk.getParentChunkId());
+        resp.setPartIndex(chunk.getPartIndex());
+        resp.setStrategy(chunk.getStrategy());
+        resp.setStrategyLabel(ChunkStrategyKind.labelOf(chunk.getStrategy()));
+        resp.setSectionPath(chunk.getSectionPath());
+        resp.setCharStart(chunk.getCharStart());
+        resp.setCharEnd(chunk.getCharEnd());
         resp.setTokenEst(chunk.getTokenEst());
         resp.setContent(chunk.getContent());
         return resp;

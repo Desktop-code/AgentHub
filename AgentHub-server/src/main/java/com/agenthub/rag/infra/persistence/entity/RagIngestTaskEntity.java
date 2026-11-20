@@ -24,6 +24,8 @@ public class RagIngestTaskEntity {
     private Long docId;
     private String status;
     private String stage;
+    /** 五步阶段摘要 JSON；每轮入库开始时清空 */
+    private String stageTrace;
     private Integer progress;
     private Integer attempts;
     private String errorMsg;

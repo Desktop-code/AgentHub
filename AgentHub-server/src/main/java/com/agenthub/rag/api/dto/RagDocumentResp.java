@@ -3,6 +3,7 @@ package com.agenthub.rag.api.dto;
 import lombok.Data;
 
 import java.time.LocalDateTime;
+import java.util.List;
 
 /**
  * 文档响应。所属域：rag。
@@ -26,8 +27,10 @@ public class RagDocumentResp {
     private Integer version;
     /** 入库任务状态，与 doc.status 同步推进 */
     private String taskStatus;
-    /** 当前阶段：解析 / 切片 / 向量化 / 写入 */
+    /** 当前阶段：解析 / 结构识别 / 切片 / 向量化 / 写入 */
     private String stage;
+    /** 本轮五步阶段摘要；成功后保留，重试 / 重切开始时清空 */
+    private List<RagStageResp> stages;
     /** 0-100 */
     private Integer progress;
     /** 已尝试次数，重试递增 */

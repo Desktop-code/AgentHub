@@ -124,6 +124,7 @@ public class EntryBasedChunkStrategy implements ChunkStrategy {
             meta.put("source_ref", sourceRef);
         }
         meta.put("source_type", DocumentType.ENTRY_BASED.name());
+        meta.put("strategy", ChunkStrategyKind.ENTRY_BASED.code());
         return new DocumentChunk(content, pageNum, section, meta);
     }
 

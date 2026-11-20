@@ -5,7 +5,13 @@
  */
 import request from '@/utils/request'
 import type { PageResult, Result } from '@/types'
-import type { RagChunkRow, RagDocumentRow, RagKbRow } from '@/types/rag'
+import type {
+  RagChunkRow,
+  RagDocumentRow,
+  RagKbRow,
+  RagParseTextRow,
+  RagRechunkPreviewRow
+} from '@/types/rag'
 
 /** 分页。size 不超过 100。 */
 export function pageKbs(params: {
@@ -94,3 +100,45 @@ export function rechunkDocument(kbId: number, docId: number, data: { chunkSize: 
     { timeout: 30000 }
   )
 }
+
+/**
+ * 读取本轮入库实际使用的解析文本，用于左侧原文对照。
+ * 老文档无产物时后端从原文件只读再解析，不落库、不改切片与向量。
+ */
+export function getDocumentParseText(kbId: number, docId: number) {
+  return request.get<Result<RagParseTextRow>>(`/api/rag/kbs/${kbId}/documents/${docId}/parse`)
+}
+
+/**
+ * 重新切片预览：只按片长/重叠重算，不写切片、不动向量、不改文档状态。
+ * 确认覆盖仍调用 rechunkDocument。
+ */
+export function previewRechunkDocument(
+  kbId: number,
+  docId: number,
+  data: { chunkSize: number; chunkOverlap?: number }
+) {
+  return request.post<Result<RagRechunkPreviewRow>>(
+    `/api/rag/kbs/${kbId}/documents/${docId}/rechunk/preview`,
+    data,
+    { timeout: 30000 }
+  )
+}
+
+/**
+ * 单条切片编辑：只更新该片正文与章节路径，并只重写这一片向量。
+ * 空正文由前后端双重拦截；权限沿用 rag:doc:rechunk。
+ */
+export function updateDocumentChunk(
+  kbId: number,
+  docId: number,
+  chunkId: number,
+  data: { content: string; sectionPath?: string | null }
+) {
+  return request.put<Result<RagChunkRow>>(
+    `/api/rag/kbs/${kbId}/documents/${docId}/chunks/${chunkId}`,
+    data,
+    { timeout: 30000 }
+  )
+}
+

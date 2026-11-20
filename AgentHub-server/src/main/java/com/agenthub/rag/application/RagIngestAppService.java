@@ -6,17 +6,22 @@ import com.agenthub.common.error.ErrorCode;
 import com.agenthub.common.web.OperatorContext;
 import com.agenthub.rag.domain.model.RagChunk;
 import com.agenthub.rag.domain.model.RagDocument;
+import com.agenthub.rag.domain.model.RagDocumentParse;
 import com.agenthub.rag.domain.model.RagDocumentStatus;
+import com.agenthub.rag.domain.model.RagIngestStage;
 import com.agenthub.rag.domain.model.RagIngestStatus;
 import com.agenthub.rag.domain.model.RagIngestTask;
 import com.agenthub.rag.domain.model.RagKnowledgeBase;
 import com.agenthub.rag.domain.repository.RagChunkRepository;
+import com.agenthub.rag.domain.repository.RagDocumentParseRepository;
 import com.agenthub.rag.domain.repository.RagDocumentRepository;
 import com.agenthub.rag.domain.repository.RagIngestTaskRepository;
 import com.agenthub.rag.domain.repository.RagKnowledgeBaseRepository;
 import com.agenthub.rag.domain.service.ChunkPipeline;
+import com.agenthub.rag.domain.service.ChunkPresentation;
 import com.agenthub.rag.domain.service.RagAccessPolicy;
 import com.agenthub.rag.domain.service.RagUploadTypes;
+import com.agenthub.rag.domain.service.ir.StructuredDocument;
 import com.agenthub.rag.infra.parse.RagDocumentParser;
 import com.agenthub.rag.infra.storage.RagFileStorage;
 import com.agenthub.spi.rag.ChunkVector;
@@ -54,8 +59,9 @@ public class RagIngestAppService {
 
     private static final Logger log = LoggerFactory.getLogger(RagIngestAppService.class);
 
-    /** 入库阶段名，与前端进度文案一致 */
+    /** 入库阶段名，与前端阶段条固定五步一致；禁止在对外文案里出现存储实现名 */
     private static final String STAGE_PARSE = "解析";
+    private static final String STAGE_STRUCT = "结构识别";
     private static final String STAGE_CHUNK = "切片";
     private static final String STAGE_EMBED = "向量化";
     private static final String STAGE_WRITE = "写入";
@@ -68,6 +74,7 @@ public class RagIngestAppService {
     private final EmbeddingClient embeddings;
     private final RagDocumentParser parser;
     private final RagFileStorage storage;
+    private final RagDocumentParseRepository parses;
     private final OperatorContext operatorContext;
     private final OperLogWriter operLogWriter;
     private final TaskExecutor ingestExecutor;
@@ -81,6 +88,7 @@ public class RagIngestAppService {
      * @param embeddings     向量化（测试用 mock 替身注入）
      * @param parser         文档解析
      * @param storage        原文落盘
+     * @param parses         解析文本产物（原文对照 / 重切预览）
      * @param operatorContext 操作人
      * @param operLogWriter  操作日志
      * @param ingestExecutor 入库线程池
@@ -89,6 +97,7 @@ public class RagIngestAppService {
                                RagChunkRepository chunks, RagIngestTaskRepository tasks,
                                RagProvider provider, EmbeddingClient embeddings,
                                RagDocumentParser parser, RagFileStorage storage,
+                               RagDocumentParseRepository parses,
                                OperatorContext operatorContext, OperLogWriter operLogWriter,
                                @Qualifier("ragIngestExecutor") TaskExecutor ingestExecutor) {
         this.kbs = kbs;
@@ -99,6 +108,7 @@ public class RagIngestAppService {
         this.embeddings = embeddings;
         this.parser = parser;
         this.storage = storage;
+        this.parses = parses;
         this.operatorContext = operatorContext;
         this.operLogWriter = operLogWriter;
         this.ingestExecutor = ingestExecutor;
@@ -261,6 +271,8 @@ public class RagIngestAppService {
         }
         chunks.deleteByDocId(docId);
         tasks.deleteByDocId(docId);
+        // 解析全文也要清：否则删文档后仍能通过产物表读到正文
+        parses.deleteByDocId(docId);
         documents.logicalDelete(docId);
         storage.delete(doc.getSourceUri());
         operLogWriter.write("rag", "remove-doc", "rag_document", String.valueOf(docId),
@@ -322,6 +334,10 @@ public class RagIngestAppService {
     void run(Long taskId, Long docId, Long kbId, String sourceUri, boolean resetFirst,
              IngestParams overrideChunk) {
         RagKnowledgeBase kb = null;
+        // 阶段摘要与「当前正在跑的阶段」放在 try 外：失败分支要能把该步标成 FAILED
+        List<RagIngestStage> stages = new ArrayList<>();
+        String currentStage = null;
+        long stageStartedAt = 0L;
         try {
             log.info("[RAG] 入库开始 taskId={} docId={} kbId={}", taskId, docId, kbId);
             tasks.markRunning(taskId);
@@ -340,25 +356,52 @@ public class RagIngestAppService {
             if (operatorId == null) {
                 operatorId = 0L;
             }
+            IngestParams params = overrideChunk == null ? IngestParams.fromKb(kb.getIngestConfig()) : overrideChunk;
 
             // 1) 解析（本地默认；MinerU/Vision 可选，失败回退，无 Key 不炸）
+            currentStage = STAGE_PARSE;
+            stageStartedAt = beginStage(taskId, stages, currentStage);
             progress(taskId, STAGE_PARSE, 10);
             byte[] raw = storage.read(sourceUri);
             if (raw.length == 0) {
                 throw new IllegalStateException("原文件已丢失，请重新上传");
             }
-            String text = parser.parse(title, raw);
+            // 换行统一为 \n：解析产物、切片偏移与前端对照共用同一坐标系
+            String text = ChunkPipeline.normalizeNewlines(parser.parse(title, raw));
+            saveParseArtifact(kb, doc, docId, text);
+            finishStage(taskId, stages, currentStage, stageStartedAt, "解析出 " + text.length() + " 字符");
 
-            // 2) 切前清洗 → IR+原型 → 四策略 → 切后去噪（ingest_config 可盖默认 450/100/150）
-            progress(taskId, STAGE_CHUNK, 30);
-            IngestParams params = overrideChunk == null ? IngestParams.fromKb(kb.getIngestConfig()) : overrideChunk;
-            List<com.agenthub.rag.domain.service.DocumentChunk> pieces = ChunkPipeline.chunkRich(
-                    title, text, params.chunkSize(), params.overlap(), params.minChunkSize());
+            // 2) 结构识别：把现有 IR + 原型分析做成可见阶段，判定规则不改
+            currentStage = STAGE_STRUCT;
+            stageStartedAt = beginStage(taskId, stages, currentStage);
+            progress(taskId, STAGE_STRUCT, 22);
+            StructuredDocument ir = ChunkPipeline.structure(title, text,
+                    params.chunkSize(), params.overlap(), params.minChunkSize());
+            Integer headerMeta = metaInt(ir.getMetadata().get("headerCount"));
+            int headerCount = headerMeta == null ? 0 : headerMeta;
+            String docType = ir.getDocType() == null ? null : ir.getDocType().name();
+            parses.updateStats(docId, headerCount, docType, null);
+            finishStage(taskId, stages, currentStage, stageStartedAt,
+                    "识别到 " + headerCount + " 个标题" + (docType == null ? "" : " · " + docTypeLabel(docType)));
+
+            // 3) 切前清洗 → IR+原型 → 四策略 → 切后去噪（复用上一步 IR，不重复结构分析）
+            currentStage = STAGE_CHUNK;
+            stageStartedAt = beginStage(taskId, stages, currentStage);
+            progress(taskId, STAGE_CHUNK, 35);
+            List<com.agenthub.rag.domain.service.DocumentChunk> pieces = ChunkPipeline.chunkPrepared(
+                    ir, params.chunkSize(), params.overlap(), params.minChunkSize());
             if (pieces.isEmpty()) {
                 throw new IllegalStateException("正文切片后为空，请检查文件内容");
             }
+            // 原文映射与展示元数据：只读 IR 产物，不改切分结果
+            ChunkPresentation.assignOffsets(pieces, text);
+            String strategy = dominantStrategy(pieces);
+            parses.updateStats(docId, headerCount, docType, strategy);
+            finishStage(taskId, stages, currentStage, stageStartedAt, "生成 " + pieces.size() + " 片");
 
-            // 3) 向量化 N→N（分批；条数必须与请求一致，禁止静默丢片）
+            // 4) 向量化 N→N（分批；条数必须与请求一致，禁止静默丢片）
+            currentStage = STAGE_EMBED;
+            stageStartedAt = beginStage(taskId, stages, currentStage);
             List<String> texts = new ArrayList<>(pieces.size());
             for (com.agenthub.rag.domain.service.DocumentChunk piece : pieces) {
                 texts.add(piece.getContent());
@@ -367,7 +410,7 @@ public class RagIngestAppService {
             int batch = Math.max(1, embeddings.maxBatchSize());
             for (int from = 0; from < texts.size(); from += batch) {
                 int to = Math.min(from + batch, texts.size());
-                progress(taskId, STAGE_EMBED, 30 + (int) Math.round(40.0 * to / texts.size()));
+                progress(taskId, STAGE_EMBED, 45 + (int) Math.round(35.0 * to / texts.size()));
                 float[][] part = embeddings.embed(kb.getEmbeddingModelId(),
                         texts.subList(from, to), kb.getVectorDimension());
                 if (part == null || part.length != to - from) {
@@ -377,27 +420,157 @@ public class RagIngestAppService {
                     vectors.add(v);
                 }
             }
+            finishStage(taskId, stages, currentStage, stageStartedAt,
+                    "向量化 " + texts.size() + " 条 · 维度 " + kb.getVectorDimension());
 
-            // 4) 先写 MySQL 拿主键，再写 Milvus，保证两边可对齐
-            progress(taskId, STAGE_WRITE, 75);
+            // 5) 先写 MySQL 拿主键，再写 Milvus，保证两边可对齐
+            currentStage = STAGE_WRITE;
+            stageStartedAt = beginStage(taskId, stages, currentStage);
+            progress(taskId, STAGE_WRITE, 82);
             List<RagChunk> rows = buildChunks(pieces, kb, docId, operatorId);
             List<RagChunk> inserted = chunks.insertBatch(rows, operatorId);
             List<ChunkVector> vectors2 = buildVectors(inserted, vectors, kb, docId, title);
             provider.upsertChunks(kb, vectors2);
+            finishStage(taskId, stages, currentStage, stageStartedAt, "写入切片 " + inserted.size() + " 条");
 
             documents.updateStatus(docId, RagDocumentStatus.READY.getCode(), inserted.size(), null);
             tasks.markSuccess(taskId);
             log.info("[RAG] 入库成功 docId={} kbId={} chunks={}", docId, kbId, inserted.size());
         } catch (EmbeddingException | RagStoreException | IllegalArgumentException | IllegalStateException e) {
-            // 业务可解释的失败：保留原文，清掉半成品，允许重试
+            // 业务可解释的失败：保留原文，标记当前阶段失败，清半成品后允许重试
+            failStage(taskId, stages, currentStage, stageStartedAt, e.getMessage());
             cleanupHalfDone(kb, docId);
             fail(taskId, docId, truncate(e.getMessage(), 480));
             log.warn("[RAG] 入库失败 docId={} reason={}", docId, e.getMessage());
         } catch (RuntimeException e) {
+            failStage(taskId, stages, currentStage, stageStartedAt, "入库异常：" + e.getClass().getSimpleName());
             cleanupHalfDone(kb, docId);
             fail(taskId, docId, truncate("入库异常：" + e.getClass().getSimpleName(), 480));
             log.error("[RAG] 入库异常 docId={}", docId, e);
         }
+    }
+
+    /**
+     * 开启一个阶段：先落 RUNNING，前端阶段条立刻能看到当前步。
+     *
+     * @param taskId 任务
+     * @param stages 本地阶段列表（单线程写）
+     * @param stage  阶段名
+     * @return 阶段开始时间（毫秒）
+     */
+    private long beginStage(Long taskId, List<RagIngestStage> stages, String stage) {
+        RagIngestStage entry = new RagIngestStage();
+        entry.setStage(stage);
+        entry.setStatus("RUNNING");
+        stages.add(entry);
+        tasks.updateStages(taskId, stages);
+        return System.currentTimeMillis();
+    }
+
+    /**
+     * 结束当前阶段：写 SUCCESS、耗时与简要产物；摘要截断到 200 字，避免任务行膨胀。
+     *
+     * @param taskId    任务
+     * @param stages    本地阶段列表
+     * @param stage     阶段名
+     * @param startedAt 开始时间
+     * @param summary   产物摘要
+     */
+    private void finishStage(Long taskId, List<RagIngestStage> stages, String stage,
+                             long startedAt, String summary) {
+        RagIngestStage entry = lastRunning(stages);
+        if (entry == null) {
+            entry = new RagIngestStage();
+            entry.setStage(stage);
+            stages.add(entry);
+        }
+        entry.setStatus("SUCCESS");
+        entry.setElapsedMs(Math.max(0L, System.currentTimeMillis() - startedAt));
+        entry.setSummary(truncate(summary, 200));
+        tasks.updateStages(taskId, stages);
+    }
+
+    /**
+     * 标记当前阶段失败：保留已完成阶段的摘要，失败步写原因，后续步骤不伪造。
+     *
+     * @param taskId    任务
+     * @param stages    本地阶段列表
+     * @param stage     阶段名（可能为空：还没进入任何阶段）
+     * @param startedAt 开始时间；0 表示未开始
+     * @param reason    失败原因
+     */
+    private void failStage(Long taskId, List<RagIngestStage> stages, String stage,
+                           long startedAt, String reason) {
+        if (stage == null) {
+            return;
+        }
+        RagIngestStage entry = lastRunning(stages);
+        if (entry == null) {
+            entry = new RagIngestStage();
+            entry.setStage(stage);
+            stages.add(entry);
+        }
+        entry.setStatus("FAILED");
+        entry.setElapsedMs(startedAt <= 0 ? null : Math.max(0L, System.currentTimeMillis() - startedAt));
+        entry.setSummary(truncate(reason == null ? "未知原因" : reason, 200));
+        tasks.updateStages(taskId, stages);
+    }
+
+    private static RagIngestStage lastRunning(List<RagIngestStage> stages) {
+        for (int i = stages.size() - 1; i >= 0; i--) {
+            if ("RUNNING".equals(stages.get(i).getStatus())) {
+                return stages.get(i);
+            }
+        }
+        return null;
+    }
+
+    /**
+     * 落解析产物：本轮实际使用的解析文本，供文档页对照与重切预览。
+     * 解析文本是派生产物，写失败按入库失败处理，避免页面长期显示旧文本。
+     *
+     * @param kb    知识库
+     * @param doc   文档（可为空，空时不写）
+     * @param docId 文档 id
+     * @param text  解析文本
+     */
+    private void saveParseArtifact(RagKnowledgeBase kb, RagDocument doc, Long docId, String text) {
+        RagDocumentParse parse = new RagDocumentParse();
+        parse.setTenantId(kb.getTenantId());
+        parse.setKbId(kb.getId());
+        parse.setDocId(docId);
+        parse.setContent(text);
+        parse.setCharCount(text.length());
+        parse.setHeaderCount(0);
+        parse.setVersion(doc == null || doc.getVersion() == null ? 1 : doc.getVersion());
+        parses.save(parse);
+    }
+
+    /**
+     * 本轮切片实际使用的策略：同一文档通常只路由到一种策略，取第一片的编码即可；
+     * 拿不到了解就返回 null，绝不为展示猜测。
+     */
+    private static String dominantStrategy(List<com.agenthub.rag.domain.service.DocumentChunk> pieces) {
+        for (com.agenthub.rag.domain.service.DocumentChunk piece : pieces) {
+            String code = ChunkPresentation.strategyCode(piece);
+            if (code != null) {
+                return code;
+            }
+        }
+        return null;
+    }
+
+    /**
+     * IR 原型的对外中文说明，用于结构识别阶段摘要。
+     */
+    private static String docTypeLabel(String docType) {
+        return switch (docType) {
+            case "HIERARCHICAL" -> "层级型";
+            case "ENTRY_BASED" -> "条目型";
+            case "TABULAR" -> "表格型";
+            case "NARRATIVE" -> "叙述型";
+            default -> docType;
+        };
     }
 
     /**
@@ -435,9 +608,10 @@ public class RagIngestAppService {
     }
 
     /**
-     * 把 IR 切片落到 rag_chunk 行；partIndex 从元数据回填，正文优先用 IR content。
+     * 把 IR 切片落到 rag_chunk 行。
      * <p>
-     * 若有 sectionTitle 且正文未以该标题开头，则前置一行标题，便于检索命中后阅读。
+     * 除正文与 partIndex 外，补齐本轮可展示的元数据：策略、章节路径、解析文本偏移。
+     * 旧逻辑「有 sectionTitle 且正文未以其开头则前置标题」保持不变，仍由 ChunkPresentation 统一。
      */
     private List<RagChunk> buildChunks(List<com.agenthub.rag.domain.service.DocumentChunk> pieces,
                                        RagKnowledgeBase kb, Long docId, Long operatorId) {
@@ -445,13 +619,17 @@ public class RagIngestAppService {
         long now = System.currentTimeMillis() / 1000;
         for (int i = 0; i < pieces.size(); i++) {
             com.agenthub.rag.domain.service.DocumentChunk piece = pieces.get(i);
-            String content = storeContent(piece);
+            String content = ChunkPresentation.storedContent(piece);
             RagChunk chunk = new RagChunk();
             chunk.setTenantId(kb.getTenantId());
             chunk.setKbId(kb.getId());
             chunk.setDocId(docId);
             chunk.setChunkIndex(i);
             chunk.setPartIndex(metaInt(piece, "partIndex", "part_index"));
+            chunk.setStrategy(ChunkPresentation.strategyCode(piece));
+            chunk.setSectionPath(ChunkPresentation.sectionPath(piece));
+            chunk.setCharStart(metaInt(piece, "char_start", "charStart"));
+            chunk.setCharEnd(metaInt(piece, "char_end", "charEnd"));
             chunk.setContent(content);
             chunk.setTokenEst(ChunkPipeline.estimateTokens(content));
             chunk.setVersion(1);
@@ -466,15 +644,23 @@ public class RagIngestAppService {
     }
 
     /**
-     * 入库正文：保留 IR content；有章节名时前置，避免元数据列缺失导致检索看不到标题。
+     * 读 IR 元数据里的整型值（兼容 JSON 反序列化出的 Number 与字符串）。
+     *
+     * @param value 元数据值
+     * @return 整型；无法解析时为 null
      */
-    private static String storeContent(com.agenthub.rag.domain.service.DocumentChunk piece) {
-        String body = piece.getContent() == null ? "" : piece.getContent().trim();
-        String title = piece.getSectionTitle() == null ? "" : piece.getSectionTitle().trim();
-        if (title.isEmpty() || body.startsWith(title)) {
-            return body;
+    private static Integer metaInt(Object value) {
+        if (value instanceof Number n) {
+            return n.intValue();
         }
-        return title + "\n\n" + body;
+        if (value == null) {
+            return null;
+        }
+        try {
+            return Integer.parseInt(String.valueOf(value).trim());
+        } catch (NumberFormatException e) {
+            return null;
+        }
     }
 
     private static Integer metaInt(com.agenthub.rag.domain.service.DocumentChunk piece, String... keys) {

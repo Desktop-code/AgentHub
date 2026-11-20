@@ -67,6 +67,7 @@ public class TabularChunkStrategy implements ChunkStrategy {
             meta.put("file_name", doc.getFileName());
             meta.put("block_type", BlockType.TABLE.name());
             meta.put("source_type", DocumentType.TABULAR.name());
+            meta.put("strategy", ChunkStrategyKind.TABULAR.code());
             meta.put("table_header", header);
             meta.put("row_index", startRow + i);
             chunks.add(new DocumentChunk(content, pageNum, header, meta));
@@ -76,6 +77,7 @@ public class TabularChunkStrategy implements ChunkStrategy {
             meta.put("file_name", doc.getFileName());
             meta.put("block_type", BlockType.TABLE.name());
             meta.put("source_type", DocumentType.TABULAR.name());
+            meta.put("strategy", ChunkStrategyKind.TABULAR.code());
             meta.put("table_header", header);
             chunks.add(new DocumentChunk(header, pageNum, header, meta));
         }

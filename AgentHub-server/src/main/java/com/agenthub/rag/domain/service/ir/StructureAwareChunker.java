@@ -95,10 +95,19 @@ public class StructureAwareChunker {
     }
 
     /**
-     * @param minChunkSize 过短切片合并阈值（策略内同章节合并）
-     * @return 带元数据的切片；正文无效时为空
+     * 只跑「解析文本 → IR → 原型识别」这一段，供入库把「结构识别」作为独立可见阶段。
+     * <p>
+     * 返回值与 {@link #chunk(String, String, int, int, int)} 内部构建的 IR 完全一致；
+     * 调用方可把它交给 {@link #chunkStructured(StructuredDocument, int, int, int)}，避免重复结构分析。
+     *
+     * @param fileName     原始文件名
+     * @param text         解析正文
+     * @param chunkSize    目标长度（写入 IR 元数据）
+     * @param overlap      重叠（写入 IR 元数据）
+     * @param minChunkSize 过短合并阈值（写入 IR 元数据）
+     * @return 已识别原型的 IR
      */
-    public List<DocumentChunk> chunk(String fileName, String text, int chunkSize, int overlap, int minChunkSize) {
+    public StructuredDocument structure(String fileName, String text, int chunkSize, int overlap, int minChunkSize) {
         StructuredDocument ir = documentStructurer.structure(fileName, text, chunkSize, overlap, minChunkSize);
         ir.setDocType(documentTypeAnalyzer.analyze(ir));
         Object noiseObj = ir.getMetadata().get("noiseHits");
@@ -110,6 +119,36 @@ public class StructureAwareChunker {
             log.warn("[IR][{}] 文档被判定为 NARRATIVE：sectionTitle 通常为空；若期望章节切片请检查 HEADER 是否被误杀",
                     DocumentStructurer.BUILD_TAG);
         }
+        return ir;
+    }
+
+    /**
+     * @param minChunkSize 过短切片合并阈值（策略内同章节合并）
+     * @return 带元数据的切片；正文无效时为空
+     */
+    public List<DocumentChunk> chunk(String fileName, String text, int chunkSize, int overlap, int minChunkSize) {
+        return chunkStructured(structure(fileName, text, chunkSize, overlap, minChunkSize),
+                chunkSize, overlap, minChunkSize);
+    }
+
+    /**
+     * 对已构建并识别原型的 IR 执行「策略路由 → 超长再切 → 空壳合并 → 切后去噪」。
+     * <p>
+     * 与 {@link #chunk(String, String, int, int, int)} 的后半段完全等价：
+     * 只是允许调用方先拿 IR 记录「结构识别」摘要，再继续切片，判定规则一行未改。
+     *
+     * @param ir           已识别原型的 IR
+     * @param chunkSize    目标片长
+     * @param overlap      重叠
+     * @param minChunkSize 过短合并阈值
+     * @return 带元数据的切片
+     */
+    public List<DocumentChunk> chunkStructured(StructuredDocument ir, int chunkSize, int overlap, int minChunkSize) {
+        if (ir == null) {
+            return List.of();
+        }
+        String fileName = ir.getFileName();
+        Object noiseObj = ir.getMetadata().get("noiseHits");
         List<DocumentChunk> routed = chunkStrategyRouter.route(ir);
         int size = Math.max(80, chunkSize);
         int ov = Math.max(0, overlap);

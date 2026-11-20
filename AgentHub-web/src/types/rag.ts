@@ -68,7 +68,7 @@ export const DOC_STATUS_LABEL: Record<string, string> = {
   FAILED: '失败'
 }
 
-/** 文档响应；含入库任务进度 */
+/** 文档响应；含入库任务进度与五步阶段摘要 */
 export interface RagDocumentRow {
   id: number
   kbId: number
@@ -83,27 +83,90 @@ export interface RagDocumentRow {
   version?: number | null
   /** 任务状态，与 status 同步推进 */
   taskStatus?: string | null
-  /** 解析 / 切片 / 向量化 / 写入 */
+  /** 当前阶段：解析 / 结构识别 / 切片 / 向量化 / 写入 */
   stage?: string | null
   /** 0-100 */
   progress?: number | null
   attempts?: number | null
+  /** 五步阶段摘要；成功后仍保留，老任务可能为空 */
+  stages?: RagStageRow[] | null
   createTime?: string
   updateTime?: string
 }
 
+/** 入库阶段摘要；status 为 RUNNING / SUCCESS / FAILED */
+export interface RagStageRow {
+  /** 阶段名：解析 / 结构识别 / 切片 / 向量化 / 写入 */
+  stage: string
+  status: string
+  /** 该步耗时（毫秒）；未结束或未知为空 */
+  elapsedMs?: number | null
+  /** 简要产物或失败原因 */
+  summary?: string | null
+}
+
 /**
  * 切片行。所属域：rag。
- * 与后端 RagChunkResp 对齐：只有序号、Token 估算与完整正文，不含向量与内部主键细节。
+ * 与后端 RagChunkResp 对齐：序号、策略、章节路径、Token、正文与解析文本偏移。
+ * 旧数据可能没有策略 / 路径 / 偏移，前端不得据此编造。
  */
 export interface RagChunkRow {
   id: number
   /** 文档内序号，从 0 起；展示用 chunkIndex + 1 */
   chunkIndex: number
+  /** 父块 id；超长再切时可追溯来源 */
+  parentChunkId?: number | null
+  /** 超长再切序号，从 1 起 */
+  partIndex?: number | null
+  /** 策略编码：HIERARCHICAL / ENTRY_BASED / TABULAR / NARRATIVE */
+  strategy?: string | null
+  /** 策略中文标签：层级 / 条目 / 表格 / 叙述；未知为空 */
+  strategyLabel?: string | null
+  /** 章节路径，如「退货政策 / 质检时效」 */
+  sectionPath?: string | null
+  /** 在解析文本中的起始偏移（含）；为空表示未建立映射 */
+  charStart?: number | null
+  /** 在解析文本中的结束偏移（不含） */
+  charEnd?: number | null
   /** Token 估算，展示参考值 */
   tokenEst?: number | null
   /** 完整正文 */
   content: string
+}
+
+/** 文档解析文本；fromSource=true 表示老文档从原文件只读再解析，不是入库产物 */
+export interface RagParseTextRow {
+  text: string
+  charCount: number
+  headerCount: number
+  fromSource?: boolean | null
+  /** 不可用原因；可用时为空 */
+  message?: string | null
+}
+
+/** 重切预览中的单条切片卡片，字段与落库后的 RagChunkRow 对齐 */
+export interface RagChunkPreviewRow {
+  chunkIndex: number
+  strategy?: string | null
+  strategyLabel?: string | null
+  sectionPath?: string | null
+  partIndex?: number | null
+  tokenEst?: number | null
+  content: string
+  charStart?: number | null
+  charEnd?: number | null
+}
+
+/** 重新切片预览结果；只读，不改库与向量 */
+export interface RagRechunkPreviewRow {
+  chunkSize: number
+  chunkOverlap: number
+  /** 预计切片数（全量） */
+  chunkCount: number
+  tokenTotal: number
+  /** 预览卡片；超长文档只回前 N 条 */
+  chunks: RagChunkPreviewRow[]
+  truncated?: boolean | null
 }
 
 /** Agent 知识库绑定 */

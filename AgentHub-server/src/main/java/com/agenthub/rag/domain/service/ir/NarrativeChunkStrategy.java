@@ -43,6 +43,7 @@ public class NarrativeChunkStrategy implements ChunkStrategy {
             meta.put("file_name", doc.getFileName());
             meta.put("block_type", BlockType.PARAGRAPH.name());
             meta.put("source_type", DocumentType.NARRATIVE.name());
+            meta.put("strategy", ChunkStrategyKind.NARRATIVE.code());
             out.add(new DocumentChunk(c.getContent(), c.getPageNum(), c.getSectionTitle(), meta));
         }
         return out;

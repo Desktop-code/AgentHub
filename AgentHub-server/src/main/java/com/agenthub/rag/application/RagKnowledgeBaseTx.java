@@ -4,6 +4,7 @@ import com.agenthub.audit.domain.OperLogWriter;
 import com.agenthub.rag.domain.model.RagKnowledgeBase;
 import com.agenthub.rag.domain.repository.AgentKbBindRepository;
 import com.agenthub.rag.domain.repository.RagChunkRepository;
+import com.agenthub.rag.domain.repository.RagDocumentParseRepository;
 import com.agenthub.rag.domain.repository.RagDocumentRepository;
 import com.agenthub.rag.domain.repository.RagIngestTaskRepository;
 import com.agenthub.rag.domain.repository.RagKnowledgeBaseRepository;
@@ -29,6 +30,7 @@ public class RagKnowledgeBaseTx {
     private final RagDocumentRepository documentRepository;
     private final RagChunkRepository chunkRepository;
     private final RagIngestTaskRepository ingestTaskRepository;
+    private final RagDocumentParseRepository documentParseRepository;
     private final AgentKbBindRepository agentKbBindRepository;
     private final OperLogWriter operLogWriter;
 
@@ -37,16 +39,19 @@ public class RagKnowledgeBaseTx {
      * @param documentRepository  文档表（删库时逻辑删）
      * @param chunkRepository     切片表
      * @param ingestTaskRepository 入库任务表
+     * @param documentParseRepository 解析文本产物表（删库时物理清）
      * @param agentKbBindRepository Agent 绑定表
      * @param operLogWriter       操作日志（加入当前事务，与业务同生共死）
      */
     public RagKnowledgeBaseTx(RagKnowledgeBaseRepository kbs, RagDocumentRepository documentRepository,
                               RagChunkRepository chunkRepository, RagIngestTaskRepository ingestTaskRepository,
+                              RagDocumentParseRepository documentParseRepository,
                               AgentKbBindRepository agentKbBindRepository, OperLogWriter operLogWriter) {
         this.kbs = kbs;
         this.documentRepository = documentRepository;
         this.chunkRepository = chunkRepository;
         this.ingestTaskRepository = ingestTaskRepository;
+        this.documentParseRepository = documentParseRepository;
         this.agentKbBindRepository = agentKbBindRepository;
         this.operLogWriter = operLogWriter;
     }
@@ -106,6 +111,7 @@ public class RagKnowledgeBaseTx {
         int documents = documentRepository.countByKb(kbId);
         chunkRepository.deleteByKb(kbId);
         ingestTaskRepository.deleteByKb(kbId);
+        documentParseRepository.deleteByKb(kbId);
         documentRepository.logicalDeleteByKb(kbId);
         agentKbBindRepository.logicalDeleteByKbId(kbId, operatorId);
         kbs.logicalDelete(kbId, operatorId);
