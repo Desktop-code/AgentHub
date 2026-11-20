@@ -118,6 +118,12 @@ sql/*
 .cursorignore
 .cursorrules
 AGENTS.md
+# Impeccable：设计系统产物（PRODUCT.md / DESIGN.md / .impeccable/design.json / surfaces）要入库，
+# 只忽略本机配置与运行时目录；questions / mocks / review 等运行目录自身也会生成 .gitignore。
+.impeccable/config.local.json
+.impeccable/questions/
+.impeccable/mocks/
+.impeccable/review/
 
 # ========== 部署与环境==========
 # compose 本地覆盖（常含明文口令/真实端口/私钥路径）

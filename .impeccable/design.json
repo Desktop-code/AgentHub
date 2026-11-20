@@ -1,0 +1,584 @@
+{
+  "schemaVersion": 2,
+  "generatedAt": "2026-11-21T01:45:00+08:00",
+  "title": "Design System: AgentHub",
+  "extensions": {
+    "colorMeta": {
+      "primary": {
+        "role": "primary",
+        "displayName": "Signal Violet 信号紫",
+        "canonical": "oklch(58.4% 0.245 285)",
+        "tonalRamp": [
+          "oklch(15% 0.06 285)",
+          "oklch(25% 0.11 285)",
+          "oklch(35% 0.165 285)",
+          "oklch(45% 0.215 285)",
+          "oklch(58.4% 0.245 285)",
+          "oklch(72% 0.17 285)",
+          "oklch(86% 0.085 285)",
+          "oklch(95% 0.03 285)"
+        ]
+      },
+      "primary-hover": {
+        "role": "primary",
+        "displayName": "Signal Violet Deep 深信号紫",
+        "canonical": "oklch(54% 0.24 285)",
+        "tonalRamp": [
+          "oklch(15% 0.06 285)",
+          "oklch(25% 0.11 285)",
+          "oklch(34% 0.16 285)",
+          "oklch(43% 0.21 285)",
+          "oklch(54% 0.24 285)",
+          "oklch(69% 0.17 285)",
+          "oklch(84% 0.085 285)",
+          "oklch(94% 0.03 285)"
+        ]
+      },
+      "primary-active": {
+        "role": "primary",
+        "displayName": "Signal Violet Pressed 按压紫",
+        "canonical": "oklch(44% 0.21 285)",
+        "tonalRamp": [
+          "oklch(14% 0.05 285)",
+          "oklch(23% 0.10 285)",
+          "oklch(32% 0.15 285)",
+          "oklch(38% 0.18 285)",
+          "oklch(44% 0.21 285)",
+          "oklch(61% 0.17 285)",
+          "oklch(79% 0.09 285)",
+          "oklch(93% 0.03 285)"
+        ]
+      },
+      "primary-tint": {
+        "role": "primary",
+        "displayName": "Signal Violet Wash 紫雾底",
+        "canonical": "oklch(96.5% 0.02 285)",
+        "tonalRamp": [
+          "oklch(16% 0.04 285)",
+          "oklch(27% 0.07 285)",
+          "oklch(38% 0.10 285)",
+          "oklch(50% 0.13 285)",
+          "oklch(66% 0.14 285)",
+          "oklch(80% 0.10 285)",
+          "oklch(90% 0.06 285)",
+          "oklch(96.5% 0.02 285)"
+        ]
+      },
+      "primary-tint-soft": {
+        "role": "primary",
+        "displayName": "Signal Violet Wash Soft 浅紫卡底",
+        "canonical": "oklch(96.6% 0.018 285)",
+        "tonalRamp": [
+          "oklch(16% 0.04 285)",
+          "oklch(27% 0.07 285)",
+          "oklch(38% 0.10 285)",
+          "oklch(50% 0.12 285)",
+          "oklch(66% 0.13 285)",
+          "oklch(80% 0.09 285)",
+          "oklch(90% 0.05 285)",
+          "oklch(96.6% 0.018 285)"
+        ]
+      },
+      "scope-cyan": {
+        "role": "secondary",
+        "displayName": "Scope Cyan 示波器青",
+        "canonical": "oklch(80% 0.155 220)",
+        "tonalRamp": [
+          "oklch(16% 0.05 220)",
+          "oklch(28% 0.09 220)",
+          "oklch(40% 0.12 220)",
+          "oklch(52% 0.14 220)",
+          "oklch(66% 0.15 220)",
+          "oklch(80% 0.155 220)",
+          "oklch(90% 0.08 220)",
+          "oklch(96% 0.03 220)"
+        ]
+      },
+      "page-bg": {
+        "role": "neutral",
+        "displayName": "Room Gray 房间灰",
+        "canonical": "oklch(97.8% 0.004 240)",
+        "tonalRamp": [
+          "oklch(15% 0.01 240)",
+          "oklch(28% 0.012 240)",
+          "oklch(41% 0.012 240)",
+          "oklch(55% 0.01 240)",
+          "oklch(70% 0.008 240)",
+          "oklch(83% 0.006 240)",
+          "oklch(92% 0.005 240)",
+          "oklch(97.8% 0.004 240)"
+        ]
+      },
+      "surface": {
+        "role": "neutral",
+        "displayName": "Console Paper 操作台纸白",
+        "canonical": "oklch(100% 0 0)",
+        "tonalRamp": [
+          "oklch(15% 0 0)",
+          "oklch(30% 0 0)",
+          "oklch(45% 0 0)",
+          "oklch(60% 0 0)",
+          "oklch(75% 0 0)",
+          "oklch(88% 0 0)",
+          "oklch(96% 0 0)",
+          "oklch(100% 0 0)"
+        ]
+      },
+      "surface-muted": {
+        "role": "neutral",
+        "displayName": "Quiet Gray 静灰",
+        "canonical": "oklch(98% 0 0)",
+        "tonalRamp": [
+          "oklch(15% 0 0)",
+          "oklch(29% 0 0)",
+          "oklch(43% 0 0)",
+          "oklch(58% 0 0)",
+          "oklch(73% 0 0)",
+          "oklch(86% 0 0)",
+          "oklch(94% 0 0)",
+          "oklch(98% 0 0)"
+        ]
+      },
+      "text": {
+        "role": "neutral",
+        "displayName": "Ink 墨色",
+        "canonical": "oklch(28% 0.02 250)",
+        "tonalRamp": [
+          "oklch(15% 0.02 250)",
+          "oklch(28% 0.02 250)",
+          "oklch(40% 0.02 250)",
+          "oklch(52% 0.018 250)",
+          "oklch(66% 0.015 250)",
+          "oklch(80% 0.01 250)",
+          "oklch(90% 0.006 250)",
+          "oklch(97% 0.004 250)"
+        ]
+      },
+      "text-regular": {
+        "role": "neutral",
+        "displayName": "Ink Regular 常墨",
+        "canonical": "oklch(38% 0.02 250)",
+        "tonalRamp": [
+          "oklch(15% 0.02 250)",
+          "oklch(26% 0.02 250)",
+          "oklch(38% 0.02 250)",
+          "oklch(50% 0.018 250)",
+          "oklch(64% 0.015 250)",
+          "oklch(78% 0.01 250)",
+          "oklch(89% 0.006 250)",
+          "oklch(97% 0.004 250)"
+        ]
+      },
+      "text-secondary": {
+        "role": "neutral",
+        "displayName": "Readable Gray 可读灰",
+        "canonical": "oklch(55% 0.015 255)",
+        "tonalRamp": [
+          "oklch(15% 0.015 255)",
+          "oklch(28% 0.015 255)",
+          "oklch(41% 0.015 255)",
+          "oklch(48% 0.015 255)",
+          "oklch(55% 0.015 255)",
+          "oklch(70% 0.012 255)",
+          "oklch(85% 0.008 255)",
+          "oklch(96% 0.004 255)"
+        ]
+      },
+      "text-faint": {
+        "role": "neutral",
+        "displayName": "Decoration Gray 装饰灰",
+        "canonical": "oklch(72% 0.015 255)",
+        "tonalRamp": [
+          "oklch(16% 0.015 255)",
+          "oklch(30% 0.015 255)",
+          "oklch(44% 0.015 255)",
+          "oklch(58% 0.015 255)",
+          "oklch(72% 0.015 255)",
+          "oklch(83% 0.012 255)",
+          "oklch(92% 0.008 255)",
+          "oklch(97% 0.004 255)"
+        ]
+      },
+      "border": {
+        "role": "neutral",
+        "displayName": "Hairline 发丝线",
+        "canonical": "oklch(94.5% 0.008 260)",
+        "tonalRamp": [
+          "oklch(16% 0.008 260)",
+          "oklch(30% 0.008 260)",
+          "oklch(44% 0.008 260)",
+          "oklch(58% 0.008 260)",
+          "oklch(72% 0.008 260)",
+          "oklch(84% 0.008 260)",
+          "oklch(94.5% 0.008 260)",
+          "oklch(97.5% 0.004 260)"
+        ]
+      },
+      "border-soft": {
+        "role": "neutral",
+        "displayName": "Hairline Soft 柔和发丝线",
+        "canonical": "oklch(96.5% 0.008 255)",
+        "tonalRamp": [
+          "oklch(16% 0.008 255)",
+          "oklch(30% 0.008 255)",
+          "oklch(44% 0.008 255)",
+          "oklch(58% 0.008 255)",
+          "oklch(72% 0.008 255)",
+          "oklch(85% 0.008 255)",
+          "oklch(96.5% 0.008 255)",
+          "oklch(98.5% 0.004 255)"
+        ]
+      },
+      "success": {
+        "role": "neutral",
+        "displayName": "Clear Green 通过绿",
+        "canonical": "oklch(48% 0.12 165)",
+        "tonalRamp": [
+          "oklch(15% 0.05 165)",
+          "oklch(27% 0.08 165)",
+          "oklch(38% 0.10 165)",
+          "oklch(44% 0.11 165)",
+          "oklch(48% 0.12 165)",
+          "oklch(64% 0.13 165)",
+          "oklch(82% 0.09 165)",
+          "oklch(95% 0.04 165)"
+        ]
+      },
+      "warning": {
+        "role": "neutral",
+        "displayName": "Attention Amber 待办琥珀",
+        "canonical": "oklch(52% 0.13 65)",
+        "tonalRamp": [
+          "oklch(15% 0.05 65)",
+          "oklch(28% 0.08 65)",
+          "oklch(40% 0.11 65)",
+          "oklch(47% 0.12 65)",
+          "oklch(52% 0.13 65)",
+          "oklch(68% 0.14 75)",
+          "oklch(85% 0.10 80)",
+          "oklch(96% 0.045 85)"
+        ]
+      },
+      "danger": {
+        "role": "neutral",
+        "displayName": "Fault Red 故障红",
+        "canonical": "oklch(48% 0.18 25)",
+        "tonalRamp": [
+          "oklch(15% 0.06 25)",
+          "oklch(27% 0.10 25)",
+          "oklch(38% 0.14 25)",
+          "oklch(44% 0.16 25)",
+          "oklch(48% 0.18 25)",
+          "oklch(64% 0.16 25)",
+          "oklch(82% 0.10 25)",
+          "oklch(95% 0.04 25)"
+        ]
+      },
+      "success-tint": {
+        "role": "neutral",
+        "displayName": "Clear Green Wash 通过绿底",
+        "canonical": "oklch(97% 0.02 165)",
+        "tonalRamp": [
+          "oklch(16% 0.03 165)",
+          "oklch(28% 0.05 165)",
+          "oklch(40% 0.07 165)",
+          "oklch(52% 0.09 165)",
+          "oklch(66% 0.10 165)",
+          "oklch(80% 0.08 165)",
+          "oklch(90% 0.05 165)",
+          "oklch(97% 0.02 165)"
+        ]
+      },
+      "warning-tint": {
+        "role": "neutral",
+        "displayName": "Attention Amber Wash 待办琥珀底",
+        "canonical": "oklch(98.5% 0.025 85)",
+        "tonalRamp": [
+          "oklch(16% 0.03 85)",
+          "oklch(30% 0.06 85)",
+          "oklch(44% 0.08 85)",
+          "oklch(58% 0.10 85)",
+          "oklch(72% 0.10 85)",
+          "oklch(84% 0.07 85)",
+          "oklch(92% 0.045 85)",
+          "oklch(98.5% 0.025 85)"
+        ]
+      },
+      "neutral-tint": {
+        "role": "neutral",
+        "displayName": "Idle Gray 停用灰底",
+        "canonical": "oklch(96.5% 0.003 250)",
+        "tonalRamp": [
+          "oklch(16% 0.003 250)",
+          "oklch(30% 0.003 250)",
+          "oklch(44% 0.003 250)",
+          "oklch(58% 0.003 250)",
+          "oklch(72% 0.003 250)",
+          "oklch(84% 0.003 250)",
+          "oklch(96.5% 0.003 250)",
+          "oklch(98.5% 0.002 250)"
+        ]
+      },
+      "signin-bg": {
+        "role": "neutral",
+        "displayName": "Sign-in Night 登录夜色",
+        "canonical": "oklch(15% 0.02 265)",
+        "tonalRamp": [
+          "oklch(10% 0.02 265)",
+          "oklch(15% 0.02 265)",
+          "oklch(24% 0.03 265)",
+          "oklch(36% 0.04 265)",
+          "oklch(50% 0.04 265)",
+          "oklch(66% 0.03 265)",
+          "oklch(84% 0.02 265)",
+          "oklch(96% 0.01 265)"
+        ]
+      },
+      "signin-glass": {
+        "role": "neutral",
+        "displayName": "Glass Fill 玻璃填充",
+        "canonical": "rgba(255, 255, 255, 0.08)"
+      }
+    },
+    "typographyMeta": {
+      "display": {
+        "displayName": "Display / 登录字标",
+        "purpose": "只用于登录页 AgentHub 字标；控制台内不出现。"
+      },
+      "title": {
+        "displayName": "Title / 页头与卡片标题",
+        "purpose": "页头标题、卡片标题、弹窗标题，16px/600。"
+      },
+      "subtitle": {
+        "displayName": "Subtitle / 说明",
+        "purpose": "页头说明、表单提示、表单元信息，13px/400，单行省略。"
+      },
+      "body": {
+        "displayName": "Body / 正文",
+        "purpose": "表格正文、卡片描述、对话正文，14px/400/1.5。"
+      },
+      "label": {
+        "displayName": "Label / 标签",
+        "purpose": "页签、状态标签、目录小标题、时间戳，12px/600。"
+      },
+      "mono": {
+        "displayName": "Mono / 编码",
+        "purpose": "编码、traceId、耗时数字，12px 等宽。"
+      }
+    },
+    "shadows": [
+      {
+        "name": "rest",
+        "value": "0 1px 3px rgba(0, 0, 0, 0.05)",
+        "purpose": "静止白卡的唯一阴影，把白面从 #F5F7FA 页底托起。"
+      },
+      {
+        "name": "hover-lift",
+        "value": "0 4px 12px rgba(0, 0, 0, 0.08)",
+        "purpose": "仅可点卡片 hover 时使用，同时上移 2px。"
+      },
+      {
+        "name": "selected",
+        "value": "0 1px 3px rgba(99, 91, 255, 0.12)",
+        "purpose": "被选中的业务卡，与 #F4F4FF 底色配合。"
+      },
+      {
+        "name": "focus-glow",
+        "value": "0 0 0 2px rgba(99, 91, 255, 0.2)",
+        "purpose": "输入框聚焦与按钮 :focus-visible 的 2px 紫光。"
+      },
+      {
+        "name": "glass",
+        "value": "0 24px 64px rgba(0, 0, 0, 0.45), inset 0 1px 0 rgba(255, 255, 255, 0.12)",
+        "purpose": "仅登录页玻璃卡的悬浮与内高光。"
+      },
+      {
+        "name": "signin-submit",
+        "value": "0 8px 24px rgba(99, 91, 255, 0.35)",
+        "purpose": "登录主按钮的紫色投影。"
+      }
+    ],
+    "motion": [
+      {
+        "name": "ease-standard",
+        "value": "cubic-bezier(0.25, 0.8, 0.25, 1)",
+        "purpose": "网格 → 详情飞入，280ms。"
+      },
+      {
+        "name": "ease-leave",
+        "value": "ease",
+        "purpose": "详情退场，200ms，只降透明度。"
+      },
+      {
+        "name": "hover-lift",
+        "value": "box-shadow 0.2s ease, transform 0.2s ease",
+        "purpose": "可点卡片悬浮上移；禁止 transition: all。"
+      },
+      {
+        "name": "aside-collapse",
+        "value": "width 0.3s ease",
+        "purpose": "侧栏 240px ↔ 64px 折叠，工作流专注模式归零同用。"
+      },
+      {
+        "name": "quick-card",
+        "value": "0.15s ease",
+        "purpose": "对话空态快捷卡的位移与阴影过渡。"
+      }
+    ],
+    "breakpoints": [
+      { "name": "xl", "value": "1440px" },
+      { "name": "lg", "value": "1280px" },
+      { "name": "md-lg", "value": "1200px" },
+      { "name": "md", "value": "1100px" },
+      { "name": "sm-lg", "value": "1024px" },
+      { "name": "sm", "value": "960px" },
+      { "name": "sm-md", "value": "900px" },
+      { "name": "xs-lg", "value": "768px" },
+      { "name": "xs", "value": "640px" }
+    ]
+  },
+  "components": [
+    {
+      "name": "Primary Button",
+      "kind": "button",
+      "refersTo": "button-primary",
+      "description": "页面唯一主操作：新建、保存、发送。紫底白字，32px 高。",
+      "html": "<button class=\"ds-btn-primary\" type=\"button\">保存</button>",
+      "css": ".ds-btn-primary{display:inline-flex;align-items:center;justify-content:center;height:32px;padding:0 14px;border:0;border-radius:8px;background:var(--ah-primary,#635bff);color:#fff;font-family:'Segoe UI','PingFang SC','Microsoft YaHei',sans-serif;font-size:14px;font-weight:400;line-height:1;cursor:pointer;transition:background-color .15s ease,box-shadow .15s ease}.ds-btn-primary:hover{background:var(--ah-primary-hover,#5146f5)}.ds-btn-primary:active{background:var(--ah-primary-active,#4338ca)}.ds-btn-primary:focus-visible{outline:none;box-shadow:0 0 0 2px rgba(99,91,255,.2)}"
+    },
+    {
+      "name": "Reset Button",
+      "kind": "button",
+      "refersTo": "button-reset",
+      "description": "白底描边的次级操作：重置、取消。与主按钮同高同圆角。",
+      "html": "<button class=\"ds-btn-reset\" type=\"button\">重置</button>",
+      "css": ".ds-btn-reset{display:inline-flex;align-items:center;justify-content:center;height:32px;padding:0 14px;border:1px solid var(--ah-border,#ebeef5);border-radius:8px;background:#fff;color:var(--ah-text,#1f2937);font-family:'Segoe UI','PingFang SC','Microsoft YaHei',sans-serif;font-size:14px;line-height:1;cursor:pointer;transition:background-color .15s ease,border-color .15s ease}.ds-btn-reset:hover{background:#f5f7fa;border-color:#c0c4cc}.ds-btn-reset:focus-visible{outline:none;box-shadow:0 0 0 2px rgba(99,91,255,.2)}"
+    },
+    {
+      "name": "Text Input",
+      "kind": "input",
+      "refersTo": "input",
+      "description": "筛选与表单输入：浅灰填充、无描边，聚焦转白加紫光。",
+      "html": "<label class=\"ds-field\"><span class=\"ds-field-label\">关键词</span><input class=\"ds-input\" placeholder=\"搜索名称或编码\" /></label>",
+      "css": ".ds-field{display:flex;align-items:center;gap:8px;font-family:'Segoe UI','PingFang SC','Microsoft YaHei',sans-serif}.ds-field-label{font-size:13px;color:#374151;white-space:nowrap}.ds-input{width:220px;height:32px;padding:0 12px;border:1px solid transparent;border-radius:8px;background:var(--ah-input-fill,#f5f7fa);color:var(--ah-text,#1f2937);font-family:inherit;font-size:14px;box-sizing:border-box;transition:background-color .15s ease,border-color .15s ease,box-shadow .15s ease}.ds-input::placeholder{color:#9ca3af}.ds-input:focus{outline:none;background:#fff;border-color:var(--ah-primary,#635bff);box-shadow:0 0 0 2px rgba(99,91,255,.2)}"
+    },
+    {
+      "name": "Sidebar Nav Item",
+      "kind": "nav",
+      "refersTo": "nav-item",
+      "description": "40px 高导航项；当前项紫底白字，hover 浅灰底。",
+      "html": "<nav class=\"ds-nav-list\"><a class=\"ds-nav is-current\" href=\"#\"><svg width=\"16\" height=\"16\" viewBox=\"0 0 16 16\" fill=\"none\" stroke=\"currentColor\" stroke-width=\"1.5\" aria-hidden=\"true\"><rect x=\"2\" y=\"2\" width=\"12\" height=\"12\" rx=\"3\"/><path d=\"M5 8h6\"/></svg><span>对话</span></a><a class=\"ds-nav\" href=\"#\"><svg width=\"16\" height=\"16\" viewBox=\"0 0 16 16\" fill=\"none\" stroke=\"currentColor\" stroke-width=\"1.5\" aria-hidden=\"true\"><path d=\"M2 5h12M2 8h12M2 11h8\"/></svg><span>模型管理</span></a></nav>",
+      "css": ".ds-nav-list{display:flex;flex-direction:column;gap:2px;padding:12px;background:#fff;font-family:'Segoe UI','PingFang SC','Microsoft YaHei',sans-serif}.ds-nav{display:flex;align-items:center;gap:10px;height:40px;padding:0 12px;border-radius:6px;color:#4b5563;font-size:14px;text-decoration:none;transition:background-color .2s ease,color .2s ease}.ds-nav:hover{background:#f3f4f6}.ds-nav.is-current{background:var(--ah-primary,#635bff);color:#fff;font-weight:600}.ds-nav svg{flex:none;width:16px;height:16px}"
+    },
+    {
+      "name": "Workspace Tab",
+      "kind": "chip",
+      "refersTo": "tab-active",
+      "description": "40px 页签条里的 24px 小标签：当前页紫雾底 + 紫字。",
+      "html": "<div class=\"ds-tabs\"><span class=\"ds-tab is-active\">模型管理<i class=\"ds-tab-close\">×</i></span><span class=\"ds-tab\">工具管理</span></div>",
+      "css": ".ds-tabs{display:flex;align-items:center;gap:4px;height:40px;padding:0 12px;background:#f5f7fa;border-bottom:1px solid #f2f6fc;font-family:'Segoe UI','PingFang SC','Microsoft YaHei',sans-serif}.ds-tab{display:inline-flex;align-items:center;gap:4px;height:24px;padding:0 8px;border-radius:6px;color:#6b7280;font-size:12px;line-height:1;cursor:pointer;white-space:nowrap}.ds-tab:hover{background:rgba(255,255,255,.72);color:#1f2937}.ds-tab.is-active{background:#f4f3ff;color:var(--ah-primary,#635bff);font-weight:600}.ds-tab-close{font-style:normal;font-size:11px;opacity:.55}.ds-tab-close:hover{opacity:1}"
+    },
+    {
+      "name": "Config Card",
+      "kind": "card",
+      "refersTo": "card-config",
+      "description": "模型 / 工具 / Skill / Agent 网格业务卡：160px 锁高、两行描述、36px 底栏。",
+      "html": "<article class=\"ds-card\"><header class=\"ds-card-head\"><h3>DeepSeek 对话</h3></header><div class=\"ds-card-body\"><p>按用途绑定的对话实例，出站走统一协议适配层，失败可回落。</p></div><footer class=\"ds-card-foot\"><span>v2</span><span>3 个工具</span></footer></article>",
+      "css": ".ds-card{display:flex;flex-direction:column;height:160px;min-height:160px;max-height:160px;overflow:hidden;border-radius:8px;background:#fff;box-shadow:0 1px 3px rgba(0,0,0,.05);cursor:pointer;font-family:'Segoe UI','PingFang SC','Microsoft YaHei',sans-serif;transition:box-shadow .2s ease,transform .2s ease}.ds-card:hover{transform:translateY(-2px);box-shadow:0 4px 12px rgba(0,0,0,.08)}.ds-card-head{padding:12px 14px 0;min-width:0}.ds-card-head h3{margin:0;overflow:hidden;color:#303133;font-size:14px;font-weight:600;line-height:1.4;text-overflow:ellipsis;white-space:nowrap}.ds-card-body{flex:1 1 auto;min-height:0;overflow:hidden;padding:8px 14px}.ds-card-body p{display:-webkit-box;margin:0;overflow:hidden;color:#606266;font-size:14px;line-height:1.5;-webkit-box-orient:vertical;-webkit-line-clamp:2}.ds-card-foot{display:flex;align-items:center;gap:8px;height:36px;margin-top:auto;padding:0 10px;border-top:1px solid #f2f6fc;background:#fafafa;color:#6b7280;font-size:12px}"
+    },
+    {
+      "name": "Status Tag",
+      "kind": "chip",
+      "refersTo": "tag-success",
+      "description": "启用 / 停用小标签：浅语义底 + 加深文字，20px 高。",
+      "html": "<div class=\"ds-tags\"><span class=\"ds-tag ds-tag-on\">启用</span><span class=\"ds-tag ds-tag-off\">停用</span></div>",
+      "css": ".ds-tags{display:flex;align-items:center;gap:6px;font-family:'Segoe UI','PingFang SC','Microsoft YaHei',sans-serif}.ds-tag{display:inline-flex;align-items:center;height:20px;padding:0 6px;border:1px solid transparent;border-radius:4px;font-size:12px;line-height:1;white-space:nowrap}.ds-tag-on{color:#047857;background:#ecfdf5;border-color:#a7f3d0}.ds-tag-off{color:#6b7280;background:#f3f4f6;border-color:#e5e7eb}"
+    },
+    {
+      "name": "Page Header",
+      "kind": "custom",
+      "refersTo": "card-config",
+      "description": "业务页页头：16px 标题 + 13px 说明同行，右侧主操作；不包白卡。",
+      "html": "<div class=\"ds-ph\"><div class=\"ds-ph-left\"><h2 class=\"ds-ph-title\">模型管理</h2><span class=\"ds-ph-desc\">供应商、凭证与按用途绑定的实例</span></div><button class=\"ds-ph-btn\" type=\"button\">新建实例</button></div>",
+      "css": ".ds-ph{display:flex;align-items:center;justify-content:space-between;gap:16px;margin:0 0 12px;font-family:'Segoe UI','PingFang SC','Microsoft YaHei',sans-serif}.ds-ph-left{display:flex;align-items:baseline;gap:8px;min-width:0}.ds-ph-title{flex:none;margin:0;color:#1f2937;font-size:16px;font-weight:600;line-height:1.4}.ds-ph-desc{min-width:0;overflow:hidden;color:#6b7280;font-size:13px;line-height:1.4;white-space:nowrap;text-overflow:ellipsis}.ds-ph-btn{flex:none;height:32px;padding:0 14px;border:0;border-radius:8px;background:var(--ah-primary,#635bff);color:#fff;font-family:inherit;font-size:14px;cursor:pointer;transition:background-color .15s ease}.ds-ph-btn:hover{background:#5146f5}.ds-ph-btn:focus-visible{outline:none;box-shadow:0 0 0 2px rgba(99,91,255,.2)}"
+    }
+  ],
+  "narrative": {
+    "northStar": "The Control Room（中控室）",
+    "overview": "这是一个值班员的中控室，不是展厅。浅灰的墙、白色的仪表盘、几盏语义色的小灯；值班的人一眼要看懂三件事：哪些通道在跑、哪一路失败、这条记录属于谁。所以界面几乎不用装饰性线条，卡片靠底色与一层极轻的阴影分层，纵向节奏由 8px 圆角与 12/16px 的间距撑起来，靠字重与颜色而不是边框来建立层级。\n\n紫色的用法像中控台上那一排唯一的亮灯：主操作、当前页签、被选中的那张卡。它稀缺，所以一眼就能定位「现在在哪、下一步按什么」。青色只出现在两类地方 —— 登录页的光晕与 logo 的节点 —— 作为设备的指示灯，不进业务页面。\n\n密度是克制的：表格去掉竖线只留极细横线，筛选条与页签条都压在 40px 上下，正文 14px / 说明 13px / 标签 12px，三级字号就够。动效只发生在状态变化上：卡片 hover 上浮 2px、详情从网格飞入 280ms、侧栏折叠 300ms；静止状态不动，且全部尊重 prefers-reduced-motion。",
+    "keyCharacteristics": [
+      "浅灰页底（#F5F7FA）+ 白色卡片 + 一层 5% 黑的静止阴影，卡片无描边。",
+      "单一强调色：信号紫只给主操作、当前态与选中；语义色（绿/琥珀/红）只给状态。",
+      "系统字体栈，不加载 Web 字体；字号只有 16 / 14 / 13 / 12 四级。",
+      "左侧通高导航（240px / 64px）+ 右侧 40px 页签条 + 独立滚动主区，没有顶栏。",
+      "登录页是唯一的暗色「入场券」，玻璃拟态与光晕不向控制台扩散。"
+    ],
+    "rules": [
+      {
+        "name": "The One Violet Rule",
+        "body": "紫色是当前态与主操作的专有色；一屏里它出现的地方应能用一句话数完。面积越大，权威越弱。",
+        "section": "colors"
+      },
+      {
+        "name": "The Readable Gray Rule",
+        "body": "承载信息的文字最深到 #6B7280；#9CA3AF 及更浅只做装饰，不写说明与数据。",
+        "section": "colors"
+      },
+      {
+        "name": "The Retired Blue Rule",
+        "body": "查询按钮的 #409EFF 与左栏当前卡的 #3B82F6 环是遗留蓝，只存在于既有代码里，不得成为新控件的第三种强调色。",
+        "section": "colors"
+      },
+      {
+        "name": "The No-Webfont Rule",
+        "body": "不引入 Web 字体、不在 <head> 里加字体链接；新增字重只能从系统已有的 400 / 500 / 600 / 700 / 800 中取。",
+        "section": "typography"
+      },
+      {
+        "name": "The 16/13 Rule",
+        "body": "页头永远只有 16px 的标题与 13px 的说明，没有副标题、没有面包屑堆叠。要表达更多信息，放进下方的卡片或筛选条。",
+        "section": "typography"
+      },
+      {
+        "name": "The Flush Workspace Rule",
+        "body": "整屏页（对话、工作流画布、运行）用 is-flush 去掉主区留白与滚动，把高度与滚动交给页面内部；禁止出现外层与内层双滚动条。",
+        "section": "layout"
+      },
+      {
+        "name": "The No-Top-Bar Rule",
+        "body": "不新增顶部 Header。全局动作放左栏底部账户行，页面动作放页头右侧。",
+        "section": "layout"
+      },
+      {
+        "name": "The Flat-At-Rest Rule",
+        "body": "静止不位移、不发光。位移只发生在 hover，且幅度是 2px；禁止给静态容器（表格卡、面板、页签条）加上浮。",
+        "section": "elevation"
+      },
+      {
+        "name": "The 8/6/4 Rule",
+        "body": "新控件只从 8px / 6px / 4px 里选圆角；12px 与 20px 属于对话与登录两个已划定区域，不进入普通业务卡片。",
+        "section": "elevation"
+      }
+    ],
+    "dos": [
+      "Do 所有业务页用 <PageHeader>：标题 16px + 说明 13px 同行，铺在灰底上，不加白卡。",
+      "Do 单表页把主按钮放进 #extra；多区块页把新建按钮放在对应区块标题行，页头只留标题与说明。",
+      "Do 卡片 8px 圆角 + 0 1px 3px rgba(0, 0, 0, 0.05)，无描边；只有可点卡允许 hover 上浮 2px。",
+      "Do 表格去竖线，只留 #F2F6FC 横线；表头 #FAFAFA + #5F6673 600。",
+      "Do 正文辅助信息最深用 #6B7280；状态一律走语义色（绿通/琥珀待/红错/灰停），不新造颜色。",
+      "Do 过渡只写 box-shadow / transform / background-color，150–200ms；长动画（飞卡 280ms、侧栏 300ms）保持现节奏。",
+      "Do 尊重 prefers-reduced-motion：飞卡、详情转场、左栏位移在该媒体查询下直接取消。",
+      "Do 界面文案用「运行」；「对话 / 单兵 / 方案 / 入口 Router / 工作流 / 人工待办」是固定术语。"
+    ],
+    "donts": [
+      "Don't 新增顶栏或在侧栏顶部加 workspace / 租户切换 —— 产品没有这些概念。",
+      "Don't 把紫色用在静态装饰、图标底色、大面积标题条上；它只属于主操作与当前态。",
+      "Don't 新加蓝色控件。查询按钮的 #409EFF 与左栏当前卡的 #3B82F6 环是遗留漂移，不要照抄进新页面。",
+      "Don't 把登录页的玻璃拟态、渐变、光晕带进控制台；暗色只属于登录。",
+      "Don't 给静态容器加 hover 上浮或把 transition: all 写进卡片（会让网格换列时逐帧重排）。",
+      "Don't 用 #909399 或更浅的灰承载正文与说明。",
+      "Don't 把页头包进白卡，或在内容区重复放一个「新建」。",
+      "Don't 在普通业务卡上使用 12px 以上圆角；12px 属于对话，20px 属于登录。"
+    ]
+  }
+}
