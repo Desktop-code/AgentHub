@@ -26,6 +26,30 @@ public interface RagChunkRepository {
     List<RagChunk> listByDocId(Long docId);
 
     /**
+     * 按主键取单条切片。单条编辑前必须校验它确实属于目标文档，不能只信前端 id。
+     *
+     * @param id 切片主键
+     * @return 切片；不存在时为空
+     */
+    java.util.Optional<RagChunk> findById(Long id);
+
+    /**
+     * 只更新一条切片的正文与派生字段（Token、哈希、版本、章节路径）。
+     * <p>
+     * 单条编辑不允许改序号、父块与偏移，避免与整篇重切的两代切片语义混淆。
+     *
+     * @param id          切片主键
+     * @param content     新正文（非空）
+     * @param tokenEst    Token 估算
+     * @param contentHash 新正文哈希
+     * @param version     新版本号
+     * @param sectionPath 章节路径，null 表示不改
+     * @return 影响行数
+     */
+    int updateContent(Long id, String content, Integer tokenEst, String contentHash,
+                      Integer version, String sectionPath);
+
+    /**
      * 按切片 id 批量取正文。检索命中后回填完整原文用。
      *
      * @param ids 切片 id

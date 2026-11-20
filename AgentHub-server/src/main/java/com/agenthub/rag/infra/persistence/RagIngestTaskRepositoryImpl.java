@@ -1,5 +1,6 @@
 package com.agenthub.rag.infra.persistence;
 
+import com.agenthub.rag.domain.model.RagIngestStage;
 import com.agenthub.rag.domain.model.RagIngestStatus;
 import com.agenthub.rag.domain.model.RagIngestTask;
 import com.agenthub.rag.domain.repository.RagIngestTaskRepository;
@@ -7,9 +8,14 @@ import com.agenthub.rag.infra.persistence.entity.RagIngestTaskEntity;
 import com.agenthub.rag.infra.persistence.mapper.RagIngestTaskMapper;
 import com.baomidou.mybatisplus.core.conditions.query.LambdaQueryWrapper;
 import com.baomidou.mybatisplus.core.conditions.update.LambdaUpdateWrapper;
+import com.fasterxml.jackson.core.type.TypeReference;
+import com.fasterxml.jackson.databind.ObjectMapper;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import org.springframework.stereotype.Repository;
 
 import java.time.LocalDateTime;
+import java.util.List;
 import java.util.Optional;
 
 /**
@@ -18,6 +24,12 @@ import java.util.Optional;
  */
 @Repository
 public class RagIngestTaskRepositoryImpl implements RagIngestTaskRepository {
+
+    private static final Logger log = LoggerFactory.getLogger(RagIngestTaskRepositoryImpl.class);
+    /** 阶段摘要只含字符串与数字，普通 ObjectMapper 足够，不需要 JavaTime 模块 */
+    private static final ObjectMapper JSON = new ObjectMapper();
+    private static final TypeReference<List<RagIngestStage>> STAGE_LIST = new TypeReference<>() {
+    };
 
     private final RagIngestTaskMapper mapper;
 
@@ -80,9 +92,34 @@ public class RagIngestTaskRepositoryImpl implements RagIngestTaskRepository {
                 .set(RagIngestTaskEntity::getStage, "解析")
                 .set(RagIngestTaskEntity::getProgress, 5)
                 .set(RagIngestTaskEntity::getErrorMsg, null)
+                // 新一轮开始：清掉上一轮阶段摘要，阶段条只展示本轮五步
+                .set(RagIngestTaskEntity::getStageTrace, null)
                 .set(RagIngestTaskEntity::getStartTime, LocalDateTime.now())
                 .set(RagIngestTaskEntity::getFinishTime, null)
                 .setSql("attempts = attempts + 1"));
+    }
+
+    /**
+     * {@inheritDoc}
+     * 写失败只打日志不抛：阶段摘要是可观测信息，不能反过来把入库主流程打挂。
+     */
+    @Override
+    public void updateStages(Long id, List<RagIngestStage> stages) {
+        if (id == null) {
+            return;
+        }
+        String json = null;
+        if (stages != null && !stages.isEmpty()) {
+            try {
+                json = JSON.writeValueAsString(stages);
+            } catch (Exception e) {
+                log.warn("[RAG] 阶段摘要序列化失败 taskId={} reason={}", id, e.getClass().getSimpleName());
+                return;
+            }
+        }
+        mapper.update(null, new LambdaUpdateWrapper<RagIngestTaskEntity>()
+                .eq(RagIngestTaskEntity::getId, id)
+                .set(RagIngestTaskEntity::getStageTrace, json));
     }
 
     /** {@inheritDoc} */
@@ -126,6 +163,8 @@ public class RagIngestTaskRepositoryImpl implements RagIngestTaskRepository {
                 .set(RagIngestTaskEntity::getStage, "排队中")
                 .set(RagIngestTaskEntity::getProgress, 0)
                 .set(RagIngestTaskEntity::getErrorMsg, null)
+                // 重试 / 重切都会复用任务行：旧阶段摘要必须清空，否则会显示上一轮产物
+                .set(RagIngestTaskEntity::getStageTrace, null)
                 .set(RagIngestTaskEntity::getStartTime, null)
                 .set(RagIngestTaskEntity::getFinishTime, null));
     }
@@ -158,6 +197,7 @@ public class RagIngestTaskRepositoryImpl implements RagIngestTaskRepository {
         task.setDocId(entity.getDocId());
         task.setStatus(entity.getStatus());
         task.setStage(entity.getStage());
+        task.setStages(parseStages(entity.getStageTrace()));
         task.setProgress(entity.getProgress());
         task.setAttempts(entity.getAttempts());
         task.setErrorMsg(entity.getErrorMsg());
@@ -168,5 +208,24 @@ public class RagIngestTaskRepositoryImpl implements RagIngestTaskRepository {
         task.setCreateTime(entity.getCreateTime());
         task.setUpdateTime(entity.getUpdateTime());
         return task;
+    }
+
+    /**
+     * 解析阶段摘要 JSON。坏 JSON 只当作「本轮无摘要」处理，不能让列表接口 500。
+     *
+     * @param json stage_trace 列
+     * @return 阶段列表；空或损坏时为空列表
+     */
+    private static List<RagIngestStage> parseStages(String json) {
+        if (json == null || json.isBlank()) {
+            return List.of();
+        }
+        try {
+            List<RagIngestStage> parsed = JSON.readValue(json, STAGE_LIST);
+            return parsed == null ? List.of() : parsed;
+        } catch (Exception e) {
+            log.warn("[RAG] 阶段摘要解析失败 reason={}", e.getClass().getSimpleName());
+            return List.of();
+        }
     }
 }

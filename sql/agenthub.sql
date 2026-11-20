@@ -923,6 +923,10 @@ CREATE TABLE `rag_chunk`  (
   `chunk_index` int(11) NOT NULL COMMENT '文档内切片序号，从 0 起',
   `parent_chunk_id` bigint(20) NULL DEFAULT NULL COMMENT '父块（条目型/超长再切）',
   `part_index` int(11) NULL DEFAULT NULL COMMENT '超长切分序号，从 1 起',
+  `strategy` varchar(24) CHARACTER SET utf8mb4 COLLATE utf8mb4_general_ci NULL DEFAULT NULL COMMENT '切片策略：HIERARCHICAL/ENTRY_BASED/TABULAR/NARRATIVE',
+  `section_path` varchar(512) CHARACTER SET utf8mb4 COLLATE utf8mb4_general_ci NULL DEFAULT NULL COMMENT '章节路径：文章/节标题、条目名或表头',
+  `char_start` int(11) NULL DEFAULT NULL COMMENT '在解析文本中的起始偏移（含），0 起；空表示未建立映射',
+  `char_end` int(11) NULL DEFAULT NULL COMMENT '在解析文本中的结束偏移（不含）',
   `content` text CHARACTER SET utf8mb4 COLLATE utf8mb4_general_ci NOT NULL COMMENT '切片原文（完整正文以本列为准）',
   `token_est` int(11) NULL DEFAULT NULL COMMENT '估算 token 数',
   `milvus_pk` bigint(20) NULL DEFAULT NULL COMMENT 'Milvus 主键，通常等于 id',
@@ -967,6 +971,28 @@ CREATE TABLE `rag_document`  (
 ) ENGINE = InnoDB AUTO_INCREMENT = 1 CHARACTER SET = utf8mb4 COLLATE = utf8mb4_general_ci COMMENT = 'RAG 文档表（② 使用）' ROW_FORMAT = Dynamic;
 
 -- ----------------------------
+-- Table structure for rag_document_parse
+-- ----------------------------
+DROP TABLE IF EXISTS `rag_document_parse`;
+CREATE TABLE `rag_document_parse`  (
+  `id` bigint(20) NOT NULL AUTO_INCREMENT COMMENT '主键',
+  `tenant_id` bigint(20) NOT NULL DEFAULT 0 COMMENT '租户',
+  `kb_id` bigint(20) NOT NULL COMMENT 'rag_knowledge_base.id',
+  `doc_id` bigint(20) NOT NULL COMMENT 'rag_document.id，一篇文档只保留一份当前解析产物',
+  `content` longtext CHARACTER SET utf8mb4 COLLATE utf8mb4_general_ci NOT NULL COMMENT '本轮入库实际使用的解析文本（已统一 \\n）',
+  `char_count` int(11) NOT NULL DEFAULT 0 COMMENT '解析文本字符数',
+  `header_count` int(11) NOT NULL DEFAULT 0 COMMENT '结构识别出的标题数；未识别时为 0',
+  `doc_type` varchar(32) CHARACTER SET utf8mb4 COLLATE utf8mb4_general_ci NULL DEFAULT NULL COMMENT 'IR 原型：ENTRY_BASED/HIERARCHICAL/NARRATIVE/TABULAR',
+  `strategy` varchar(32) CHARACTER SET utf8mb4 COLLATE utf8mb4_general_ci NULL DEFAULT NULL COMMENT '实际路由到的切片策略',
+  `version` int(11) NOT NULL DEFAULT 1 COMMENT '入库轮次，随重灌/重切递增',
+  `create_time` datetime NOT NULL DEFAULT CURRENT_TIMESTAMP COMMENT '创建时间',
+  `update_time` datetime NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP COMMENT '更新时间',
+  PRIMARY KEY (`id`) USING BTREE,
+  UNIQUE INDEX `uk_doc_id`(`doc_id`) USING BTREE,
+  INDEX `idx_kb_doc`(`kb_id`, `doc_id`) USING BTREE
+) ENGINE = InnoDB AUTO_INCREMENT = 1 CHARACTER SET = utf8mb4 COLLATE = utf8mb4_general_ci COMMENT = 'RAG 文档解析文本产物（对照与重切预览）' ROW_FORMAT = Dynamic;
+
+-- ----------------------------
 -- Table structure for rag_ingest_task
 -- ----------------------------
 DROP TABLE IF EXISTS `rag_ingest_task`;
@@ -976,7 +1002,8 @@ CREATE TABLE `rag_ingest_task`  (
   `kb_id` bigint(20) NOT NULL COMMENT 'rag_knowledge_base.id',
   `doc_id` bigint(20) NOT NULL COMMENT 'rag_document.id',
   `status` varchar(20) CHARACTER SET utf8mb4 COLLATE utf8mb4_general_ci NOT NULL DEFAULT 'PENDING' COMMENT 'PENDING/RUNNING/SUCCESS/FAILED',
-  `stage` varchar(64) CHARACTER SET utf8mb4 COLLATE utf8mb4_general_ci NULL DEFAULT NULL COMMENT '当前阶段：解析/切片/向量化/写库',
+  `stage` varchar(64) CHARACTER SET utf8mb4 COLLATE utf8mb4_general_ci NULL DEFAULT NULL COMMENT '当前阶段：解析/结构识别/切片/向量化/写入',
+  `stage_trace` mediumtext CHARACTER SET utf8mb4 COLLATE utf8mb4_general_ci NULL COMMENT '五步阶段摘要 JSON：[{stage,status,elapsedMs,summary}]，每轮入库重置',
   `progress` int(11) NOT NULL DEFAULT 0 COMMENT '0-100',
   `attempts` int(11) NOT NULL DEFAULT 0 COMMENT '已尝试次数，重试 +1',
   `error_msg` varchar(512) CHARACTER SET utf8mb4 COLLATE utf8mb4_general_ci NULL DEFAULT NULL COMMENT '失败原因；成功时清空',

@@ -3,6 +3,7 @@ package com.agenthub.rag.domain.model;
 import lombok.Data;
 
 import java.time.LocalDateTime;
+import java.util.List;
 
 /**
  * 异步入库任务。所属域：rag。对应 rag_ingest_task。
@@ -21,8 +22,10 @@ public class RagIngestTask {
     private Long docId;
     /** PENDING / RUNNING / SUCCESS / FAILED */
     private String status;
-    /** 当前阶段：解析 / 切片 / 向量化 / 写库 */
+    /** 当前阶段：解析 / 结构识别 / 切片 / 向量化 / 写入 */
     private String stage;
+    /** 本轮五步阶段摘要；成功后保留，重试 / 重切开始时清空 */
+    private List<RagIngestStage> stages;
     /** 0-100 */
     private Integer progress;
     /** 已尝试次数，重试 +1 */

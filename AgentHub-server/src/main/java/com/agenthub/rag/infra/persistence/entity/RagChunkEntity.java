@@ -23,6 +23,14 @@ public class RagChunkEntity {
     private Integer chunkIndex;
     private Long parentChunkId;
     private Integer partIndex;
+    /** 切片策略：HIERARCHICAL / ENTRY_BASED / TABULAR / NARRATIVE */
+    private String strategy;
+    /** 章节路径：文章/节标题、条目名或表头 */
+    private String sectionPath;
+    /** 在解析文本中的起始偏移（含），空表示未建立映射 */
+    private Integer charStart;
+    /** 在解析文本中的结束偏移（不含） */
+    private Integer charEnd;
     private String content;
     private Integer tokenEst;
     private Long milvusPk;

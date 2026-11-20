@@ -30,11 +30,19 @@ public interface RagIngestTaskRepository {
     Optional<RagIngestTask> findByDocId(Long docId);
 
     /**
-     * 标记进入 RUNNING，并累加 attempts、记录本轮开始时间、清空上次失败原因。
+     * 标记进入 RUNNING，并累加 attempts、记录本轮开始时间、清空上次失败原因与上一轮阶段摘要。
      *
      * @param id 主键
      */
     void markRunning(Long id);
+
+    /**
+     * 整体覆盖本轮五步阶段摘要。入库线程是唯一写者，按列表整体落库即可。
+     *
+     * @param id     主键
+     * @param stages 阶段列表；空列表落 null，表示本轮尚未开始
+     */
+    void updateStages(Long id, java.util.List<com.agenthub.rag.domain.model.RagIngestStage> stages);
 
     /**
      * 更新进度与阶段（RUNNING 期间高频，字段少所以直接 update）。

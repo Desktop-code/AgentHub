@@ -5,10 +5,12 @@ import com.agenthub.rag.domain.repository.RagChunkRepository;
 import com.agenthub.rag.infra.persistence.entity.RagChunkEntity;
 import com.agenthub.rag.infra.persistence.mapper.RagChunkMapper;
 import com.baomidou.mybatisplus.core.conditions.query.LambdaQueryWrapper;
+import com.baomidou.mybatisplus.core.conditions.update.LambdaUpdateWrapper;
 import org.springframework.stereotype.Repository;
 
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Optional;
 
 /**
  * 切片仓储实现。所属域：rag 的 infra。
@@ -44,6 +46,10 @@ public class RagChunkRepositoryImpl implements RagChunkRepository {
             entity.setChunkIndex(chunk.getChunkIndex());
             entity.setParentChunkId(chunk.getParentChunkId());
             entity.setPartIndex(chunk.getPartIndex());
+            entity.setStrategy(chunk.getStrategy());
+            entity.setSectionPath(chunk.getSectionPath());
+            entity.setCharStart(chunk.getCharStart());
+            entity.setCharEnd(chunk.getCharEnd());
             entity.setContent(chunk.getContent());
             entity.setTokenEst(chunk.getTokenEst());
             entity.setVersion(chunk.getVersion() == null ? 1 : chunk.getVersion());
@@ -85,6 +91,37 @@ public class RagChunkRepositoryImpl implements RagChunkRepository {
                 .stream()
                 .map(this::toDomain)
                 .toList();
+    }
+
+    /** {@inheritDoc} */
+    @Override
+    public Optional<RagChunk> findById(Long id) {
+        RagChunkEntity entity = id == null ? null : mapper.selectById(id);
+        return entity == null ? Optional.empty() : Optional.of(toDomain(entity));
+    }
+
+    /**
+     * {@inheritDoc}
+     * <p>
+     * 只 set 单条可编辑列：deleted、chunk_index、part_index、偏移都不在更新范围内，
+     * 保证单条编辑不会打乱整篇切片的序号与原文映射。
+     */
+    @Override
+    public int updateContent(Long id, String content, Integer tokenEst, String contentHash,
+                             Integer version, String sectionPath) {
+        if (id == null) {
+            return 0;
+        }
+        LambdaUpdateWrapper<RagChunkEntity> wrapper = new LambdaUpdateWrapper<RagChunkEntity>()
+                .eq(RagChunkEntity::getId, id)
+                .set(RagChunkEntity::getContent, content)
+                .set(RagChunkEntity::getTokenEst, tokenEst)
+                .set(RagChunkEntity::getContentHash, contentHash)
+                .set(RagChunkEntity::getVersion, version);
+        if (sectionPath != null) {
+            wrapper.set(RagChunkEntity::getSectionPath, sectionPath);
+        }
+        return mapper.update(null, wrapper);
     }
 
     /** {@inheritDoc} */
@@ -140,6 +177,10 @@ public class RagChunkRepositoryImpl implements RagChunkRepository {
         chunk.setChunkIndex(entity.getChunkIndex());
         chunk.setParentChunkId(entity.getParentChunkId());
         chunk.setPartIndex(entity.getPartIndex());
+        chunk.setStrategy(entity.getStrategy());
+        chunk.setSectionPath(entity.getSectionPath());
+        chunk.setCharStart(entity.getCharStart());
+        chunk.setCharEnd(entity.getCharEnd());
         chunk.setContent(entity.getContent());
         chunk.setTokenEst(entity.getTokenEst());
         chunk.setMilvusPk(entity.getMilvusPk());

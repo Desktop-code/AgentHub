@@ -23,6 +23,14 @@ public class RagChunk {
     private Long parentChunkId;
     /** 超长切分序号，从 1 起 */
     private Integer partIndex;
+    /** 切片策略：HIERARCHICAL / ENTRY_BASED / TABULAR / NARRATIVE；旧数据为空 */
+    private String strategy;
+    /** 章节路径：文章/节标题、条目名或表头；旧数据为空 */
+    private String sectionPath;
+    /** 在解析文本中的起始偏移（含），空表示未建立映射 */
+    private Integer charStart;
+    /** 在解析文本中的结束偏移（不含） */
+    private Integer charEnd;
     /** 完整正文 */
     private String content;
     /** 估算 token */

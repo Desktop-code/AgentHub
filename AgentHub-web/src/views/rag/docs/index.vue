@@ -36,7 +36,7 @@
 
     <div class="split">
       <!-- 左栏：工具栏 + 文档表（上传并入工具栏，不再占高大拖拽区） -->
-      <section class="pane pane-left">
+      <section class="pane pane-docs">
         <el-card class="pane-card" shadow="never">
           <template #header>
             <div class="pane-head">
@@ -56,7 +56,7 @@
             >
               <el-button type="primary" size="small" :icon="Upload" :loading="uploading">上传文档</el-button>
             </el-upload>
-            <span class="toolbar-hint">上传文档支持 txt/md/pdf，单文件 ≤ 20MB</span>
+            <span class="toolbar-hint">支持 txt/md/pdf，≤ 20MB</span>
 
             <div class="toolbar-spacer" />
 
@@ -78,7 +78,7 @@
 
           <el-alert v-if="listError" :title="listError" type="error" show-icon :closable="false" class="block-alert" />
 
-          <!-- 表格单独滚动：分页钉在卡片底，左右两栏才能同高贴底 -->
+          <!-- 表格单独滚动：分页钉在卡片底，两栏才能同高贴底 -->
           <div class="table-scroll">
             <el-table
               v-loading="loading"
@@ -89,11 +89,8 @@
               @row-click="onRowClick"
             >
               <el-table-column v-bind="indexColumnProps" />
-              <el-table-column prop="title" label="文档名" min-width="140" show-overflow-tooltip align="left" />
-              <el-table-column label="大小" width="78" align="right">
-                <template #default="{ row }">{{ formatByteSize(row.byteSize) }}</template>
-              </el-table-column>
-              <el-table-column label="状态" width="96">
+              <el-table-column prop="title" label="文档名" min-width="110" show-overflow-tooltip align="left" />
+              <el-table-column label="状态" width="88">
                 <template #default="{ row }">
                   <el-tag size="small" effect="plain" :class="statusClass(row.status)">
                     {{ statusLabel(row.status) }}
@@ -103,10 +100,10 @@
                   </div>
                 </template>
               </el-table-column>
-              <el-table-column label="切片数" width="64" align="center">
+              <el-table-column label="切片" width="52" align="center">
                 <template #default="{ row }">{{ row.chunkCount ?? 0 }}</template>
               </el-table-column>
-              <el-table-column label="操作" width="132" align="center" fixed="right">
+              <el-table-column label="操作" width="100" align="center" fixed="right">
                 <template #default="{ row }">
                   <el-button
                     v-if="canViewChunks"
@@ -114,7 +111,7 @@
                     type="primary"
                     @click.stop="openChunks(row)"
                   >
-                    查看切片
+                    查看
                   </el-button>
                   <el-button
                     v-if="row.status === 'FAILED' && user.hasPerm('rag:doc:retry')"
@@ -143,28 +140,23 @@
         </el-card>
       </section>
 
-      <!-- 右栏：选中文档摘要 + 切片卡片 -->
-      <section class="pane pane-right">
-        <el-card class="pane-card" shadow="never">
+      <!-- 右栏：阶段条 + 左解析文本 / 右切片列表对照 -->
+      <section class="pane pane-main">
+        <el-card v-if="currentDoc" class="pane-card compare-card" shadow="never">
           <template #header>
             <div class="pane-head">
               <div class="pane-head-left">
-                <template v-if="currentDoc">
-                  <div class="doc-summary">
-                    <span class="doc-summary-name" :title="currentDoc.title">{{ currentDoc.title }}</span>
-                    <span class="doc-summary-sep">|</span>
-                    <span>总切片数 {{ chunks.length }}</span>
-                    <span class="doc-summary-sep">|</span>
-                    <span>总 Tokens {{ totalTokens }}</span>
-                  </div>
-                </template>
-                <template v-else>
-                  <span class="pane-title">切片预览</span>
-                  <span class="pane-sub">请在左侧选择一个文档以查看切片</span>
-                </template>
+                <div class="doc-summary">
+                  <span class="doc-summary-name" :title="currentDoc.title">{{ currentDoc.title }}</span>
+                  <span class="doc-summary-sep">|</span>
+                  <span>切片 {{ chunks.length }} 片</span>
+                  <span class="doc-summary-sep">|</span>
+                  <span>总 Tokens {{ totalTokens }}</span>
+                </div>
+                <span class="pane-sub">入库链路：解析 → 结构识别 → 切片 → 向量化 → 写入；点某一步看摘要</span>
               </div>
               <el-button
-                v-if="currentDoc && user.hasPerm('rag:doc:rechunk')"
+                v-if="user.hasPerm('rag:doc:rechunk')"
                 type="primary"
                 plain
                 size="small"
@@ -178,64 +170,244 @@
             </div>
           </template>
 
+          <!-- 五步阶段条：成功 / 失败后仍保留，状态与摘要来自任务行 stage_trace -->
+          <div class="stage-bar">
+            <el-popover
+              v-for="(step, index) in stages"
+              :key="step.stage"
+              trigger="click"
+              placement="bottom-start"
+              :width="280"
+            >
+              <template #reference>
+                <div :class="['stage-step', `stage-${step.status.toLowerCase()}`]">
+                  <span class="stage-dot">{{ index + 1 }}</span>
+                  <div class="stage-text">
+                    <span class="stage-name">{{ step.stage }}</span>
+                    <span class="stage-meta">{{ stageMeta(step) }}</span>
+                  </div>
+                </div>
+              </template>
+              <div class="stage-pop">
+                <div class="stage-pop-title">{{ step.stage }} · {{ stageStatusLabel(step.status) }}</div>
+                <div class="stage-pop-line">
+                  耗时：{{ step.elapsedMs == null ? '未记录' : formatElapsed(step.elapsedMs) }}
+                </div>
+                <div class="stage-pop-line">摘要：{{ step.summary || '该步没有记录摘要' }}</div>
+                <div v-if="step.stage === '解析'" class="stage-pop-line muted">左侧展示的就是这一步产出的解析文本</div>
+              </div>
+            </el-popover>
+          </div>
+
           <el-alert v-if="chunkError" :title="chunkError" type="error" show-icon :closable="false" class="block-alert" />
 
-          <!-- 未选文档：浅灰图标空态 -->
-          <div v-if="!currentDoc" class="chunk-empty">
-            <el-icon class="chunk-empty-icon"><Document /></el-icon>
-            <p class="chunk-empty-text">请在左侧选择一个文档以查看切片</p>
-          </div>
-
-          <div v-else-if="!chunks.length" class="chunk-empty" v-loading="chunkLoading">
-            <el-icon class="chunk-empty-icon"><Document /></el-icon>
-            <p class="chunk-empty-text">{{ emptyChunkText }}</p>
-            <el-button
-              v-if="currentDoc.status === 'FAILED' && user.hasPerm('rag:doc:retry')"
-              link
-              type="primary"
-              @click="onRetry(currentDoc)"
-            >
-              查看失败原因后重试
-            </el-button>
-          </div>
-
-          <div v-else v-loading="chunkLoading" class="chunk-list">
-            <article v-for="chunk in chunks" :key="chunk.id" class="chunk-card">
-              <header class="chunk-head">
-                <div class="chunk-head-left">
-                  <span class="chunk-title">切片 #{{ (chunk.chunkIndex ?? 0) + 1 }}</span>
-                  <span class="chunk-token">Token: {{ chunk.tokenEst ?? 0 }}</span>
-                </div>
-                <!-- 编辑入口预留：当前无单条切片写接口，点击仅提示后续能力 -->
-                <el-button link type="primary" size="small" @click="onEditChunk(chunk)">编辑</el-button>
+          <div class="compare">
+            <!-- 左侧：本轮入库实际使用的解析文本 -->
+            <section class="compare-pane compare-parse">
+              <header class="compare-head">
+                <span class="compare-title">解析文本</span>
+                <span class="compare-sub">
+                  {{ parseInfo ? `${parseInfo.charCount} 字符` : '—' }}
+                  <template v-if="parseInfo?.headerCount"> · {{ parseInfo.headerCount }} 个标题</template>
+                  <template v-if="parseInfo?.fromSource"> · 原文件只读解析</template>
+                </span>
               </header>
-              <pre class="chunk-body">{{ chunk.content }}</pre>
-            </article>
+              <div ref="parseScrollRef" v-loading="parseLoading" class="compare-body parse-body">
+                <el-alert
+                  v-if="parseError"
+                  :title="parseError"
+                  type="error"
+                  show-icon
+                  :closable="false"
+                  class="compare-alert"
+                />
+                <template v-else-if="parseBlocks.length">
+                  <p
+                    v-for="block in parseBlocks"
+                    :key="block.key"
+                    :data-parse-key="block.key"
+                    :class="[
+                      'parse-block',
+                      block.level ? `parse-h${block.level}` : '',
+                      { 'is-active': isBlockActive(block) }
+                    ]"
+                    @click="onParseBlockClick(block)"
+                  >
+                    <span v-if="block.level" class="parse-badge">H{{ block.level }}</span>
+                    {{ block.text }}
+                  </p>
+                </template>
+                <div v-else-if="!parseLoading" class="compare-empty">
+                  {{ parseMessage || '该文档没有可展示的解析文本' }}
+                </div>
+              </div>
+            </section>
+
+            <!-- 右侧：切片卡片，点击与左侧原文联动 -->
+            <section class="compare-pane compare-chunks">
+              <header class="compare-head">
+                <span class="compare-title">切片</span>
+                <span class="compare-sub">点一片可在左侧定位原文</span>
+              </header>
+              <div ref="chunkListRef" v-loading="chunkLoading" class="compare-body chunk-list">
+                <div v-if="!chunks.length" class="compare-empty">
+                  <p class="compare-empty-text">{{ emptyChunkText }}</p>
+                  <el-button
+                    v-if="currentDoc.status === 'FAILED' && user.hasPerm('rag:doc:retry')"
+                    link
+                    type="primary"
+                    @click="onRetry(currentDoc)"
+                  >
+                    查看失败原因后重试
+                  </el-button>
+                </div>
+                <article
+                  v-for="chunk in chunks"
+                  :key="chunk.id"
+                  :data-chunk-id="chunk.id"
+                  :class="['chunk-card', { 'is-active': activeChunkId === chunk.id }]"
+                  @click="focusChunk(chunk)"
+                >
+                  <header class="chunk-head">
+                    <div class="chunk-head-left">
+                      <span class="chunk-title">切片 #{{ (chunk.chunkIndex ?? 0) + 1 }}</span>
+                      <el-tag size="small" effect="plain" :class="['strategy-tag', strategyClass(chunk.strategy)]">
+                        {{ chunk.strategyLabel || '未记录' }}
+                      </el-tag>
+                      <span class="chunk-token">Token: {{ chunk.tokenEst ?? 0 }}</span>
+                    </div>
+                    <el-button
+                      v-if="user.hasPerm('rag:doc:rechunk')"
+                      link
+                      type="primary"
+                      size="small"
+                      @click.stop="openEditChunk(chunk)"
+                    >
+                      编辑
+                    </el-button>
+                  </header>
+                  <div class="chunk-path" :title="chunk.sectionPath || ''">
+                    章节：{{ chunk.sectionPath || '—' }}
+                    <span v-if="chunk.partIndex"> · 第 {{ chunk.partIndex }} 段</span>
+                  </div>
+                  <pre class="chunk-body">{{ chunk.content }}</pre>
+                </article>
+              </div>
+            </section>
+          </div>
+        </el-card>
+
+        <!-- 未选文档：浅灰图标空态 -->
+        <el-card v-else class="pane-card" shadow="never">
+          <div class="chunk-empty">
+            <el-icon class="chunk-empty-icon"><Document /></el-icon>
+            <p class="chunk-empty-text">请在左侧选择一个文档，查看入库阶段、解析文本与切片对照</p>
           </div>
         </el-card>
       </section>
     </div>
 
-    <el-dialog v-model="rechunk.open" title="重新切片" width="460px" :close-on-click-modal="false">
+    <!-- 重切：先只读预览，确认后才清旧切片与向量 -->
+    <el-dialog v-model="rechunk.open" title="重新切片" :width="rechunk.preview ? '760px' : '460px'" :close-on-click-modal="false">
+      <template v-if="!rechunk.preview">
+        <el-form label-width="88px">
+          <el-form-item label="切片长度" required>
+            <el-input-number v-model="rechunk.chunkSize" :min="100" :max="4000" :step="50" controls-position="right" />
+            <div class="hint">字符数；越小切片越细，越大单条信息越完整但易被模型截断</div>
+          </el-form-item>
+          <el-form-item label="重叠">
+            <el-input-number
+              v-model="rechunk.chunkOverlap"
+              :min="0"
+              :max="overlapMax"
+              :step="10"
+              controls-position="right"
+            />
+            <div class="hint">不超过切片长度的一半；不填则沿用知识库入库参数</div>
+          </el-form-item>
+        </el-form>
+        <el-alert
+          type="info"
+          :closable="false"
+          show-icon
+          title="先预览：只按新片长重算并展示卡片，不会清掉现有切片、不会改向量，该文档仍可检索。"
+        />
+      </template>
+
+      <template v-else>
+        <div class="preview-summary">
+          预计 <b>{{ rechunk.preview?.chunkCount ?? 0 }}</b> 片 · 总 Tokens
+          <b>{{ rechunk.preview?.tokenTotal ?? 0 }}</b>
+          <span class="muted">
+            （片长 {{ rechunk.preview?.chunkSize }} / 重叠 {{ rechunk.preview?.chunkOverlap }}）
+          </span>
+        </div>
+        <el-alert
+          v-if="rechunk.preview?.truncated"
+          type="info"
+          :closable="false"
+          show-icon
+          :title="`片数较多，预览只展示前 ${rechunk.preview?.chunks.length ?? 0} 片；确认后仍按全量落库。`"
+        />
+        <div class="preview-list">
+          <div v-for="card in rechunk.preview?.chunks || []" :key="card.chunkIndex" class="preview-card">
+            <header class="chunk-head">
+              <div class="chunk-head-left">
+                <span class="chunk-title">切片 #{{ card.chunkIndex + 1 }}</span>
+                <el-tag size="small" effect="plain" :class="['strategy-tag', strategyClass(card.strategy)]">
+                  {{ card.strategyLabel || '未记录' }}
+                </el-tag>
+                <span class="chunk-token">Token: {{ card.tokenEst ?? 0 }}</span>
+              </div>
+            </header>
+            <div class="chunk-path">章节：{{ card.sectionPath || '—' }}</div>
+            <pre class="chunk-body">{{ card.content }}</pre>
+          </div>
+        </div>
+        <el-alert
+          type="warning"
+          :closable="false"
+          show-icon
+          title="确认覆盖会先清掉该文档现有切片与向量，再按预览参数重新入库；期间该文档不可检索，完成后恢复。"
+        />
+      </template>
+
+      <template #footer>
+        <template v-if="!rechunk.preview">
+          <el-button @click="rechunk.open = false">取消</el-button>
+          <el-button type="primary" :loading="rechunk.previewing" @click="previewRechunk">预览切片</el-button>
+        </template>
+        <template v-else>
+          <el-button :disabled="rechunk.saving" @click="backToRechunkEdit">返回修改</el-button>
+          <el-button :disabled="rechunk.saving" @click="rechunk.open = false">取消</el-button>
+          <el-button type="primary" :loading="rechunk.saving" @click="submitRechunk">确认覆盖并重灌</el-button>
+        </template>
+      </template>
+    </el-dialog>
+
+    <!-- 单条切片编辑：只改这一片正文/章节路径，并只重写这一片向量 -->
+    <el-dialog v-model="edit.open" title="编辑切片" width="620px" :close-on-click-modal="false">
       <el-form label-width="88px">
-        <el-form-item label="切片长度" required>
-          <el-input-number v-model="rechunk.chunkSize" :min="100" :max="4000" :step="50" controls-position="right" />
-          <div class="hint">字符数；越小切片越细，越大单条信息越完整但易被模型截断</div>
+        <el-form-item label="切片序号">
+          <span class="muted">切片 #{{ edit.chunkIndex + 1 }}</span>
         </el-form-item>
-        <el-form-item label="重叠">
-          <el-input-number v-model="rechunk.chunkOverlap" :min="0" :max="2000" :step="10" controls-position="right" />
-          <div class="hint">不填则沿用知识库入库参数</div>
+        <el-form-item label="章节路径">
+          <el-input v-model="edit.sectionPath" clearable placeholder="可留空；例如：退货政策 / 质检时效" />
+        </el-form-item>
+        <el-form-item label="正文" required>
+          <el-input
+            v-model="edit.content"
+            type="textarea"
+            :rows="10"
+            resize="vertical"
+            placeholder="切片正文不能为空"
+          />
+          <div class="hint">保存后只更新这一片正文与向量，其它切片保持不变；空正文不允许保存。</div>
         </el-form-item>
       </el-form>
-      <el-alert
-        type="warning"
-        :closable="false"
-        show-icon
-        title="重切会先清掉该文档现有切片与向量，再按新片长重新入库；期间该文档不可检索。"
-      />
       <template #footer>
-        <el-button @click="rechunk.open = false">取消</el-button>
-        <el-button type="primary" :loading="rechunk.saving" @click="submitRechunk">开始重切</el-button>
+        <el-button :disabled="edit.saving" @click="edit.open = false">取消</el-button>
+        <el-button type="primary" :loading="edit.saving" @click="saveChunk">保存</el-button>
       </template>
     </el-dialog>
   </div>
@@ -248,32 +420,45 @@
  *
  * 职责：
  * 1. 顶栏展示库名 / Embedding / 重建索引，并弱化返回入口；
- * 2. 左栏工具栏上传与检索，表格展示文档大小、状态、切片数；
- * 3. 右栏查看选中文档切片摘要与卡片列表；「编辑」按钮为后续人工微调预留。
+ * 2. 左栏工具栏上传与检索，表格展示文档状态、切片数；
+ * 3. 右栏展示选中文档的五步入库阶段条、解析文本与切片卡片，并支持左右联动；
+ * 4. 重新切片先只读预览，确认后才覆盖；单条切片可编辑正文与章节路径。
  *
  * 约束：
  * - 不在此页改 Embedding / 建库参数；重建索引复用知识库 rebuild 接口；
- * - 单条切片写接口尚未开放，编辑仅提示；调整内容靠整篇重切；
- * - 页面按 :id 参数复用同一组件，切库时靠 watch 重新拉数据而不重挂。
+ * - 预览接口只读，不得在前端先把旧切片清掉；
+ * - 旧文档没有策略/偏移时显示「未记录」，不编造策略结论。
  */
-import { computed, onActivated, onBeforeUnmount, onDeactivated, reactive, ref, watch } from 'vue'
+import { computed, nextTick, onActivated, onBeforeUnmount, onDeactivated, reactive, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { Back, Document, RefreshRight, Search, Upload } from '@element-plus/icons-vue'
 import {
   deleteDocument,
+  getDocumentParseText,
   getKb,
   listDocumentChunks,
   pageDocuments,
+  previewRechunkDocument,
   rebuildKb,
   rechunkDocument,
   retryDocument,
+  updateDocumentChunk,
   uploadDocument
 } from '@/api/rag'
 import TablePager from '@/components/TablePager.vue'
 import { useListIndexColumn } from '@/composables/listIndex'
 import { useUserStore } from '@/stores/user'
-import { DOC_STATUS_LABEL, KB_CAPABILITY_LABEL, type RagChunkRow, type RagDocumentRow, type RagKbRow } from '@/types/rag'
+import {
+  DOC_STATUS_LABEL,
+  KB_CAPABILITY_LABEL,
+  type RagChunkRow,
+  type RagDocumentRow,
+  type RagKbRow,
+  type RagParseTextRow,
+  type RagRechunkPreviewRow,
+  type RagStageRow
+} from '@/types/rag'
 
 /** KeepAlive 的 include 比对组件名，必须与 router meta.cacheName 一致 */
 defineOptions({ name: 'RagKbDocs' })
@@ -282,12 +467,24 @@ defineOptions({ name: 'RagKbDocs' })
 const DEFAULT_CHUNK_SIZE = 450
 const DEFAULT_CHUNK_OVERLAP = 100
 
+/** 对外固定的五步入库阶段；顺序与后端 stage_trace 一致 */
+const STAGE_NAMES = ['解析', '结构识别', '切片', '向量化', '写入'] as const
+
 /** 本页状态文案：偏操作态，与列表页「可检索」略有区分 */
 const DOC_STATUS_UI: Record<string, string> = {
   PENDING: '待解析',
   RUNNING: '解析中',
   READY: '就绪',
   FAILED: '失败'
+}
+
+/** 阶段状态中文 */
+const STAGE_STATUS_UI: Record<string, string> = {
+  SUCCESS: '已完成',
+  RUNNING: '进行中',
+  FAILED: '失败',
+  PENDING: '待处理',
+  UNKNOWN: '未记录'
 }
 
 const route = useRoute()
@@ -332,20 +529,39 @@ const retryingId = ref(0)
 const removingId = ref(0)
 const query = reactive({ current: 1, size: 10, keyword: '' })
 /** 文档表最左「序号」列；左栏偏窄，列宽收到 56px，序号仍跨页连续 */
-const { indexColumnProps } = useListIndexColumn(() => query.current, () => query.size, 56)
+const { indexColumnProps } = useListIndexColumn(() => query.current, () => query.size, 48)
 
-/* ---------------- 右栏：切片 ---------------- */
+/* ---------------- 右栏：阶段 / 解析文本 / 切片 ---------------- */
 const currentDoc = ref<RagDocumentRow | null>(null)
 const chunks = ref<RagChunkRow[]>([])
 const chunkLoading = ref(false)
 const chunkError = ref('')
+const parseInfo = ref<RagParseTextRow | null>(null)
+const parseLoading = ref(false)
+const parseError = ref('')
+const parseScrollRef = ref<HTMLElement | null>(null)
+const chunkListRef = ref<HTMLElement | null>(null)
+/** 当前联动选中的切片 id；为空表示未选中 */
+const activeChunkId = ref<number | null>(null)
 
-/** 重切弹窗状态；chunkSize 默认取知识库入库参数 */
+/** 重切弹窗状态；preview 为空表示仍在参数步骤 */
 const rechunk = reactive({
   open: false,
+  previewing: false,
   saving: false,
   chunkSize: DEFAULT_CHUNK_SIZE,
-  chunkOverlap: DEFAULT_CHUNK_OVERLAP
+  chunkOverlap: DEFAULT_CHUNK_OVERLAP,
+  preview: null as RagRechunkPreviewRow | null
+})
+
+/** 单条切片编辑弹窗状态 */
+const edit = reactive({
+  open: false,
+  saving: false,
+  chunkId: 0,
+  chunkIndex: 0,
+  content: '',
+  sectionPath: ''
 })
 
 /** 列表轮询句柄：有文档处于 PENDING/RUNNING 时定时刷新 */
@@ -370,6 +586,54 @@ const totalTokens = computed(() =>
   chunks.value.reduce((sum, chunk) => sum + (Number(chunk.tokenEst) || 0), 0)
 )
 
+/** 重叠上限：不超过片长一半，与后端 IngestParams 的收紧规则一致 */
+const overlapMax = computed(() => Math.max(0, Math.floor(rechunk.chunkSize / 2)))
+
+// 片长调小时同步收紧重叠，避免提交一个必然被后端夹紧的值造成预览与落库口径不一致
+watch(
+  () => rechunk.chunkSize,
+  () => {
+    if (rechunk.chunkOverlap > overlapMax.value) {
+      rechunk.chunkOverlap = overlapMax.value
+    }
+  }
+)
+
+/** 阶段条展示行 */
+interface StageView {
+  stage: string
+  status: string
+  elapsedMs: number | null
+  summary: string | null
+}
+
+/** 五个阶段的可展示行：后端有记录用记录，否则显示未记录，不伪造摘要 */
+const stages = computed<StageView[]>(() => {
+  const recorded = new Map<string, RagStageRow>()
+  for (const row of currentDoc.value?.stages || []) {
+    if (row?.stage) {
+      recorded.set(row.stage, row)
+    }
+  }
+  const activeStage = currentDoc.value?.stage || ''
+  return STAGE_NAMES.map((name) => {
+    const row = recorded.get(name)
+    if (row) {
+      return {
+        stage: name,
+        status: row.status || 'UNKNOWN',
+        elapsedMs: row.elapsedMs ?? null,
+        summary: row.summary ?? null
+      }
+    }
+    // 老任务没有阶段记录：进行中的当前步可据任务 stage 推断，其余不猜测
+    if (busyCurrent.value && activeStage === name) {
+      return { stage: name, status: 'RUNNING', elapsedMs: null, summary: null }
+    }
+    return { stage: name, status: 'UNKNOWN', elapsedMs: null, summary: null }
+  })
+})
+
 /** 右侧空状态文案：按文档状态区分「还没跑完」与「确实没有切片」 */
 const emptyChunkText = computed(() => {
   const status = currentDoc.value?.status
@@ -381,6 +645,454 @@ const emptyChunkText = computed(() => {
   }
   return '该文档还没有切片，可尝试重新切片'
 })
+
+/** 解析文本不可用时的提示（旧文档无产物且原文件缺失） */
+const parseMessage = computed(() => parseInfo.value?.message || '')
+
+/** 解析文本按行切成段落，带偏移与标题层级，供左侧渲染与联动 */
+interface ParseBlock {
+  key: number
+  text: string
+  level: number
+  start: number
+  end: number
+}
+
+const parseBlocks = computed<ParseBlock[]>(() => {
+  const text = parseInfo.value?.text
+  if (!text) {
+    return []
+  }
+  const blocks: ParseBlock[] = []
+  let offset = 0
+  text.split('\n').forEach((line, index) => {
+    const start = offset
+    const end = start + line.length
+    offset = end + 1
+    if (!line.trim()) {
+      return
+    }
+    const heading = detectHeading(line)
+    blocks.push({ key: index, text: heading.text, level: heading.level, start, end })
+  })
+  return blocks
+})
+
+/**
+ * 识别一行是否标题并给出层级：Markdown # 优先，其次常见中文编号。
+ * 只用于展示层级，不参与切片算法。
+ *
+ * @param line 原始行
+ * @return 展示文本与层级；普通正文层级为 0
+ */
+function detectHeading(line: string): { text: string; level: number } {
+  const trimmed = line.trim()
+  const markdown = /^(#{1,6})\s+(.*)$/.exec(trimmed)
+  if (markdown) {
+    return { text: markdown[2], level: markdown[1].length }
+  }
+  if (/^第[一二三四五六七八九十百千0-9]+[章节部篇]/.test(trimmed)) {
+    return { text: trimmed, level: 2 }
+  }
+  if (/^[一二三四五六七八九十]+、/.test(trimmed)) {
+    return { text: trimmed, level: 3 }
+  }
+  if (/^（[一二三四五六七八九十]+）/.test(trimmed)) {
+    return { text: trimmed, level: 4 }
+  }
+  return { text: line, level: 0 }
+}
+
+/** 字符区间：[start, end)，下标对齐解析文本 */
+interface ChunkRange {
+  start: number
+  end: number
+}
+
+/** 定位结果：除原文本区间外带上归一化终点，供下一片继续往后找 */
+interface LocatedSpan extends ChunkRange {
+  normEnd: number
+}
+
+/** 解析文本的归一化视图：折叠空白 + 去掉行首 Markdown 记号，并保留回原文本的下标 */
+interface NormalizedParse {
+  /** 原解析文本 */
+  raw: string
+  /** 归一化文本 */
+  text: string
+  /** map[k] = 归一化第 k 个字符在原文本中的下标；末位是原文本长度 */
+  map: number[]
+}
+
+/** 行首 Markdown 记号：标题井号、无序列表符号、有序列表序号（与后端 ChunkPresentation 同口径） */
+const LINE_MARKER = /^[ \t]*(?:#{1,6}[ \t]+|[-*+][ \t]+|\d+[.、)][ \t]+)/
+
+/** 超长再切给标题追加的 (i/n) 后缀 */
+const PART_SUFFIX = /\s*\(\d+\/\d+\)\s*$/
+
+/** 解析文本归一化视图：只随解析文本变化重算，切片定位与旧偏移校验共用 */
+const parseNorm = computed<NormalizedParse | null>(() => {
+  const raw = parseInfo.value?.text
+  return raw ? normalizeWithIndex(raw) : null
+})
+
+/** 切片范围缓存：解析文本或切片变化后失效，点击时再懒建一遍 */
+let chunkRangeMap: Map<number, ChunkRange | null> | null = null
+
+/** 清掉切片范围缓存；解析文本或切片列表一变就必须调用，避免高亮落到旧范围 */
+function invalidateChunkRanges() {
+  chunkRangeMap = null
+}
+
+watch(parseNorm, invalidateChunkRanges)
+
+/** 当前选中切片在解析文本中的范围；无偏移时用整段正文定位作为等价映射 */
+const activeRange = computed<ChunkRange | null>(() => {
+  if (activeChunkId.value == null) {
+    return null
+  }
+  const chunk = chunks.value.find((item) => item.id === activeChunkId.value)
+  return chunk ? chunkRange(chunk) : null
+})
+
+/** 左侧段落是否落在当前选中切片的范围内 */
+function isBlockActive(block: ParseBlock): boolean {
+  const range = activeRange.value
+  if (!range) {
+    return false
+  }
+  return block.end > range.start && block.start < range.end
+}
+
+/**
+ * 取某切片在解析文本中的范围：首次调用时按全篇顺序算一遍并缓存。
+ *
+ * @param chunk 切片
+ * @return 范围；无偏移且定位不到时为 null（不高亮）
+ */
+function chunkRange(chunk: RagChunkRow): ChunkRange | null {
+  if (!chunkRangeMap) {
+    chunkRangeMap = buildChunkRanges()
+  }
+  return chunkRangeMap.get(chunk.id) ?? null
+}
+
+/**
+ * 一次算完全篇切片范围：按切片顺序带游标定位，避免相邻片互相抢位置。
+ * 每片优先用后端偏移，但偏移明显没盖住该片正文时（历史数据只记了标题）改用正文定位结果。
+ *
+ * @return 切片 id → 范围（无映射为 null）
+ */
+function buildChunkRanges(): Map<number, ChunkRange | null> {
+  const ranges = new Map<number, ChunkRange | null>()
+  const norm = parseNorm.value
+  if (!norm) {
+    for (const chunk of chunks.value) {
+      ranges.set(chunk.id, null)
+    }
+    return ranges
+  }
+  let cursor = 0
+  for (const chunk of chunks.value) {
+    const located = locateChunkSpan(norm, chunk, cursor)
+    if (located) {
+      cursor = Math.max(cursor, located.normEnd)
+    }
+    ranges.set(chunk.id, pickRange(norm.raw, chunk, located))
+  }
+  return ranges
+}
+
+/**
+ * 决定用哪个范围：后端偏移已完整覆盖该片正文（含标题）时直接用，否则以正文定位结果为准。
+ *
+ * @param raw     解析文本
+ * @param chunk   切片
+ * @param located 正文定位结果，可空
+ * @return 最终范围；没有可信范围时为 null
+ */
+function pickRange(raw: string, chunk: RagChunkRow, located: LocatedSpan | null): ChunkRange | null {
+  const stored = storedRange(raw, chunk)
+  if (located) {
+    if (stored && stored.start <= located.start && stored.end >= located.end) {
+      return stored
+    }
+    return { start: located.start, end: located.end }
+  }
+  if (!stored) {
+    return null
+  }
+  // 正文在原文里定位不到时，只有标题的旧偏移宁可不亮，也不伪造范围
+  return isHeadingOnlyRange(raw, stored, chunk) ? null : stored
+}
+
+/**
+ * 后端偏移做基础校验：缺失、越界、空区间一律视为不可用。
+ *
+ * @param raw   解析文本
+ * @param chunk 切片
+ * @return 可用的偏移范围；不可用为 null
+ */
+function storedRange(raw: string, chunk: RagChunkRow): ChunkRange | null {
+  const start = chunk.charStart
+  const end = chunk.charEnd
+  if (start == null || end == null) {
+    return null
+  }
+  if (start < 0 || end <= start || end > raw.length) {
+    return null
+  }
+  return { start, end }
+}
+
+/**
+ * 判断偏移是否「只盖住了章节标题」：切片还有正文、范围却正好等于标题。
+ * <p>
+ * 历史数据把标题长度当整片偏移写入，这类范围不参与高亮，避免显示成「整片只有标题」。
+ *
+ * @param raw   解析文本
+ * @param range 后端偏移范围
+ * @param chunk 切片
+ * @return true 表示只有标题、不可用
+ */
+function isHeadingOnlyRange(raw: string, range: ChunkRange, chunk: RagChunkRow): boolean {
+  const heading = collapse(headingTitle(chunk))
+  if (!heading) {
+    return false
+  }
+  if (collapse(raw.slice(range.start, range.end)) !== heading) {
+    return false
+  }
+  return collapse(chunk.content || '').length > heading.length
+}
+
+/**
+ * 在归一化文本中定位整片正文。
+ *
+ * @param norm  归一化解析文本
+ * @param chunk 切片
+ * @param from  归一化搜索起点（上一片终点）
+ * @return 范围与归一化终点；定位不到为 null
+ */
+function locateChunkSpan(norm: NormalizedParse, chunk: RagChunkRow, from: number): LocatedSpan | null {
+  for (const candidate of chunkBodyCandidates(chunk)) {
+    const needle = collapse(candidate)
+    // 过短正文容易命中无关位置，宁可不标偏移
+    if (needle.length < 4) {
+      continue
+    }
+    let at = norm.text.indexOf(needle, Math.max(0, from))
+    if (at < 0 && from > 0) {
+      at = norm.text.indexOf(needle)
+    }
+    if (at < 0) {
+      continue
+    }
+    return {
+      start: extendToHeading(norm.raw, norm.map[at], chunk),
+      end: norm.map[at + needle.length - 1] + 1,
+      normEnd: at + needle.length
+    }
+  }
+  return null
+}
+
+/**
+ * 可用来在原文定位的正文候选：整片优先，其次去掉策略合成的非原文前缀。
+ *
+ * @param chunk 切片
+ * @return 候选正文，按优先级排列
+ */
+function chunkBodyCandidates(chunk: RagChunkRow): string[] {
+  const content = chunk.content || ''
+  const lines = content.split('\n')
+  const heading = headingTitle(chunk)
+  const path = (chunk.sectionPath || '')
+    .split(' / ')
+    .map((part) => part.trim())
+    .filter(Boolean)
+  const candidates: string[] = []
+  const push = (value: string) => {
+    const text = value.trim()
+    if (text.length >= 4) {
+      candidates.push(text)
+    }
+  }
+  push(content)
+  let drop = 0
+  if (content.startsWith('表头：') && lines.length > 1) {
+    // 表格片首行是「表头：…」，原文只有后面的数据行
+    drop = 1
+  } else if (
+    path.length > 1 &&
+    lines.length > 2 &&
+    lines[0].trim() === path[0] &&
+    lines[1].trim() === path[path.length - 1]
+  ) {
+    // 条目片首两行是「条目名 / 字段名」，原文没有
+    drop = 2
+  } else if (lines.length > 1 && heading && lines[0].replace(PART_SUFFIX, '').trim() === heading) {
+    // 正文被前置了章节标题时先去掉，避免把标题当成正文定位
+    drop = 1
+  }
+  if (drop > 0 && drop < lines.length) {
+    push(lines.slice(drop).join('\n'))
+  }
+  return candidates
+}
+
+/**
+ * 把正文起点前移到该节标题行行首，让高亮覆盖「标题 + 正文」。
+ * <p>
+ * 只在标题独占一行、且标题行与正文之间只有空行/列表记号时前移；否则保持正文起点，
+ * 避免把上一节标题或正文里的同名串带进选区。
+ *
+ * @param raw       解析文本
+ * @param bodyStart 正文起点
+ * @param chunk     切片
+ * @return 前移后的起点；不该前移时原样返回
+ */
+function extendToHeading(raw: string, bodyStart: number, chunk: RagChunkRow): number {
+  const heading = headingTitle(chunk)
+  if (!heading) {
+    return bodyStart
+  }
+  // 正文本身从标题文字开始（正文被前置标题）时从当前起点算，否则找紧邻正文的上一处标题
+  const startsWithHeading = raw.startsWith(heading, bodyStart)
+  const at = startsWithHeading ? bodyStart : raw.lastIndexOf(heading, Math.max(0, bodyStart - 1))
+  if (at < 0) {
+    return bodyStart
+  }
+  const lineStart = raw.lastIndexOf('\n', at - 1) + 1
+  let lineEnd = raw.indexOf('\n', at + heading.length)
+  if (lineEnd < 0) {
+    lineEnd = raw.length
+  }
+  // 标题必须独占该行：标题之后到换行之间只剩空白
+  if (raw.slice(at + heading.length, lineEnd).trim()) {
+    return bodyStart
+  }
+  // 标题在正文之前时，两者之间只允许空行与该片首行的列表记号
+  if (!startsWithHeading && (lineEnd >= bodyStart || hasContent(raw.slice(lineEnd, bodyStart)))) {
+    return bodyStart
+  }
+  // 行首只允许 Markdown 井号，否则命中可能是正文里的同名串
+  const prefix = raw.slice(lineStart, at).trim()
+  if (prefix && !/^#{1,6}$/.test(prefix)) {
+    return bodyStart
+  }
+  return lineStart
+}
+
+/**
+ * 章节标题：取章节路径最后一段，并去掉超长再切追加的 (i/n) 后缀。
+ *
+ * @param chunk 切片
+ * @return 标题文本；没有为 ''
+ */
+function headingTitle(chunk: RagChunkRow): string {
+  const path = (chunk.sectionPath || '').trim()
+  const last = path.includes(' / ') ? path.slice(path.lastIndexOf(' / ') + 3) : path
+  return last.replace(PART_SUFFIX, '').trim()
+}
+
+/**
+ * 片段里除空行与该行行首 Markdown 记号外是否还有内容。
+ *
+ * @param gap 待检查片段
+ * @return true 表示有实际内容
+ */
+function hasContent(gap: string): boolean {
+  return gap.split('\n').some((line) => line.replace(LINE_MARKER, '').trim().length > 0)
+}
+
+/**
+ * 构建解析文本的归一化视图：连续空白折叠为单空格、行首 Markdown 记号跳过，并记录回原文本的下标。
+ *
+ * @param raw 解析文本
+ * @return 归一化视图
+ */
+function normalizeWithIndex(raw: string): NormalizedParse {
+  let text = ''
+  const map: number[] = []
+  let pendingSpace = -1
+  let lineStart = true
+  for (let i = 0; i < raw.length; i++) {
+    const ch = raw[i]
+    if (ch === '\n') {
+      lineStart = true
+    }
+    if (lineStart) {
+      const marker = lineMarkerLength(raw, i)
+      if (marker > 0) {
+        i += marker - 1
+        continue
+      }
+    }
+    if (/\s/.test(ch)) {
+      if (text.length > 0 && pendingSpace < 0) {
+        pendingSpace = i
+      }
+      continue
+    }
+    lineStart = false
+    if (pendingSpace >= 0) {
+      map.push(pendingSpace)
+      text += ' '
+      pendingSpace = -1
+    }
+    map.push(i)
+    text += ch
+  }
+  map.push(raw.length)
+  return { raw, text, map }
+}
+
+/**
+ * 行首 Markdown 记号的长度（只含记号本身，不含其后的空白）。
+ *
+ * @param text 原文本
+ * @param i    行首下标
+ * @return 需要跳过的字符数；不是记号返回 0
+ */
+function lineMarkerLength(text: string, i: number): number {
+  const first = text[i]
+  if (first === '#') {
+    let n = 0
+    while (text[i + n] === '#') {
+      n++
+    }
+    const next = text[i + n]
+    return n <= 6 && (next === undefined || /\s/.test(next)) ? n : 0
+  }
+  if (first === '-' || first === '*' || first === '+') {
+    return /\s/.test(text[i + 1] ?? '') ? 1 : 0
+  }
+  if (/\d/.test(first)) {
+    let n = 0
+    while (/\d/.test(text[i + n] ?? '')) {
+      n++
+    }
+    const punct = text[i + n]
+    return punct && '.、)'.includes(punct) && /\s/.test(text[i + n + 1] ?? '') ? n + 1 : 0
+  }
+  return 0
+}
+
+/**
+ * 折叠连续空白并去掉行首 Markdown 记号，供切片正文与解析文本做等价比较。
+ *
+ * @param text 待归一化文本
+ * @return 归一化文本
+ */
+function collapse(text: string): string {
+  return text
+    .split('\n')
+    .map((line) => line.replace(LINE_MARKER, ''))
+    .join('\n')
+    .replace(/\s+/g, ' ')
+    .trim()
+}
 
 /** 状态配色：就绪绿、失败红、进行中橙、其它灰 */
 function statusClass(status: string) {
@@ -405,22 +1117,44 @@ function statusLabel(status: string) {
   return DOC_STATUS_UI[status] || DOC_STATUS_LABEL[status] || status
 }
 
-/**
- * 字节数格式化为可读大小。
- *
- * @param bytes 文件字节数；空则显示 —
- */
-function formatByteSize(bytes?: number | null) {
-  if (bytes == null || !Number.isFinite(bytes) || bytes < 0) {
+/** 阶段状态中文 */
+function stageStatusLabel(status: string) {
+  return STAGE_STATUS_UI[status] || status
+}
+
+/** 阶段副标题：优先产物摘要，其次耗时，最后状态 */
+function stageMeta(step: { status: string; elapsedMs: number | null; summary: string | null }) {
+  if (step.summary) {
+    return step.summary
+  }
+  if (step.elapsedMs != null) {
+    return formatElapsed(step.elapsedMs)
+  }
+  return stageStatusLabel(step.status)
+}
+
+/** 毫秒转可读耗时 */
+function formatElapsed(ms: number) {
+  if (!Number.isFinite(ms) || ms < 0) {
     return '—'
   }
-  if (bytes < 1024) {
-    return `${bytes} B`
+  return ms < 1000 ? `${Math.round(ms)} ms` : `${(ms / 1000).toFixed(1)} s`
+}
+
+/** 策略标签配色；未知策略保持中性 */
+function strategyClass(code?: string | null) {
+  switch (code) {
+    case 'HIERARCHICAL':
+      return 'strategy-hierarchical'
+    case 'ENTRY_BASED':
+      return 'strategy-entry'
+    case 'TABULAR':
+      return 'strategy-tabular'
+    case 'NARRATIVE':
+      return 'strategy-narrative'
+    default:
+      return 'strategy-none'
   }
-  if (bytes < 1024 * 1024) {
-    return `${(bytes / 1024).toFixed(bytes < 10 * 1024 ? 1 : 0)} KB`
-  }
-  return `${(bytes / (1024 * 1024)).toFixed(1)} MB`
 }
 
 /**
@@ -437,7 +1171,7 @@ function rowClass({ row }: { row: RagDocumentRow }) {
 }
 
 /**
- * 点击行即打开切片，减少必须点「查看切片」的步骤；操作列按钮自行 stop。
+ * 点击行即打开对照，减少必须点「查看」的步骤；操作列按钮自行 stop。
  *
  * @param row 文档行
  */
@@ -466,7 +1200,7 @@ async function loadKb() {
     kb.value = data.data
     const fromConfig = parseChunkSize(data.data.ingestConfig)
     rechunk.chunkSize = fromConfig.size
-    rechunk.chunkOverlap = fromConfig.overlap
+    rechunk.chunkOverlap = Math.min(fromConfig.overlap, Math.floor(fromConfig.size / 2))
   } catch {
     kb.value = null
     kbError.value = '知识库信息加载失败'
@@ -525,13 +1259,17 @@ function syncCurrentDoc() {
   if (!fresh) {
     currentDoc.value = null
     chunks.value = []
+    parseInfo.value = null
+    activeChunkId.value = null
+    invalidateChunkRanges()
     return
   }
   const wasRunning = selected.status === 'RUNNING' || selected.status === 'PENDING'
   currentDoc.value = fresh
-  // 重切/入库刚跑完：右栏是空的，自动补一次切片，省掉用户再点一次「查看切片」
+  // 重切/入库刚跑完：右栏还是旧的，自动补一次解析文本与切片，省掉用户再点一次
   if (wasRunning && fresh.status === 'READY') {
     void loadChunks()
+    void loadParseText()
   }
 }
 
@@ -591,6 +1329,12 @@ async function doUpload(file: File) {
     ElMessage.success(data.data?.status === 'PENDING' ? '已受理，正在后台入库' : '已上传')
     query.current = 1
     await load()
+    // 上传后直接打开该文档：阶段条与解析/切片对照立刻可见，不必再找一行点一次
+    const uploaded = data.data
+    if (uploaded && canViewChunks.value) {
+      const fresh = rows.value.find((row) => row.id === uploaded.id) || uploaded
+      await openChunks(fresh)
+    }
   } finally {
     uploading.value = false
   }
@@ -658,6 +1402,9 @@ async function onRemove(row: RagDocumentRow) {
     if (currentDoc.value?.id === row.id) {
       currentDoc.value = null
       chunks.value = []
+      parseInfo.value = null
+      activeChunkId.value = null
+      invalidateChunkRanges()
     }
     ElMessage.success('已删除')
     await load()
@@ -667,16 +1414,20 @@ async function onRemove(row: RagDocumentRow) {
 }
 
 /**
- * 拉取某文档的切片并展示在右栏。
+ * 拉取某文档的解析文本与切片并展示在右栏。
  *
  * @param row 文档行
  */
 async function openChunks(row: RagDocumentRow) {
   currentDoc.value = row
-  // 先清空上一份切片：否则加载期间右栏会短暂显示别的文档内容
+  // 先清空上一份数据：否则加载期间右栏会短暂显示别的文档内容
   chunks.value = []
+  parseInfo.value = null
+  activeChunkId.value = null
   chunkError.value = ''
-  await loadChunks()
+  parseError.value = ''
+  invalidateChunkRanges()
+  await Promise.all([loadChunks(), loadParseText()])
 }
 
 async function loadChunks() {
@@ -689,52 +1440,188 @@ async function loadChunks() {
   try {
     const { data } = await listDocumentChunks(kbId.value, doc.id)
     chunks.value = data.data || []
+    invalidateChunkRanges()
   } catch {
     chunkError.value = '切片加载失败'
     chunks.value = []
+    invalidateChunkRanges()
   } finally {
     chunkLoading.value = false
   }
 }
 
-/**
- * 单条切片编辑预留入口。写接口未交付前不发请求，避免误导为已可用。
- *
- * @param chunk 当前切片
- */
-function onEditChunk(chunk: RagChunkRow) {
-  ElMessage.info(`切片 #${(chunk.chunkIndex ?? 0) + 1} 的编辑能力即将上线，当前请用「重新切片」调整`)
+/** 读取解析文本：只读接口，失败只提示，不影响切片列表 */
+async function loadParseText() {
+  const doc = currentDoc.value
+  if (!doc) {
+    return
+  }
+  parseLoading.value = true
+  parseError.value = ''
+  try {
+    const { data } = await getDocumentParseText(kbId.value, doc.id)
+    parseInfo.value = data.data
+  } catch {
+    parseError.value = '解析文本加载失败；可重新切片后重试'
+    parseInfo.value = null
+  } finally {
+    parseLoading.value = false
+  }
 }
 
-/** 打开重切弹窗：片长以知识库当前入库参数为默认，用户可改 */
+/** 点击左侧原文段落：选中包含该段落的切片并滚动到对应卡片 */
+function onParseBlockClick(block: ParseBlock) {
+  const hit = chunks.value.find((chunk) => {
+    const range = chunkRange(chunk)
+    return range ? block.end > range.start && block.start < range.end : false
+  })
+  if (!hit) {
+    ElMessage.info('该段没有对应的切片（可能被清洗规则过滤）')
+    return
+  }
+  activeChunkId.value = hit.id
+  void nextTick(() => {
+    chunkListRef.value
+      ?.querySelector<HTMLElement>(`[data-chunk-id="${hit.id}"]`)
+      ?.scrollIntoView({ block: 'nearest', behavior: 'smooth' })
+  })
+}
+
+/** 点击右侧切片：选中并滚动左侧对应原文 */
+function focusChunk(chunk: RagChunkRow) {
+  activeChunkId.value = chunk.id
+  const range = chunkRange(chunk)
+  if (!range) {
+    return
+  }
+  const target = parseBlocks.value.find((block) => block.end > range.start && block.start < range.end)
+  if (!target) {
+    return
+  }
+  void nextTick(() => {
+    parseScrollRef.value
+      ?.querySelector<HTMLElement>(`[data-parse-key="${target.key}"]`)
+      ?.scrollIntoView({ block: 'nearest', behavior: 'smooth' })
+  })
+}
+
+/** 打开重切弹窗：重置到参数步骤，片长以知识库当前入库参数为默认 */
 function openRechunk() {
   if (!currentDoc.value) {
     return
   }
   const fromConfig = parseChunkSize(kb.value?.ingestConfig)
   rechunk.chunkSize = fromConfig.size
-  rechunk.chunkOverlap = fromConfig.overlap
+  rechunk.chunkOverlap = Math.min(fromConfig.overlap, Math.floor(fromConfig.size / 2))
+  rechunk.preview = null
   rechunk.open = true
+}
+
+/** 只读预览：不写库、不动向量，也不改变右栏已有切片 */
+async function previewRechunk() {
+  const doc = currentDoc.value
+  if (!doc) {
+    return
+  }
+  if (rechunk.chunkSize < 100 || rechunk.chunkSize > 4000) {
+    ElMessage.warning('切片长度需在 100–4000 之间')
+    return
+  }
+  rechunk.previewing = true
+  try {
+    const { data } = await previewRechunkDocument(kbId.value, doc.id, {
+      chunkSize: rechunk.chunkSize,
+      chunkOverlap: rechunk.chunkOverlap
+    })
+    rechunk.preview = data.data
+  } finally {
+    rechunk.previewing = false
+  }
+}
+
+/** 从预览返回参数步骤，不产生任何写操作 */
+function backToRechunkEdit() {
+  rechunk.preview = null
 }
 
 async function submitRechunk() {
   const doc = currentDoc.value
-  if (!doc) {
+  const preview = rechunk.preview
+  if (!doc || !preview) {
+    return
+  }
+  try {
+    await ElMessageBox.confirm(
+      `确认覆盖「${doc.title}」的现有切片与向量？覆盖开始后该文档暂时不可检索，完成后恢复。`,
+      '确认覆盖',
+      { confirmButtonText: '确认覆盖', cancelButtonText: '取消', type: 'warning' }
+    )
+  } catch {
     return
   }
   rechunk.saving = true
   try {
     await rechunkDocument(kbId.value, doc.id, {
-      chunkSize: rechunk.chunkSize,
-      chunkOverlap: rechunk.chunkOverlap
+      chunkSize: preview.chunkSize,
+      chunkOverlap: preview.chunkOverlap
     })
     rechunk.open = false
-    // 旧切片已被服务端清空，这里立即清右栏，等文档回到 READY 再让用户点开查看
+    rechunk.preview = null
+    // 旧切片已被服务端清空，这里立即清右栏，等文档回到 READY 再自动补拉
     chunks.value = []
+    parseInfo.value = null
+    activeChunkId.value = null
+    invalidateChunkRanges()
     ElMessage.success('已受理，正在按新片长重新入库')
     await load()
   } finally {
     rechunk.saving = false
+  }
+}
+
+/**
+ * 打开单条切片编辑：带上当前正文与章节路径。
+ *
+ * @param chunk 当前切片
+ */
+function openEditChunk(chunk: RagChunkRow) {
+  edit.chunkId = chunk.id
+  edit.chunkIndex = chunk.chunkIndex ?? 0
+  edit.content = chunk.content
+  edit.sectionPath = chunk.sectionPath || ''
+  edit.open = true
+}
+
+/** 保存单条切片：只替换本地这一片，不重载整篇，避免其它卡片闪动 */
+async function saveChunk() {
+  const doc = currentDoc.value
+  if (!doc || !edit.chunkId) {
+    return
+  }
+  const content = edit.content.trim()
+  if (!content) {
+    ElMessage.warning('切片正文不能为空')
+    return
+  }
+  edit.saving = true
+  try {
+    const { data } = await updateDocumentChunk(kbId.value, doc.id, edit.chunkId, {
+      content,
+      // 空字符串表示清空章节路径；null 会被后端当作「不修改」
+      sectionPath: edit.sectionPath.trim()
+    })
+    const updated = data.data
+    const index = chunks.value.findIndex((item) => item.id === edit.chunkId)
+    if (index >= 0 && updated) {
+      // 只替换更新后的这一片：序号、其它片与总 Token 由 computed 自然刷新
+      chunks.value.splice(index, 1, updated)
+      // 正文改了，原偏移/定位结果都不再可信，下一次点击重算
+      invalidateChunkRanges()
+    }
+    edit.open = false
+    ElMessage.success('已保存，仅更新该切片及其向量')
+  } finally {
+    edit.saving = false
   }
 }
 
@@ -757,7 +1644,11 @@ watch(
     stopPoll()
     currentDoc.value = null
     chunks.value = []
+    parseInfo.value = null
+    parseError.value = ''
     chunkError.value = ''
+    activeChunkId.value = null
+    invalidateChunkRanges()
     query.current = 1
     query.keyword = ''
     void loadKb()
@@ -877,13 +1768,14 @@ onBeforeUnmount(stopPoll)
   height: 100%;
 }
 
-.pane-left {
-  flex: 0 0 48%;
-  max-width: 48%;
+/* 左栏只放文档列表，收窄后把宽度留给对照区 */
+.pane-docs {
+  flex: 0 0 400px;
+  max-width: 400px;
 }
 
-.pane-right {
-  flex: 1 1 52%;
+.pane-main {
+  flex: 1 1 auto;
 }
 
 .pane-card {
@@ -907,6 +1799,10 @@ onBeforeUnmount(stopPoll)
   min-height: 0;
   padding: 12px 14px 14px;
   overflow: hidden;
+}
+
+.compare-card :deep(.el-card__body) {
+  gap: 10px;
 }
 
 .pane-head {
@@ -948,7 +1844,7 @@ onBeforeUnmount(stopPoll)
 }
 
 .doc-summary-name {
-  max-width: 240px;
+  max-width: 280px;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -996,13 +1892,13 @@ onBeforeUnmount(stopPoll)
 }
 
 .toolbar-search {
-  width: 160px;
+  width: 150px;
   max-width: 100%;
 }
 
 .toolbar .btn-query,
 .toolbar .btn-reset {
-  min-width: 56px;
+  min-width: 52px;
 }
 
 :deep(.is-current-doc) {
@@ -1012,6 +1908,404 @@ onBeforeUnmount(stopPoll)
 
 :deep(.el-table__row) {
   cursor: pointer;
+}
+
+/* ---------------- 五步阶段条 ---------------- */
+.stage-bar {
+  display: flex;
+  flex: none;
+  gap: 8px;
+  min-width: 0;
+  overflow-x: auto;
+  padding-bottom: 2px;
+}
+
+.stage-step {
+  display: flex;
+  flex: 1 1 0;
+  align-items: center;
+  gap: 8px;
+  min-width: 120px;
+  padding: 8px 10px;
+  border: 1px solid #e8eaed;
+  border-radius: 8px;
+  background: #f8f9fa;
+  cursor: pointer;
+  transition: border-color 0.15s ease, background 0.15s ease;
+}
+
+.stage-step:hover {
+  border-color: #c9c5ff;
+}
+
+.stage-dot {
+  display: inline-flex;
+  flex: none;
+  align-items: center;
+  justify-content: center;
+  width: 20px;
+  height: 20px;
+  border-radius: 50%;
+  background: #e5e7eb;
+  color: #6b7280;
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.stage-text {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  min-width: 0;
+}
+
+.stage-name {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--ah-text);
+  white-space: nowrap;
+}
+
+.stage-meta {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 11px;
+  color: var(--ah-text-muted);
+}
+
+.stage-success {
+  border-color: #a7f3d0;
+  background: #ecfdf5;
+}
+
+.stage-success .stage-dot {
+  background: #10b981;
+  color: #fff;
+}
+
+.stage-running {
+  border-color: #fde68a;
+  background: #fffbeb;
+}
+
+.stage-running .stage-dot {
+  background: #d97706;
+  color: #fff;
+}
+
+.stage-failed {
+  border-color: #fecaca;
+  background: #fef2f2;
+}
+
+.stage-failed .stage-dot {
+  background: #ef4444;
+  color: #fff;
+}
+
+.stage-unknown .stage-dot {
+  background: #e5e7eb;
+  color: #9ca3af;
+}
+
+.stage-pop {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  font-size: 12px;
+  line-height: 1.6;
+  color: var(--ah-text-secondary);
+}
+
+.stage-pop-title {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--ah-text);
+}
+
+.stage-pop-line {
+  word-break: break-word;
+}
+
+/* ---------------- 左原文 / 右切片对照 ---------------- */
+.compare {
+  display: flex;
+  flex: 1;
+  gap: 10px;
+  min-height: 0;
+  min-width: 0;
+}
+
+.compare-pane {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  min-height: 0;
+  border: 1px solid #e8eaed;
+  border-radius: 8px;
+  overflow: hidden;
+  background: #fff;
+}
+
+.compare-parse {
+  flex: 0 0 42%;
+}
+
+.compare-chunks {
+  flex: 1 1 auto;
+}
+
+.compare-head {
+  display: flex;
+  flex: none;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 10px;
+  padding: 8px 12px;
+  border-bottom: 1px solid #eef0f3;
+  background: #fafbfc;
+}
+
+.compare-title {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--ah-text);
+}
+
+.compare-sub {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 11px;
+  color: var(--ah-text-muted);
+}
+
+.compare-body {
+  flex: 1;
+  min-height: 0;
+  overflow: auto;
+  padding: 10px 12px;
+}
+
+.parse-body {
+  font-size: 13px;
+  line-height: 1.75;
+  color: var(--ah-text);
+}
+
+.parse-block {
+  margin: 0 0 4px;
+  padding: 3px 6px;
+  border-radius: 5px;
+  white-space: pre-wrap;
+  word-break: break-word;
+  cursor: pointer;
+  transition: background 0.15s ease;
+}
+
+.parse-block:hover {
+  background: #f7f6ff;
+}
+
+.parse-block.is-active {
+  background: #efeaff;
+  box-shadow: inset 2px 0 0 #635bff;
+}
+
+.parse-h1 {
+  font-size: 16px;
+  font-weight: 700;
+  margin-top: 8px;
+}
+
+.parse-h2 {
+  font-size: 15px;
+  font-weight: 600;
+  margin-top: 7px;
+}
+
+.parse-h3 {
+  font-size: 14px;
+  font-weight: 600;
+  margin-top: 6px;
+}
+
+.parse-h4 {
+  font-size: 13px;
+  font-weight: 600;
+  margin-top: 5px;
+}
+
+.parse-h5,
+.parse-h6 {
+  font-size: 13px;
+  font-weight: 600;
+}
+
+.parse-badge {
+  display: inline-block;
+  margin-right: 6px;
+  padding: 0 5px;
+  border-radius: 4px;
+  background: #f3f4f6;
+  color: var(--ah-text-muted);
+  font-size: 10px;
+  line-height: 16px;
+  vertical-align: 1px;
+}
+
+.compare-alert {
+  margin-bottom: 8px;
+}
+
+.compare-empty {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  min-height: 160px;
+  padding: 24px 12px;
+  color: var(--ah-text-muted);
+  font-size: 13px;
+  line-height: 1.6;
+  text-align: center;
+}
+
+.compare-empty-text {
+  margin: 0;
+}
+
+.chunk-list {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding-right: 2px;
+}
+
+.chunk-card {
+  border: 1px solid #e8eaed;
+  border-radius: 8px;
+  padding: 10px 12px;
+  background: #f8f9fa;
+  cursor: pointer;
+  transition: border-color 0.15s ease, background 0.15s ease;
+}
+
+.chunk-card:hover {
+  border-color: #c9c5ff;
+}
+
+.chunk-card.is-active {
+  border-color: #635bff;
+  background: #f7f5ff;
+  box-shadow: 0 0 0 1px rgba(99, 91, 255, 0.18);
+}
+
+.chunk-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 6px;
+}
+
+.chunk-head-left {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}
+
+.chunk-title {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--ah-text);
+}
+
+.chunk-token {
+  font-size: 12px;
+  color: var(--ah-text-muted);
+}
+
+.chunk-path {
+  margin-bottom: 6px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 12px;
+  color: var(--ah-text-secondary);
+}
+
+.chunk-body {
+  margin: 0;
+  font-family: inherit;
+  font-size: 13px;
+  line-height: 1.7;
+  color: var(--ah-text);
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+/* ---------------- 重切预览 ---------------- */
+.preview-summary {
+  margin-bottom: 10px;
+  font-size: 13px;
+  color: var(--ah-text-secondary);
+}
+
+.preview-summary b {
+  color: var(--ah-text);
+}
+
+.preview-list {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  max-height: 46vh;
+  margin: 10px 0;
+  overflow: auto;
+  padding-right: 4px;
+}
+
+.preview-card {
+  border: 1px solid #e8eaed;
+  border-radius: 8px;
+  padding: 8px 10px;
+  background: #f8f9fa;
+}
+
+/* ---------------- 状态色 ---------------- */
+.strategy-tag {
+  --el-tag-bg-color: #f3f4f6;
+  --el-tag-border-color: #e5e7eb;
+  --el-tag-text-color: #6b7280;
+}
+
+.strategy-hierarchical {
+  --el-tag-bg-color: #eef2ff;
+  --el-tag-border-color: #c7d2fe;
+  --el-tag-text-color: #4f46e5;
+}
+
+.strategy-entry {
+  --el-tag-bg-color: #ecfdf5;
+  --el-tag-border-color: #a7f3d0;
+  --el-tag-text-color: #059669;
+}
+
+.strategy-tabular {
+  --el-tag-bg-color: #fffbeb;
+  --el-tag-border-color: #fde68a;
+  --el-tag-text-color: #b45309;
+}
+
+.strategy-narrative {
+  --el-tag-bg-color: #eff6ff;
+  --el-tag-border-color: #bfdbfe;
+  --el-tag-text-color: #2563eb;
 }
 
 .chunk-empty {
@@ -1036,59 +2330,6 @@ onBeforeUnmount(stopPoll)
   font-size: 13px;
   line-height: 1.5;
   text-align: center;
-}
-
-.chunk-list {
-  display: flex;
-  flex: 1;
-  flex-direction: column;
-  gap: 10px;
-  min-height: 0;
-  overflow: auto;
-  padding-right: 2px;
-}
-
-.chunk-card {
-  border: 1px solid #e8eaed;
-  border-radius: 8px;
-  padding: 10px 12px;
-  background: #f8f9fa;
-}
-
-.chunk-head {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 12px;
-  margin-bottom: 8px;
-}
-
-.chunk-head-left {
-  display: flex;
-  align-items: center;
-  gap: 12px;
-  min-width: 0;
-}
-
-.chunk-title {
-  font-size: 13px;
-  font-weight: 600;
-  color: var(--ah-text);
-}
-
-.chunk-token {
-  font-size: 12px;
-  color: var(--ah-text-muted);
-}
-
-.chunk-body {
-  margin: 0;
-  font-family: inherit;
-  font-size: 13px;
-  line-height: 1.7;
-  color: var(--ah-text);
-  white-space: pre-wrap;
-  word-break: break-word;
 }
 
 .btn-icon {
@@ -1131,6 +2372,17 @@ onBeforeUnmount(stopPoll)
   --el-tag-bg-color: #f3f4f6;
 }
 
+@media (max-width: 1440px) {
+  .pane-docs {
+    flex: 0 0 360px;
+    max-width: 360px;
+  }
+
+  .compare-parse {
+    flex: 0 0 44%;
+  }
+}
+
 @media (max-width: 1280px) {
   .page {
     height: auto;
@@ -1148,12 +2400,23 @@ onBeforeUnmount(stopPoll)
     overflow: visible;
   }
 
-  .pane-left,
-  .pane-right {
+  .pane-docs,
+  .pane-main {
     flex: 1 1 auto;
     max-width: 100%;
     width: 100%;
-    height: min(70vh, 640px);
+    height: min(72vh, 680px);
+  }
+
+  .compare {
+    flex-direction: column;
+    min-height: 480px;
+  }
+
+  .compare-parse,
+  .compare-chunks {
+    flex: 1 1 auto;
+    min-height: 220px;
   }
 
   .toolbar-search {

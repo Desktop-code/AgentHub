@@ -47,6 +47,8 @@ public class HierarchicalChunkStrategy implements ChunkStrategy {
         String fileName = doc.getFileName();
         // REQ-03b：跟踪最近专篇级 H1，供空壳合并门禁使用
         String currentArticle = "";
+        // 专篇标题层级：仅当它比当前节更靠近根时才拼成「专篇 / 节」路径，避免把平级标题误当父级
+        int currentArticleLevel = 0;
         for (DocumentChunk c : raw) {
             if (TocNoiseFilter.isLowQualityChunk(c.getContent())) {
                 continue;
@@ -60,17 +62,21 @@ public class HierarchicalChunkStrategy implements ChunkStrategy {
             String title = c.getSectionTitle() == null ? "" : c.getSectionTitle().trim();
             if (level <= 1 || ShellChunkProcessor.looksLikeArticleTitle(title)) {
                 currentArticle = title;
+                currentArticleLevel = level;
             } else if (!StringUtils.hasText(currentArticle) && StringUtils.hasText(title)) {
                 currentArticle = title;
+                currentArticleLevel = level;
             }
             Map<String, Object> meta = new LinkedHashMap<>();
             meta.put("file_name", fileName);
             meta.put("block_type", BlockType.HEADER.name());
             meta.put("source_type", DocumentType.HIERARCHICAL.name());
+            meta.put("strategy", ChunkStrategyKind.HIERARCHICAL.code());
             meta.put("header_path", title);
             meta.put("header_level", level);
             if (StringUtils.hasText(currentArticle)) {
                 meta.put("article_title", currentArticle);
+                meta.put("article_level", currentArticleLevel);
             }
             out.add(new DocumentChunk(body, c.getPageNum(), title, meta));
         }
