@@ -55,7 +55,20 @@
       </el-form>
     </div>
 
-    <el-alert v-if="listError" :title="listError" type="error" show-icon :closable="false" class="block-alert" />
+    <!-- 失败但已有旧数据：保留列表，顶部出错误条 + 重试；无数据时改用列表内错误块 -->
+    <el-alert
+      v-if="listError && (gridRows.length || railRows.length)"
+      :title="listError"
+      type="error"
+      show-icon
+      :closable="false"
+      class="block-alert"
+    >
+      <div class="block-alert__body">
+        <span>{{ listErrorReason }}</span>
+        <el-button link type="danger" size="small" @click="retryCurrent">重试</el-button>
+      </div>
+    </el-alert>
 
     <!--
       双层同页：飞卡过程中两层都用 v-show 留在 DOM。
@@ -68,7 +81,20 @@
         :class="{ 'is-active': viewMode === 'grid' }"
       >
         <div ref="gridWrapRef" v-loading="listLoading && viewMode === 'grid'" class="grid-wrap">
-          <el-empty v-if="!listLoading && !gridRows.length" description="还没有 Skill" />
+          <!-- 失败且无旧数据：只出错误块，不让「还没有 Skill」同时出现 -->
+          <LoadError
+            v-if="!listLoading && listError && !gridRows.length"
+            title="Skill 列表加载失败"
+            :reason="listErrorReason"
+            center
+            @retry="loadRows"
+          />
+          <el-empty
+            v-else-if="!listLoading && !gridRows.length"
+            :description="gridFiltered ? '没有符合条件的结果' : '还没有 Skill'"
+          >
+            <el-button v-if="gridFiltered" @click="resetGridFilter">清除筛选</el-button>
+          </el-empty>
           <div v-else-if="gridRows.length" class="grid">
             <ConfigCard
               v-for="row in gridRows"
@@ -169,7 +195,20 @@
               />
             </div>
             <div v-loading="listLoading && viewMode === 'master'" class="rail-list">
-              <el-empty v-if="!listLoading && !railRows.length" description="没有符合筛选的 Skill" />
+              <!-- 左栏失败且无数据：错误块 + 重试；有旧数据时保留列表，错误在顶部条 -->
+              <LoadError
+                v-if="!listLoading && listError && !railRows.length"
+                class="rail-error"
+                title="Skill 列表加载失败"
+                :reason="listErrorReason"
+                @retry="loadAll"
+              />
+              <el-empty
+                v-else-if="!listLoading && !railRows.length"
+                :description="railKeyword.trim() ? '没有符合条件的结果' : '还没有 Skill'"
+              >
+                <el-button v-if="railKeyword.trim()" @click="railKeyword = ''">清除筛选</el-button>
+              </el-empty>
               <button
                 v-for="row in railRows"
                 :key="row.id"
@@ -207,14 +246,29 @@
               v-loading="detailLoading"
               class="detail-panel"
             >
+              <!-- 详情失败且表单未载入：详情卡内给完整错误块 + 重试，不留顶部一条提示 + 下方空白 -->
+              <LoadError
+                v-if="detailError && !form"
+                class="detail-error"
+                title="Skill 详情加载失败"
+                :reason="detailErrorReason"
+                :retrying="detailLoading"
+                @retry="retryDetail"
+              />
+              <!-- 已有表单时失败：保留表单，顶部错误条 + 重试 -->
               <el-alert
-                v-if="detailError"
+                v-else-if="detailError"
                 :title="detailError"
                 type="error"
                 show-icon
                 :closable="false"
                 class="block-alert"
-              />
+              >
+                <div class="block-alert__body">
+                  <span>{{ detailErrorReason }}</span>
+                  <el-button link type="danger" size="small" @click="retryDetail">重试</el-button>
+                </div>
+              </el-alert>
               <!-- 表单体可滚，底栏取消/保存始终贴底可见 -->
               <el-form v-if="form" label-width="96px" class="detail-form">
                 <div class="detail-form__body">
@@ -239,10 +293,10 @@
                     <el-col :span="3">
                       <!-- 状态开关居右，与下两行按钮列对齐 -->
                       <el-form-item label="状态" label-width="42px" class="status-item">
-                        <el-switch
-                          :model-value="form.status === 1"
-                          :disabled="!user.hasPerm('skill:enable') || statusSaving"
-                          @change="(on: string | number | boolean) => onStatusSwitch(on === true)"
+                        <StatusSwitch
+                          :status="form.status"
+                          :disabled="!user.hasPerm('skill:enable')"
+                          :commit="commitStatus"
                         />
                       </el-form-item>
                     </el-col>
@@ -488,7 +542,9 @@ import {
   updateSkill
 } from '@/api/skill'
 import ConfigCard from '@/components/ConfigCard.vue'
+import LoadError from '@/components/common/LoadError.vue'
 import FlipGhost from '@/components/browse/FlipGhost.vue'
+import StatusSwitch from '@/components/admin/StatusSwitch.vue'
 import PageHeader from '@/components/PageHeader.vue'
 import TablePager from '@/components/TablePager.vue'
 import SkillFormDialog from '@/components/skill/SkillFormDialog.vue'
@@ -499,6 +555,7 @@ import { useBrowseFlip } from '@/composables/useBrowseFlip'
 import type { FlipCardSnap } from '@/composables/viewFlip'
 import { CARD_HEIGHT_NORMAL, lastPage, useGridPageSize } from '@/composables/gridPageSize'
 import { confirmDiscardUnsaved } from '@/utils/unsavedConfirm'
+import { requestErrorText } from '@/utils/requestError'
 import { useUserStore } from '@/stores/user'
 import type { SkillCard, SkillDetail, SkillVersionDetail, SkillVersionRow } from '@/types/skill'
 
@@ -521,9 +578,12 @@ const user = useUserStore()
 const listLoading = ref(false)
 const detailLoading = ref(false)
 const saving = ref(false)
-const statusSaving = ref(false)
 const listError = ref('')
+/** 列表 / 左栏失败的可读原因（错误块第二行） */
+const listErrorReason = ref('')
 const detailError = ref('')
+/** 详情失败的可读原因；与 detailError 短标题分开，供错误块第二行 */
+const detailErrorReason = ref('')
 const createOpen = ref(false)
 /** 正文预览抽屉开关；只读，不影响脏标记 */
 const previewOpen = ref(false)
@@ -688,6 +748,11 @@ const {
 
 const canEdit = computed(() => user.hasPerm('skill:edit'))
 
+/** 网格是否带筛选/搜索条件：决定空态写「还没有 Skill」还是「没有符合条件的结果」 */
+const gridFiltered = computed(
+  () => !!(query.keyword.trim() || query.status === 0 || query.status === 1)
+)
+
 /** 相对 baseline 是否有未保存改动（不含开关状态）。 */
 const dirty = computed(() => {
   if (!form.value || !baseline.value || !canEdit.value) {
@@ -825,6 +890,7 @@ function clearDetail() {
   versionBaseline.value = ''
   activeVersionId.value = 0
   detailError.value = ''
+  detailErrorReason.value = ''
   previewOpen.value = false
 }
 
@@ -846,6 +912,7 @@ async function loadRows() {
   gridSizeSynced = true
   listLoading.value = true
   listError.value = ''
+  listErrorReason.value = ''
   try {
     const { data } = await pageSkills({
       current: query.current,
@@ -869,13 +936,13 @@ async function loadRows() {
       query.current = fallback
       void loadRows()
     }
-  } catch {
+  } catch (e) {
     if (seq !== rowsSeq) {
       return
     }
     listError.value = 'Skill 列表加载失败'
-    rows.value = []
-    total.value = 0
+    listErrorReason.value = requestErrorText(e)
+    // 保留旧 rows / total：失败时不能把已有列表清成空白再配一句「没有数据」
   } finally {
     if (seq === rowsSeq) {
       listLoading.value = false
@@ -887,6 +954,24 @@ async function loadRows() {
 function searchGrid() {
   query.current = 1
   void loadRows()
+}
+
+/**
+ * 顶部错误条的重试：主从态重拉左栏（全量），网格态重拉当前页；不改筛选与页码。
+ */
+function retryCurrent() {
+  if (viewMode.value === 'master') {
+    void loadAll()
+    return
+  }
+  void loadRows()
+}
+
+/** 详情失败重试：按当前选中 id 重新拉详情与版本列表 */
+function retryDetail() {
+  if (activeId.value > 0) {
+    void loadDetail(activeId.value)
+  }
 }
 
 /** 重置：清空筛选并重查。 */
@@ -906,6 +991,7 @@ async function loadAll(silent = false) {
     listLoading.value = true
   }
   listError.value = ''
+  listErrorReason.value = ''
   try {
     const all: SkillCard[] = []
     let current = 1
@@ -926,9 +1012,10 @@ async function loadAll(silent = false) {
     } while (all.length < totalCount && current <= RAIL_MAX_PAGES)
     railSource.value = all
     total.value = totalCount
-  } catch {
+  } catch (e) {
     listError.value = 'Skill 列表加载失败'
-    railSource.value = []
+    listErrorReason.value = requestErrorText(e)
+    // 保留已加载的左栏行：失败时不能清空后让左栏误显示成「还没有 Skill」
   } finally {
     if (!silent) {
       listLoading.value = false
@@ -945,13 +1032,16 @@ async function loadAll(silent = false) {
 async function loadDetail(id: number, preferVersionId = 0) {
   detailLoading.value = true
   detailError.value = ''
+  detailErrorReason.value = ''
   try {
     const { data } = await getSkill(id)
     applyDetail(data.data)
     await loadVersions(id, preferVersionId)
-  } catch {
-    detailError.value = '详情加载失败'
+  } catch (e) {
+    // 先清空旧详情壳，再把失败态写回（clearDetail 会重置 detailError / detailErrorReason）
     clearDetail()
+    detailError.value = '详情加载失败'
+    detailErrorReason.value = requestErrorText(e)
   } finally {
     detailLoading.value = false
   }
@@ -1326,30 +1416,26 @@ function cancelDetail() {
 }
 
 /**
- * 启停开关即时提交；同步 baseline 无关，不点亮保存/取消。
+ * 详情状态开关提交；提交中 loading 与失败回滚由公共 StatusSwitch 负责，
+ * 成功后用服务端返回值回写 status / updateTime，并同步网格与左栏卡片。
+ * 启停与表单脏态无关，不点亮保存/取消。
  *
- * @param enabled 目标是否启用
+ * @param status 目标状态：1 启用，0 停用
  */
-async function onStatusSwitch(enabled: boolean) {
+async function commitStatus(status: number) {
   if (!form.value || !activeId.value) {
     return
   }
-  const next = enabled ? 1 : 0
-  if (form.value.status === next) {
+  if (form.value.status === status) {
     return
   }
-  statusSaving.value = true
-  try {
-    const { data } = await changeSkillStatus(activeId.value, next)
-    form.value = {
-      ...form.value,
-      status: data.data.status,
-      updateTime: data.data.updateTime
-    }
-    onCatalogChanged()
-  } finally {
-    statusSaving.value = false
+  const { data } = await changeSkillStatus(activeId.value, status)
+  form.value = {
+    ...form.value,
+    status: data.data.status,
+    updateTime: data.data.updateTime
   }
+  onCatalogChanged()
 }
 
 onMounted(loadRows)
@@ -1360,6 +1446,38 @@ onMounted(loadRows)
 
 .block-alert {
   margin: 12px 16px 0;
+}
+
+/* 顶部错误条正文：原因 + 重试同排 */
+.block-alert__body {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  font-size: 12px;
+}
+
+/* 左栏 186px 窄栏：错误块纵向排，避免挤成一行 */
+.rail-error {
+  min-height: 0;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 8px;
+  padding: 10px 12px;
+}
+
+.rail-error :deep(.load-error__text) {
+  flex: none;
+  width: 100%;
+}
+
+.rail-error :deep(.load-error__retry) {
+  margin-left: 0;
+}
+
+/* 详情失败块：详情卡内留出与表单一致的边距，不贴边 */
+.detail-error {
+  margin: 12px 16px;
 }
 
 .card-del {
@@ -1376,7 +1494,8 @@ onMounted(loadRows)
   border: 0;
   border-radius: 6px;
   background: transparent;
-  color: #9ca3af;
+  /* 纯图标按钮（关闭 / 更多）：装饰性弱字，不承载信息 */
+  color: var(--ah-text-faint);
   font-size: 20px;
   font-weight: 400;
   line-height: 1;
@@ -1416,18 +1535,6 @@ onMounted(loadRows)
   display: flex;
   flex-wrap: wrap;
   gap: 6px;
-}
-
-.badge-on {
-  --el-tag-text-color: #10b981;
-  --el-tag-border-color: #a7f3d0;
-  --el-tag-bg-color: #ecfdf5;
-}
-
-.badge-off {
-  --el-tag-text-color: #6b7280;
-  --el-tag-border-color: #e5e7eb;
-  --el-tag-bg-color: #f3f4f6;
 }
 
 .muted {
@@ -1681,7 +1788,7 @@ onMounted(loadRows)
   border: 0;
   border-radius: 4px;
   background: transparent;
-  color: #9ca3af;
+  color: var(--ah-text-faint);
   font-size: 14px;
   line-height: 1;
   cursor: pointer;
@@ -1708,8 +1815,8 @@ onMounted(loadRows)
 
 .version-item__time {
   flex-basis: 100%;
-  color: var(--ah-text-muted, #9ca3af);
-  font-size: 11px;
+  color: var(--ah-text-muted);
+  font-size: 12px;
 }
 
 .version-editor {

@@ -1,7 +1,29 @@
 <template>
   <div class="detail-root">
   <section v-loading="loading" class="panel">
-    <el-alert v-if="error" :title="error" type="error" show-icon :closable="false" class="block-alert" />
+    <!-- 详情失败且无表单：在详情卡内给完整错误块 + 重试，不留顶部一条提示 + 下方空白 -->
+    <LoadError
+      v-if="error && !form"
+      class="detail-error"
+      title="Agent 详情加载失败"
+      :reason="errorReason"
+      :retrying="loading"
+      @retry="load()"
+    />
+    <!-- 已有表单时刷新失败：保留表单，顶部错误条 + 重试 -->
+    <el-alert
+      v-else-if="error"
+      :title="error"
+      type="error"
+      show-icon
+      :closable="false"
+      class="block-alert"
+    >
+      <div class="block-alert__body">
+        <span>{{ errorReason }}</span>
+        <el-button link type="danger" size="small" @click="load()">重试</el-button>
+      </div>
+    </el-alert>
     <template v-if="form">
       <header class="detail-title">
         <div class="title-main">
@@ -531,6 +553,7 @@ import PurposePromptDialog from '@/components/agent/PurposePromptDialog.vue'
 import SkillBindDialog from '@/components/agent/SkillBindDialog.vue'
 import ToolBindDialog from '@/components/agent/ToolBindDialog.vue'
 import TablePager from '@/components/TablePager.vue'
+import LoadError from '@/components/common/LoadError.vue'
 import { normalizeAgentAvatarConfig } from '@/constants/agentLooks'
 import { isPlatformDefaultAssistant } from '@/constants/platformAgents'
 import { useUserStore } from '@/stores/user'
@@ -560,6 +583,7 @@ import { useFormDirty } from '@/composables/useFormDirty'
 import { registerDraft } from '@/composables/draftGuard'
 import { confirmDiscardUnsaved } from '@/utils/unsavedConfirm'
 import { formatMinute } from '@/utils/datetime'
+import { requestErrorText } from '@/utils/requestError'
 import { listAgentKbs } from '@/api/ragBind'
 
 /** 单条运行限制字段。占位用平台 default，max 用平台硬顶。 */
@@ -730,6 +754,8 @@ const loading = ref(false)
 const saving = ref(false)
 const statusSaving = ref(false)
 const error = ref('')
+/** 详情失败的可读原因（错误块第二行）；与 error 短标题分开 */
+const errorReason = ref('')
 const form = ref<AgentDetail | null>(null)
 const savedMode = ref('REACT')
 const routeCount = ref(0)
@@ -1439,6 +1465,7 @@ watch(
 async function load(preserveDraft = true) {
   loading.value = true
   error.value = ''
+  errorReason.value = ''
   // 刷新前先记下草稿：服务端回来的值要填进 form，但草稿字段必须由用户原值覆盖回去
   const draftBefore = preserveDraft && isDirty.value ? draftFromForm(form.value) : null
   try {
@@ -1505,12 +1532,13 @@ async function load(preserveDraft = true) {
     if (draftBefore) {
       restoreDraft(draftBefore)
     }
-  } catch {
+  } catch (e) {
     if (!active) {
       return
     }
     error.value = '详情加载失败'
-    form.value = null
+    errorReason.value = requestErrorText(e)
+    // 已有表单时保留旧数据（顶部错误条 + 重试）；首次失败表单本就是 null，由错误块接管
   } finally {
     if (active) {
       loading.value = false
@@ -2410,6 +2438,20 @@ async function removeSkill(row: SkillBind) {
 
 .block-alert {
   margin-bottom: 12px;
+}
+
+/* 详情失败块：与表单内边距对齐，不贴卡片边 */
+.detail-error {
+  margin: 4px 0 12px;
+}
+
+/* 顶部错误条正文：原因 + 重试同排 */
+.block-alert__body {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  font-size: 12px;
 }
 
 .keep-note {

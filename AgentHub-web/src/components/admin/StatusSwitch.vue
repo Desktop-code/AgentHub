@@ -6,23 +6,26 @@
     :inactive-value="0"
     :disabled="disabled || busy"
     :loading="busy"
+    :title="title"
     @change="onChange"
   />
 </template>
 
 <script setup lang="ts">
 /**
- * 系统管理列表启停开关。所属域：admin 前端共用。
- * 启用 = 1，停用 = 0。提交失败时回到点击前的值，刷新后以服务器返回为准。
- * 无编辑权限时由调用方 disabled，不在这里放宽权限。
+ * 列表行内启停开关（公共组件）。所属域：admin 前端共用，供系统管理 / 模型 / 工具等列表复用。
+ * 启用 = 1，停用 = 0。提交中进入 loading 且禁用，避免连点重复提交；
+ * 提交失败时回到点击前的值，原因由请求拦截器弹出；无编辑权限时由调用方 disabled，不在这里放宽权限。
  */
 import { ref, watch } from 'vue'
 
 const props = defineProps<{
   /** 当前状态，1 启用 / 正常，其它视为停用 */
   status: number
-  /** 无权限或外部忙时禁用 */
+  /** 无权限、业务锁定或外部忙时禁用 */
   disabled?: boolean
+  /** 悬浮说明，例如「平台级实例不可停用」；不需要提示时不传 */
+  title?: string
   /**
    * 把新状态提交到服务器。失败必须 reject，成功后把行上的 status 写成服务器值。
    *
@@ -33,6 +36,7 @@ const props = defineProps<{
 
 /** 开关上看到的值。请求未完成前可以先拨过去，失败再拨回 */
 const shown = ref(props.status === 1 ? 1 : 0)
+/** 提交中：开关 loading + 禁用，防止连点 */
 const busy = ref(false)
 
 watch(

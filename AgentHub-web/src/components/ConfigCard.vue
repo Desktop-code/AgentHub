@@ -165,12 +165,13 @@ withDefaults(
   overflow: hidden;
   background: #fafafa;
   border-top: 1px solid var(--ah-border-soft, #f2f6fc);
-  color: #909399;
+  /* 底栏承载工具数 / 版本等元信息，用小一号的可读灰，不用 #9ca3af 一类的装饰灰 */
+  color: var(--ah-text-muted);
 }
 
 .config-card__footer :deep(.meta),
 .config-card__footer :deep(.card-meta),
 .config-card__footer :deep(.version) {
-  color: #909399;
+  color: var(--ah-text-muted);
 }
 </style>

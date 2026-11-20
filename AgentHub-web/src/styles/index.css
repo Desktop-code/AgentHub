@@ -12,7 +12,10 @@
   --ah-surface: #ffffff;
   --ah-text: #1f2937;
   --ah-text-secondary: #6b7280;
-  --ah-text-muted: #9ca3af;
+  /* 承载信息的辅助字（说明 / 副标题 / 时间 / 编号）：与 secondary 同级，保证可读；
+     纯装饰（分隔线、占位图标、禁用态）请用下面的 faint，不要再用 muted 承载正文 */
+  --ah-text-muted: #6b7280;
+  --ah-text-faint: #9ca3af;
   --ah-border: #ebeef5;
   --ah-border-soft: #f2f6fc;
   --ah-divider: #e4e7ed;
@@ -315,7 +318,8 @@ body.el-popup-parent--hidden .main {
 :root .el-table {
   --el-table-border-color: var(--ah-border-soft);
   --el-table-header-bg-color: #fafafa;
-  --el-table-header-text-color: #909399;
+  /* 表头文字加深到可读灰（原 #909399 在浅底上偏淡），字号仍由组件保持紧凑 */
+  --el-table-header-text-color: #5f6673;
   --el-table-row-hover-bg-color: #fafafa;
   background: transparent;
 }
@@ -332,7 +336,7 @@ body.el-popup-parent--hidden .main {
 
 .el-table th.el-table__cell {
   background: #fafafa;
-  color: #909399;
+  color: #5f6673;
   font-weight: 600;
   border-bottom: 1px solid var(--ah-border) !important;
 }
@@ -360,6 +364,47 @@ body.el-popup-parent--hidden .main {
 .el-table__fixed-right::before,
 .el-table__fixed::before {
   background-color: var(--ah-border-soft);
+}
+
+/* ========== 语义标签：只加深文字，保留浅底与语义色含义 ==========
+   组件 CSS 晚于本文件加载，故用 :root 前缀提一层权重，避免被 .el-tag--success 等反压；
+   排除 effect="dark"：深底标签必须保留白字，不能把文字压成深绿 / 深红 */
+:root .el-tag.el-tag--success:not(.el-tag--dark) {
+  --el-tag-text-color: #047857;
+}
+
+:root .el-tag.el-tag--danger:not(.el-tag--dark) {
+  --el-tag-text-color: #b91c1c;
+}
+
+:root .el-tag.el-tag--warning:not(.el-tag--dark) {
+  --el-tag-text-color: #b45309;
+}
+
+/* 卡片启停小标签（网格卡 / 左栏共用）。原先四页各拷一份，收口到这里统一跟色 */
+:root .badge-on {
+  --el-tag-text-color: #047857;
+  --el-tag-border-color: #a7f3d0;
+  --el-tag-bg-color: #ecfdf5;
+}
+
+:root .badge-off {
+  --el-tag-text-color: #6b7280;
+  --el-tag-border-color: #e5e7eb;
+  --el-tag-bg-color: #f3f4f6;
+}
+
+/* 表格内置空态（el-table #empty）里的「文案 + 清除筛选」横排 */
+.ah-empty-inline {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 13px;
+  color: var(--ah-text-muted);
+}
+
+.ah-empty-inline .el-button {
+  font-size: 13px;
 }
 
 .pager {

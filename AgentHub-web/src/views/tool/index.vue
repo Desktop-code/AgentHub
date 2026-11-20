@@ -71,7 +71,20 @@
       </el-form>
     </div>
 
-    <el-alert v-if="listError" :title="listError" type="error" show-icon :closable="false" class="block-alert" />
+    <!-- 失败但已有旧数据：保留列表，顶部出错误条 + 重试；无数据时改用列表内错误块 -->
+    <el-alert
+      v-if="listError && filteredSources.length"
+      :title="listError"
+      type="error"
+      show-icon
+      :closable="false"
+      class="block-alert"
+    >
+      <div class="block-alert__body">
+        <span>{{ listErrorReason }}</span>
+        <el-button link type="danger" size="small" @click="loadSources">重试</el-button>
+      </div>
+    </el-alert>
 
     <!--
       双层同页：飞卡过程中两层都用 v-show 留在 DOM。
@@ -84,7 +97,20 @@
         :class="{ 'is-active': viewMode === 'grid' }"
       >
         <div ref="gridWrapRef" v-loading="sourceLoading && viewMode === 'grid'" class="grid-wrap">
-          <el-empty v-if="!sourceLoading && !filteredSources.length" description="还没有工具源" />
+          <!-- 失败且无旧数据：只出错误块，不让「还没有工具源」同时出现 -->
+          <LoadError
+            v-if="!sourceLoading && listError && !filteredSources.length"
+            title="工具源加载失败"
+            :reason="listErrorReason"
+            center
+            @retry="loadSources"
+          />
+          <el-empty
+            v-else-if="!sourceLoading && !filteredSources.length"
+            :description="sourceDenied ? '没有查看工具源的权限' : sourceFiltered ? '没有符合条件的结果' : '还没有工具源'"
+          >
+            <el-button v-if="sourceFiltered && !sourceDenied" @click="clearSourceFilters">清除筛选</el-button>
+          </el-empty>
           <div v-else-if="pagedSources.length" class="grid">
             <ConfigCard
               v-for="item in pagedSources"
@@ -208,10 +234,20 @@
                 <span class="rail-name">全部</span>
                 <span class="rail-code">跨源汇总</span>
               </button>
-              <el-empty
-                v-if="!sourceLoading && !railRows.length"
-                description="没有符合筛选的工具源"
+              <el-empty v-if="sourceDenied" description="没有查看工具源的权限" />
+              <LoadError
+                v-else-if="!sourceLoading && listError && !railRows.length"
+                class="rail-error"
+                title="工具源加载失败"
+                :reason="listErrorReason"
+                @retry="loadSources"
               />
+              <el-empty
+                v-else-if="!sourceLoading && !railRows.length"
+                :description="railFiltered ? '没有符合条件的结果' : '还没有工具源'"
+              >
+                <el-button v-if="railFiltered" @click="clearSourceFilters">清除筛选</el-button>
+              </el-empty>
               <button
                 v-for="item in railRows"
                 :key="item.id"
@@ -250,10 +286,10 @@
                 <h2>{{ itemPanelTitle }}</h2>
                 <div class="panel-actions">
                   <!-- 源级启停：仅 MCP 真源；开关内不显示文字 -->
-                  <el-switch
+                  <StatusSwitch
                     v-if="selected && selected.type === 'MCP' && user.hasPerm('tool:source:enable')"
-                    :model-value="selected.status === 1"
-                    @change="(on: string | number | boolean) => onSourceSwitch(selected!, on === true)"
+                    :status="selected.status"
+                    :commit="(next: number) => commitSourceStatus(selected!, next)"
                   />
                   <el-button
                     v-if="selected && selected.type === 'MCP' && user.hasPerm('tool:source:edit')"
@@ -261,17 +297,19 @@
                   >
                     编辑
                   </el-button>
-                  <!-- 源内批量启停：仅 MCP 真源；对当前源下全部未删除工具项生效 -->
+                  <!-- 源内批量启停：仅 MCP 真源；提交中只让当前动作转圈，另一个禁用 -->
                   <el-button
                     v-if="selected && selected.type === 'MCP' && user.hasPerm('tool:item:enable')"
-                    :loading="batchStatusLoading"
+                    :loading="batchStatusAction === 1"
+                    :disabled="batchStatusAction !== null && batchStatusAction !== 1"
                     @click="onBatchItemStatus(1)"
                   >
                     全部启用
                   </el-button>
                   <el-button
                     v-if="selected && selected.type === 'MCP' && user.hasPerm('tool:item:enable')"
-                    :loading="batchStatusLoading"
+                    :loading="batchStatusAction === 0"
+                    :disabled="batchStatusAction !== null && batchStatusAction !== 0"
                     @click="onBatchItemStatus(0)"
                   >
                     全部停用
@@ -332,13 +370,49 @@
                 </el-form>
               </div>
               <!-- 描述列读工具项已有 description，内置和 MCP 同一张表；空值显示「暂无说明」 -->
-              <el-table
-                v-loading="itemLoading"
-                class="item-table"
-                :data="items"
-                empty-text="没有工具项"
-                table-layout="fixed"
-              >
+              <!-- 无旧数据时失败：错误块顶替表格，避免与「没有工具项」同屏 -->
+              <LoadError
+                v-if="itemError && !items.length"
+                title="工具项加载失败"
+                :reason="itemErrorReason"
+                :retrying="itemLoading"
+                @retry="loadItems"
+              />
+              <template v-else>
+                <!-- 有旧数据时失败：保留表格，上方错误条 + 重试 -->
+                <el-alert
+                  v-if="itemError"
+                  :title="itemError"
+                  type="error"
+                  show-icon
+                  :closable="false"
+                  class="block-alert"
+                >
+                  <div class="block-alert__body">
+                    <span>{{ itemErrorReason }}</span>
+                    <el-button link type="danger" size="small" @click="loadItems">重试</el-button>
+                  </div>
+                </el-alert>
+                <el-table
+                  v-loading="itemLoading"
+                  class="item-table"
+                  :data="items"
+                  table-layout="fixed"
+                >
+                  <!-- 空态按原因分开：权限不足 / 筛选无结果 / 首次没有 -->
+                  <template #empty>
+                    <div class="ah-empty-inline">
+                      <span>{{ itemEmptyText }}</span>
+                      <el-button
+                        v-if="itemFiltered && !itemDenied"
+                        link
+                        type="primary"
+                        @click="resetItemFilter"
+                      >
+                        清除筛选
+                      </el-button>
+                    </div>
+                  </template>
                 <!-- 最左序号列固定窄宽；描述比名称长，多给一倍最小宽 -->
                 <el-table-column v-bind="indexColumnProps" />
                 <el-table-column prop="name" label="名称" min-width="1" align="center" header-align="center" show-overflow-tooltip />
@@ -355,10 +429,10 @@
                 </el-table-column>
                 <el-table-column label="状态" min-width="1" align="center" header-align="center">
                   <template #default="{ row }">
-                    <el-switch
+                    <StatusSwitch
                       v-if="user.hasPerm('tool:item:enable')"
-                      :model-value="row.status === 1"
-                      @change="(on: string | number | boolean) => onItemSwitch(row, on === true)"
+                      :status="row.status"
+                      :commit="(next: number) => commitItemStatus(row, next)"
                     />
                     <span v-else>{{ row.status === 1 ? '启用' : '停用' }}</span>
                   </template>
@@ -377,6 +451,7 @@
                 :total="total"
                 @change="loadItems"
               />
+              </template>
             </div>
           </div>
         </div>
@@ -426,16 +501,19 @@ import {
   updateSource
 } from '@/api/tool'
 import ConfigCard from '@/components/ConfigCard.vue'
+import LoadError from '@/components/common/LoadError.vue'
 import PageHeader from '@/components/PageHeader.vue'
 import TablePager from '@/components/TablePager.vue'
 import FlipGhost from '@/components/browse/FlipGhost.vue'
 import ViewModeToggle from '@/components/browse/ViewModeToggle.vue'
+import StatusSwitch from '@/components/admin/StatusSwitch.vue'
 import ItemFormDialog from '@/components/tool/ItemFormDialog.vue'
 import SourceFormDialog from '@/components/tool/SourceFormDialog.vue'
 import SyncResultDialog from '@/components/tool/SyncResultDialog.vue'
 import { useBrowseFlip } from '@/composables/useBrowseFlip'
 import type { FlipCardSnap } from '@/composables/viewFlip'
 import { useListIndexColumn } from '@/composables/listIndex'
+import { requestErrorText } from '@/utils/requestError'
 import { useUserStore } from '@/stores/user'
 import type { SyncResult, ToolItemRow, ToolSource } from '@/types/tool'
 
@@ -444,9 +522,18 @@ const user = useUserStore()
 const sourceLoading = ref(false)
 const itemLoading = ref(false)
 const syncing = ref(false)
-/** 源内批量启停请求中；两个按钮共用，避免并发重复提交 */
-const batchStatusLoading = ref(false)
+/** 源内批量启停：正在提交的动作（1 启用 / 0 停用 / null 空闲），用于按钮 loading 与互斥 */
+const batchStatusAction = ref<number | null>(null)
 const listError = ref('')
+/** 工具源列表失败的可读原因（错误块第二行） */
+const listErrorReason = ref('')
+/** 无 tool:source:list 权限：列表空是权限所致，不能写「还没有工具源」 */
+const sourceDenied = ref(false)
+/** 工具项表失败标题 / 原因；有旧数据时保留表格，只在上方出提示 */
+const itemError = ref('')
+const itemErrorReason = ref('')
+/** 无 tool:item:list 权限：工具项表空是权限所致 */
+const itemDenied = ref(false)
 const removingId = ref(0)
 const sources = ref<ToolSource[]>([])
 const items = ref<ToolItemRow[]>([])
@@ -487,6 +574,7 @@ const {
   showGridLayer,
   showMasterLayer,
   gridDraft,
+  gridFilter,
   gridPage,
   gridWrapRef,
   filteredRows: filteredSources,
@@ -543,6 +631,42 @@ const itemPanelTitle = computed(() => (selected.value ? selected.value.name : '�
 const canSync = computed(
   () => !!selected.value && selected.value.type === 'MCP' && selected.value.status === 1 && !syncing.value
 )
+
+/**
+ * 工具源网格是否带生效筛选：决定空态写「还没有工具源」还是「没有符合条件的结果」。
+ * 只看已生效条件（gridFilter），不是还在输入框里的草稿。
+ */
+const sourceFiltered = computed(() => {
+  const filter = gridFilter as { keyword: string; type: string; status?: number }
+  return !!(
+    filter.keyword.trim() ||
+    filter.type ||
+    filter.status === 0 ||
+    filter.status === 1
+  )
+})
+
+/** 左栏是否带筛选条件（网格筛选 + 左栏搜索词任一） */
+const railFiltered = computed(() => sourceFiltered.value || !!railKeyword.value.trim())
+
+/** 工具项表是否带筛选：决定空态文案与是否给「清除筛选」 */
+const itemFiltered = computed(
+  () => !!(query.keyword.trim() || query.type || query.status === 0 || query.status === 1)
+)
+
+/** 工具项空态文案：权限不足 / 筛选无结果 / 首次没有，三种原因分开写 */
+const itemEmptyText = computed(() => {
+  if (itemDenied.value) {
+    return '没有查看工具项的权限'
+  }
+  return itemFiltered.value ? '没有符合条件的结果' : '没有工具项'
+})
+
+/** 清空工具源筛选与左栏搜索词；网格是前端筛选，无需重新请求 */
+function clearSourceFilters() {
+  resetGridFilter()
+  railKeyword.value = ''
+}
 
 /** 主从工具项筛选重置。 */
 function resetItemFilter() {
@@ -679,8 +803,20 @@ async function loadBuiltinItemCounts() {
 }
 
 async function loadSources() {
+  // 无列表权限时不发请求，直接给「权限不足」说明，避免 403 被误写成「加载失败」
+  if (!user.hasPerm('tool:source:list')) {
+    sourceDenied.value = true
+    sources.value = []
+    sourceLoading.value = false
+    // 权限缺失是「看不到」而非加载失败：清掉失败态，避免错误块与权限说明同屏
+    listError.value = ''
+    listErrorReason.value = ''
+    return
+  }
+  sourceDenied.value = false
   sourceLoading.value = true
   listError.value = ''
+  listErrorReason.value = ''
   try {
     const { data } = await listSources()
     sources.value = data.data || []
@@ -689,9 +825,10 @@ async function loadSources() {
       activeId.value = 0
     }
     await loadBuiltinItemCounts()
-  } catch {
+  } catch (e) {
     listError.value = '工具源加载失败'
-    sources.value = []
+    listErrorReason.value = requestErrorText(e)
+    // 保留旧 sources：失败时不能把已有列表清成空白再配一句「没有数据」
   } finally {
     sourceLoading.value = false
   }
@@ -699,11 +836,19 @@ async function loadSources() {
 
 async function loadItems() {
   if (!user.hasPerm('tool:item:list')) {
+    itemDenied.value = true
     items.value = []
     total.value = 0
+    // 同源列表：权限缺失清掉失败态，只留权限说明
+    itemError.value = ''
+    itemErrorReason.value = ''
+    itemLoading.value = false
     return
   }
+  itemDenied.value = false
   itemLoading.value = true
+  itemError.value = ''
+  itemErrorReason.value = ''
   try {
     const { data } = await pageItems({
       current: query.current,
@@ -716,6 +861,10 @@ async function loadItems() {
     })
     items.value = data.data.records
     total.value = data.data.total
+  } catch (e) {
+    itemError.value = '工具项加载失败'
+    itemErrorReason.value = requestErrorText(e)
+    // 保留旧工具项行：失败时上方出错误条，表格不清空
   } finally {
     itemLoading.value = false
   }
@@ -785,17 +934,16 @@ async function saveSource(payload: Record<string, unknown>, done: () => void) {
 }
 
 /**
- * MCP 源启停（右栏开关）。
+ * MCP 源启停（右栏开关）；提交中与失败回滚由公共 StatusSwitch 负责。
  *
- * @param row 工具源
- * @param enabled 目标是否启用
+ * @param row    工具源
+ * @param status 目标状态：1 启用，0 停用
  */
-async function onSourceSwitch(row: ToolSource, enabled: boolean) {
-  const next = enabled ? 1 : 0
-  if (row.status === next) {
+async function commitSourceStatus(row: ToolSource, status: number) {
+  if (row.status === status) {
     return
   }
-  await changeSourceStatus(row.id, next)
+  await changeSourceStatus(row.id, status)
   await loadSources()
 }
 
@@ -873,17 +1021,16 @@ async function saveItem(payload: Record<string, unknown>, done: () => void) {
 }
 
 /**
- * 工具项列表开关。
+ * 工具项列表开关；提交中与失败回滚由公共 StatusSwitch 负责。
  *
- * @param row 工具项
- * @param enabled 目标是否启用
+ * @param row    工具项
+ * @param status 目标状态：1 启用，0 停用
  */
-async function onItemSwitch(row: ToolItemRow, enabled: boolean) {
-  const next = enabled ? 1 : 0
-  if (row.status === next) {
+async function commitItemStatus(row: ToolItemRow, status: number) {
+  if (row.status === status) {
     return
   }
-  await changeItemStatus(row.id, next)
+  await changeItemStatus(row.id, status)
   await loadItems()
 }
 
@@ -906,7 +1053,7 @@ async function removeItem(row: ToolItemRow) {
  */
 async function onBatchItemStatus(status: number) {
   const target = selected.value
-  if (!target || target.type !== 'MCP' || batchStatusLoading.value) {
+  if (!target || target.type !== 'MCP' || batchStatusAction.value !== null) {
     return
   }
   const label = status === 1 ? '全部启用' : '全部停用'
@@ -918,7 +1065,8 @@ async function onBatchItemStatus(status: number) {
   } catch {
     return
   }
-  batchStatusLoading.value = true
+  // 确认后再进入提交中：只让当前动作转圈，另一个按钮禁用，避免并发重复提交
+  batchStatusAction.value = status
   try {
     const { data } = await changeAllItemStatus(target.id, status)
     ElMessage.success(`${label}完成，共 ${data.data.updated} 项`)
@@ -926,7 +1074,7 @@ async function onBatchItemStatus(status: number) {
     await loadItems()
     await loadBuiltinItemCounts()
   } finally {
-    batchStatusLoading.value = false
+    batchStatusAction.value = null
   }
 }
 
@@ -943,6 +1091,33 @@ onMounted(async () => {
   margin-bottom: 12px;
 }
 
+/* 顶部错误条正文：原因 + 重试同排 */
+.block-alert__body {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  font-size: 12px;
+}
+
+/* 左栏 186px 窄栏：错误块纵向排，避免挤成一行 */
+.rail-error {
+  min-height: 0;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 8px;
+  padding: 10px 12px;
+}
+
+.rail-error :deep(.load-error__text) {
+  flex: none;
+  width: 100%;
+}
+
+.rail-error :deep(.load-error__retry) {
+  margin-left: 0;
+}
+
 .card-del {
   position: absolute;
   top: 8px;
@@ -957,7 +1132,8 @@ onMounted(async () => {
   border: 0;
   border-radius: 6px;
   background: transparent;
-  color: #9ca3af;
+  /* 纯图标按钮：装饰性弱字，不承载信息 */
+  color: var(--ah-text-faint);
   font-size: 20px;
   font-weight: 400;
   line-height: 1;
@@ -999,18 +1175,6 @@ onMounted(async () => {
   color: var(--ah-text-secondary);
   font-size: 12px;
   white-space: nowrap;
-}
-
-.badge-on {
-  --el-tag-text-color: #10b981;
-  --el-tag-border-color: #a7f3d0;
-  --el-tag-bg-color: #ecfdf5;
-}
-
-.badge-off {
-  --el-tag-text-color: #6b7280;
-  --el-tag-border-color: #e5e7eb;
-  --el-tag-bg-color: #f3f4f6;
 }
 
 .badge-plain {
