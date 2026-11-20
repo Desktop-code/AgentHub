@@ -93,7 +93,23 @@
       </el-form>
     </div>
 
-    <el-alert v-if="listError" :title="listError" type="error" show-icon :closable="false" class="block-alert" />
+    <!--
+      失败但已有旧数据：保留列表，顶部出错误条 + 重试。
+      无数据时这里不出现，改用列表内的错误块，避免「加载失败」与「还没有 Agent」同时画。
+    -->
+    <el-alert
+      v-if="listError && (gridRows.length || railRows.length)"
+      :title="listError"
+      type="error"
+      show-icon
+      :closable="false"
+      class="block-alert"
+    >
+      <div class="block-alert__body">
+        <span>{{ listErrorReason }}</span>
+        <el-button link type="danger" size="small" @click="retryCurrent">重试</el-button>
+      </div>
+    </el-alert>
 
     <!--
       双层同页：飞卡过程中两层都用 v-show 留在 DOM，禁止路由卸载网格。
@@ -106,7 +122,21 @@
         :class="{ 'is-active': viewMode === 'grid' }"
       >
         <div ref="gridWrapRef" v-loading="listLoading && viewMode === 'grid'" class="grid-wrap">
-          <el-empty v-if="!listLoading && !gridRows.length" description="还没有 Agent" />
+          <!-- 失败且无旧数据：只出错误块，不让「还没有 Agent」同时出现 -->
+          <LoadError
+            v-if="!listLoading && listError && !gridRows.length"
+            title="Agent 列表加载失败"
+            :reason="listErrorReason"
+            center
+            @retry="loadRows"
+          />
+          <el-empty
+            v-else-if="!listLoading && !gridRows.length"
+            :description="gridFiltered ? '没有符合条件的结果' : '还没有 Agent'"
+          >
+            <!-- 带筛选/搜索时给清除入口，而不是让用户自己回想改过什么 -->
+            <el-button v-if="gridFiltered" @click="clearFilters">清除筛选</el-button>
+          </el-empty>
           <div v-else-if="gridRows.length" class="grid">
             <ConfigCard
               v-for="row in gridRows"
@@ -257,7 +287,20 @@
             </div>
             <!-- loading 只反映左栏自身分页；网格用 listLoading，两者不可混用 -->
             <div ref="railListRef" v-loading="railLoading" class="rail-list" @scroll.passive="onRailScroll">
-              <el-empty v-if="!railLoading && !railRows.length" description="没有符合筛选的 Agent" />
+              <!-- 左栏失败且无数据：错误块 + 重试；有旧数据时保留列表，错误在顶部条 -->
+              <LoadError
+                v-if="!railLoading && listError && !railRows.length"
+                class="rail-error"
+                title="Agent 列表加载失败"
+                :reason="listErrorReason"
+                @retry="resetRail"
+              />
+              <el-empty
+                v-else-if="!railLoading && !railRows.length"
+                :description="railFiltered ? '没有符合条件的结果' : '还没有 Agent'"
+              >
+                <el-button v-if="railFiltered" @click="clearFilters">清除筛选</el-button>
+              </el-empty>
               <!--
                 虚拟列表：只渲染可视窗口内的卡（P2-2）。
                 .rail-window 撑出「全部行」的总高度以维持正确滚动条，
@@ -382,6 +425,7 @@ import AgentDetailSkeleton from '@/components/agent/AgentDetailSkeleton.vue'
 import AgentFormDialog from '@/components/agent/AgentFormDialog.vue'
 import FlipGhost from '@/components/browse/FlipGhost.vue'
 import ConfigCard from '@/components/ConfigCard.vue'
+import LoadError from '@/components/common/LoadError.vue'
 import PageHeader from '@/components/PageHeader.vue'
 import TablePager from '@/components/TablePager.vue'
 import { agentBrowse } from '@/composables/agentBrowse'
@@ -394,6 +438,7 @@ import { computeVirtualWindow, scrollTopForIndex } from '@/composables/virtualWi
 import { isPlatformDefaultAssistant } from '@/constants/platformAgents'
 import { useUserStore } from '@/stores/user'
 import { maTrialPathOrEmpty } from '@/utils/maTrial'
+import { requestErrorText } from '@/utils/requestError'
 import type { AgentCard, AgentCardPatch, AgentSave } from '@/types/agent'
 
 /** 三横线列表图标。 */
@@ -437,6 +482,8 @@ const listLoading = ref(false)
  */
 const detailSuspended = ref(false)
 const listError = ref('')
+/** 列表 / 左栏失败的可读原因（第二行），与 listError 短标题分开存，避免把原因当标题 */
+const listErrorReason = ref('')
 const createOpen = ref(false)
 const removingId = ref(0)
 /** 正在即时切换启停的卡片 id；非 0 时禁止重复点，避免并发改写状态 */
@@ -751,6 +798,17 @@ const {
 })
 
 /**
+ * 网格是否带筛选/搜索条件：决定空态是「首次没有数据」还是「筛选无结果」。
+ * 三者任一生效就说明用户主动收窄了范围，不能再写「还没有 Agent」。
+ */
+const gridFiltered = computed(
+  () => !!(agentBrowse.keyword.trim() || agentBrowse.runMode !== 'ALL' || agentBrowse.status !== 'ALL')
+)
+
+/** 左栏是否带筛选条件（网格筛选 + 左栏搜索词任一），决定左栏空态文案与清除入口 */
+const railFiltered = computed(() => gridFiltered.value || !!railKeyword.value.trim())
+
+/**
  * 网格卡点击入口：试跑抽屉打开时忽略；去程期间挂起右栏详情，
  * 把 AgentDetail 的挂载与并发请求推迟到落地之后。
  * <p>「…」菜单区域内的点击 / 回车必须整体忽略：el-dropdown 的 click 是组件 emit，
@@ -998,6 +1056,7 @@ async function loadRows() {
   gridSizeSynced = true
   listLoading.value = true
   listError.value = ''
+  listErrorReason.value = ''
   try {
     const { data } = await pageAgents({
       current: agentBrowse.current,
@@ -1020,13 +1079,13 @@ async function loadRows() {
       agentBrowse.current = fallback
       void loadRows()
     }
-  } catch {
+  } catch (e) {
     if (seq !== rowsSeq) {
       return
     }
     listError.value = 'Agent 列表加载失败'
-    rows.value = []
-    total.value = 0
+    listErrorReason.value = requestErrorText(e)
+    // 保留旧 rows / total：失败时不能把已有列表清成空白再配一句「没有数据」
   } finally {
     if (seq === rowsSeq) {
       listLoading.value = false
@@ -1094,6 +1153,8 @@ async function loadRailMore(): Promise<void> {
     return
   }
   railLoading.value = true
+  listError.value = ''
+  listErrorReason.value = ''
   const page = railPage.value
   try {
     const { data } = await pageAgents({
@@ -1130,9 +1191,10 @@ async function loadRailMore(): Promise<void> {
     if (!railHasMore.value) {
       disconnectRailObserver()
     }
-  } catch {
+  } catch (e) {
     listError.value = 'Agent 列表加载失败'
-    // 失败即停止，防止错误状态下持续重试打满后端
+    listErrorReason.value = requestErrorText(e)
+    // 失败即停止，防止错误状态下持续重试打满后端；已加载的左栏行保留
     railHasMore.value = false
     disconnectRailObserver()
   } finally {
@@ -1221,6 +1283,35 @@ function patchRailRow(patch?: AgentCardPatch): boolean {
   return true
 }
 
+/**
+ * 顶部错误条的重试：主从态重拉左栏，网格态重拉当前页；不改筛选与页码。
+ */
+function retryCurrent() {
+  if (viewMode.value === 'master') {
+    void resetRail()
+    return
+  }
+  void loadRows()
+}
+
+/** 清空筛选时是否要吞掉一次 railKeyword 防抖重置，避免同一条件打两次请求 */
+let swallowNextRailReset = false
+
+/**
+ * 清空网格筛选与左栏搜索词后重查；用于「没有符合条件的结果」的清除入口。
+ * 只回第一页，不改分页大小。
+ */
+function clearFilters() {
+  agentBrowse.keyword = ''
+  agentBrowse.runMode = 'ALL'
+  agentBrowse.status = 'ALL'
+  const hadKeyword = !!railKeyword.value.trim()
+  railKeyword.value = ''
+  // 搜索词本来就为空时 watch 不触发，不能置位，否则会吞掉下一次真实搜索的防抖
+  swallowNextRailReset = hadKeyword
+  search()
+}
+
 function search() {
   agentBrowse.current = 1
   if (viewMode.value === 'master') {
@@ -1238,6 +1329,11 @@ function search() {
 watch(railKeyword, () => {
   window.clearTimeout(railSearchTimer)
   railSearchTimer = window.setTimeout(() => {
+    // clearFilters 已用 search()/resetRail() 收口，吞掉本次防抖避免重复请求
+    if (swallowNextRailReset) {
+      swallowNextRailReset = false
+      return
+    }
     /*
      * 网格态下左栏不可见，不发请求。
      * backToGrid 会清空 railKeyword，此处拦截可避免它触发一次无谓加载；
@@ -1673,6 +1769,33 @@ function onTrial(payload: { agentId: number; name: string; runMode: string }) {
   margin-bottom: 12px;
 }
 
+/* 顶部错误条正文：原因 + 重试同一行；换行时按钮仍紧跟原因 */
+.block-alert__body {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  font-size: 12px;
+}
+
+/* 左栏 186px 窄栏：错误块改为纵向，避免图标 + 文案 + 按钮挤成一条 */
+.rail-error {
+  min-height: 0;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 8px;
+  padding: 10px 12px;
+}
+
+.rail-error :deep(.load-error__text) {
+  flex: none;
+  width: 100%;
+}
+
+.rail-error :deep(.load-error__retry) {
+  margin-left: 0;
+}
+
 .grid-wrap {
   min-height: 160px;
 }
@@ -1749,7 +1872,8 @@ function onTrial(payload: { agentId: number; name: string; runMode: string }) {
   border: 0;
   border-radius: 6px;
   background: transparent;
-  color: #9ca3af;
+  /* 纯图标按钮：装饰性弱字，不承载信息 */
+  color: var(--ah-text-faint);
   font-size: 16px;
   line-height: 1;
   cursor: pointer;
@@ -1807,18 +1931,6 @@ function onTrial(payload: { agentId: number; name: string; runMode: string }) {
 .card .badges {
   flex-wrap: nowrap;
   overflow: hidden;
-}
-
-.badge-on {
-  --el-tag-text-color: #10b981;
-  --el-tag-border-color: #a7f3d0;
-  --el-tag-bg-color: #ecfdf5;
-}
-
-.badge-off {
-  --el-tag-text-color: #6b7280;
-  --el-tag-border-color: #e5e7eb;
-  --el-tag-bg-color: #f3f4f6;
 }
 
 .muted {

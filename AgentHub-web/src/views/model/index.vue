@@ -121,7 +121,20 @@
       </el-form>
     </div>
 
-    <el-alert v-if="listError" :title="listError" type="error" show-icon :closable="false" class="block-alert" />
+    <!-- 失败但已有旧数据：保留列表，顶部出错误条 + 重试；无数据时改用列表内错误块 -->
+    <el-alert
+      v-if="listError && filteredProviders.length"
+      :title="listError"
+      type="error"
+      show-icon
+      :closable="false"
+      class="block-alert"
+    >
+      <div class="block-alert__body">
+        <span>{{ listErrorReason }}</span>
+        <el-button link type="danger" size="small" @click="loadProviders">重试</el-button>
+      </div>
+    </el-alert>
 
     <!--
       双层同页：飞卡过程中两层都用 v-show 留在 DOM。
@@ -134,7 +147,20 @@
         :class="{ 'is-active': viewMode === 'grid' }"
       >
         <div ref="gridWrapRef" v-loading="providerLoading && viewMode === 'grid'" class="grid-wrap">
-          <el-empty v-if="!providerLoading && !filteredProviders.length" description="还没有供应商" />
+          <!-- 失败且无旧数据：只出错误块，不让「还没有供应商」同时出现 -->
+          <LoadError
+            v-if="!providerLoading && listError && !filteredProviders.length"
+            title="供应商列表加载失败"
+            :reason="listErrorReason"
+            center
+            @retry="loadProviders"
+          />
+          <el-empty
+            v-else-if="!providerLoading && !filteredProviders.length"
+            :description="providerDenied ? '没有查看供应商的权限' : providerFiltered ? '没有符合条件的结果' : '还没有供应商'"
+          >
+            <el-button v-if="providerFiltered && !providerDenied" @click="clearProviderFilters">清除筛选</el-button>
+          </el-empty>
           <div v-else-if="pagedProviders.length" class="grid">
             <ConfigCard
               v-for="item in pagedProviders"
@@ -255,7 +281,20 @@
                 <span class="rail-name">全部</span>
                 <span class="rail-code">跨供应商实例</span>
               </button>
-              <el-empty v-if="!providerLoading && !railRows.length" description="没有符合筛选的供应商" />
+              <el-empty v-if="providerDenied" description="没有查看供应商的权限" />
+              <LoadError
+                v-else-if="!providerLoading && listError && !railRows.length"
+                class="rail-error"
+                title="供应商列表加载失败"
+                :reason="listErrorReason"
+                @retry="loadProviders"
+              />
+              <el-empty
+                v-else-if="!providerLoading && !railRows.length"
+                :description="railFiltered ? '没有符合条件的结果' : '还没有供应商'"
+              >
+                <el-button v-if="railFiltered" @click="clearProviderFilters">清除筛选</el-button>
+              </el-empty>
               <button
                 v-for="row in railRows"
                 :key="row.id"
@@ -299,11 +338,11 @@
                 <div class="detail-actions">
                   <!-- 选中具体供应商时才出供应商级操作；勿在此放删除 / 新建模型 -->
                   <template v-if="activeProvider">
-                    <el-switch
+                    <StatusSwitch
                       v-if="user.hasPerm('model:provider:edit')"
-                      :model-value="activeProvider.status === 1"
+                      :status="activeProvider.status"
                       :disabled="flipBusy"
-                      @change="(on: string | number | boolean) => onProviderSwitch(activeProvider!, on === true)"
+                      :commit="(next: number) => commitProviderStatus(activeProvider!, next)"
                     />
                     <el-badge
                       v-if="user.hasPerm('model:provider:edit') || user.hasPerm('model:provider:resetKey')"
@@ -372,7 +411,44 @@
               </div>
 
               <el-card class="table-card" shadow="never">
-                <el-table v-loading="instanceLoading" :data="instances" empty-text="没有模型实例">
+                <!-- 失败且无旧数据：错误块顶替表格，不与「没有模型实例」同屏 -->
+                <LoadError
+                  v-if="instanceError && !instances.length"
+                  title="模型实例加载失败"
+                  :reason="instanceErrorReason"
+                  :retrying="instanceLoading"
+                  @retry="loadInstances"
+                />
+                <template v-else>
+                  <!-- 失败但有旧数据：保留表格，上方错误条 + 重试 -->
+                  <el-alert
+                    v-if="instanceError"
+                    :title="instanceError"
+                    type="error"
+                    show-icon
+                    :closable="false"
+                    class="block-alert"
+                  >
+                    <div class="block-alert__body">
+                      <span>{{ instanceErrorReason }}</span>
+                      <el-button link type="danger" size="small" @click="loadInstances">重试</el-button>
+                    </div>
+                  </el-alert>
+                  <el-table v-loading="instanceLoading" :data="instances">
+                    <!-- 空态按原因分开：权限不足 / 筛选无结果 / 首次没有 -->
+                    <template #empty>
+                      <div class="ah-empty-inline">
+                        <span>{{ instanceEmptyText }}</span>
+                        <el-button
+                          v-if="instanceFiltered && !instanceDenied"
+                          link
+                          type="primary"
+                          @click="resetInstanceFilter"
+                        >
+                          清除筛选
+                        </el-button>
+                      </div>
+                    </template>
                   <!-- 最左序号列：跨页连续，纯展示 -->
                   <el-table-column v-bind="indexColumnProps" />
                   <el-table-column v-if="activeId === 0" prop="providerName" label="供应商" min-width="100" align="center" />
@@ -398,12 +474,12 @@
                   <el-table-column label="状态" width="90" align="center">
                     <template #default="{ row }">
                       <!-- 平台级实例不可停用：开关禁用并给出 title 提示，后端同样强校验 -->
-                      <el-switch
+                      <StatusSwitch
                         v-if="user.hasPerm('model:instance:edit')"
-                        :model-value="row.status === 1"
+                        :status="row.status"
                         :disabled="row.platformLocked === 1"
                         :title="row.platformLocked === 1 ? '平台级实例不可停用，请先取消平台级' : ''"
-                        @change="(on: string | number | boolean) => onInstanceSwitch(row, on === true)"
+                        :commit="(next: number) => commitInstanceStatus(row, next)"
                       />
                       <span v-else>{{ row.status === 1 ? '启用' : '停用' }}</span>
                     </template>
@@ -464,6 +540,7 @@
                   :total="total"
                   @change="loadInstances"
                 />
+                </template>
               </el-card>
             </div>
           </div>
@@ -533,7 +610,9 @@ import {
 } from '@/api/memory'
 import FlipGhost from '@/components/browse/FlipGhost.vue'
 import ViewModeToggle from '@/components/browse/ViewModeToggle.vue'
+import StatusSwitch from '@/components/admin/StatusSwitch.vue'
 import ConfigCard from '@/components/ConfigCard.vue'
+import LoadError from '@/components/common/LoadError.vue'
 import PageHeader from '@/components/PageHeader.vue'
 import TablePager from '@/components/TablePager.vue'
 import CredentialDialog from '@/components/model/CredentialDialog.vue'
@@ -544,6 +623,7 @@ import TestResultDialog from '@/components/model/TestResultDialog.vue'
 import type { FlipCardSnap } from '@/composables/viewFlip'
 import { useBrowseFlip } from '@/composables/useBrowseFlip'
 import { useListIndexColumn } from '@/composables/listIndex'
+import { requestErrorText } from '@/utils/requestError'
 import { useUserStore } from '@/stores/user'
 import type { ConnectivityResult, InstanceRow, ProviderCard } from '@/types/model'
 import type { ConfirmNotice, ConfirmRow } from '@/types'
@@ -565,6 +645,15 @@ const user = useUserStore()
 const providerLoading = ref(false)
 const instanceLoading = ref(false)
 const listError = ref('')
+/** 供应商列表失败的可读原因（错误块第二行） */
+const listErrorReason = ref('')
+/** 无 model:provider:list 权限：列表空是权限所致，不能写「还没有供应商」 */
+const providerDenied = ref(false)
+/** 模型实例表失败标题 / 原因；有旧数据时保留表格，只在上方出提示 */
+const instanceError = ref('')
+const instanceErrorReason = ref('')
+/** 无 model:instance:list 权限：实例表空是权限所致 */
+const instanceDenied = ref(false)
 const providers = ref<ProviderCard[]>([])
 const instances = ref<InstanceRow[]>([])
 const total = ref(0)
@@ -853,6 +942,7 @@ const {
   showGridLayer,
   showMasterLayer,
   gridDraft,
+  gridFilter,
   gridPage,
   gridWrapRef,
   filteredRows: filteredProviders,
@@ -901,7 +991,16 @@ const {
     query.current = 1
     instances.value = []
     total.value = 0
-    return fetchInstances().catch(() => null)
+    instanceError.value = ''
+    instanceErrorReason.value = ''
+    // 没有实例查看权限时预取会直接返回 null；先标明「看不到」，否则落地后会误写成「没有模型实例」
+    instanceDenied.value = !user.hasPerm('model:instance:list')
+    // 预取失败也要落到错误态，否则落地后只有空表却没有任何原因
+    return fetchInstances().catch((e) => {
+      instanceError.value = '模型实例加载失败'
+      instanceErrorReason.value = requestErrorText(e)
+      return null
+    })
   },
   // 落地即写状态：预取已完成的直接同步落地，未完成的等它返回
   landed: async (_row, prepared) => {
@@ -922,6 +1021,34 @@ const {
 const activeProvider = computed(() =>
   activeId.value > 0 ? providers.value.find((item) => item.id === activeId.value) : undefined
 )
+
+/**
+ * 供应商网格是否带生效筛选：决定空态写「还没有供应商」还是「没有符合条件的结果」。
+ * 只看已生效条件（gridFilter），不是还在输入框里的草稿。
+ */
+const providerFiltered = computed(() => {
+  const filter = gridFilter as { keyword: string; protocol: string; status?: number }
+  return !!(
+    filter.keyword.trim() ||
+    filter.protocol ||
+    filter.status === 0 ||
+    filter.status === 1
+  )
+})
+
+/** 左栏是否带筛选条件（网格筛选 + 左栏搜索词任一） */
+const railFiltered = computed(() => providerFiltered.value || !!railKeyword.value.trim())
+
+/** 模型实例表是否带筛选：决定空态文案与是否给「清除筛选」 */
+const instanceFiltered = computed(() => !!(query.capability || query.keyword.trim()))
+
+/** 实例表空态文案：权限不足 / 筛选无结果 / 首次没有，三种原因分开写 */
+const instanceEmptyText = computed(() => {
+  if (instanceDenied.value) {
+    return '没有查看模型实例的权限'
+  }
+  return instanceFiltered.value ? '没有符合条件的结果' : '没有模型实例'
+})
 
 /** 网格筛选 / 分页 / 左栏过滤已由 useBrowseFlip 提供（filteredProviders / pagedProviders / railRows） */
 
@@ -965,8 +1092,20 @@ function snapFromProvider(row: ProviderCard): FlipCardSnap {
 }
 
 async function loadProviders() {
+  // 无列表权限时不发请求，直接给「权限不足」说明，避免 403 被误写成「加载失败」
+  if (!user.hasPerm('model:provider:list')) {
+    providerDenied.value = true
+    providers.value = []
+    providerLoading.value = false
+    // 权限缺失是「看不到」而非加载失败：清掉失败态，避免错误块与权限说明同屏
+    listError.value = ''
+    listErrorReason.value = ''
+    return
+  }
+  providerDenied.value = false
   providerLoading.value = true
   listError.value = ''
+  listErrorReason.value = ''
   try {
     const { data } = await listProviders()
     providers.value = data.data || []
@@ -978,9 +1117,10 @@ async function loadProviders() {
         await loadInstances()
       }
     }
-  } catch {
+  } catch (e) {
     listError.value = '供应商列表加载失败'
-    providers.value = []
+    listErrorReason.value = requestErrorText(e)
+    // 保留旧 providers：失败时不能把已有列表清成空白再配一句「没有数据」
   } finally {
     providerLoading.value = false
   }
@@ -1010,15 +1150,27 @@ async function fetchInstances(): Promise<{ records: InstanceRow[]; total: number
  */
 async function loadInstances() {
   if (!user.hasPerm('model:instance:list')) {
+    instanceDenied.value = true
     instances.value = []
     total.value = 0
+    // 权限缺失是「看不到」，不是加载失败：清掉上一轮的失败态，避免错误块和权限说明打架
+    instanceError.value = ''
+    instanceErrorReason.value = ''
+    instanceLoading.value = false
     return
   }
+  instanceDenied.value = false
   instanceLoading.value = true
+  instanceError.value = ''
+  instanceErrorReason.value = ''
   try {
     const result = await fetchInstances()
     instances.value = result?.records ?? []
     total.value = result?.total ?? 0
+  } catch (e) {
+    instanceError.value = '模型实例加载失败'
+    instanceErrorReason.value = requestErrorText(e)
+    // 保留旧实例行：失败时上方出错误条，表格不清空
   } finally {
     instanceLoading.value = false
   }
@@ -1036,6 +1188,12 @@ function resetInstanceFilter() {
   query.keyword = ''
   query.current = 1
   void loadInstances()
+}
+
+/** 清空供应商筛选与左栏搜索词；网格是前端筛选，无需重新请求 */
+function clearProviderFilters() {
+  resetGridFilter()
+  railKeyword.value = ''
 }
 
 /** 左栏点「全部」：无飞卡，右栏跨商实例表。 */
@@ -1102,14 +1260,13 @@ async function onCredentialsChanged() {
 }
 
 /**
- * 右栏开关切换供应商启停。
+ * 右栏开关切换供应商启停；由公共 StatusSwitch 负责提交中 loading 与失败回滚。
  *
- * @param row 当前供应商
- * @param enabled 目标是否启用
+ * @param row    当前供应商
+ * @param status 目标状态：1 启用，0 停用
  */
-async function onProviderSwitch(row: ProviderCard, enabled: boolean) {
-  const next = enabled ? 1 : 0
-  if (row.status === next) {
+async function commitProviderStatus(row: ProviderCard, status: number) {
+  if (row.status === status) {
     return
   }
   await updateProvider(row.id, {
@@ -1117,7 +1274,7 @@ async function onProviderSwitch(row: ProviderCard, enabled: boolean) {
     protocol: row.protocol,
     baseUrl: row.baseUrl,
     remark: row.remark || '',
-    status: next
+    status
   })
   await loadProviders()
 }
@@ -1162,17 +1319,16 @@ async function saveInstance(payload: Record<string, unknown>, done: () => void) 
 }
 
 /**
- * 列表开关切换实例启停。
+ * 列表开关切换实例启停；由公共 StatusSwitch 负责提交中 loading 与失败回滚。
  *
- * @param row 当前实例
- * @param enabled 目标是否启用
+ * @param row    当前实例
+ * @param status 目标状态：1 启用，0 停用
  */
-async function onInstanceSwitch(row: InstanceRow, enabled: boolean) {
-  const next = enabled ? 1 : 0
-  if (row.status === next) {
+async function commitInstanceStatus(row: InstanceRow, status: number) {
+  if (row.status === status) {
     return
   }
-  await changeInstanceStatus(row.id, next)
+  await changeInstanceStatus(row.id, status)
   await loadInstances()
 }
 
@@ -1676,6 +1832,33 @@ onUnmounted(() => {
   margin-bottom: 12px;
 }
 
+/* 顶部错误条正文：原因 + 重试同排 */
+.block-alert__body {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  font-size: 12px;
+}
+
+/* 左栏 186px 窄栏：错误块纵向排，避免挤成一行 */
+.rail-error {
+  min-height: 0;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 8px;
+  padding: 10px 12px;
+}
+
+.rail-error :deep(.load-error__text) {
+  flex: none;
+  width: 100%;
+}
+
+.rail-error :deep(.load-error__retry) {
+  margin-left: 0;
+}
+
 /* 记忆向量可观测条：圆角 + 柔和浅黄底，去掉突兀实线边框（class 挂在 el-alert 根上） */
 .vector-alert {
   margin-bottom: 12px;
@@ -1737,7 +1920,8 @@ onUnmounted(() => {
   border: 0;
   border-radius: 6px;
   background: transparent;
-  color: #9ca3af;
+  /* 纯图标按钮：装饰性弱字，不承载信息 */
+  color: var(--ah-text-faint);
   font-size: 20px;
   font-weight: 400;
   line-height: 1;
@@ -1795,18 +1979,6 @@ onUnmounted(() => {
   display: flex;
   flex-wrap: wrap;
   gap: 6px;
-}
-
-.badge-on {
-  --el-tag-text-color: #10b981;
-  --el-tag-border-color: #a7f3d0;
-  --el-tag-bg-color: #ecfdf5;
-}
-
-.badge-off {
-  --el-tag-text-color: #6b7280;
-  --el-tag-border-color: #e5e7eb;
-  --el-tag-bg-color: #f3f4f6;
 }
 
 .detail-body {

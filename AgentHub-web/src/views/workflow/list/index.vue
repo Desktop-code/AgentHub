@@ -55,10 +55,37 @@
       </div>
     </div>
 
-    <el-alert v-if="listError" :title="listError" type="error" show-icon :closable="false" class="block-alert" />
+    <!-- 失败但已有旧数据：保留列表，顶部出错误条 + 重试；无数据时表内改用错误块 -->
+    <el-alert
+      v-if="listError && rows.length"
+      :title="listError"
+      type="error"
+      show-icon
+      :closable="false"
+      class="block-alert"
+    >
+      <div class="block-alert__body">
+        <span>{{ listErrorReason }}</span>
+        <el-button link type="danger" size="small" @click="loadRows">重试</el-button>
+      </div>
+    </el-alert>
 
     <section class="panel">
-      <el-table v-loading="loading" :data="rows" empty-text="还没有工作流" class="wf-table">
+      <el-table v-loading="loading" :data="rows" class="wf-table">
+        <!-- 空态按原因分开：加载失败 / 筛选无结果 / 首次没有；失败时不再出现「还没有工作流」 -->
+        <template #empty>
+          <LoadError
+            v-if="listError"
+            title="工作流列表加载失败"
+            :reason="listErrorReason"
+            :retrying="loading"
+            @retry="loadRows"
+          />
+          <div v-else class="ah-empty-inline">
+            <span>{{ rowsFiltered ? '没有符合条件的结果' : '还没有工作流' }}</span>
+            <el-button v-if="rowsFiltered" link type="primary" @click="resetFilter">清除筛选</el-button>
+          </div>
+        </template>
         <!-- 最左序号列：跨页连续，纯展示，不参与接口排序 -->
         <el-table-column v-bind="indexColumnProps" />
         <!-- 名称双行：主行名称 + 副行简介，信息密度接近企业级中台列表 -->
@@ -206,7 +233,12 @@ X-App-Secret: ********
           show-icon
           :closable="false"
           class="block-alert"
-        />
+        >
+          <div class="block-alert__body">
+            <span>{{ releaseErrorReason }}</span>
+            <el-button link type="danger" size="small" @click="retryReleases">重试</el-button>
+          </div>
+        </el-alert>
         <el-empty v-else-if="!releaseLoading && !releases.length" description="还没有发布版本" />
         <div v-for="item in releases" :key="item.id" class="release-item">
           <div class="release-item__head">
@@ -245,8 +277,10 @@ import { useRouter } from 'vue-router'
 import { ArrowDown, MoreFilled, Plus, RefreshRight, Search } from '@element-plus/icons-vue'
 import { ElMessage, ElMessageBox, type FormInstance, type FormRules } from 'element-plus'
 import PageHeader from '@/components/PageHeader.vue'
+import LoadError from '@/components/common/LoadError.vue'
 import TablePager from '@/components/TablePager.vue'
 import { useListIndexColumn } from '@/composables/listIndex'
+import { requestErrorText } from '@/utils/requestError'
 import WorkflowTrialDrawer from '@/views/workflow/editor/WorkflowTrialDrawer.vue'
 import {
   createWorkflowDef,
@@ -279,6 +313,8 @@ const STATUS_OPTIONS = [
 
 const loading = ref(false)
 const listError = ref('')
+/** 列表失败的可读原因（表内错误块第二行） */
+const listErrorReason = ref('')
 const rows = ref<WorkflowDefRow[]>([])
 const total = ref(0)
 const query = reactive({
@@ -289,6 +325,9 @@ const query = reactive({
 })
 /** 工作流表最左「序号」列；跨页连续，仅前端展示 */
 const { indexColumnProps } = useListIndexColumn(() => query.current, () => query.size)
+
+/** 列表是否带筛选条件：决定空态写「还没有工作流」还是「没有符合条件的结果」 */
+const rowsFiltered = computed(() => !!(query.keyword.trim() || query.status))
 
 const createOpen = ref(false)
 /** 应用触发说明弹窗；本页不代调 OpenAPI */
@@ -330,6 +369,8 @@ const pageActive = ref(true)
 const releaseOpen = ref(false)
 const releaseLoading = ref(false)
 const releaseError = ref('')
+/** 版本列表失败的可读原因（抽屉错误条第二行） */
+const releaseErrorReason = ref('')
 const releaseTarget = ref<WorkflowDefRow | null>(null)
 const releases = ref<WorkflowReleaseRow[]>([])
 
@@ -364,6 +405,7 @@ function formatTime(value?: string | null): string {
 async function loadRows() {
   loading.value = true
   listError.value = ''
+  listErrorReason.value = ''
   try {
     const { data } = await pageWorkflowDefs({
       current: query.current,
@@ -374,10 +416,10 @@ async function loadRows() {
     const page = data.data
     rows.value = page?.records || []
     total.value = page?.total || 0
-  } catch {
+  } catch (e) {
     listError.value = '工作流列表加载失败'
-    rows.value = []
-    total.value = 0
+    listErrorReason.value = requestErrorText(e)
+    // 保留旧 rows / total：失败时不能把已有列表清成空白再配一句「没有数据」
   } finally {
     loading.value = false
   }
@@ -443,16 +485,36 @@ function openEditor(row: WorkflowDefRow) {
 async function openReleases(row: WorkflowDefRow) {
   releaseTarget.value = row
   releaseOpen.value = true
+  // 换成另一行时先清旧版本，避免短暂显示上一条工作流的版本
+  releases.value = []
+  await loadReleases(row)
+}
+
+/**
+ * 拉取指定工作流的发布版本。
+ * 失败保留旧版本行（抽屉重试时不清空），只把错误条置起。
+ *
+ * @param row 目标工作流定义
+ */
+async function loadReleases(row: WorkflowDefRow) {
   releaseLoading.value = true
   releaseError.value = ''
-  releases.value = []
+  releaseErrorReason.value = ''
   try {
     const { data } = await listWorkflowReleases(row.id)
     releases.value = data.data || []
-  } catch {
+  } catch (e) {
     releaseError.value = '版本列表加载失败'
+    releaseErrorReason.value = requestErrorText(e)
   } finally {
     releaseLoading.value = false
+  }
+}
+
+/** 版本抽屉错误条的重试：按当前目标重拉，不关闭抽屉 */
+function retryReleases() {
+  if (releaseTarget.value) {
+    void loadReleases(releaseTarget.value)
   }
 }
 
@@ -646,6 +708,15 @@ onDeactivated(() => {
   margin-bottom: 12px;
 }
 
+/* 顶部 / 抽屉错误条正文：原因 + 重试同排 */
+.block-alert__body {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  font-size: 12px;
+}
+
 .cell-name {
   overflow: hidden;
   color: var(--ah-text-primary, #111827);
@@ -714,9 +785,9 @@ onDeactivated(() => {
 
 .release-item__fp {
   margin-top: 4px;
-  color: var(--ah-text-muted, #9ca3af);
+  color: var(--ah-text-muted);
   font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
-  font-size: 11px;
+  font-size: 12px;
 }
 
 /* 应用触发说明：偏文档排版，代码块保持可读但不喧宾夺主 */
