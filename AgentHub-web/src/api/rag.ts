@@ -43,7 +43,7 @@ export function updateKb(id: number, data: Record<string, unknown>) {
   return request.put<Result<RagKbRow>>(`/api/rag/kbs/${id}`, data)
 }
 
-/** 重建集合。初始化失败恢复、Milvus 数据被清理后修复。 */
+/** 重建索引（后端建集合）。初始化失败恢复、Milvus 数据被清理后修复。 */
 export function rebuildKb(id: number) {
   return request.post<Result<RagKbRow>>(`/api/rag/kbs/${id}/rebuild`, null, { timeout: 30000 })
 }

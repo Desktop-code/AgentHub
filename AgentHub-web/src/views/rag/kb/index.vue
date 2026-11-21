@@ -18,7 +18,7 @@
         </el-form-item>
         <el-form-item label="状态">
           <el-select v-model="query.status" class="filter-select" clearable placeholder="全部" @change="onSearch">
-            <el-option label="就绪" value="READY" />
+            <el-option label="可检索" value="READY" />
             <el-option label="初始化失败" value="INIT_FAILED" />
           </el-select>
         </el-form-item>
@@ -41,80 +41,106 @@
       </el-form>
     </div>
 
-    <el-alert v-if="listError" :title="listError" type="error" show-icon :closable="false" class="block-alert" />
+    <!--
+      失败但已有旧数据：保留列表，顶部出错误条 + 重试。
+      无数据时这里不出现，改用表格内的错误块，避免「加载失败」与「还没有知识库」同时画。
+    -->
+    <el-alert
+      v-if="listError && rows.length"
+      :title="listError"
+      type="error"
+      show-icon
+      :closable="false"
+      class="block-alert"
+    >
+      <div class="block-alert__body">
+        <span>{{ listErrorReason }}</span>
+        <el-button link type="danger" size="small" :loading="loading" @click="load">重试</el-button>
+      </div>
+    </el-alert>
 
     <el-card class="table-card" shadow="never">
-      <el-table v-loading="loading" :data="rows" empty-text="还没有知识库">
-        <!-- 最左序号列：跨页连续，纯展示，不参与接口排序 -->
-        <el-table-column v-bind="indexColumnProps" />
-        <el-table-column label="名称" min-width="160" align="center" show-overflow-tooltip>
-          <template #default="{ row }">
-            <!-- 名称本身就是进入该库文档管理页的入口，比只靠「操作」列更符合直觉 -->
-            <el-button
-              v-if="user.hasPerm('rag:doc:list')"
-              link
-              type="primary"
-              class="name-link"
-              @click="openDocs(row)"
-            >
-              {{ row.name }}
-            </el-button>
-            <span v-else>{{ row.name }}</span>
-          </template>
-        </el-table-column>
-        <el-table-column label="状态" min-width="110" align="center">
-          <template #default="{ row }">
-            <el-tag size="small" effect="plain" :class="statusClass(row.status)">
-              {{ KB_STATUS_LABEL[row.status] || row.status }}
-            </el-tag>
-          </template>
-        </el-table-column>
-        <el-table-column label="检索能力" min-width="120" align="center">
-          <template #default="{ row }">
-            <!-- 能力为 null 表示集合没建成功，不显示「仅向量」以免误导 -->
-            <span v-if="row.storeCapability">{{ KB_CAPABILITY_LABEL[row.storeCapability] || row.storeCapability }}</span>
-            <span v-else class="muted">—</span>
-          </template>
-        </el-table-column>
-        <el-table-column label="Embedding" min-width="180" align="center">
-          <template #default="{ row }">
-            <div class="cell-stack">
-              <span :title="row.embeddingModelName || ''">{{ row.embeddingModelName || `#${row.embeddingModelId}` }}</span>
-              <span class="muted">维度 {{ row.vectorDimension }}</span>
-            </div>
-          </template>
-        </el-table-column>
-        <el-table-column label="可见性" min-width="100" align="center">
-          <template #default="{ row }">{{ KB_VISIBILITY_LABEL[row.visibility] || row.visibility }}</template>
-        </el-table-column>
-        <el-table-column label="创建时间" min-width="160" align="center">
-          <template #default="{ row }">{{ formatDateTime(row.createTime) }}</template>
-        </el-table-column>
-        <el-table-column label="操作" min-width="290" align="center">
-          <template #default="{ row }">
-            <el-button
-              v-if="user.hasPerm('rag:doc:list')"
-              link
-              type="primary"
-              @click="openDocs(row)"
-            >
-              文档
-            </el-button>
-            <el-button v-if="user.hasPerm('rag:kb:edit')" link type="primary" @click="openEdit(row)">编辑</el-button>
-            <el-button
-              v-if="user.hasPerm('rag:kb:rebuild')"
-              link
-              type="primary"
-              :loading="rebuildingId === row.id"
-              @click="onRebuild(row)"
-            >
-              重建集合
-            </el-button>
-            <el-button v-if="user.hasPerm('rag:kb:remove')" link type="danger" @click="onDelete(row)">删除</el-button>
-          </template>
-        </el-table-column>
-      </el-table>
-      <TablePager v-model:current="query.current" v-model:size="query.size" :total="total" @change="load" />
+      <!-- 失败且无旧数据：错误块顶替表格，不让成功空态冒充失败 -->
+      <LoadError
+        v-if="!loading && listError && !rows.length"
+        title="知识库列表加载失败"
+        :reason="listErrorReason"
+        :retrying="loading"
+        @retry="load"
+      />
+      <template v-else>
+        <el-table v-loading="loading" :data="rows" empty-text="还没有知识库">
+          <!-- 最左序号列：跨页连续，纯展示，不参与接口排序 -->
+          <el-table-column v-bind="indexColumnProps" />
+          <el-table-column label="名称" min-width="160" align="center" show-overflow-tooltip>
+            <template #default="{ row }">
+              <!-- 名称本身就是进入该库文档管理页的入口，比只靠「操作」列更符合直觉 -->
+              <el-button
+                v-if="user.hasPerm('rag:doc:list')"
+                link
+                type="primary"
+                class="name-link"
+                @click="openDocs(row)"
+              >
+                {{ row.name }}
+              </el-button>
+              <span v-else>{{ row.name }}</span>
+            </template>
+          </el-table-column>
+          <el-table-column label="状态" min-width="110" align="center">
+            <template #default="{ row }">
+              <el-tag size="small" effect="plain" :class="statusClass(row.status)">
+                {{ KB_STATUS_LABEL[row.status] || row.status }}
+              </el-tag>
+            </template>
+          </el-table-column>
+          <el-table-column label="检索能力" min-width="120" align="center">
+            <template #default="{ row }">
+              <!-- 能力为 null 表示集合没建成功，不显示「仅向量」以免误导 -->
+              <span v-if="row.storeCapability">{{ KB_CAPABILITY_LABEL[row.storeCapability] || row.storeCapability }}</span>
+              <span v-else class="muted">—</span>
+            </template>
+          </el-table-column>
+          <el-table-column label="Embedding" min-width="180" align="center">
+            <template #default="{ row }">
+              <div class="cell-stack">
+                <span :title="row.embeddingModelName || ''">{{ row.embeddingModelName || `#${row.embeddingModelId}` }}</span>
+                <span class="muted">维度 {{ row.vectorDimension }}</span>
+              </div>
+            </template>
+          </el-table-column>
+          <el-table-column label="可见性" min-width="100" align="center">
+            <template #default="{ row }">{{ KB_VISIBILITY_LABEL[row.visibility] || row.visibility }}</template>
+          </el-table-column>
+          <el-table-column label="创建时间" min-width="160" align="center">
+            <template #default="{ row }">{{ formatDateTime(row.createTime) }}</template>
+          </el-table-column>
+          <el-table-column label="操作" min-width="290" align="center">
+            <template #default="{ row }">
+              <el-button
+                v-if="user.hasPerm('rag:doc:list')"
+                link
+                type="primary"
+                @click="openDocs(row)"
+              >
+                文档
+              </el-button>
+              <el-button v-if="user.hasPerm('rag:kb:edit')" link type="primary" @click="openEdit(row)">编辑</el-button>
+              <el-button
+                v-if="user.hasPerm('rag:kb:rebuild')"
+                link
+                type="primary"
+                :loading="rebuildingId === row.id"
+                @click="onRebuild(row)"
+              >
+                重建索引
+              </el-button>
+              <el-button v-if="user.hasPerm('rag:kb:remove')" link type="danger" @click="onDelete(row)">删除</el-button>
+            </template>
+          </el-table-column>
+        </el-table>
+        <TablePager v-model:current="query.current" v-model:size="query.size" :total="total" @change="load" />
+      </template>
     </el-card>
 
     <!--
@@ -269,7 +295,7 @@ defineOptions({ name: 'RagKbManage' })
 /**
  * 知识库管理页。所属域：rag。
  * 一期只做建库 + 初始化 + CRUD：建库时同步建 Collection，失败落 INIT_FAILED 并给出原因，
- * 管理员可在列表直接「重建集合」，不必重填表单。
+ * 管理员可在列表直接「重建索引」，不必重填表单。
  * 维度与 Embedding 建库即锁定，编辑弹窗不提供修改入口。
  */
 import { computed, onMounted, reactive, ref } from 'vue'
@@ -280,12 +306,14 @@ import { createKb, deleteKb, pageKbs, rebuildKb, updateKb } from '@/api/rag'
 import { pageInstances } from '@/api/model'
 import PageHeader from '@/components/PageHeader.vue'
 import TablePager from '@/components/TablePager.vue'
+import LoadError from '@/components/common/LoadError.vue'
 import KbConfigTabs from '@/components/rag/KbConfigTabs.vue'
 import { useListIndexColumn } from '@/composables/listIndex'
 import { useObjectDirty } from '@/composables/useFormDirty'
 import { useUserStore } from '@/stores/user'
 import { confirmDiscardUnsaved } from '@/utils/unsavedConfirm'
 import { formatDateTime } from '@/utils/datetime'
+import { requestErrorText } from '@/utils/requestError'
 import {
   buildIngestConfig,
   buildRetrievalConfig,
@@ -360,6 +388,8 @@ const user = useUserStore()
 const router = useRouter()
 const loading = ref(false)
 const listError = ref('')
+/** 列表失败的可读原因（错误块第二行），与 listError 短标题分开存，避免把原因当标题 */
+const listErrorReason = ref('')
 const rows = ref<RagKbRow[]>([])
 const total = ref(0)
 const rebuildingId = ref(0)
@@ -468,7 +498,7 @@ function openDocs(row: RagKbRow) {
   void router.push(`/rag/kb/${row.id}/docs`)
 }
 
-/** 状态标签配色：就绪绿、失败红、其它灰 */
+/** 状态标签配色：可检索绿、失败红、其它灰 */
 function statusClass(status: string) {
   if (status === 'READY') {
     return 'tag-on'
@@ -481,9 +511,17 @@ function statusClass(status: string) {
 
 const hasOptions = computed(() => embeddingOptions.value.length > 0)
 
+/**
+ * 拉取当前页知识库列表。
+ *
+ * <p>失败时保留已加载的 rows / total，由页面分成两种呈现：有旧数据→顶部错误条 + 重试；
+ * 无数据→表格位置改成错误块 + 重试。两条路径都能再点一次重试（{@link load}），
+ * 不允许让「还没有知识库」这类成功空态顶替失败。
+ */
 async function load() {
   loading.value = true
   listError.value = ''
+  listErrorReason.value = ''
   try {
     const { data } = await pageKbs({
       current: query.current,
@@ -494,10 +532,11 @@ async function load() {
     })
     rows.value = data.data.records || []
     total.value = data.data.total || 0
-  } catch {
+  } catch (e) {
+    // 失败原因单独存：短标题给标题行，具体原因给第二行，便于判断是网络还是后端报错
     listError.value = '知识库列表加载失败'
-    rows.value = []
-    total.value = 0
+    listErrorReason.value = requestErrorText(e)
+    // 保留旧 rows / total：失败时不能把已有列表清成空白再配一句「还没有知识库」
   } finally {
     loading.value = false
   }
@@ -718,9 +757,9 @@ async function saveCreate() {
     })
     create.open = false
     const result = data.data
-    // 建集失败不是接口错误：明确提示原因，引导管理员点「重建集合」
+    // 建集失败不是接口错误：明确提示原因，引导管理员点「重建索引」
     if (result?.status === 'INIT_FAILED') {
-      ElMessage.warning(`知识库已创建，但集合初始化失败：${result.errorMsg || '未知原因'}。可点「重建集合」重试。`)
+      ElMessage.warning(`知识库已创建，但集合初始化失败：${result.errorMsg || '未知原因'}。可点「重建索引」重试。`)
     } else {
       ElMessage.success('知识库已创建，集合初始化完成')
     }
@@ -784,13 +823,14 @@ async function saveEdit() {
 }
 
 /**
- * 重建集合。会丢弃该库已有向量，二次确认后再执行。
+ * 重建索引。会丢弃该库已有向量，二次确认后再执行。
+ * 与文档管理页同名（那里的按钮也叫「重建索引」），同一操作只用一个说法。
  */
 async function onRebuild(row: RagKbRow) {
   try {
     await ElMessageBox.confirm(
       `重建「${row.name}」的向量集合？已有切片向量会被清空（一期尚无入库数据，通常无影响）。`,
-      '重建集合',
+      '重建索引',
       { confirmButtonText: '重建', cancelButtonText: '取消', type: 'warning' }
     )
   } catch {
@@ -843,6 +883,15 @@ onMounted(load)
 
 .block-alert {
   margin-bottom: 12px;
+}
+
+/* 顶部错误条正文：原因 + 重试同排 */
+.block-alert__body {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  font-size: 12px;
 }
 
 .cell-stack {

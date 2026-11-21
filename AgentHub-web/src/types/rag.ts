@@ -33,9 +33,9 @@ export interface RagKbRow {
   updateTime?: string
 }
 
-/** 状态中文与标签样式，供列表/详情共用，避免两处写死字符串 */
+/** 状态中文与标签样式，供列表/详情共用，避免两处写死字符串；READY 统一叫「可检索」 */
 export const KB_STATUS_LABEL: Record<string, string> = {
-  READY: '就绪',
+  READY: '可检索',
   INIT_FAILED: '初始化失败',
   DISABLED: '已停用'
 }
