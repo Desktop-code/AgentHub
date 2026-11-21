@@ -70,9 +70,11 @@ import org.springframework.stereotype.Component;
 import java.util.ArrayList;
 import java.util.Comparator;
 import java.util.LinkedHashMap;
+import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
+import java.util.Set;
 
 import static com.agenthub.runtime.application.router.ChildOutcome.hasAnswer;
 import static com.agenthub.runtime.application.router.ChildOutcome.keyOf;
@@ -2329,6 +2331,54 @@ public class RouterTrialExecutor {
     /** 用户明确点名「按工作流 / 走方案」时写进依据的一句人话。 */
     private static final String EXPLICIT_KIND_REASON = "用户明确要求按该运行方式执行";
 
+    /** 方案内层按成员职责覆盖命中时写进依据的一句人话。 */
+    private static final String COVERED_REASON = "问句点名了该成员的职责范围，按方案成员分工直接派出";
+
+    /**
+     * 方案链路：这一问按成员名称 / 简介打中了哪几名候选。所属域：runtime。
+     *
+     * <p>口径复用 {@link EntrySchemePreference#coveredBy}（与入口 coveringScheme 同源），
+     * 这里只负责三件衔接工作：
+     * <ol>
+     *   <li>把当前候选拍成「成员名称 + 简介」并保持候选顺序；</li>
+     *   <li>只取子 Agent 候选参与判定——方案 / 工作流目标没有「成员职责」语义，
+     *       它们的说明是线路说明，按名称匹配容易误伤，留给判路由模型判断；</li>
+     *   <li>命中顺序就是派发顺序（上层再按 sortOrder 排一次，两者一致）。</li>
+     * </ol>
+     *
+     * <p>旧 {@code agent_route} 口径（{@code spec == null}）恒返回空表：那条链的候选本来就是
+     * 单兵池，没有「方案成员分工」这层语义，保持现网行为不变。
+     *
+     * @param spec       当前方案执行来源；可空（旧口径）
+     * @param userText   用户原问
+     * @param candidates 本轮可用候选
+     * @return 按候选顺序命中的子 Agent 候选；没有命中或非方案链路时为空表
+     */
+    private List<Candidate> coveredMembers(MaRunSpec spec, String userText, List<Candidate> candidates) {
+        if (spec == null || candidates == null || candidates.isEmpty() || userText == null || userText.isBlank()) {
+            return List.of();
+        }
+        // 只有子 Agent 候选参与：方案 / 工作流目标的说明是线路说明，不按成员名称匹配
+        List<Candidate> plain = new ArrayList<>();
+        List<EntrySchemePreference.MemberDuty> duties = new ArrayList<>();
+        for (Candidate candidate : candidates) {
+            if (candidate == null || candidate.agent() == null || candidate.delegatedTarget()) {
+                continue;
+            }
+            plain.add(candidate);
+            duties.add(new EntrySchemePreference.MemberDuty(
+                    candidate.agent().getName(), candidate.agent().getDescription()));
+        }
+        boolean[] hit = EntrySchemePreference.coveredBy(userText, duties);
+        List<Candidate> covered = new ArrayList<>();
+        for (int i = 0; i < hit.length; i++) {
+            if (hit[i]) {
+                covered.add(plain.get(i));
+            }
+        }
+        return covered;
+    }
+
     /**
      * 判断文本是否包含任一标记。
      *
@@ -2560,6 +2610,29 @@ public class RouterTrialExecutor {
                                              List<Candidate> candidates, long userId, long sessionId,
                                              long deadlineNanos, TrialProgress progress) {
         int maxN = runtime.maxRouteChildrenOrDefault();
+        /*
+         * 0) 方案链路先做「成员职责覆盖」：与入口 coveringScheme 同一套名称 / 简介口径，
+         *    只是这里数的是「当前方案有几名候选被打中」，不是「有几个方案能覆盖」。
+         *
+         * <p>为什么排在关键字与判定模型之前：本模板的候选是方案成员，route_key 多为
+         * {@code MA_KB_Policy} 这类英文键，对中文问句永远不命中；而判定模型会把握手式的
+         * 「整理要点 + 起草报告」收成「一件事的先后步骤」只派一位，把制度检索那一路丢掉。
+         * 命中几位就派几位，不再让模型决定条数。
+         *
+         * <p>命中 1 位也直接派：这一位已经是被问句明确对应的成员，再问一次模型只是多一次
+         * 出站调用与一次漂移机会。只有一位都没打中，才回到现网的关键字 → 判定模型。
+         *
+         * <p>只对方案链路生效（{@code spec != null}）；旧 {@code agent_route} 口径一行不变。
+         */
+        List<Candidate> covered = coveredMembers(spec, userText, candidates);
+        if (!covered.isEmpty()) {
+            List<RoutedIntent> coveredIntents = new ArrayList<>(covered.size());
+            for (Candidate hit : covered) {
+                // 每一块交付都按整句派：被覆盖的成员各自去处理自己那一块，子问题不再由模型切
+                coveredIntents.add(new RoutedIntent(hit, userText, COVERED_REASON));
+            }
+            return coveredIntents;
+        }
         // 关键字优先与并行模板同口径：本地命中就不必再花一次判路由调用
         List<AgentRoute> keywordHits = RouteKeywordPicker.matchAll(userText,
                 candidates.stream().map(Candidate::route).toList(),
@@ -2628,7 +2701,58 @@ public class RouterTrialExecutor {
         if (intents.isEmpty()) {
             throw new TrialFailure("判路由失败：模型给出的 route_key 均未匹配当前候选，请检查候选配置");
         }
-        return intents;
+        return keepRuleCovered(intents, coveredMembers(spec, userText, candidates));
+    }
+
+    /**
+     * 判定模型的结果过一遍规则校验：规则已命中的成员不能被模型丢掉。所属域：runtime。
+     *
+     * <p>覆盖判定已经在模型之前返回，走到说明<b>一位都没被规则打中</b>，正常不会有补齐。
+     * 这里仍做一次并集：同一套匹配在本轮内可能因为调用顺序变化（例如先跑了关键字）
+     * 而让规则命中与模型结果并存，此时以「规则命中的都要留下」为准，
+     * 模型额外给的目标也保留——两边都不丢，顺序仍由上层按 sortOrder 定。
+     *
+     * <p>不在候选里的 route_key 在上一步已按现网丢弃，这里不碰。
+     *
+     * @param intents 判定模型给出的意图（已映射回候选）
+     * @param covered 规则命中的候选
+     * @return 并集；规则集为空时原样返回模型结果
+     */
+    private static List<RoutedIntent> keepRuleCovered(List<RoutedIntent> intents, List<Candidate> covered) {
+        if (covered == null || covered.isEmpty()) {
+            return intents;
+        }
+        Set<Long> present = new LinkedHashSet<>();
+        for (RoutedIntent intent : intents) {
+            Long key = routeIdentity(intent.candidate());
+            if (key != null) {
+                present.add(key);
+            }
+        }
+        List<RoutedIntent> merged = new ArrayList<>(intents);
+        for (Candidate hit : covered) {
+            Long key = routeIdentity(hit);
+            if (key != null && present.add(key)) {
+                merged.add(new RoutedIntent(hit, "", COVERED_REASON));
+            }
+        }
+        return merged;
+    }
+
+    /**
+     * 候选的稳定身份：方案链路按 ma_candidate 主键，旧口径按子 Agent 主键。所属域：runtime。
+     *
+     * @param candidate 候选；可空
+     * @return 身份键；都取不到时为 null
+     */
+    private static Long routeIdentity(Candidate candidate) {
+        if (candidate == null) {
+            return null;
+        }
+        if (candidate.route() != null && candidate.route().getId() != null) {
+            return candidate.route().getId();
+        }
+        return candidate.agent() == null ? null : candidate.agent().getId();
     }
 
     /**
