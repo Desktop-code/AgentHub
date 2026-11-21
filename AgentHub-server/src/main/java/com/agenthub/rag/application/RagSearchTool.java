@@ -55,6 +55,17 @@ public class RagSearchTool {
      * 因此这里只给产品词，不出现主机、端口、异常码与中间件名；原始原因只进日志。
      */
     public static final String KB_UNAVAILABLE = "知识库暂时不可用，请稍后再试。";
+    /**
+     * 工具说明的<b>静态前半段</b>：只讲能力边界与结果语义，不含任何库名。
+     * <p>
+     * 注解里只能放常量，而库清单必须随当前 Agent 绑定即时生成，因此真正的出口描述
+     * 由 {@link KbSearchToolExposure#descriptionIfExposed} 在本段之后续拼清单；
+     * 本常量仍保留，供没有绑定的直调场景（单测 / 其它装配）与排障阅读使用。
+     */
+    public static final String TOOL_DESCRIPTION = "检索当前 Agent 已绑定的知识库，返回相关文档片段与来源。"
+            + "适用于制度、政策、FAQ、产品说明等知识型问题。"
+            + "无命中时会返回「未找到」，此时必须明确告知用户没有依据，禁止编造；"
+            + "返回「暂时不可用」时只需告知用户稍后再试，不要展开技术细节。";
 
     private final RagRetrievalAppService retrieval;
     private final AgentKbBindAppService binds;
@@ -94,10 +105,7 @@ public class RagSearchTool {
      * @return JSON 或中文说明
      */
     @Tool(name = "searchKnowledgeBase",
-            description = "检索当前 Agent 已绑定的知识库，返回相关文档片段与来源。"
-                    + "适用于制度、政策、FAQ、产品说明等知识型问题。"
-                    + "无命中时会返回「未找到」，此时必须明确告知用户没有依据，禁止编造；"
-                    + "返回「暂时不可用」时只需告知用户稍后再试，不要展开技术细节。")
+            description = RagSearchTool.TOOL_DESCRIPTION)
     public String searchKnowledgeBase(
             @ToolParam(name = "query", description = "检索问题或关键字") String query,
             @ToolParam(name = "topK", description = "无需填写；返回条数由知识库检索参数决定",
