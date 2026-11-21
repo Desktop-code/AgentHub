@@ -237,14 +237,18 @@
             </ConfigCard>
           </div>
         </div>
-        <!-- 网格卡片墙精简底栏（mode=grid）：总数常显 + 页码仅多页时出现，无「x条/页」「前往x页」 -->
+        <!--
+          网格卡片墙精简底栏（mode=grid）：总数常显 + 页码仅多页时出现，无「x条/页」「前往x页」。
+          网格这一层的实体是**供应商**（不是右栏的模型实例），总数文案必须与卡片一致，
+          否则「共 N 个模型」会和右栏实例数撞词，让人以为供应商数=实例数。
+        -->
         <TablePager
           v-if="viewMode === 'grid' && filteredProviders.length > 0"
           v-model:current="gridPage.current"
           v-model:size="gridPage.size"
           :total="filteredProviders.length"
           mode="grid"
-          :total-text="`共 ${filteredProviders.length} 个模型`"
+          :total-text="`共 ${filteredProviders.length} 个供应商`"
           pager-on-multi-page-only
           @change="onGridPageChange"
         />

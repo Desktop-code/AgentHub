@@ -25,12 +25,14 @@ public class ModelReferencePolicy {
 
     /**
      * 实例显式绑定凭证，被引用时不能删，否则探活无法解密。
+     * 文案带条数：前端虽然已按同一计数禁用删除，但直接调接口时也要能看懂为什么被拒。
      *
      * @param instanceCount 未删除实例数
      */
     public void assertCredentialDeletable(int instanceCount) {
         if (instanceCount > 0) {
-            throw new BizException(ErrorCode.BAD_REQUEST, "该凭证仍被模型实例引用，不能删除");
+            throw new BizException(ErrorCode.BAD_REQUEST,
+                    "该凭证已被 " + instanceCount + " 个模型实例引用，不能删除；可改用「重置 Key」替换密钥");
         }
     }
 

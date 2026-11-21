@@ -143,6 +143,13 @@ public class ModelCredentialAppService {
         }
     }
 
+    /**
+     * 单条凭证出参：掩码 + 引用它的实例数（0 表示可删）。
+     * 创建/更新/重置都走这里，保证「能不能删」的判断与列表同源。
+     *
+     * @param row 凭证
+     * @return 不含明文的出参
+     */
     private CredentialResp toResp(ModelCredential row) {
         CredentialResp resp = new CredentialResp();
         resp.setId(row.getId());
@@ -150,6 +157,7 @@ public class ModelCredentialAppService {
         resp.setName(row.getName());
         resp.setApiKeyMask(row.getApiKeyMask());
         resp.setStatus(row.getStatus());
+        resp.setInstanceCount(instances.countByCredentialId(row.getId()));
         resp.setCreateTime(row.getCreateTime());
         return resp;
     }

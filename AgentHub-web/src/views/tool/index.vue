@@ -186,14 +186,18 @@
             </ConfigCard>
           </div>
         </div>
-        <!-- 网格卡片墙精简底栏（mode=grid）：总数常显 + 页码仅多页时出现，无「x条/页」「前往x页」 -->
+        <!--
+          网格卡片墙精简底栏（mode=grid）：总数常显 + 页码仅多页时出现，无「x条/页」「前往x页」。
+          网格这一层的实体是**工具源**（BUILTIN / MCP），与空态「还没有工具源」同口径；
+          写「个工具」会和右栏工具项撞词。
+        -->
         <TablePager
           v-if="viewMode === 'grid' && filteredSources.length > 0"
           v-model:current="gridPage.current"
           v-model:size="gridPage.size"
           :total="filteredSources.length"
           mode="grid"
-          :total-text="`共 ${filteredSources.length} 个工具`"
+          :total-text="`共 ${filteredSources.length} 个工具源`"
           pager-on-multi-page-only
           @change="onGridPageChange"
         />
@@ -297,19 +301,19 @@
                   >
                     编辑
                   </el-button>
-                  <!-- 源内批量启停：仅 MCP 真源；提交中只让当前动作转圈，另一个禁用 -->
+                  <!-- 源内批量启停：仅 MCP 真源；取条数与提交中都禁用另一颗，避免并发重复提交 -->
                   <el-button
                     v-if="selected && selected.type === 'MCP' && user.hasPerm('tool:item:enable')"
-                    :loading="batchStatusAction === 1"
-                    :disabled="batchStatusAction !== null && batchStatusAction !== 1"
+                    :loading="batchStatusAction === 1 || batchPreparing === 1"
+                    :disabled="batchBusy && batchStatusAction !== 1"
                     @click="onBatchItemStatus(1)"
                   >
                     全部启用
                   </el-button>
                   <el-button
                     v-if="selected && selected.type === 'MCP' && user.hasPerm('tool:item:enable')"
-                    :loading="batchStatusAction === 0"
-                    :disabled="batchStatusAction !== null && batchStatusAction !== 0"
+                    :loading="batchStatusAction === 0 || batchPreparing === 0"
+                    :disabled="batchBusy && batchStatusAction !== 0"
                     @click="onBatchItemStatus(0)"
                   >
                     全部停用
@@ -413,21 +417,26 @@
                       </el-button>
                     </div>
                   </template>
-                <!-- 最左序号列固定窄宽；描述比名称长，多给一倍最小宽 -->
+                <!--
+                  列宽策略（table-layout=fixed）：名称 / 展示名 / 描述用 min-width 吃掉剩余宽度，
+                  按 170:130:240 分配 —— 描述最宽、名称次之，保证 `mcp__filesystem__read_file`
+                  这类调用名与说明一屏读得全；来源类型 / 状态 / 操作按内容给固定宽度，
+                  不参与均分，避免把主列挤瘦。合计约 900px，1440 宽下不横向滚动，更窄时才滚。
+                -->
                 <el-table-column v-bind="indexColumnProps" />
-                <el-table-column prop="name" label="名称" min-width="1" align="center" header-align="center" show-overflow-tooltip />
-                <el-table-column prop="title" label="展示名" min-width="1" align="center" header-align="center" show-overflow-tooltip />
-                <el-table-column label="描述" min-width="2" align="left" header-align="center" show-overflow-tooltip>
+                <el-table-column prop="name" label="名称" min-width="170" align="left" header-align="center" show-overflow-tooltip />
+                <el-table-column prop="title" label="展示名" min-width="130" align="left" header-align="center" show-overflow-tooltip />
+                <el-table-column label="描述" min-width="240" align="left" header-align="center" show-overflow-tooltip>
                   <template #default="{ row }">
                     <span class="item-desc">{{ itemDescription(row) }}</span>
                   </template>
                 </el-table-column>
-                <el-table-column label="来源类型" min-width="1" align="center" header-align="center">
+                <el-table-column label="来源类型" width="96" align="center" header-align="center">
                   <template #default="{ row }">
                     <el-tag size="small" effect="plain">{{ row.sourceType || '-' }}</el-tag>
                   </template>
                 </el-table-column>
-                <el-table-column label="状态" min-width="1" align="center" header-align="center">
+                <el-table-column label="状态" width="84" align="center" header-align="center">
                   <template #default="{ row }">
                     <StatusSwitch
                       v-if="user.hasPerm('tool:item:enable')"
@@ -437,7 +446,7 @@
                     <span v-else>{{ row.status === 1 ? '启用' : '停用' }}</span>
                   </template>
                 </el-table-column>
-                <el-table-column label="操作" min-width="1" align="center" header-align="center">
+                <el-table-column label="操作" width="116" align="center" header-align="center">
                   <template #default="{ row }">
                     <el-button v-if="user.hasPerm('tool:item:edit')" link type="primary" @click="openItem(row)">编辑</el-button>
                     <el-button v-if="user.hasPerm('tool:item:remove')" link type="danger" @click="removeItem(row)">删除</el-button>
@@ -466,7 +475,12 @@
       :preset-source-id="activeId > 0 ? activeId : undefined"
       @submit="saveItem"
     />
-    <SyncResultDialog v-model="syncDialog.open" :result="syncDialog.result" />
+    <SyncResultDialog
+      v-model="syncDialog.open"
+      :result="syncDialog.result"
+      :can-view-items="user.hasPerm('tool:item:list')"
+      @view-items="goToItemsAfterSync"
+    />
 
     <FlipGhost :snap="ghostSnap" :frame="ghostFrame" :landing="ghostLanding" />
   </div>
@@ -524,6 +538,10 @@ const itemLoading = ref(false)
 const syncing = ref(false)
 /** 源内批量启停：正在提交的动作（1 启用 / 0 停用 / null 空闲），用于按钮 loading 与互斥 */
 const batchStatusAction = ref<number | null>(null)
+/** 批量前正在统计该源工具项条数的动作：只让被点的那颗转圈，另一颗直接禁用 */
+const batchPreparing = ref<number | null>(null)
+/** 批量链路是否被占用（取条数或提交中）：用于互相禁用，避免重复点开两个确认框 */
+const batchBusy = computed(() => batchPreparing.value !== null || batchStatusAction.value !== null)
 const listError = ref('')
 /** 工具源列表失败的可读原因（错误块第二行） */
 const listErrorReason = ref('')
@@ -1049,19 +1067,45 @@ async function removeItem(row: ToolItemRow) {
  * 源内批量启停：对当前选中 MCP 源下全部未删除工具项一次性置为启用 / 停用。
  * 只改 status，不下架、不改 schema；操作前二次确认，避免误点把整源工具全部打开。
  *
+ * 确认文案必须写全三件事：作用对象（哪个源）、影响多少项（先查一次总数）、
+ * 以及「只改白名单、不影响已绑定的 Agent 调用参数」。原来的拼接文案读成
+ * 「所有工具项启用」，既没说数量也没说范围。
+ *
  * @param status 1 全部启用，0 全部停用
  */
 async function onBatchItemStatus(status: number) {
   const target = selected.value
-  if (!target || target.type !== 'MCP' || batchStatusAction.value !== null) {
+  if (!target || target.type !== 'MCP' || batchBusy.value) {
     return
   }
-  const label = status === 1 ? '全部启用' : '全部停用'
+  const verb = status === 1 ? '启用' : '停用'
+  // 先取该源下的工具项总数（size=1 只要 total）：确认框要给出真实条数，不能只写「所有」。
+  // 只有「能看工具项」的账号才发这次统计请求，避免只有启停权限时白挨一个 403 提示。
+  let count = 0
+  if (user.hasPerm('tool:item:list')) {
+    batchPreparing.value = status
+    try {
+      const { data } = await pageItems({ current: 1, size: 1, sourceId: target.id })
+      count = data.data.total ?? 0
+    } catch {
+      // 取数失败不拦操作：后端仍会按真实范围执行，这里退化成不写具体条数
+      count = 0
+    } finally {
+      batchPreparing.value = null
+    }
+  }
+  const scope = count > 0 ? `全部 ${count} 个工具项` : '全部工具项'
+  // 不用换行符拼接：MessageBox 默认按纯文本渲染，\n 会被折叠；拆成两句用句号分隔
+  const message =
+    `将把「${target.name}」下的${scope}一次性设为${verb}。` +
+    `影响范围仅限本工具源：只改白名单启停，不下架工具、不改参数与说明。` +
+    (status === 0 ? '停用后，已绑定这些工具的 Agent 将无法再调用它们。' : '')
   try {
-    await ElMessageBox.confirm(
-      `确定把「${target.name}」下所有工具项${label.replace('全部', '')}？仅影响本工具源。`,
-      label
-    )
+    await ElMessageBox.confirm(message, status === 1 ? '批量启用工具项' : '批量停用工具项', {
+      type: status === 0 ? 'warning' : 'info',
+      confirmButtonText: `确认${verb}`,
+      cancelButtonText: '取消'
+    })
   } catch {
     return
   }
@@ -1069,12 +1113,29 @@ async function onBatchItemStatus(status: number) {
   batchStatusAction.value = status
   try {
     const { data } = await changeAllItemStatus(target.id, status)
-    ElMessage.success(`${label}完成，共 ${data.data.updated} 项`)
+    ElMessage.success(`${verb}完成，共 ${data.data.updated} 项`)
     query.current = 1
     await loadItems()
     await loadBuiltinItemCounts()
   } finally {
     batchStatusAction.value = null
+  }
+}
+
+/**
+ * 同步结果弹窗的「查看工具项」下一步。
+ * 本次有新增时把状态筛到「停用」，新增项（id 最大、按 id 倒序排在最前）正好落在首屏；
+ * 没有新增就只收起筛选，回到该源当前全部工具项，不做无意义的过滤。
+ */
+async function goToItemsAfterSync() {
+  const created = syncDialog.result?.created ?? 0
+  query.keyword = ''
+  query.type = ''
+  query.status = created > 0 ? 0 : undefined
+  query.current = 1
+  await loadItems()
+  if (created > 0) {
+    ElMessage.info('已筛出停用的工具项，逐行打开开关即加入白名单')
   }
 }
 

@@ -16,5 +16,11 @@ public class CredentialResp {
     private String name;
     private String apiKeyMask;
     private Integer status;
+    /**
+     * 仍引用本凭证的未删除模型实例数。
+     * 前端据此在凭证行直接禁用「删除」并说明原因（有引用时只能重置 Key）；
+     * 与后端删除校验同源，避免用户点了才被拒。
+     */
+    private Integer instanceCount;
     private LocalDateTime createTime;
 }

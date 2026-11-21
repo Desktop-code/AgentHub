@@ -21,7 +21,10 @@
     <div class="center-body">
       <!-- ============ 左栏：对象导航 ============ -->
       <aside class="rail">
-        <!-- L1 只有一条系统级对象，红系描边 + 系统级 Tag 与下方 L2 区分 -->
+        <!--
+          L1 只有一条系统级对象。它是**类别**语义而非故障：只用中性灰阶与下方 L2 区分，
+          故障红留给真正的失败与危险操作，免得整页第一视觉信号是错的。
+        -->
         <button
           type="button"
           class="obj-card obj-l1"
@@ -30,7 +33,7 @@
         >
           <span class="obj-head">
             <span class="obj-title">平台全局约束 (L1)</span>
-            <el-tag type="danger" size="small" effect="dark">系统级</el-tag>
+            <el-tag type="info" size="small" effect="plain">系统级</el-tag>
           </span>
           <span class="obj-meta">
             <template v-if="l1CardRow">
@@ -48,11 +51,39 @@
           <span class="rail-gap-label">L2 用途模板</span>
         </div>
 
-        <div class="rail-head">
-          <span class="rail-count">固定 {{ templates.length }} 个用途槽位</span>
+        <!--
+          计数只在目录确实加载成功后才写：失败时整行不渲染，绝不出现「固定 0 个用途槽位」——
+          那等于把「没拉到」写成「就是 0 个」。已有旧数据时保留真实条数。
+        -->
+        <div v-if="!catalogError || templates.length" class="rail-head">
+          <span class="rail-count">
+            {{ loading && !templates.length ? '正在加载用途槽位…' : `固定 ${templates.length} 个用途槽位` }}
+          </span>
         </div>
 
         <div v-loading="loading" class="rail-list">
+          <!-- 目录失败且没有旧数据：错误块 + 重试顶替槽位列表，不与任何「0 个」文案同屏 -->
+          <LoadError
+            v-if="catalogError && !templates.length"
+            class="rail-error"
+            title="提示词目录加载失败"
+            :reason="catalogErrorReason"
+            :retrying="loading"
+            @retry="reloadAll"
+          />
+          <!-- 目录失败但已有旧数据：保留槽位卡片，上方给紧凑错误条 + 重试 -->
+          <LoadError
+            v-else-if="catalogError"
+            class="rail-error rail-error--inline"
+            title="提示词目录刷新失败"
+            :reason="catalogErrorReason"
+            :retrying="loading"
+            @retry="reloadAll"
+          />
+          <!-- 成功且用途槽位就是 0：给成功空态，绝不与失败共用一句话 -->
+          <p v-if="!catalogError && !loading && !templates.length" class="rail-empty">
+            后端没有返回任何用途槽位，请检查提示词用途枚举配置。
+          </p>
           <!--
             固定用途槽位：每个 purpose 恒一张卡，不再按 template_key 铺多卡。
             空槽也占位，点进去开的是该用途下唯一约定 key 的草稿。
@@ -338,12 +369,17 @@
         <p v-if="drawer.readonly" class="form-tip">已发布版本只读；改文案请点「新版本」开下一稿。</p>
       </el-form>
 
-      <!-- 只读查看无页脚；编辑态才留保存 / 发布。关抽屉走右上 × 或遮罩，由 before-close 统一拦截 -->
+      <!--
+        抽屉页脚：编辑态才出现取消 / 保存草稿 / 发布；只读查看保持原样（右上 × 关闭）。
+        取消在最左，与其余弹窗「取消在左、主操作在右」的范式一致；点了丢弃改动并关抽屉，不提交。
+        发布用 primary 而不是 success：绿在本系统只表状态（已发布 / 生效），
+        主操作必须全站同一个紫，否则同屏出现两个高权重按钮、主操作不唯一。
+      -->
       <template v-if="canSaveDraft || canPublishFromDrawer" #footer>
+        <el-button :disabled="saving || publishing" @click="onCancelDrawer">取消</el-button>
         <!-- 未改任何字段时不提供保存：没有草稿可提交，避免「点了没反应」 -->
         <el-button
           v-if="canSaveDraft"
-          type="primary"
           :loading="saving"
           :disabled="!drawerDirty"
           @click="onSave"
@@ -352,7 +388,7 @@
         </el-button>
         <el-button
           v-if="canPublishFromDrawer"
-          type="success"
+          type="primary"
           :loading="publishing"
           @click="onPublishFromDrawer"
         >
@@ -390,7 +426,8 @@ defineOptions({ name: 'PromptCenter' })
  * 1. 只消费既有 L1/L2 API + 一个左栏目录聚合接口；不接 PromptAssembler、不做变量替换、不调模型；
  * 2. 生效规则由后端发布逻辑保证（同 locale 的 L1、同 purpose+locale 的 L2 各至多一条生效），
  *    前端只负责展示「生效中」标识，不自行造第二套判定；
- * 3. Agent L3 覆盖 UI 不在本页，Soft 段仅标注「允许 Agent 配置者覆盖」。
+ * 3. Agent L3 覆盖 UI 不在本页，Soft 段仅标注「允许 Agent 配置者覆盖」；
+ * 4. 目录加载失败必须落成左栏「错误块 + 重试」，禁止把失败渲染成「固定 0 个用途槽位」。
  */
 import { computed, onMounted, reactive, ref } from 'vue'
 import { Plus, RefreshRight } from '@element-plus/icons-vue'
@@ -406,9 +443,11 @@ import {
   saveTemplateDraft
 } from '@/api/prompt'
 import PageHeader from '@/components/PageHeader.vue'
+import LoadError from '@/components/common/LoadError.vue'
 import { useRowIndexColumn } from '@/composables/listIndex'
 import { useFormDirty } from '@/composables/useFormDirty'
 import { confirmDiscardUnsaved } from '@/utils/unsavedConfirm'
+import { requestErrorText } from '@/utils/requestError'
 import { formatDateTime } from '@/utils/datetime'
 import { useUserStore } from '@/stores/user'
 import type {
@@ -479,6 +518,10 @@ const locale = ref('zh-CN')
 
 /** 左栏目录（L2 卡片来自这里，避免每个模板查一次列表） */
 const catalog = ref<PromptCatalog | null>(null)
+/** 目录加载失败短标题；空串表示当前没有失败（与空槽「0 个」严格互斥） */
+const catalogError = ref('')
+/** 目录失败的可读原因，供 LoadError 第二行 */
+const catalogErrorReason = ref('')
 /** L1 版本（含正文）：中栏列表与预览都要用，因此常驻内存 */
 const l1Versions = ref<PromptConstraint[]>([])
 
@@ -608,6 +651,21 @@ async function beforeDrawerClose(done: () => void) {
   }
 }
 
+/**
+ * 页脚「取消」：与「保存草稿」成对，点了丢弃本次改动并关闭抽屉，不提交任何请求。
+ * 有未保存改动时先走同一套确认；用户选「继续编辑」则留在抽屉里，什么都不改。
+ */
+async function onCancelDrawer() {
+  if (!drawer.readonly && drawerDirty.value) {
+    if (!(await confirmDiscardUnsaved('提示词草稿'))) {
+      return
+    }
+  }
+  // 回写快照再关：下次打开同一版本时看到的是已落库内容，不会残留上次被丢弃的草稿
+  drawerDirtyTracker.reset()
+  drawer.open = false
+}
+
 /** L1 卡片显示的版本：优先生效行（已发布且生效），其次最新（后端已按 version 倒序） */
 const l1CardRow = computed(
   () =>
@@ -648,10 +706,11 @@ const selectedKey = computed(() => selectedSlot.value?.templateKey ?? selectedPu
 /**
  * 中栏标题右侧的标签。恒返回一份：L1 是「系统级」，L2 是用途码。
  * 只用同一个 el-tag 渲染，切换对象时只换文案与配色，不会出现两个标签并存的瞬间。
+ * L1 用 info 而非 danger：系统级是类别，不是故障。
  */
 const headTag = computed<HeadTag>(() => {
   if (selectedKind.value === 'L1') {
-    return { text: '系统级', type: 'danger', effect: 'dark' }
+    return { text: '系统级', type: 'info', effect: 'plain' }
   }
   if (!selectedPurpose.value) {
     return { text: 'L2', type: 'info', effect: 'plain' }
@@ -804,16 +863,39 @@ function draftIdInDrawer() {
 
 /**
  * 首屏与切语言：目录 + L1 版本一起拉，随后默认选中 L1。
+ * <p>
+ * 两个请求分开收口：目录失败要落成左栏的「错误 + 重试」，
+ * 绝不能让 `templates` 变成空数组后把计数写成「固定 0 个用途槽位」。
+ * 任一失败都保留已有数据，不做清空。
  */
 async function reloadAll() {
   loading.value = true
+  catalogError.value = ''
+  catalogErrorReason.value = ''
   try {
-    const [catalogResp, l1Resp] = await Promise.all([
+    // allSettled：单边失败不拖垮另一边，各自按自己的失败态处理
+    const [catalogResult, l1Result] = await Promise.allSettled([
       getPromptCatalog({ locale: locale.value }),
       listConstraints({ locale: locale.value })
     ])
-    catalog.value = catalogResp.data.data
-    l1Versions.value = l1Resp.data.data || []
+    if (catalogResult.status === 'fulfilled') {
+      catalog.value = catalogResult.value.data.data
+    } else {
+      // 保留旧 catalog：失败时左栏仍显示上次拉到的槽位，只在上面给错误条
+      catalogError.value = '提示词目录加载失败'
+      catalogErrorReason.value = requestErrorText(catalogResult.reason)
+    }
+    if (l1Result.status === 'fulfilled') {
+      l1Versions.value = l1Result.value.data.data || []
+    }
+    // 目录失败时不按「空槽」清中栏：现有选中与版本列表保持原样，等重试成功再对齐；
+    // 但 L1 版本是另一个请求，拉到了就该刷新中栏，不能因为目录失败而装旧
+    if (catalogError.value) {
+      if (selectedKind.value === 'L1') {
+        applyL1Versions()
+      }
+      return
+    }
     // 目录是固定用途槽位，恒有 5 条；只有后端异常返回空才回落 L1
     if (selectedKind.value === 'L2' && !selectedSlot.value) {
       selectedKind.value = 'L1'
@@ -1302,10 +1384,21 @@ async function refreshL1() {
   await refreshCatalog()
 }
 
-/** 只刷左栏目录（L2 卡片与 L1 卡片摘要） */
+/**
+ * 只刷左栏目录（L2 卡片与 L1 卡片摘要）。
+ * 写操作已成功落库时，目录刷新失败不能让调用方以为保存失败：
+ * 这里吞掉异常、落成左栏错误条 + 重试，已有槽位卡片保持原样。
+ */
 async function refreshCatalog() {
-  const { data } = await getPromptCatalog({ locale: locale.value })
-  catalog.value = data.data
+  try {
+    const { data } = await getPromptCatalog({ locale: locale.value })
+    catalog.value = data.data
+    catalogError.value = ''
+    catalogErrorReason.value = ''
+  } catch (e) {
+    catalogError.value = '提示词目录加载失败'
+    catalogErrorReason.value = requestErrorText(e)
+  }
 }
 
 /**
@@ -1413,17 +1506,17 @@ onMounted(() => {
   background: #f4f3ff;
 }
 
-/* L1 系统级：红系描边与淡红底，和下方 L2 卡片视觉分层 */
+/* L1 系统级：只用中性灰阶区分层级，不借故障红（红在本系统专指失败 / 危险操作） */
 .obj-l1 {
-  border-color: #f3c6c6;
-  border-left: 3px solid #f56c6c;
-  background: #fef4f4;
+  border-color: var(--ah-border);
+  border-left: 3px solid var(--ah-text-faint);
+  background: #fafafa;
 }
 
 .obj-l1.is-selected {
-  border-color: #f56c6c;
-  border-left: 3px solid #f56c6c;
-  background: #fdeaea;
+  border-color: var(--ah-primary);
+  border-left: 3px solid var(--ah-primary);
+  background: #f4f3ff;
 }
 
 .obj-head {
@@ -1503,6 +1596,43 @@ onMounted(() => {
 
 .rail-list .obj-card + .obj-card {
   margin-top: 8px;
+}
+
+/* 左栏 272px：错误块纵向排，避免挤成一行；与模型/Skill 左栏同口径 */
+.rail-error {
+  min-height: 0;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 8px;
+  padding: 10px 12px;
+}
+
+/* 已有旧目录时的错误条：仍占满宽度，但不再撑高，槽位卡片紧随其后 */
+.rail-error--inline {
+  min-height: 0;
+  margin-bottom: 8px;
+  padding: 8px 10px;
+}
+
+.rail-error :deep(.load-error__text) {
+  flex: none;
+  width: 100%;
+}
+
+.rail-error :deep(.load-error__retry) {
+  margin-left: 0;
+}
+
+/* 成功但槽位确实为 0：给成功空态文案，与失败块互斥 */
+.rail-empty {
+  margin: 0;
+  padding: 16px;
+  border: 1px dashed var(--ah-divider);
+  border-radius: 6px;
+  color: var(--ah-text-secondary);
+  font-size: 12px;
+  line-height: 1.7;
+  text-align: center;
 }
 
 /* ============ 中栏 ============ */

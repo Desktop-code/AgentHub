@@ -16,8 +16,11 @@ import com.baomidou.mybatisplus.extension.plugins.pagination.Page;
 import org.springframework.stereotype.Repository;
 
 import java.time.LocalDateTime;
+import java.util.Collection;
+import java.util.HashMap;
 import java.util.LinkedHashSet;
 import java.util.List;
+import java.util.Map;
 import java.util.Optional;
 import java.util.Set;
 
@@ -145,6 +148,28 @@ public class ModelInstanceRepositoryImpl implements ModelInstanceRepository {
     @Override
     public int countByCredentialId(Long credentialId) {
         return count(new LambdaQueryWrapper<ModelInstanceEntity>().eq(ModelInstanceEntity::getCredentialId, credentialId));
+    }
+
+    /**
+     * {@inheritDoc}
+     * 一次 IN 查询取回 credential_id，再在内存分组计数；只取一列，避免把整行实例读出来。
+     */
+    @Override
+    public Map<Long, Integer> countByCredentialIds(Collection<Long> credentialIds) {
+        if (credentialIds == null || credentialIds.isEmpty()) {
+            return Map.of();
+        }
+        List<ModelInstanceEntity> rows = mapper.selectList(new LambdaQueryWrapper<ModelInstanceEntity>()
+                .select(ModelInstanceEntity::getCredentialId)
+                .in(ModelInstanceEntity::getCredentialId, credentialIds));
+        Map<Long, Integer> counts = new HashMap<>();
+        for (ModelInstanceEntity row : rows) {
+            if (row == null || row.getCredentialId() == null) {
+                continue;
+            }
+            counts.merge(row.getCredentialId(), 1, Integer::sum);
+        }
+        return counts;
     }
 
     /** {@inheritDoc} */
