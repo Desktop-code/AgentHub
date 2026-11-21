@@ -24,6 +24,7 @@ import { pendingAttachments } from '@/components/runtime/userMessageImages'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import {
   approveWorkbenchPlan,
+  cancelWorkbenchSession,
   clearWorkbenchSession,
   createWorkbenchSession,
   deleteWorkbenchSession,
@@ -50,6 +51,7 @@ import {
 import {
   advancePlanState,
   appendChoice,
+  appendError,
   appendFile,
   appendParticipantBegin,
   appendParticipantEnd,
@@ -92,7 +94,6 @@ import { groupSessionsForWorkbench, parseSessionTime } from '@/components/runtim
 import { rowShowsSpinner, sessionStillRunning, shouldResumeTurn } from '@/components/runtime/sessionProgress'
 import { friendlyWorkbenchError } from '@/utils/workbenchFriendlyError'
 import { isStreamAbort, shouldResumeAfterReturn } from '@/components/runtime/workbench/workbenchLeave'
-import { workbenchRouteBadge } from '@/utils/workbenchRouteBadge'
 import type { SessionGroup } from '@/components/runtime/trial/sessionGroup'
 import type { ChatTurn, TrialEvent, TrialPlanView, TrialSession } from '@/types/runtime'
 import type { WorkbenchConfig, WorkbenchRouteOption, WorkbenchRouteOptions } from '@/types/workbench'
@@ -132,13 +133,35 @@ export function useWorkbenchChat(pageActive: Ref<boolean>) {
   const turns = ref<ChatTurn[]>([])
   const history = ref<TrialSession[]>([])
   /**
+   * 左栏「把当前行滚进视野」的信号。
+   *
+   * <p>为什么不用 activeId 变化触发：清空一条旧会话时 activeId 不变，
+   * 变的是它被重排到「今天」首条；父级只在确实需要跟随位置时自增这个令牌，
+   * 子组件据此滚到选中行，不把普通切会话也变成一次强制滚动。
+   */
+  const historyRevealToken = ref(0)
+  /**
    * 本地已知会话（id → 会话）。服务端列表取不到当前行时用它补行：
    * 本轮进行中时后端还没回写轮次/预览，列表接口看起来像空壳。
    */
   const knownSessions = ref<Map<number, TrialSession>>(new Map())
   const pageError = ref('')
   const sending = ref(false)
+  /**
+   * 本次在途轮是否已被用户停止。
+   * true 时后续 SSE 帧不再追加过程/正文，避免「已中断」之后还在长出新内容。
+   */
+  const halted = ref(false)
+  /** 停止请求进行中：防止连点发出多次 cancel，成功后由 halted 接管 */
+  const stopping = ref(false)
   const historyLoading = ref(false)
+  /**
+   * 已落库会话的正文是否仍在取（点开历史 / 首屏恢复）。
+   *
+   * <p>与 historyLoading 分开：后者是左栏列表，这个是右栏正文。
+   * 主列据此在加载期间不出空态标题，输入条也不提示「请先新建会话」。
+   */
+  const sessionLoading = ref(false)
   /** 已加载到的页码；首屏重置为 1，追加成功才前进。 */
   const historyCurrent = ref(1)
   /** 服务端全量条数（COUNT），用于判断还有没有下一页。 */
@@ -150,6 +173,13 @@ export function useWorkbenchChat(pageActive: Ref<boolean>) {
   const historyHasMore = computed(() => historyLoadedRows.value < historyTotal.value)
   /** 前端临时「新对话」：未发首问前可输入；不占库。 */
   const draftReady = ref(false)
+  /**
+   * 草稿代次：每点一次「+ 新建对话」自增。
+   *
+   * <p>临时会话 id 恒为 -1，单靠 id 无法区分两次新建；输入草稿与事件回放都靠这个
+   * 代次隔离，避免把上一份未发送内容带进新的草稿会话。
+   */
+  const draftToken = ref(0)
   /** 计划批准 / 取消请求进行中。避免连点消费同一份计划。 */
   const approving = ref(false)
   /** 编排根下当前待批的子专家计划；同一根同时只允许一个。 */
@@ -200,6 +230,21 @@ export function useWorkbenchChat(pageActive: Ref<boolean>) {
     () => ready.value && (draftReady.value || (!!session.value && session.value.status !== 'CANCELLED'))
   )
 
+  /**
+   * 工作台运行中是否可停止。
+   *
+   * <p>必须已经有真实会话 id（草稿还没创建会话时后端没有可中断的对象）；
+   * 已经成功停止后置灰，避免对同一轮重复发停止请求。
+   */
+  const canStopRun = computed(
+    () =>
+      sending.value &&
+      !halted.value &&
+      !stopping.value &&
+      !!session.value &&
+      !isTempSession(session.value)
+  )
+
   /** 不能发送时的说明。未就绪优先于「会话已取消」。 */
   const blockedHint = computed(() => {
     if (!ready.value) {
@@ -211,8 +256,36 @@ export function useWorkbenchChat(pageActive: Ref<boolean>) {
     return ''
   })
 
-  /** 页头主标题：当前会话标题，草稿与空态统一显示「新对话」。 */
-  const title = computed(() => (session.value ? sessionTitle(session.value) : '新对话'))
+  /**
+   * 右栏正文是否仍在加载。
+   *
+   * <p>三种来源：就绪配置还没回来（还判断不出该落到哪条会话）、首屏还在拉历史列表、
+   * 已落库会话正在取事件。主列据此先不出空态、输入条先不提示「请先新建会话」；
+   * 等状态落定后再决定显示什么。
+   * 草稿（draftReady）与已经拿到快照 / 在途流的会话都不算加载：正文马上就有。
+   */
+  const threadLoading = computed(
+    () =>
+      sessionLoading.value ||
+      ((configLoading.value || historyLoading.value) && !session.value && !draftReady.value)
+  )
+
+  /**
+   * 主列页标题（`<h1>` 文本）。
+   *
+   * <p>口径：已落库会话直接用现成会话名（与左栏行同一个 {@link sessionTitle}，
+   * 首轮标题未生成时也同为「新对话」，两边永远一致）；还没有会话、或正在新建草稿时
+   * 用朴素页标题「对话」——不编展示名，也不另写口号。
+   *
+   * <p>改名接口回写 `session` 后本 computed 随之失效，主列标题与左栏行同一帧更新。
+   */
+  const title = computed(() => {
+    const current = session.value
+    if (!current || isTempSession(current)) {
+      return '对话'
+    }
+    return sessionTitle(current)
+  })
 
   /** 左栏分组：临时草稿钉最前，仍在执行的本地会话补行，其余按日期分组。 */
   const historyGroups = computed<SessionGroup[]>(() => {
@@ -328,17 +401,7 @@ export function useWorkbenchChat(pageActive: Ref<boolean>) {
   /** 当前沿用的 route_key；只用于 @ 列表标记选中项，不渲染成文本 */
   const currentRouteKey = computed(() => (routes.value?.currentRouteKey || '').trim())
 
-  /**
-   * 底部徽标：**只反映用户本次 @ 了谁**。
-   *
-   * <p>为什么不能再按「当前沿用线路（sticky）」写「已指定××」：点选续作或普通问答之后，
-   * 会话里会一直留着上一位专家，于是这行一直显示「已指定后端技术专家」，
-   * 用户以为下一句被钉死、不再走入口。实际上下一条新问题本来就走入口判定，
-   * 只有 @ 才是真的强制指定。取消 @ 后这行立刻回到「自动匹配专家」。
-   */
-  const gatewayBadgeText = computed(() =>
-    workbenchRouteBadge(pendingForceRoute.value?.agentName, routeInvalid.value)
-  )
+  // 底部输入区不再展示「自动匹配专家」徽标：每轮真实路由改由 ChatPanel 顶部的常驻路由行露出。
 
   /** 是否允许打开 @ 面板：就绪、不在发送中、有候选 */
   const canPickRoute = computed(
@@ -690,6 +753,10 @@ export function useWorkbenchChat(pageActive: Ref<boolean>) {
       return
     }
     stopResume()
+    // 草稿没有要取的正文：立刻离开加载态，空态就是它的正常样子
+    sessionLoading.value = false
+    // 每次新建都是一份新草稿：代次自增，输入槽与事件回放都不会串到上一份
+    draftToken.value += 1
     session.value = sessionStub(TEMP_SESSION_ID, Date.now())
     turns.value = []
     childPending.value = null
@@ -714,6 +781,8 @@ export function useWorkbenchChat(pageActive: Ref<boolean>) {
     pageError.value = ''
     pendingForceRoute.value = null
     if (id === TEMP_SESSION_ID) {
+      // 草稿没有要取的正文：立刻离开加载态，空态就是它的正常样子
+      sessionLoading.value = false
       if (!isTempSession(session.value)) {
         startDraft()
       }
@@ -749,6 +818,8 @@ export function useWorkbenchChat(pageActive: Ref<boolean>) {
 
     // 1) 本页还在消费这一轮：直接接上，禁止再用 events 拍平
     if (live && !live.finished) {
+      // 正文已在内存里，不亮加载态，也不该先闪空态
+      sessionLoading.value = false
       turns.value = live.turns
       syncSessionFromTurns(id, live.turns)
       return
@@ -759,6 +830,8 @@ export function useWorkbenchChat(pageActive: Ref<boolean>) {
     if (snapshot) {
       turns.value = snapshot
     }
+    // 没快照就要等事件接口：这期间主列 / 输入条都先按「加载中」处理
+    sessionLoading.value = !snapshot
 
     try {
       const fetched = await fetchResumeEvents(id)
@@ -778,8 +851,9 @@ export function useWorkbenchChat(pageActive: Ref<boolean>) {
       }
       syncSessionFromEvents(events)
       // 有内存增量 = 本轮确实在跑且能看到过程：直接进续订。
-      // 会话已被收成终态时不再续：重启后的取消行要能看到已有消息，不能一直「正在作答」
-      if (fetched.live && events.length && sessionStillRunning(progressStatus(id))) {
+      // 会话已被收成终态、或本轮已留下「已中断」闭环时不再续：
+      // 停止后刷新不能把最后一张 RUNNING 快照当成还在跑，必须落到中断终态。
+      if (fetched.live && events.length && sessionStillRunning(progressStatus(id)) && !stoppedClosure(events)) {
         beginResume(id, events, false, true)
         return
       }
@@ -801,6 +875,75 @@ export function useWorkbenchChat(pageActive: Ref<boolean>) {
       if (token === openToken) {
         pageError.value = '会话事件加载失败'
       }
+    } finally {
+      // 只有仍是最后一次打开时才收加载态：连点两条会话时，旧请求不能替新请求收尾
+      if (token === openToken) {
+        sessionLoading.value = false
+      }
+    }
+  }
+
+  /**
+   * 把当前在途轮标成「已中断」，保留已收到的过程与正文。
+   *
+   * <p>只处理仍在流式的助手轮：已经 done / error 的轮不再补标记；
+   * 错误块走 {@link appendError}，同一句不会重复插。
+   */
+  function markHaltedTurn() {
+    for (let i = turns.value.length - 1; i >= 0; i -= 1) {
+      const turn = turns.value[i]
+      if (turn.role !== 'assistant') {
+        continue
+      }
+      if (turn.status !== 'streaming') {
+        return
+      }
+      turn.status = 'error'
+      turn.phase = 'error'
+      appendError(turn, '已中断')
+      // 触发整列重算：状态条 / 停止按钮 / 重试入口都看这一轮
+      turns.value = [...turns.value]
+      return
+    }
+  }
+
+  /**
+   * 停止正在运行的这一轮：调用与服务端一致的取消接口，由后端中断模型/工具。
+   *
+   * <p>为什么不在前端 abort SSE 冒充停止：abort 只断开接收，后端还在跑；
+   * 再把页签当成失活续订，反而会把这一轮重新接回来。这里只发 cancel。
+   *
+   * <p>成功：保留已收到的过程与正文，本轮末尾标「已中断」；
+   * 失败：不动时间线、不假装停掉，说明原因后仍可再次点停止。
+   */
+  async function stopRun() {
+    const current = session.value
+    if (!sending.value || stopping.value || !current || isTempSession(current)) {
+      return
+    }
+    const id = current.id
+    stopping.value = true
+    try {
+      await cancelWorkbenchSession(id)
+      // 请求返回时这一轮可能刚好自己结束：不再补「已中断」，避免误标成功轮
+      if (!sending.value) {
+        return
+      }
+      halted.value = true
+      pageError.value = ''
+      markHaltedTurn()
+      // 把已收口的中断态写进刷新前快照：下次首屏先按「已停」画，不等事件接口回来再改口。
+      // 停止是低频操作，强制同步写一次，避免用户立刻刷新时还读到旧的 streaming 快照
+      saveSnapshot(id, true)
+    } catch (error) {
+      // 失败时保持 sending=true、halted=false：按钮仍可点，不假装已经停掉
+      if (!sending.value) {
+        return
+      }
+      const raw = error instanceof Error && error.message ? error.message.trim() : ''
+      pageError.value = raw ? `停止失败：${raw}` : '停止失败，请稍后重试'
+    } finally {
+      stopping.value = false
     }
   }
 
@@ -823,6 +966,7 @@ export function useWorkbenchChat(pageActive: Ref<boolean>) {
     }
     const runId = ++runSeq
     sending.value = true
+    halted.value = false
     pageError.value = ''
     // 一次点击生成一次幂等键：网络重试 / 浏览器重放同一请求只真正跑一轮
     const idempotencyKey = newTrialIdempotencyKey()
@@ -903,7 +1047,8 @@ export function useWorkbenchChat(pageActive: Ref<boolean>) {
               routes.value = undefined
               live.status = 'error'
               live.phase = 'error'
-              pageError.value = '指定线路失败，请 @ 重选或直接发送由系统匹配'
+              // 失败落在本轮助手块里（同一轮只在一处完整说明），不再另起顶部横幅
+              appendError(live, '指定线路失败，请 @ 重选或直接发送由系统匹配')
               return
             }
           } else {
@@ -912,7 +1057,8 @@ export function useWorkbenchChat(pageActive: Ref<boolean>) {
         } catch (error) {
           live.status = 'error'
           live.phase = 'error'
-          pageError.value = messageOf(error, '新建会话失败')
+          // 建会话失败也落在本轮：保留原话（模型 / 路由类可行动提示），并提供重试
+          appendError(live, messageOf(error, '新建会话失败'))
           // 新建失败常见原因是默认接待被停用：重读一次就绪状态，让横幅与输入禁用及时生效
           void loadConfig()
           return
@@ -963,11 +1109,11 @@ export function useWorkbenchChat(pageActive: Ref<boolean>) {
           await refreshSessionTitle(sessionId)
           scheduleTitleRefresh(sessionId)
         }
-      } else if (live.status === 'streaming') {
+      } else if (live.status === 'streaming' && !halted.value) {
         live.status = 'error'
         live.phase = 'error'
-        if (!pageError.value) {
-          pageError.value = '连接已结束'
+        if (!live.blocks.some((block) => block.kind === 'error')) {
+          appendError(live, '连接已结束')
         }
       }
       if (!superseded) {
@@ -981,7 +1127,9 @@ export function useWorkbenchChat(pageActive: Ref<boolean>) {
       }
       live.status = 'error'
       live.phase = 'error'
-      pageError.value = messageOf(error, '发送失败')
+      if (!halted.value && !live.blocks.some((block) => block.kind === 'error')) {
+        appendError(live, messageOf(error, '发送失败'))
+      }
     } finally {
       if (streamAbort === controller) {
         streamAbort = undefined
@@ -1028,6 +1176,7 @@ export function useWorkbenchChat(pageActive: Ref<boolean>) {
     const sessionId = current.id
     const runId = ++runSeq
     sending.value = true
+    halted.value = false
     pageError.value = ''
     childPending.value = null
     // 手动续作接管展示：停轮询，这一轮改由 SSE 驱动
@@ -1114,7 +1263,9 @@ export function useWorkbenchChat(pageActive: Ref<boolean>) {
       activeParticipantName: '',
       activeKind: '',
       activeDepth: undefined as number | undefined,
-      persisted: false
+      persisted: false,
+      /** 是否已经给本轮写过失败说明：onError / 连接中断都只落一处 */
+      errorReported: false
     }
     const handlers: TrialStreamHandlers = {
       onPhase: (phase) => {
@@ -1266,6 +1417,10 @@ export function useWorkbenchChat(pageActive: Ref<boolean>) {
         touchSnapshot()
       },
       onAssistant: (text) => {
+        // 用户已停止：不再把停止之后到达的正文追加到「已中断」的轮上
+        if (halted.value) {
+          return
+        }
         if (live.phase !== 'done') {
           live.phase = 'answering'
         }
@@ -1276,13 +1431,25 @@ export function useWorkbenchChat(pageActive: Ref<boolean>) {
         state.persisted = true
         live.status = payload.status === 'FAILED' ? 'error' : 'done'
         live.phase = payload.status === 'FAILED' ? 'error' : 'done'
+        if (halted.value) {
+          // 停止后服务端还会回一帧「已中断」终态：本轮已标好，不再补失败文案
+          childPending.value = null
+          sending.value = false
+          // 本轮的压制到此结束，续作 / 下一轮重新按正常路径处理
+          halted.value = false
+          return
+        }
         if (payload.planPending) {
           live.planPending = true
           live.status = 'done'
           live.phase = 'done'
         }
-        // 根本轮已出终答（或整轮失败）：子计划不可能还在待批
         childPending.value = null
+        // 失败轮在助手块里给一条完整说明；onError 已给过时不重复
+        if (payload.status === 'FAILED' && !state.errorReported) {
+          appendError(live, friendlyWorkbenchError(payload.errorSummary || '本轮执行失败'))
+          state.errorReported = true
+        }
         /*
          * 输入立刻放开（P0-C2）：收尾的历史对齐还要几个请求，不能让它挡着「问下一句」。
          * 上一轮的收尾若与新一句撞车，由 runSeq 判定为「已被接管」，不会再回写 turns。
@@ -1292,18 +1459,37 @@ export function useWorkbenchChat(pageActive: Ref<boolean>) {
       onError: (message) => {
         live.status = 'error'
         live.phase = 'error'
-        // SSE 硬核不可用也走友好映射，避免红条打出「没有可用的对话模型」原文
-        pageError.value = friendlyWorkbenchError(message || '')
         childPending.value = null
+        // 已停止的轮不再追加第二条失败说明（避免与「已中断」打架）
+        if (!halted.value) {
+          appendError(live, friendlyWorkbenchError(message || '本轮执行失败'))
+        }
+        // 无论是否被停止，onDone 都不再补第二条
+        state.errorReported = true
       }
     }
     return { handlers, state }
   }
 
-  /** 清空当前会话事件，保留会话与标题。 */
-  async function clearCurrent() {
-    const current = session.value
-    if (!current || isTempSession(current) || sending.value) {
+  /**
+   * 清空当前会话事件：删事件、重置轮次，会话与标题保留，之后可以继续发送。
+   *
+   * <p>两个入口（左栏「清空当前」与主列标题旁菜单）共用本函数，结果必须一致：
+   * 右栏时间线清空、当前会话换成服务端返回的清空态、左栏同一行原位更新。
+   *
+   * <p>为什么清空要丢掉本轮的流式登记与刷新快照：清空后服务端没有事件了，
+   * 若本地还留着 finished 的流或 sessionStorage 快照，下次打开这条会话会先把
+   * 已清掉的旧内容铺出来，再被空事件拍平 —— 看起来就是「清空没生效」。
+   *
+   * @param target 触发入口持有的会话（标题菜单显式传入）；缺省或形状不符时
+   *               取当前会话，避免把事件对象误当成会话去清
+   */
+  async function clearCurrent(target?: TrialSession) {
+    // 左栏按钮 emit 不带参（Vue 以零参调用），标题菜单显式传会话对象；
+    // 这里按 id 形状兜底，避免把事件对象误当成会话去清。
+    const current = target && typeof target.id === 'number' ? target : session.value
+    // 闸门与两个入口按钮的置灰条件一致：发送 / 续订中不改会话，清空也会被服务端拒绝
+    if (!current || isTempSession(current) || sending.value || resuming.value) {
       return
     }
     try {
@@ -1315,18 +1501,100 @@ export function useWorkbenchChat(pageActive: Ref<boolean>) {
     }
     try {
       const { data } = await clearWorkbenchSession(current.id)
-      session.value = data.data
+      // 0 轮次即无消息：后端重置轮次时不动 last_msg_preview 列，若原样收下，
+      // 左栏会把已清掉的正文继续当成「最后一条消息」。这里统一抹掉预览，
+      // 让 session / 登记表 / 列表行三处口径一致；标题仍用服务端返回值，不另编。
+      const cleared = data.data
+        ? { ...data.data, messageCount: 0, lastMsgPreview: '' }
+        : undefined
+      // 清空后这一轮不可能还在跑：停掉续订，丢掉本地流登记与刷新快照（dropLive 一并清快照）。
+      // 否则下次重进这条会话会先把已清掉的旧内容铺出来，再被空事件拍平。
+      stopResume()
+      dropLive(current.id)
       turns.value = []
       pageError.value = ''
       childPending.value = null
       pendingForceRoute.value = null
+      detached.value = false
+      // 清空后没有可中断 / 已中断的轮次：不把上一轮的停止态带进空时间线
+      halted.value = false
+      if (cleared) {
+        session.value = cleared
+        rememberKnown(cleared)
+      }
       // 清空不影响沿用线路，但一次手动换线的强制标记会被后端清掉：重读以对齐
       void loadRoutes(current.id)
+      // 先按服务端刷第 1 页（时间 / 分组对齐），再把清空态写回同一行。
+      // 顺序不能反：refreshHistoryHead 的合并规则会为「本轮执行中」保护本地补过的
+      // 轮次与预览（取较大值、空值回落本地），清空后服务端是 0 轮次，这些保护
+      // 恰好会把行「护」回清空前的老样子。
       await refreshHistoryHead()
+      if (cleared) {
+        applyClearedRow(cleared)
+      }
+      // 行可能刚被移到「今天」第一条：让左栏把选中行滚进视野，避免时间变了、列表还停在旧位置
+      historyRevealToken.value += 1
       ElMessage.success('已清空当前会话')
     } catch {
       pageError.value = '清空失败'
     }
+  }
+
+  /**
+   * 把清空后的会话写回左栏同一行与本地登记表。
+   *
+   * <p>为什么不能只靠 refreshHistoryHead：它按 id 合并时会保护本地已按事件补齐的
+   * 轮次 / 预览，清空后服务端是 0 轮次，这些保护会让行保持旧数据。这里以清空接口
+   * 返回的会话为准显式覆盖，保证「左栏按钮」与「标题旁菜单」拿到同一结果。
+   *
+   * <p>只替换清空会变的字段（轮次 / 预览 / 状态 / 时间），标题保持原样：清空的
+   * 产品语义是保留会话与标题，之后可以继续发送。
+   *
+   * @param cleared 清空接口返回并归一化过的会话（轮次 0、预览已抹空）
+   */
+  function applyClearedRow(cleared: TrialSession) {
+    const index = history.value.findIndex((row) => row.id === cleared.id)
+    if (index >= 0) {
+      // 保留行上已有的本地展示字段（agentName 等），其余以服务端清空态为准
+      const row = {
+        ...history.value[index],
+        ...cleared
+      }
+      /*
+       * 时间变了还要重排：分组只按更新时间分桶，组内顺序沿用数组顺序。
+       * 只改 updateTime 不移动行，就会出现「行已显示刚刚，却仍在今天末尾」。
+       * 位置按服务端时间落到第一条比它旧的行之前；时间未更新（stamp=0）时原位不动，
+       * 不在前端伪造「刚刚」，也不把它硬拽进「今天」。
+       */
+      const stamp = parseSessionTime(row.updateTime || row.startTime)
+      history.value.splice(index, 1)
+      if (stamp > 0) {
+        const insertAt = history.value.findIndex((item) => {
+          const other = parseSessionTime(item.updateTime || item.startTime)
+          return other > 0 && other <= stamp
+        })
+        if (insertAt >= 0) {
+          history.value.splice(insertAt, 0, row)
+        } else {
+          history.value.push(row)
+        }
+      } else {
+        history.value.splice(index, 0, row)
+      }
+    }
+    const existing = knownSessions.value.get(cleared.id)
+    if (!existing) {
+      return
+    }
+    // patchKnown 对空预览会回落旧值，清空必须真正抹掉，因此直接替换登记表条目
+    const next = new Map(knownSessions.value)
+    next.set(cleared.id, {
+      ...existing,
+      ...cleared,
+      messageCount: 0,
+      lastMsgPreview: ''
+    })
+    knownSessions.value = next
   }
 
   /** 左栏三点菜单：重命名 / 删除。 */
@@ -1644,6 +1912,40 @@ export function useWorkbenchChat(pageActive: Ref<boolean>) {
     return knownSessions.value.get(id)?.status
   }
 
+  /**
+   * 本轮是否已经留下「用户已停止」的闭环。
+   *
+   * <p>为什么不能只看 session.status：工作台会话在多轮期间一直是 RUNNING，
+   * 用户停止后也不会把整条会话改成 CANCELLED（要能接着聊）。停止必须落一条
+   * 「已中断」闭环事件，刷新 / 回放据此判定这一轮已经结束；只看状态会把
+   * 已停止的一轮重新续订成运行中。
+   *
+   * <p>只认最后一条 user 之后的 error：上一轮的停止说明不能挡住下一轮。
+   *
+   * @param events 已落库事件与内存快照的合并结果
+   * @return true 表示这一轮已由用户停止
+   */
+  function stoppedClosure(events: TrialEvent[]): boolean {
+    const ordered = [...events].sort((a, b) => (a.seq ?? 0) - (b.seq ?? 0))
+    let lastUser = -1
+    for (let i = 0; i < ordered.length; i += 1) {
+      if (ordered[i].eventType === 'user') {
+        lastUser = i
+      }
+    }
+    for (let i = lastUser + 1; i < ordered.length; i += 1) {
+      const item = ordered[i]
+      if (item.eventType !== 'error') {
+        continue
+      }
+      const text = `${item.contentText || ''} ${item.summary || ''}`
+      if (/已?中断|已?停止|已?取消/.test(text)) {
+        return true
+      }
+    }
+    return false
+  }
+
   /** 是否需要续订：终态不续；其余仍是末尾未收尾且不过旧，或「刚建会话、事件还没落库」。 */
   function shouldResume(id: number, events: TrialEvent[]) {
     const current = session.value
@@ -1933,6 +2235,8 @@ export function useWorkbenchChat(pageActive: Ref<boolean>) {
     turns.value = []
     pageError.value = ''
     draftReady.value = false
+    // 右栏已清空，不存在待取的正文
+    sessionLoading.value = false
     childPending.value = null
   }
 
@@ -1979,16 +2283,22 @@ export function useWorkbenchChat(pageActive: Ref<boolean>) {
     return value || '新对话'
   }
 
-  /** 左栏副标题：预览 + 相对时间。 */
+  /**
+   * 左栏副标题：预览 + 相对时间。
+   *
+   * <p>0 轮次表示这条会话当前没有消息（新建未提问，或刚被「清空当前」清空）：
+   * 后端重置轮次时不会清 `last_msg_preview` 列，若照旧展示，清空后列表看起来
+   * 一字未变，甚至把已经删掉的正文继续当作「最后一条消息」。无消息时只给时间。
+   */
   function sessionSubtitle(item: TrialSession) {
-    const preview = (item.lastMsgPreview || '').trim()
+    const preview = (item.messageCount ?? 0) > 0 ? (item.lastMsgPreview || '').trim() : ''
     const time = formatRelativeTime(item.updateTime || item.startTime)
     return preview ? `${preview} · ${time}` : time
   }
 
-  /** 行悬停提示：标题 + 完整预览。 */
+  /** 行悬停提示：标题 + 完整预览（口径与副标题一致，无消息时不展示旧预览）。 */
   function sessionTooltip(item: TrialSession) {
-    const preview = (item.lastMsgPreview || '').trim()
+    const preview = (item.messageCount ?? 0) > 0 ? (item.lastMsgPreview || '').trim() : ''
     const title = sessionTitle(item)
     return preview ? `${title}\n${preview}` : title
   }
@@ -2099,7 +2409,8 @@ export function useWorkbenchChat(pageActive: Ref<boolean>) {
       if (!pageActive.value || sending.value || session.value?.id !== current.id) {
         return
       }
-      if (live || shouldResume(current.id, events)) {
+      // 已停止的一轮同样不续：内存快照可能还在收尾，但闭环说明已经落下
+      if ((live && !stoppedClosure(events)) || shouldResume(current.id, events)) {
         // keepCurrent：第一拍不拍平本地气泡
         beginResume(current.id, events, true, live)
         return
@@ -2154,8 +2465,10 @@ export function useWorkbenchChat(pageActive: Ref<boolean>) {
     pageError,
     canSend,
     blockedHint,
+    threadLoading,
     title,
     historyGroups,
+    historyRevealToken,
     historyLoading,
     historyHasMore,
     historyLoadingMore,
@@ -2167,15 +2480,17 @@ export function useWorkbenchChat(pageActive: Ref<boolean>) {
     atRouteCandidates,
     routeSwitching,
     pendingForceRoute,
-    gatewayBadgeText,
     canPickRoute,
     showRouteChip,
     canSwitchRoute,
+    canStopRun,
+    draftToken,
     init,
     newSession,
     openHistory,
     loadMoreHistory,
     send,
+    stopRun,
     chooseOption,
     switchRoute,
     pickRoute,

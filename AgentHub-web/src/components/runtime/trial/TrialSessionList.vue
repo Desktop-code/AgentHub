@@ -77,8 +77,12 @@
           :key="item.id"
           class="session-item"
           :class="{ 'is-active': item.id === activeId, 'is-running': isRunning(item) }"
+          tabindex="0"
+          :aria-current="item.id === activeId ? 'true' : undefined"
           :title="tooltipOf(item)"
           @click="emit('open', item.id)"
+          @keydown.enter="onRowKeydown($event, item.id)"
+          @keydown.space="onRowKeydown($event, item.id)"
         >
           <div class="session-main">
             <span class="session-name">{{ titleOf(item) }}</span>
@@ -160,6 +164,11 @@ const props = withDefaults(
     sending: boolean
     /** 当前会话是否在续订中 */
     resuming: boolean
+    /**
+     * 「把选中行滚进视野」的信号：值变化时滚一次，缺省不滚。
+     * 与 activeId 分开，避免普通切会话也强制滚动；清空重排后才由父级自增。
+     */
+    revealToken?: number
     /** 历史列表加载中（第 1 页 / 重置） */
     historyLoading: boolean
     /** 是否还有下一页（服务端 total > 已加载条数） */
@@ -204,6 +213,25 @@ const emit = defineEmits<{
   /** 点「收起历史栏」：宽度由父级控制，本组件只转发 */
   (e: 'toggleCollapse'): void
 }>()
+
+/**
+ * 会话行的键盘激活：Enter / Space 打开该会话。
+ *
+ * <p>行内还有「操作」按钮：焦点在按钮上时按 Enter 归按钮（打开菜单），
+ * 这里直接放行，避免一次按键既开菜单又切会话。
+ *
+ * @param event 键盘事件
+ * @param id    会话主键
+ */
+function onRowKeydown(event: KeyboardEvent, id: number) {
+  const target = event.target as HTMLElement | null
+  if (target?.closest('button, a, input, textarea, select, [role="menuitem"]')) {
+    return
+  }
+  // Space 默认会滚一屏：行被聚焦时改为激活会话
+  event.preventDefault()
+  emit('open', id)
+}
 
 /**
  * 搜索关键字（仅工作台可见）。本地过滤已加载会话：
@@ -262,6 +290,25 @@ watch(
     if (el.scrollHeight <= el.clientHeight + 4) {
       emit('loadMore')
     }
+  }
+)
+
+/**
+ * 把当前选中行滚进视野（只在父级明确发信号时执行）。
+ *
+ * <p>用 `block: 'nearest'`：行已经在视口内时不动，避免「清空后列表整体跳一下」；
+ * 行被重排到顶部 / 新分组后，只滚到刚好可见的位置。
+ */
+watch(
+  () => props.revealToken,
+  async () => {
+    await nextTick()
+    const el = listRef.value
+    if (!el) {
+      return
+    }
+    const active = el.querySelector<HTMLElement>('.session-item.is-active')
+    active?.scrollIntoView({ block: 'nearest' })
   }
 )
 </script>
@@ -407,16 +454,25 @@ watch(
   background: #f7f6ff;
 }
 
-/* 选中态：比悬停明显加深一档，仍克制（浅紫底 + 主色描边 + 左侧色条） */
+/* 键盘聚焦：与输入聚焦同一套紫光描边，焦点位置一眼可见 */
+.session-item:focus-visible {
+  outline: 2px solid var(--ah-primary, #635bff);
+  outline-offset: 2px;
+  background: #f7f6ff;
+}
+
+/* 选中态用 DESIGN.md 的选中紫雾底 + 主色左条，不再另造更深的紫 */
 .session-item.is-active {
-  background: #e8e4ff;
-  border-color: #cdc6ff;
-  box-shadow: inset 3px 0 0 var(--ah-primary, #635bff);
+  background: #f4f4ff;
+  border-color: rgba(99, 91, 255, 0.28);
+  box-shadow:
+    inset 3px 0 0 var(--ah-primary, #635bff),
+    0 1px 3px rgba(99, 91, 255, 0.12);
 }
 
 .session-item.is-active .session-name {
-  color: #3d34c9;
-  font-weight: 650;
+  color: var(--ah-primary, #635bff);
+  font-weight: 600;
 }
 
 .session-main {
@@ -465,6 +521,7 @@ watch(
 }
 
 .session-item:hover .session-more,
+.session-item:focus-within .session-more,
 .session-item.is-active .session-more {
   display: grid;
 }
@@ -472,6 +529,7 @@ watch(
 /* 执行中优先显示转圈，不显示三点菜单，避免右侧两个图标挤在一起 */
 .session-item.is-running .session-more,
 .session-item.is-running:hover .session-more,
+.session-item.is-running:focus-within .session-more,
 .session-item.is-running.is-active .session-more {
   display: none;
 }

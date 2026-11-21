@@ -89,7 +89,7 @@ public interface RunSessionRepository {
     void updateStickyRoute(Long id, String routeKey, Long agentId, Long operatorId);
 
     /**
-     * 清空消息后的会话：状态回到 RUNNING，轮次和错误摘要清掉，结束时间置空。标题保留。
+     * 清空消息后的会话：状态回到 RUNNING，轮次、错误摘要和最后一条预览清掉，结束时间置空。标题保留。
      *
      * @param id         会话主键
      * @param operatorId 更新人

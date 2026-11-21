@@ -40,9 +40,15 @@ public class RunSessionRepositoryImpl implements RunSessionRepository {
     public PageResult<RunSession> page(SessionQuery query) {
         long current = PageQuery.clampCurrent(query.getCurrent());
         long size = PageQuery.clampSize(query.getSize());
-        // 近期会话按开始时间倒序。id 只作同一秒内的次序
-        LambdaQueryWrapper<RunSessionEntity> wrapper = new LambdaQueryWrapper<RunSessionEntity>()
-                .orderByDesc(RunSessionEntity::getStartTime)
+        /*
+         * 工作台按最近活动排（与前端「今天 / 7天内」的分组口径一致），
+         * 其余入口保持开始时间倒序。id 只作同一秒内的次序。
+         */
+        LambdaQueryWrapper<RunSessionEntity> wrapper = new LambdaQueryWrapper<>();
+        if (query.isOrderByActivity()) {
+            wrapper.orderByDesc(RunSessionEntity::getUpdateTime);
+        }
+        wrapper.orderByDesc(RunSessionEntity::getStartTime)
                 .orderByDesc(RunSessionEntity::getId);
         if (query.getUserId() != null) {
             wrapper.eq(RunSessionEntity::getUserId, query.getUserId());
@@ -208,6 +214,8 @@ public class RunSessionRepositoryImpl implements RunSessionRepository {
                 .eq(RunSessionEntity::getId, id)
                 .set(RunSessionEntity::getStatus, RunStatus.RUNNING.name())
                 .set(RunSessionEntity::getMessageCount, 0)
+                // 时间线已清空，首问预览不再成立；不清会在重进会话时又被左栏当成最后一条消息
+                .set(RunSessionEntity::getLastMsgPreview, "")
                 .set(RunSessionEntity::getErrorSummary, "")
                 .set(RunSessionEntity::getEndTime, null)
                 .set(RunSessionEntity::getUpdatedBy, operatorId)

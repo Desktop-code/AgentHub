@@ -9,6 +9,7 @@
       class="wb-sessions"
       variant="workbench"
       :groups="historyGroups"
+      :reveal-token="historyRevealToken"
       :active-id="session?.id"
       :can-create="ready"
       :can-run="true"
@@ -55,16 +56,59 @@
     </div>
 
     <section class="wb-main">
-      <!-- 右上角悬浮执行明细：位置与浮层共用同一套锚点常量 -->
+      <!--
+        主列页标题行：会话身份，不是第二条顶栏。
+        左栏展开 / 收起都保留；收起后仍能一眼看出当前在哪条会话里。
+        右侧菜单承接原先只挂在左栏的「清空当前 / 重命名 / 删除」，收起后仍有入口；
+        左栏展开时列表行内菜单保持原样，不重复摆成一套醒目按钮。
+      -->
+      <header class="wb-head" :class="{ 'is-collapsed': !sessionsVisible, 'has-inspect': canInspect }">
+        <h1 class="wb-head-title" :title="title">{{ title }}</h1>
+        <el-dropdown
+          v-if="hasCurrentSession"
+          class="wb-head-actions"
+          trigger="click"
+          :disabled="sessionBusy"
+          @command="onHeadingCommand"
+        >
+          <button
+            type="button"
+            class="wb-head-more"
+            title="当前会话操作"
+            aria-label="当前会话操作"
+            :disabled="sessionBusy"
+          >
+            <el-icon><MoreFilled /></el-icon>
+          </button>
+          <template #dropdown>
+            <el-dropdown-menu>
+              <el-dropdown-item command="rename">重命名</el-dropdown-item>
+              <el-dropdown-item command="clear">清空当前</el-dropdown-item>
+              <el-dropdown-item command="remove" divided class="wb-head-remove">删除会话</el-dropdown-item>
+            </el-dropdown-menu>
+          </template>
+        </el-dropdown>
+      </header>
+
+      <!--
+        右上角执行明细触发按钮：位置与浮层共用同一套锚点常量。
+        状态与耗时直接写在按钮上，不必打开浮卡也能看出「这轮在跑 / 跑完了、花了多久」。
+      -->
       <button
         v-if="canInspect"
+        ref="inspectButtonEl"
         type="button"
         class="wb-inspect"
+        :class="{ 'is-running': inspectRunning }"
         :style="inspectButtonStyle()"
+        :aria-expanded="detailOpen"
+        :aria-controls="detailOpen ? INSPECT_FLOAT_ID : undefined"
+        :aria-label="`执行明细：${inspectButtonText}`"
         title="执行明细"
-        @click="setInspectOpen('open')"
+        @click="toggleInspect"
       >
-        ⚡ 执行明细
+        <span class="wb-inspect-dot" aria-hidden="true" />
+        <span class="wb-inspect-text">{{ inspectButtonText }}</span>
       </button>
 
       <!-- 未就绪：说明横幅保留，不被空状态盖住；输入仍禁用 -->
@@ -78,7 +122,7 @@
         <template #title>{{ reason || '对话路由尚未就绪，暂时不能开始新对话' }}</template>
         <div class="wb-alert-body">
           <span>对话路由就绪前输入区已禁用；左侧历史会话仍可查看。</span>
-          <router-link v-if="canConfigReception" to="/orchestration/multi-agent">去配置对话路由</router-link>
+          <router-link v-if="canConfigReception" :to="receptionConfigPath">去配置对话路由</router-link>
           <router-link v-if="canConfigModel" to="/access/models">去模型中心</router-link>
         </div>
       </el-alert>
@@ -90,8 +134,18 @@
         type="warning"
         show-icon
         :closable="false"
-        :title="displayError"
-      />
+      >
+        <template #title>{{ displayError }}</template>
+        <div
+          v-if="(errorKind === 'model' && canConfigModel) || (errorKind === 'route' && canConfigReception)"
+          class="wb-alert-body"
+        >
+          <router-link v-if="errorKind === 'model' && canConfigModel" to="/access/models">去绑定模型</router-link>
+          <router-link v-if="errorKind === 'route' && canConfigReception" :to="receptionConfigPath">
+            去配置对话路由
+          </router-link>
+        </div>
+      </el-alert>
 
       <TrialChildPlanBar
         v-if="childPending"
@@ -105,7 +159,8 @@
         <ChatPanel
           class="wb-chat"
           skin="workbench"
-          :gateway-badge="gatewayBadgeText"
+          :thread-loading="threadLoading"
+          :draft-key="draftKey"
           :route-hint="routeName"
           :entry-name="schemeName"
           :route-candidates="atRouteCandidates"
@@ -116,16 +171,21 @@
           :sending="sending"
           :detached="detached"
           :can-send="canSend"
+          :can-stop="canStopRun"
           :session-ready="canSend"
           :blocked-hint="blockedHint"
           :can-approve="canSend"
           :approving="approving"
+          :can-config-model="canConfigModel"
+          :can-config-reception="canConfigReception"
+          :reception-config-to="receptionConfigPath"
           :page-active="pageActive"
           entry-composer
           :vision-enabled="false"
           :asr-enabled="false"
           :tts-enabled="false"
           @send="send"
+          @stop="stopRun"
           @approve="approvePlan"
           @reject="rejectPlan"
           @pick-route="onPickRoute"
@@ -146,18 +206,24 @@
         形态由 {@link inspectCardMode} 决定：
         - 运行中 → 紧凑状态卡（标题 + 已耗时 + 每位参与者的当前动作），不弹整张泳道；
         - 已结束 → 完整泳道（泳道 + 事件列表）。
-        用户点 X 收起后，再点按钮仍展开「当前应显示的那张」，不需要额外记忆。
+
+        **运行中自动展开紧凑卡**：让用户不点按钮也能看到谁在跑、跑到哪一步；
+        点 X / 按 Esc 收起后，本轮与下一轮都不再自动弹回，只有再点右上角按钮才重新展开。
 
         半透明落在卡片本身（见 .wb-inspect-float 的 background），底下的工作台能被隐约看见。
       -->
       <transition name="wb-inspect-fade">
         <div
           v-if="detailOpen && canInspect"
+          :id="INSPECT_FLOAT_ID"
+          ref="inspectFloatEl"
           class="wb-inspect-float"
           :class="[`is-${inspectMode}`]"
           :style="inspectPopoverStyle(inspectMode)"
           role="dialog"
+          tabindex="-1"
           :aria-label="inspectMode === 'compact' ? '执行明细（运行中）' : '执行明细'"
+          @keydown.esc.prevent.stop="closeInspect"
         >
           <!-- 运行中：紧凑状态卡，状态随直播轮询原地更新 -->
           <InspectCompactCard
@@ -198,13 +264,14 @@
  * 右栏无顶栏：方案名 / 线路下拉已收掉；手动指定改走输入框 @（同 PUT 换线语义）。
  * 执行明细仅悬浮；当前线路由输入区徽标承担，聊天流不再重复一行「当前：xxx」。
  */
-import { computed, onBeforeUnmount, ref, watch } from 'vue'
-import { Expand, Plus } from '@element-plus/icons-vue'
+import { computed, nextTick, onBeforeUnmount, ref, watch } from 'vue'
+import { Expand, Plus, MoreFilled } from '@element-plus/icons-vue'
 import ChatPanel from '@/components/runtime/ChatPanel.vue'
 import ChatRenderBoundary from '@/components/runtime/workbench/ChatRenderBoundary.vue'
 import RouterExecutionCard from '@/components/runtime/RouterExecutionCard.vue'
 import InspectCompactCard from '@/components/runtime/workbench/InspectCompactCard.vue'
 import {
+  INSPECT_FLOAT_ID,
   INSPECT_MODE_COMPACT,
   inspectButtonStyle,
   inspectCardMode,
@@ -213,8 +280,8 @@ import {
   inspectCompactTitle,
   inspectLiveTasks,
   inspectPopoverStyle,
+  inspectTriggerLabel,
   nextInspectOpen,
-  shouldCloseAfterSettle,
   shouldDropDoneTask,
   type InspectOverlayAction,
   type InspectRunningTask
@@ -224,11 +291,7 @@ import TrialSessionList from '@/components/runtime/trial/TrialSessionList.vue'
 import { useWorkbenchChat } from '@/components/runtime/workbench/useWorkbenchChat'
 import { useRouterLane } from '@/composables/useRouterLane'
 import { useUserStore } from '@/stores/user'
-import {
-  WORKBENCH_RESTING_HINT,
-  friendlyWorkbenchError,
-  isWorkbenchHardUnavailable
-} from '@/utils/workbenchFriendlyError'
+import { classifyWorkbenchError } from '@/utils/workbenchFriendlyError'
 
 const QUICK_PROMPTS = [
   '我想咨询一个业务问题，请帮我匹配合适的专家',
@@ -253,11 +316,14 @@ const pageActive = computed(() => props.pageActive !== false)
 const user = useUserStore()
 
 const {
+  config,
   ready,
   configLoading,
   reason,
   /** 默认接待方案名（现网 Router）：入口块标题直接读它，不在前端写别名 */
   schemeName,
+  /** 主列页标题：当前会话名；无会话 / 草稿时为「对话」 */
+  title,
   session,
   turns,
   sending,
@@ -269,7 +335,9 @@ const {
   pageError,
   canSend,
   blockedHint,
+  threadLoading,
   historyGroups,
+  historyRevealToken,
   historyLoading,
   historyHasMore,
   historyLoadingMore,
@@ -277,13 +345,15 @@ const {
   routeName,
   atRouteCandidates,
   pendingForceRoute,
-  gatewayBadgeText,
   canPickRoute,
+  canStopRun,
+  draftToken,
   init,
   newSession,
   openHistory,
   loadMoreHistory,
   send,
+  stopRun,
   chooseOption,
   pickRoute,
   clearPendingRoute,
@@ -300,8 +370,76 @@ const {
 } = useWorkbenchChat(pageActive)
 
 const detailOpen = ref(false)
+/**
+ * 用户是否手动关过执行明细。
+ *
+ * <p>紧凑卡在运行中默认自动出现；一旦用户点 X / Esc 收起，本轮与下一轮都不能再自动弹出，
+ * 只有用户再点右上角按钮才重新打开。切到另一条会话时重置，避免上一条会话的收起
+ * 影响下一条会话的默认展示。
+ */
+let inspectDismissed = false
+/**
+ * 当前打开是「运行中自动展开」还是用户手动打开。
+ *
+ * <p>只影响收尾动作：自动展开的紧凑卡在本轮结束时自动收起，
+ * 完整泳道因此仍必须由用户点按钮打开；用户手动打开的卡片不被收走。
+ */
+let inspectAutoOpened = false
+/** 触发按钮与浮层节点：焦点在打开时交给浮层，关闭时还回按钮 */
+const inspectButtonEl = ref<HTMLButtonElement | null>(null)
+const inspectFloatEl = ref<HTMLElement | null>(null)
 /** 左栏历史会话是否展开；收起后主区自动占满，状态与页面同生命周期（KeepAlive 下不丢） */
 const sessionsVisible = ref(true)
+
+/** 当前是否为已落库会话：草稿 / 空态没有可重命名、清空、删除的对象 */
+const hasCurrentSession = computed(() => !!session.value && !isTempSession(session.value))
+
+/**
+ * 输入草稿键：真实会话按主键，临时草稿按「新建代次」区分。
+ *
+ * <p>草稿 id 恒为 -1，只用 id 会让两次「+ 新建对话」共用同一份未发送内容；
+ * 代次由 useWorkbenchChat 在 startDraft 时自增，保证每次新建都是空输入。
+ * 空字符串表示还没有任何会话（首屏加载中），此时不启用分槽。
+ */
+const draftKey = computed(() => {
+  const current = session.value
+  if (!current) {
+    return ''
+  }
+  return isTempSession(current) ? `draft:${draftToken.value}` : `session:${current.id}`
+})
+
+/**
+ * 当前会话操作是否暂不可用。
+ *
+ * <p>与左栏行内菜单同一道闸门（发送 / 续订中不改会话），避免前后端状态打架；
+ * 只置灰标题旁的菜单按钮，不隐藏它——收起左栏后这里是唯一入口。
+ */
+const sessionBusy = computed(() => sending.value || resuming.value)
+
+/**
+ * 主列标题旁的当前会话菜单。
+ *
+ * <p>三个命令直接复用左栏同一套动作（`onSessionCommand` / `clearCurrent`），
+ * 不在页面层另写一份重命名、删除或清空逻辑。
+ *
+ * @param command el-dropdown 命令名：rename / clear / remove
+ */
+function onHeadingCommand(command: string) {
+  const current = session.value
+  if (!current || isTempSession(current) || sessionBusy.value) {
+    return
+  }
+  // 三个命令都作用在「点开菜单时的那条当前会话」上：把对象显式带进去，
+  // 清空与左栏「清空当前」走同一个 clearCurrent(target)，回写同一行结果；
+  // 重命名 / 删除与左栏共用 onSessionCommand，不另写一套。
+  if (command === 'clear') {
+    void clearCurrent(current)
+    return
+  }
+  onSessionCommand(command, current)
+}
+
 const traceActive = computed(() => sending.value || resuming.value)
 const { view: routerTrace, reload: reloadRouterTrace } = useRouterLane(traceSessionId, traceActive, pageActive)
 const canInspect = computed(() => routerTrace.value != null)
@@ -316,7 +454,7 @@ const canInspect = computed(() => routerTrace.value != null)
 const inspectRunning = computed(() => traceActive.value)
 
 /**
- * 展示用时钟：紧凑卡的「已耗时」随它涨，完成行的绿底停留与留观期满也按它判定。
+ * 展示用时钟：按钮上的耗时与紧凑卡的「已耗时」共用这一个 now。
  *
  * <p>间隔取 250ms：留观、滑出都以「毫秒级时刻比较」判定，1s 一拍会让 2s 停留
  * 变成 2~3s 的抖动；250ms 既够准又不至于让 tick 太重。
@@ -331,42 +469,41 @@ function stopInspectTicker() {
 }
 
 /**
- * 收尾留观：整轮跑完后仍短暂保持紧凑卡，让最后的「已完成」绿底被看见。
+ * 本轮收尾时刻（epoch ms）；运行中为 null，收尾那一拍记下。
  *
- * <p>为什么需要它：收尾瞬间若立刻切成完整泳道，最后一位参与者的绿色停留
- * 就被泳道替换掉了，用户看到的仍是「跑完就变样」。留观期内继续显示紧凑卡，
- * 期满后浮层整体收掉（完整泳道只在用户点按钮时才看）。
+ * <p>只用于把按钮上的耗时冻结在「这一轮结束」那一刻，不参与浮层开合。
+ * 收尾后按钮停在「已完成 · 12.3s」，等下一轮开始再清零重算。
  */
-const settledAt = ref<number | null>(null)
+const roundEndedAt = ref<number | null>(null)
+/**
+ * 由本页发起新一轮时的「发送时刻」。
+ *
+ * <p>只在本轮 trace 尚未回来时兜底：此时 `routerTrace.spans` 可能还是上一轮的，
+ * 直接拿它的起点相减会闪出一个巨大的累计耗时。等新 trace 的 traceId 到了，
+ * 仍然回到 trace 起点计时（现网口径）。
+ */
+const roundStartedAt = ref<number | null>(null)
+/** 发送那一刻的 traceId：用于判定当前 spans 是否仍属于上一轮 */
+let staleTraceId = ''
 /** 上一次的 running 值：区分「收尾跳变」与「挂载时本来就没跑」 */
 let wasRunning = false
-/** 留观期内保持紧凑卡：由 settledAt 与当前时刻算出，不另设定时器 */
-const settledHold = computed(() => {
-  if (settledAt.value == null) {
-    return false
-  }
-  return !shouldCloseAfterSettle(false, settledAt.value, inspectNow.value)
-})
 
-/** 当前应展示的卡片形态：运行中（含收尾留观期）紧凑卡，其余完整泳道 */
-const inspectMode = computed(() =>
-  inspectCardMode(inspectRunning.value || settledHold.value)
-)
+/** 当前应展示的卡片形态：运行中紧凑卡，其余完整泳道（打开与否由自动展开规则与用户手动开关共同决定） */
+const inspectMode = computed(() => inspectCardMode(inspectRunning.value))
 
 /**
- * 时钟只在「紧凑卡打开」或「正在留观」时走。
+ * 时钟只在「本轮仍在跑」或「紧凑卡打开」时走。
  *
- * <p>为什么要带上 `settledAt != null`：收尾那一拍 `inspectMode` 可能瞬间变成完整泳道
- * （浮层仍开着时用户点了按钮），此时留观判定还需要时钟推进才能期满；
- * 只按形态判断会让 `settledHold` 永远停在 true，浮层永不收起。
+ * <p>为什么要带上 running：紧凑卡可能被用户收起，按钮上的耗时仍要随秒增长；
+ * 若只按「浮层打开才走表」判断，收起后耗时就停在那一刻。
  */
 watch(
   () =>
     inspectClockNeeded({
       pageActive: pageActive.value !== false,
+      running: inspectRunning.value,
       detailOpen: detailOpen.value,
-      compact: inspectMode.value === INSPECT_MODE_COMPACT,
-      settling: settledAt.value != null
+      compact: inspectMode.value === INSPECT_MODE_COMPACT
     }),
   (need) => {
     stopInspectTicker()
@@ -467,15 +604,57 @@ const compactTitle = computed(() => {
   return inspectCompactTitle(inspectRunning.value, tasks.length, parallel)
 })
 
-/** 紧凑卡已耗时：从本轮 trace 起点算到「现在」 */
-const compactMeta = computed(() => {
-  const view = routerTrace.value
-  const startedAt = parseTraceStart(view?.spans ?? [])
-  if (startedAt == null) {
-    return ''
+/** 本轮 trace 的最早开始时刻：运行中与结束态共用同一个计时起点 */
+const inspectStartedAt = computed(() => parseTraceStart(routerTrace.value?.spans ?? []))
+
+/**
+ * 本轮耗时（毫秒）。三种来源，口径只有一个：
+ *
+ * <ul>
+ *   <li>运行中：展示时钟 {@link inspectNow} − trace 起点（现网紧凑卡原本就这么算）；</li>
+ *   <li>新一轮刚起、trace 还是上一轮：改用本轮发送时刻兜底，不闪出旧累计；</li>
+ *   <li>刚收尾：收尾时刻 {@link roundEndedAt} − trace 起点，冻结成总耗时；</li>
+ *   <li>历史会话（挂载时已结束）：trace 自身的结束时刻 − 起点，回放也给出真实耗时。</li>
+ * </ul>
+ *
+ * <p>没有另起一套秒表：运行期仍然复用 250ms 的 `inspectNow`，结束态只是把同一份
+ * 起点与收尾时刻相减，避免「浮卡关掉后耗时归零」。
+ */
+const inspectElapsedMs = computed<number | null>(() => {
+  const startedAt = inspectStartedAt.value
+  if (inspectRunning.value) {
+    // 新 trace 还没回来（traceId 仍是发送那一刻的旧值）：用本轮发送时刻兜底，
+    // 避免把上一轮的累计耗时当成这一轮，也不让秒数先跳到 0 再跳回去
+    const traceId = routerTrace.value?.traceId ?? ''
+    if (roundStartedAt.value != null && traceId === staleTraceId) {
+      return Math.max(0, inspectNow.value - roundStartedAt.value)
+    }
+    if (startedAt == null) {
+      return roundStartedAt.value == null
+        ? null
+        : Math.max(0, inspectNow.value - roundStartedAt.value)
+    }
+    return Math.max(0, inspectNow.value - startedAt)
   }
-  return inspectCompactMeta(inspectRunning.value, Math.max(0, inspectNow.value - startedAt))
+  if (startedAt == null) {
+    return null
+  }
+  const endedAt = roundEndedAt.value ?? parseTraceEnd(routerTrace.value?.spans ?? [])
+  if (endedAt == null) {
+    return null
+  }
+  return Math.max(0, endedAt - startedAt)
 })
+
+/** 按钮文案：进行中 / 已完成 + 耗时，不必打开浮卡就能读到 */
+const inspectButtonText = computed(() =>
+  inspectTriggerLabel(inspectRunning.value, inspectElapsedMs.value)
+)
+
+/** 紧凑卡已耗时：直接复用本轮耗时，不另算一份 */
+const compactMeta = computed(() =>
+  inspectCompactMeta(inspectRunning.value, inspectElapsedMs.value ?? 0)
+)
 
 /**
  * 本轮 trace 的最早开始时刻（毫秒）。
@@ -486,12 +665,8 @@ const compactMeta = computed(() => {
 function parseTraceStart(spans: readonly { startTime: string | null }[]): number | null {
   let earliest: number | null = null
   for (const span of spans) {
-    const raw = span.startTime
-    if (!raw) {
-      continue
-    }
-    const ms = Date.parse(raw.includes('T') ? raw : raw.replace(' ', 'T'))
-    if (!Number.isNaN(ms) && (earliest == null || ms < earliest)) {
+    const ms = parseSpanTime(span.startTime)
+    if (ms != null && (earliest == null || ms < earliest)) {
       earliest = ms
     }
   }
@@ -499,100 +674,185 @@ function parseTraceStart(spans: readonly { startTime: string | null }[]): number
 }
 
 /**
+ * 本轮 trace 的最晚结束时刻（毫秒）。历史会话没有 `roundEndedAt` 时用它算总耗时。
+ *
+ * <p>优先读 `endTime`；span 还没写结束时刻时退化为「开始 + latency」，
+ * 两者都拿不到就跳过，不拿当前时间冒充结束。
+ *
+ * @param spans 本轮步骤
+ * @return epoch 毫秒；没有任何结束信息时 null
+ */
+function parseTraceEnd(
+  spans: readonly { startTime: string | null; endTime: string | null; latencyMs: number | null }[]
+): number | null {
+  let latest: number | null = null
+  for (const span of spans) {
+    let ms = parseSpanTime(span.endTime)
+    if (ms == null && span.latencyMs != null) {
+      const startedAt = parseSpanTime(span.startTime)
+      if (startedAt != null) {
+        ms = startedAt + span.latencyMs
+      }
+    }
+    if (ms != null && (latest == null || ms > latest)) {
+      latest = ms
+    }
+  }
+  return latest
+}
+
+/**
+ * 解析 span 时间串为 epoch 毫秒；与全站口径一致（ISO 或 `yyyy-MM-dd HH:mm:ss[.SSS]`）。
+ *
+ * @param raw 时间串；可空
+ * @return 毫秒；解析不出时 null
+ */
+function parseSpanTime(raw: string | null): number | null {
+  if (!raw) {
+    return null
+  }
+  const ms = Date.parse(raw.includes('T') ? raw : raw.replace(' ', 'T'))
+  return Number.isNaN(ms) ? null : ms
+}
+
+/**
  * 执行明细浮层开关：open / close / reset 三种入口都收敛到一处，
  * 避免「点 X 收起」和「自动收起」各写一段、行为走样。
  */
 function setInspectOpen(action: InspectOverlayAction) {
+  // 手动打开视为「重新接受自动展示」；手动关闭记住本轮 / 下一轮都不再自动弹
+  if (action === 'open') {
+    inspectDismissed = false
+    inspectAutoOpened = false
+  } else if (action === 'close') {
+    inspectDismissed = true
+    inspectAutoOpened = false
+  } else {
+    inspectDismissed = false
+    inspectAutoOpened = false
+  }
   detailOpen.value = nextInspectOpen(detailOpen.value, action)
 }
 
 /**
- * 运行中默认展开紧凑卡；整轮完成后**留观 2s**再关闭。
+ * 本轮起止的副作用：只在 `traceActive` 的跳变上动作。
  *
- * <p>只在 `traceActive` 的**跳变**上动作，因此用户点 X 收起后不会被自动弹回
- * （收尾才切状态）。
+ * <p><b>运行中自动展开紧凑卡</b>：一轮开始时按默认展示「谁在跑、跑到哪一步」；
+ * 用户手动收起后记在 {@link inspectDismissed}，本轮不再自动弹，下一轮也不弹，
+ * 只有再点右上角按钮才恢复。没有 trace 时先记为打开，trace 到达后即可见。
  *
- * <p>为什么不在收尾那一拍立刻关：最后一位参与者刚变绿，用户需要一眼看到结果；
- * 立刻消失等于「跑完了却什么都没留住」。因此这里只标记 `settledAt`，
- * 留观是否期满由 {@link settledHold}（读 {@link inspectNow}）判定，
- * 关闭动作由下面那条 watch 在留观结束时触发 —— 判定与副作用分开，口径唯一。
- *
- * <p>`immediate` 覆盖「页面挂载时这一轮已经在跑」的场景：进页面就能看到紧凑卡。
+ * <p>收尾那一拍：记下 {@link roundEndedAt} 把按钮耗时冻结成总耗时；
+ * 自动展开的紧凑卡直接收起（完整泳道仍须用户点按钮）；
+ * 用户手动打开的浮层保持原位，形态随 `inspectRunning` 切到完整泳道，不整张滑走。
  */
 watch(
   traceActive,
   (running) => {
+    // 先对齐展示时钟，避免冻结时取到上一拍的旧 now
+    inspectNow.value = Date.now()
     if (running) {
       wasRunning = true
-      settledAt.value = null
-      setInspectOpen('open')
+      roundEndedAt.value = null
+      // 运行中默认展开紧凑执行卡（用户手动关过则保持关闭，本轮与下一轮都不再自动弹）
+      if (!inspectDismissed) {
+        // 用户本来就把浮层开着（手动打开的全泳道）：不记成自动展开，收尾时也不替他收起
+        if (!detailOpen.value) {
+          detailOpen.value = true
+          inspectAutoOpened = true
+        }
+      }
+      // 只有「本页发起」的一轮才记发送时刻：重连 / 挂载进已在跑的会话时，
+      // 应以 trace 自己的起点为准，不能把计时从进页面那一刻重新开始
+      if (sending.value) {
+        roundStartedAt.value = inspectNow.value
+        staleTraceId = routerTrace.value?.traceId ?? ''
+      } else {
+        roundStartedAt.value = null
+        staleTraceId = ''
+      }
       return
     }
-    // 挂载时本来就没在跑：不启动留观，也不动浮层（保持未打开）
+    // 挂载时本来就没在跑：不记收尾时刻，历史会话按 trace 自身结束时间算耗时
     if (!wasRunning) {
-      settledAt.value = null
       return
     }
     wasRunning = false
-    // 收尾：先记时刻进入留观；保持紧凑卡，绿底可见
-    settledAt.value = Date.now()
+    roundEndedAt.value = inspectNow.value
+    roundStartedAt.value = null
+    staleTraceId = ''
+    /*
+     * 自动展开的紧凑卡在本轮结束时收起：完整泳道仍必须由用户点按钮打开，
+     * 不把整张大卡在收尾时自动铺开。用户手动打开的卡片保持原样，可由其自行关闭。
+     */
+    if (inspectAutoOpened) {
+      detailOpen.value = false
+      inspectAutoOpened = false
+    }
   },
   { immediate: true }
 )
 
-/**
- * 留观期满 → 收起浮层。
- *
- * <p>由 `settledHold` 从 true 变 false 触发：它本身就是「收尾后未满 2s」的判定，
- * 因此这里不需要另设 setTimeout，也不会与时钟各算一套时间。
- */
-watch(settledHold, (holding, wasHolding) => {
-  if (wasHolding && !holding) {
-    setInspectOpen('close')
-  }
-})
-
-/** 关闭浮层：点顶栏 X、按 Esc 共用这一个入口（没有遮罩，也就没有点遮罩关闭） */
+/** 关闭浮层：点顶栏 X、按 Esc、再点一次按钮共用这一个入口（没有遮罩，也就没有点遮罩关闭） */
 function closeInspect() {
+  // 键盘用户按 Esc / 点 X 后，焦点回到触发按钮，不在页面里丢失
+  const shouldRestoreFocus = inspectFloatEl.value?.contains(document.activeElement) ?? false
   setInspectOpen('close')
-}
-
-/**
- * Esc 关闭：浮层打开时才挂监听，关闭即摘。
- * <p>不用全局常驻监听：工作台在 KeepAlive 里，常驻会误吃其它页面的 Esc。
- */
-function onInspectKeydown(event: KeyboardEvent) {
-  if (event.key === 'Escape') {
-    closeInspect()
+  if (shouldRestoreFocus) {
+    void nextTick(() => inspectButtonEl.value?.focus())
   }
 }
 
-watch(detailOpen, (open) => {
-  if (open) {
-    window.addEventListener('keydown', onInspectKeydown)
+/**
+ * 点按钮：关着就打开并聚焦浮卡（Esc 才有一个明确的落点），开着就收起。
+ *
+ * <p>浮层是非模态的：只有用户主动点按钮时才把焦点交给它，不抢输入框的焦点。
+ * Esc 监听挂在浮卡自身（模板上的 `@keydown.esc`），不再常驻 window，
+ * 因此焦点不在浮卡里时不会误关别的界面。
+ */
+function toggleInspect() {
+  if (detailOpen.value) {
+    closeInspect()
     return
   }
-  window.removeEventListener('keydown', onInspectKeydown)
-})
+  setInspectOpen('open')
+  void nextTick(() => inspectFloatEl.value?.focus())
+}
 
-onBeforeUnmount(() => window.removeEventListener('keydown', onInspectKeydown))
-
-const displayError = computed(() => friendlyWorkbenchError(pageError.value || ''))
-const isSoftUnavailable = computed(() => {
-  const raw = pageError.value || ''
-  return isWorkbenchHardUnavailable(raw) || displayError.value === WORKBENCH_RESTING_HINT
-})
+// pageError 在写入处已经做过友好映射（messageOf / friendlyWorkbenchError），这里不再二次改写，
+// 否则「停止失败：请求超时」会被二次映射成「小憩」，把停止失败的原因吃掉
+const displayError = computed(() => (pageError.value || '').trim())
+/** 顶部横幅按同一套分类决定「小憩」还是保留原话 + 深链 */
+const errorKind = computed(() => classifyWorkbenchError(pageError.value || ''))
+const isSoftUnavailable = computed(
+  () => errorKind.value === 'resting' && !displayError.value.startsWith('停止失败')
+)
 
 const canConfigReception = computed(() => user.hasPerm('ma:def:reception'))
 const canConfigModel = computed(() => user.hasPerm('model:provider:list'))
 
+/**
+ * 「去配置对话路由」深链：直接打开当前入口方案的编辑抽屉，并落到模型配置 Tab。
+ *
+ * <p>只到 `/orchestration/multi-agent` 列表等于让用户自己再找一次；配置项里的
+ * 判路由模型与 ROUTER 提示词都在现网方案抽屉的「模型配置」Tab（`tab=model`），
+ * 因此带上 `schemeId` 与 Tab，不另造一套设置页。没有 schemeId 时才退回列表。
+ */
+const receptionConfigPath = computed(() => {
+  const id = config.value?.schemeId
+  return id != null && id > 0
+    ? `/orchestration/multi-agent?edit=${id}&tab=model`
+    : '/orchestration/multi-agent'
+})
+
 watch(traceSessionId, () => {
   // 切会话时浮层必须回到关闭：上一轮的明细不能挂在新会话上
   setInspectOpen('reset')
-  // 新会话若已经在跑，紧凑卡应当立刻出现（traceActive 未必跳变，单独补一次）
-  if (traceActive.value) {
-    setInspectOpen('open')
-  }
+  // 新一轮的耗时从自己的 trace 起点重算；不在切会话时自动展开浮层
+  inspectNow.value = Date.now()
+  roundEndedAt.value = null
+  roundStartedAt.value = null
+  staleTraceId = ''
+  wasRunning = traceActive.value
 })
 
 /**
@@ -678,19 +938,83 @@ void init()
   background: #fff;
 }
 
+/*
+ * 主列页标题行：纯身份信息，不是第二条顶栏。
+ * 无底色、无描边、无阴影，只靠 16px 标题建立层级；不参与消息流滚动。
+ */
+.wb-head {
+  display: flex;
+  flex: none;
+  align-items: center;
+  gap: 4px;
+  padding: 16px 24px 0;
+}
+
+/* 收起左栏后，左上角悬浮「展开 / 新建」按钮占位 12 + 32 + 间距，标题让开，避免被图标压住 */
+.wb-head.is-collapsed {
+  padding-left: 56px;
+}
+
+/* 有「执行明细」按钮时右侧让位：按钮锚在 top:20 / right:24（见 inspectOverlay） */
+.wb-head.has-inspect {
+  padding-right: 168px;
+}
+
+.wb-head-title {
+  margin: 0;
+  overflow: hidden;
+  color: var(--ah-text, #1f2937);
+  font-size: 16px;
+  font-weight: 600;
+  line-height: 1.4;
+  letter-spacing: 0;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* 当前会话菜单：24px 方钮，只在 hover / 聚焦时出浅底，不与标题抢视觉 */
+.wb-head-more {
+  display: grid;
+  flex: none;
+  place-items: center;
+  width: 24px;
+  height: 24px;
+  padding: 0;
+  border: 0;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--ah-text-secondary, #6b7280);
+  cursor: pointer;
+}
+
+.wb-head-more:hover:not(:disabled) {
+  background: #f3f4f6;
+  color: var(--ah-text, #1f2937);
+}
+
+.wb-head-more:focus-visible {
+  outline: 2px solid var(--ah-primary, #635bff);
+  outline-offset: 2px;
+}
+
+.wb-head-more:disabled {
+  cursor: not-allowed;
+  opacity: 0.45;
+}
+
 .wb-inspect {
   position: absolute;
   /* top / right / height 由 inspectButtonStyle() 内联给出，与浮层共用同一套锚点 */
   z-index: 8;
   display: inline-flex;
   align-items: center;
-  gap: 4px;
+  gap: 6px;
   padding: 0 12px;
   border: 1px solid var(--ah-border-soft, #f2f6fc);
   border-radius: 999px;
   background: rgba(255, 255, 255, 0.92);
   box-shadow: 0 1px 3px rgba(0, 0, 0, 0.06);
-  color: var(--ah-text-secondary);
+  color: var(--ah-text-secondary, #6b7280);
   font: inherit;
   font-size: 12px;
   font-weight: 600;
@@ -702,6 +1026,48 @@ void init()
 .wb-inspect:hover {
   color: var(--ah-primary);
   border-color: var(--el-color-primary-light-7, #d5d3ff);
+}
+
+.wb-inspect:focus-visible {
+  outline: 2px solid var(--ah-primary, #635bff);
+  outline-offset: 2px;
+}
+
+/* 运行中：按钮文字转主色，圆点轻微呼吸；只动透明度与缩放，不位移整颗按钮 */
+.wb-inspect.is-running {
+  color: var(--ah-primary, #635bff);
+  border-color: var(--el-color-primary-light-7, #d5d3ff);
+}
+
+.wb-inspect-dot {
+  flex: none;
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: currentColor;
+}
+
+.wb-inspect.is-running .wb-inspect-dot {
+  animation: wb-inspect-breathe 1.4s ease-in-out infinite;
+}
+
+/* 耗时数字等宽：秒数跳动时按钮宽度不跟着抖 */
+.wb-inspect-text {
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+@keyframes wb-inspect-breathe {
+  0%,
+  100% {
+    opacity: 0.3;
+    transform: scale(0.9);
+  }
+
+  50% {
+    opacity: 1;
+    transform: scale(1.05);
+  }
 }
 
 /*
@@ -753,7 +1119,7 @@ void init()
 }
 
 .wb-inspect-fade-leave-active {
-  /* 与 INSPECT_EXIT_MS（180ms）同量级：先留观 2s，再花 0.18s 滑走 */
+  /* 与 INSPECT_EXIT_MS（180ms）同量级：用户收起时沿原路滑走 */
   transition: opacity 0.18s ease, transform 0.18s ease;
 }
 
@@ -767,10 +1133,27 @@ void init()
   transform: translateX(24px);
 }
 
+/* 浮层被程序聚焦时不画整圈默认 outline；键盘聚焦仍保留明确的紫色描边 */
+.wb-inspect-float:focus {
+  outline: none;
+}
+
+.wb-inspect-float:focus-visible {
+  outline: 2px solid var(--ah-primary, #635bff);
+  outline-offset: 2px;
+}
+
 @media (prefers-reduced-motion: reduce) {
   .wb-inspect-fade-enter-active,
   .wb-inspect-fade-leave-active {
     transition: none;
+  }
+
+  /* 减少动效时呼吸与滑入一起停：不允许只关一种、留下另一种硬闪 */
+  .wb-inspect.is-running .wb-inspect-dot {
+    animation: none;
+    opacity: 1;
+    transform: none;
   }
 }
 
@@ -829,5 +1212,21 @@ void init()
   width: 100%;
   padding: 12px 24px 20px;
   box-sizing: border-box;
+}
+</style>
+
+<style>
+/*
+ * 当前会话菜单的删除项：下拉挂到 body，需非 scoped 才能把文字染成危险色，
+ * 与左栏行内菜单的删除项同一语义。
+ */
+.wb-head-remove {
+  color: var(--el-color-danger) !important;
+}
+
+.wb-head-remove:hover,
+.wb-head-remove:focus {
+  color: var(--el-color-danger) !important;
+  background-color: var(--el-color-danger-light-9) !important;
 }
 </style>

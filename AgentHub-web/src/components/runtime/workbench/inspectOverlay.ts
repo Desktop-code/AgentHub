@@ -97,24 +97,28 @@ export function inspectCardMode(running: boolean): InspectCardMode {
  * 执行明细的 250ms 时钟是否该走。
  *
  * <p>只决定要不要推进 `inspectNow`。不改浮层开合：失活时浮层可以仍开着，
- * 但不再随后台 tick 重算紧凑卡和留观。
+ * 但不再随后台 tick 重算紧凑卡与按钮耗时。
+ *
+ * <p>为什么运行中也必须走表：耗时已经上收到触发按钮，浮层关着时按钮上的
+ * 「执行中 · 12.3s」仍要随时间增长；只在浮层打开时走表会让秒数停在打开那一刻。
  *
  * @param input.pageActive 页签是否在前台
+ * @param input.running    本轮是否仍在执行（决定按钮耗时是否继续增长）
  * @param input.detailOpen 浮层当前是否打开（原样读，本函数不写）
  * @param input.compact    当前形态是否为紧凑卡
- * @param input.settling   是否还在收尾留观（需要时钟才能期满）
  * @return true 才允许挂 250ms 定时器
  */
 export function inspectClockNeeded(input: {
   pageActive: boolean
+  running: boolean
   detailOpen: boolean
   compact: boolean
-  settling: boolean
 }): boolean {
   if (!input.pageActive) {
     return false
   }
-  return (input.detailOpen && input.compact) || input.settling
+  // 运行中始终走表（按钮耗时）；空闲时只有紧凑卡打开才需要推进
+  return input.running || (input.detailOpen && input.compact)
 }
 
 /* ===== 运行中紧凑卡的状态行 ===== */
@@ -168,16 +172,45 @@ export function inspectCompactTitle(running: boolean, total: number, parallel: b
  * @return 如「12.3s」；拿不到时为空串
  */
 export function inspectCompactMeta(running: boolean, elapsedMs: number): string {
-  if (!Number.isFinite(elapsedMs) || elapsedMs <= 0) {
+  const text = formatInspectDuration(elapsedMs)
+  if (!text) {
     return ''
   }
-  const text = elapsedMs < 1000
-    ? `${Math.round(elapsedMs)}ms`
-    : `${(elapsedMs / 1000).toFixed(1)}s`
   return running ? `已 ${text}` : `耗时 ${text}`
 }
 
-/* ===== 收尾节奏：完成留观 2s，再滑出 ===== */
+/**
+ * 耗时数字的统一写法：<1s 用毫秒，否则保留一位小数。
+ *
+ * <p>浮卡与触发按钮共用这一份格式化，避免两处一个写 12.3s、一个写 12s。
+ *
+ * @param elapsedMs 耗时（毫秒）
+ * @return 如「320ms」「12.3s」；拿不到或非正数时为空串
+ */
+export function formatInspectDuration(elapsedMs: number): string {
+  if (!Number.isFinite(elapsedMs) || elapsedMs <= 0) {
+    return ''
+  }
+  return elapsedMs < 1000 ? `${Math.round(elapsedMs)}ms` : `${(elapsedMs / 1000).toFixed(1)}s`
+}
+
+/**
+ * 「执行明细」触发按钮上的状态文案。
+ *
+ * <p>按钮必须自己说清「进行中还是已完成、花了多久」，不能只留一个含义不明的
+ * 「执行明细」。耗时拿不到时退化为纯状态词，不写 0s 冒充已计时。
+ *
+ * @param running   本轮是否仍在执行
+ * @param elapsedMs 耗时；null 表示还没拿到（new 一轮刚起、trace 未到）
+ * @return 如「执行中 · 12.3s」「已完成 · 12.3s」「执行中」
+ */
+export function inspectTriggerLabel(running: boolean, elapsedMs: number | null): string {
+  const head = running ? '执行中' : '已完成'
+  const duration = elapsedMs == null ? '' : formatInspectDuration(elapsedMs)
+  return duration ? `${head} · ${duration}` : head
+}
+
+/* ===== 收尾节奏：完成行留观 2s 再滑出（浮层本身不再自动关闭） ===== */
 
 /**
  * 完成后停留时长（ms）。
@@ -208,10 +241,13 @@ export function shouldDropDoneTask(doneAtMs: number | null, nowMs: number): bool
 }
 
 /**
- * 整轮结束后是否应当关闭浮层。
+ * 整轮结束后是否应当关闭浮层（保留的纯函数，供仍需「收尾留观」的调用方）。
  *
  * <p>口径：本轮已收尾，且最后一处变更发生满 {@link INSPECT_DONE_HOLD_MS}。
  * 用「收尾时刻 + 停留」判断，避免一结束就消失、用户没看见最终状态。
+ *
+ * <p>工作台当前<b>不再</b>用它做延时关闭：运行中自动展开的紧凑卡在收尾那一拍直接收起，
+ * 用户手动打开的不收；结束后的耗时改由触发按钮承载（见 `inspectTriggerLabel`）。
  *
  * @param running    本轮是否仍在跑
  * @param settledAtMs 本轮收尾时刻（epoch ms）；仍在跑时为 null
@@ -230,6 +266,14 @@ export function shouldCloseAfterSettle(
 }
 
 /* ===== 锚点：按钮与浮层共用同一份数字，避免「贴不住按钮」 ===== */
+
+/**
+ * 执行明细浮层节点的 id。
+ *
+ * <p>按钮的 `aria-controls` 指向它，读屏据此知道「按这个按钮会展开哪一块」。
+ * 只在浮层打开时出现在 DOM 里，关闭时按钮不带 `aria-controls`。
+ */
+export const INSPECT_FLOAT_ID = 'wb-inspect-float'
 
 /** 按钮距主区顶部的距离（px） */
 export const INSPECT_ANCHOR_TOP = 20
