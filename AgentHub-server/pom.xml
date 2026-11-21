@@ -23,7 +23,7 @@
         <sa-token.version>1.39.0</sa-token.version>
         <springdoc.version>2.3.0</springdoc.version>
         <!-- 试跑默认引擎。勿改成 Spring AI Alibaba，也不要为此拆 module。 -->
-        <agentscope.version>2.0.4</agentscope.version>
+        <agentscope.version>2.0.5</agentscope.version>
         <!-- RAG 本地向量库。版本钉死：SDK 小版本间 API 有差异（如 addField / Function 构建方式） -->
         <milvus.sdk.version>2.6.17</milvus.sdk.version>
         <!-- RAG 入库 PDF 解析。2.0.x 的 PDDocument.load 与 3.x 不兼容，勿随手升级 -->

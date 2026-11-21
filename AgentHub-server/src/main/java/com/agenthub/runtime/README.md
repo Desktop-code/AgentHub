@@ -1,6 +1,6 @@
 # runtime
 
-控制台试跑。默认引擎是 AgentScope-Java 2.0.4 的 ReActAgent。Router 只做一层分发，子 Agent 再走 ReAct。
+控制台试跑。默认引擎是 AgentScope-Java 2.0.5 的 ReActAgent。Router 只做一层分发，子 Agent 再走 ReAct。
 
 不在这里保存模型 Key。出站解密走 model 域的 SecretStore。
 已绑定且启用的 MCP 工具与 BUILTIN 同一套 schema 预算；本轮暴露后注册可调用句柄，模型可发起真实 tools/call（鉴权/远端失败返回明确错误，不假装成功）。

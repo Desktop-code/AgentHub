@@ -16,7 +16,7 @@
 | 层 | 选型 |
 |---|---|
 | 后端 | JDK 17、Spring Boot 3.2（单模块 Maven）、MyBatis-Plus、Sa-Token |
-| Agent 引擎 | AgentScope-Java 2.0.4：ReAct、Plan-Execute 与分发执行 |
+| Agent 引擎 | AgentScope-Java 2.0.5：ReAct、Plan-Execute 与分发执行 |
 | 数据 | MySQL 5.7+（兼容 8.0）、Redis、Milvus 2.5+ |
 | 前端 | Vue 3 + Vite + TypeScript + Element Plus + Pinia + Vue Router（工作流画布用 Vue Flow） |
 | 交付 | Docker Compose（依赖 + 后端 + Nginx 前端）、单 jar 运行 |
