@@ -35,16 +35,24 @@ public final class RetrievalConfigResolver {
     public static final int DEFAULT_RRF_TOP_N = 20;
     /** 向量分下限默认值。BGE 类模型 IP 分数常在 0.3~0.7，0.5 是较稳的起点 */
     public static final double DEFAULT_SCORE_THRESHOLD = 0.5d;
+    /** 单篇文档最多保留的切片数默认值：防止一篇长文吃光单库 topK */
+    public static final int DEFAULT_MAX_CHUNKS_PER_DOC = 3;
+    /** 单篇文档切片数硬上限：再大就没有限段意义了 */
+    public static final int MAX_MAX_CHUNKS_PER_DOC = 20;
 
     private RetrievalConfigResolver() {
     }
 
     /**
      * 合成检索参数。
+     * <p>
+     * 条数只认配置：Agent 绑定覆盖项 &gt; KB 的 retrieval_config &gt; 平台默认。
+     * 工具入参的 topK 不再参与（模型不再决定返回几条），{@code topKOverride} 仅为内部显式调用保留，
+     * 对话链路一律传 0。
      *
      * @param kbRetrievalConfig KB 的 retrieval_config JSON，可空
      * @param overridesJson     Agent 绑定的 overrides_json，可空；值为 null 表示该键不覆盖
-     * @param topKOverride      调用方（Tool 入参）显式给的 topK，≤0 表示不覆盖
+     * @param topKOverride      显式覆盖条数；≤0 表示不覆盖（对话链路恒为 0）
      * @param kbId              知识库 id
      * @param query             检索句
      * @param tenantId          租户过滤，可空
@@ -67,6 +75,12 @@ public final class RetrievalConfigResolver {
         int rrfTopN = clamp(Math.max(pickInt(over, kb, "rrfTopN", DEFAULT_RRF_TOP_N), topK), 1, MAX_RECALL_TOP_K);
         int rrfK = clamp(pickInt(over, kb, "rrfK", DEFAULT_RRF_K), 1, 1000);
         double threshold = clampDouble(pickDouble(over, kb, "scoreThreshold", DEFAULT_SCORE_THRESHOLD), 0d, 1d);
+        // 单文档限段：0 表示不配（回落默认 3）；负数当不配处理，避免出现「一段都不留」
+        int maxChunksPerDoc = pickInt(over, kb, "maxChunksPerDoc", DEFAULT_MAX_CHUNKS_PER_DOC);
+        maxChunksPerDoc = clamp(maxChunksPerDoc <= 0 ? DEFAULT_MAX_CHUNKS_PER_DOC : maxChunksPerDoc,
+                1, MAX_MAX_CHUNKS_PER_DOC);
+        // 合并后条数：0 表示自动（各库生效 topK 之和），正数才是显式上限
+        int mergedTopK = clamp(pickInt(over, kb, "mergedTopK", 0), 0, MAX_RECALL_TOP_K);
 
         SearchQuery sq = new SearchQuery();
         sq.setKbId(kbId);
@@ -80,6 +94,8 @@ public final class RetrievalConfigResolver {
         // Rerank 默认关：未配模型或未显式打开时不打精排出站
         sq.setRerankEnabled(pickBool(over, kb, "rerankEnabled", false));
         sq.setScoreThreshold(threshold);
+        sq.setMaxChunksPerDoc(maxChunksPerDoc);
+        sq.setMergedTopK(mergedTopK);
         sq.setTenantId(tenantId);
         return sq;
     }
@@ -155,6 +171,7 @@ public final class RetrievalConfigResolver {
                 "rrfTopN", DEFAULT_RRF_TOP_N,
                 "rrfK", DEFAULT_RRF_K,
                 "scoreThreshold", DEFAULT_SCORE_THRESHOLD,
+                "maxChunksPerDoc", DEFAULT_MAX_CHUNKS_PER_DOC,
                 "rrfEnabled", true,
                 "rerankEnabled", false);
     }

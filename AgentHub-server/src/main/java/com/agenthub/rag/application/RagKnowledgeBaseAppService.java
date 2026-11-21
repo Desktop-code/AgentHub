@@ -127,6 +127,9 @@ public class RagKnowledgeBaseAppService {
 
         String name = RagKbChecks.requiredText(req.getName(), RagKbChecks.NAME_MAX, "名称");
         names.assertUnique(name, null);
+        // 描述必填：运行时按描述选库，空描述会让该库在多库场景下无法参与相关性判断
+        String description = RagKbChecks.requiredText(req.getDescription(),
+                RagKbChecks.DESCRIPTION_MAX, "描述");
 
         // 维度从模型元数据带出并就此锁定；后续换模型只能新建库
         ModelInstance embedding = models.requireEmbedding(req.getEmbeddingModelId());
@@ -136,7 +139,7 @@ public class RagKnowledgeBaseAppService {
         RagKnowledgeBase kb = new RagKnowledgeBase();
         kb.setTenantId(0L);
         kb.setName(name);
-        kb.setDescription(RagKbChecks.optionalText(req.getDescription(), RagKbChecks.DESCRIPTION_MAX, "描述"));
+        kb.setDescription(description);
         kb.setStoreType(storeType.getCode());
         kb.setEmbeddingModelId(embedding.getId());
         kb.setVectorDimension(dimension);
@@ -174,12 +177,15 @@ public class RagKnowledgeBaseAppService {
         String name = RagKbChecks.requiredText(req.getName(), RagKbChecks.NAME_MAX, "名称");
         names.assertUnique(name, id);
         RagVisibility visibility = parseVisibility(req.getVisibility());
+        // 描述必填：老库的空描述允许保留，但一旦编辑就必须补齐（运行时要按描述选库）
+        String description = RagKbChecks.requiredText(req.getDescription(),
+                RagKbChecks.DESCRIPTION_MAX, "描述");
         // 0 表示清空 Rerank；其它值必须是通过校验的 RERANK 实例
         ModelInstance rerank = (req.getRerankModelId() != null && req.getRerankModelId() == 0L)
                 ? null : models.requireRerank(req.getRerankModelId());
 
         existing.setName(name);
-        existing.setDescription(RagKbChecks.optionalText(req.getDescription(), RagKbChecks.DESCRIPTION_MAX, "描述"));
+        existing.setDescription(description);
         existing.setVisibility(visibility.getCode());
         existing.setRerankModelId(rerank == null ? null : rerank.getId());
         existing.setRetrievalConfig(RagKbChecks.configJson(req.getRetrievalConfig(),

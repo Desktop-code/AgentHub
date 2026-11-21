@@ -14,7 +14,7 @@ public class RagKbUpdateReq {
     @Size(max = 100, message = "最长 100")
     private String name;
 
-    /** 描述 */
+    /** 描述，必填：运行时按描述在多库间选择本次要检索的库 */
     @Size(max = 512, message = "最长 512")
     private String description;
 

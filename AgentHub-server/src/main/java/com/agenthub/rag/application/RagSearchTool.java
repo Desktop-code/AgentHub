@@ -56,9 +56,6 @@ public class RagSearchTool {
      */
     public static final String KB_UNAVAILABLE = "知识库暂时不可用，请稍后再试。";
 
-    /** 工具入参 topK 上限：与检索服务硬顶一致 */
-    private static final int MAX_TOP_K = 10;
-
     private final RagRetrievalAppService retrieval;
     private final AgentKbBindAppService binds;
     private final AgentRerankLookup rerankLookup;
@@ -84,12 +81,16 @@ public class RagSearchTool {
      * 返回 JSON 数组（含 content / title / score / hitBy），或明确的失败说明。
      * 异常不抛出：Tool 抛异常会让整轮试跑失败，而「查不到东西」是可预期的业务结果。
      * <p>
+     * <b>条数只听配置</b>：知识库「检索参数」与 Agent 绑定覆盖项决定 topK，
+     * 入参 {@code topK} 仅为兼容旧调用保留，<b>不再参与</b>最终条数计算，
+     * 也不再向检索服务传覆盖值（恒传 0 = 不覆盖）。
+     * <p>
      * 命中有 trace 锚点时，本次调用会在 TOOL span 下写
-     * {@code tool.input → rewrite → retrieve.vector → retrieve.bm25 → rrf → rerank → tool.output}
+     * {@code tool.input → select.kb → rewrite → retrieve.vector → retrieve.bm25 → rrf → rerank → tool.output}
      * 子步；其它工具不读该锚点，仍保持单层入参/返回。
      *
      * @param query 检索问题或关键字
-     * @param topK  返回条数，默认 5，最大 10
+     * @param topK  已废弃的兼容参数：传了也不生效，条数以知识库检索参数为准
      * @return JSON 或中文说明
      */
     @Tool(name = "searchKnowledgeBase",
@@ -99,11 +100,13 @@ public class RagSearchTool {
                     + "返回「暂时不可用」时只需告知用户稍后再试，不要展开技术细节。")
     public String searchKnowledgeBase(
             @ToolParam(name = "query", description = "检索问题或关键字") String query,
-            @ToolParam(name = "topK", description = "返回条数，默认 5，最大 10", required = false) Integer topK) {
+            @ToolParam(name = "topK", description = "无需填写；返回条数由知识库检索参数决定",
+                    required = false) Integer topK) {
         if (query == null || query.isBlank()) {
             return "检索问题不能为空。";
         }
-        int k = topK == null ? 5 : Math.min(Math.max(topK, 1), MAX_TOP_K);
+        // 条数不再由模型决定：恒传 0，交给知识库检索参数 / 绑定覆盖项解析
+        int k = 0;
 
         Long agentId = RagToolContext.agentIdOrNull();
         String trimmedQuery = query.trim();
@@ -128,12 +131,12 @@ public class RagSearchTool {
 
             Map<String, Object> input = new LinkedHashMap<>();
             input.put("query", trimmedQuery);
-            input.put("topK", k);
+            // 条数来源写清楚：模型不再决定返回几条
+            input.put("topK", "按知识库检索参数");
             input.put("kbIds", usable.stream().map(RagKnowledgeBase::getId).toList());
             input.put("overrides", overrides);
             input.put("agentRerankModelId", agentRerankModelId);
             Map<String, Object> inputAttrs = new LinkedHashMap<>();
-            inputAttrs.put("topK", k);
             inputAttrs.put("kbCount", usable.size());
             inputAttrs.put("kbIds", usable.stream().map(RagKnowledgeBase::getId)
                     .map(String::valueOf).reduce((a, b) -> a + "," + b).orElse(""));

@@ -26,6 +26,10 @@ public class SearchQuery {
     private boolean rerankEnabled;
     /** 向量分下限；≤0 表示不过滤（0 分也可能是合法命中） */
     private double scoreThreshold;
+    /** 单篇文档最多保留的切片数；≤0 表示不限段（默认 3，防止一篇吃光 topK） */
+    private int maxChunksPerDoc;
+    /** 多库合并后的最终条数上限；0 表示按各库生效 topK 之和自动计算 */
+    private int mergedTopK;
     /** 租户过滤；null 表示不过滤 */
     private Long tenantId;
 
@@ -167,6 +171,34 @@ public class SearchQuery {
      */
     public void setScoreThreshold(double scoreThreshold) {
         this.scoreThreshold = scoreThreshold;
+    }
+
+    /**
+     * @return 单篇文档最多保留的切片数
+     */
+    public int getMaxChunksPerDoc() {
+        return maxChunksPerDoc;
+    }
+
+    /**
+     * @param maxChunksPerDoc 单篇文档最多保留的切片数；≤0 表示不限段
+     */
+    public void setMaxChunksPerDoc(int maxChunksPerDoc) {
+        this.maxChunksPerDoc = maxChunksPerDoc;
+    }
+
+    /**
+     * @return 合并后条数上限；0 表示按各库生效 topK 之和自动计算
+     */
+    public int getMergedTopK() {
+        return mergedTopK;
+    }
+
+    /**
+     * @param mergedTopK 合并后条数上限；≤0 表示自动
+     */
+    public void setMergedTopK(int mergedTopK) {
+        this.mergedTopK = mergedTopK;
     }
 
     /**

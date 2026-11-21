@@ -43,6 +43,8 @@ public final class RagObsSpans {
     public static final String TOOL_INPUT = "tool.input";
     /** 查询改写：本期运行时未执行，只记 skip 原因 */
     public static final String REWRITE = "rewrite";
+    /** 选库：按问句与各库描述决定本次检索哪些库 */
+    public static final String SELECT_KB = "select.kb";
     /** 向量召回：id / 摘要 / 向量分 */
     public static final String RETRIEVE_VECTOR = "retrieve.vector";
     /** BM25 召回：id / 摘要 / BM25 分 */
@@ -201,7 +203,7 @@ public final class RagObsSpans {
          *
          * @param text   入参正文（建议缩进 JSON）
          * @param query  原问
-         * @param topK   工具入参 topK
+         * @param topK   生效条数；≤0 表示由知识库配置决定，卡片上不写死数字
          * @param attrs  扁平统计（kbCount / kbIds / agentRerankModelId）
          */
         public void input(String text, String query, int topK, Map<String, Object> attrs) {
@@ -209,15 +211,15 @@ public final class RagObsSpans {
                 return;
             }
             this.query = query;
-            this.topK = topK;
+            this.topK = topK > 0 ? topK : null;
             Map<String, Object> fields = new LinkedHashMap<>();
             if (attrs != null) {
                 fields.putAll(attrs);
             }
-            // 卡片头直接给一句人话，不必展开 JSON
-            fields.put("brief", clip("检索入参：" + (query == null ? "" : query) + "（topK=" + topK + "）",
-                    MAX_BRIEF));
-            step(TOOL_INPUT, null, query, topK, text).ok(null, fields);
+            // 卡片头直接给一句人话，不必展开 JSON；条数由配置决定时不再显示数字
+            String suffix = topK > 0 ? "（topK=" + topK + "）" : "（条数按知识库检索参数）";
+            fields.put("brief", clip("检索入参：" + (query == null ? "" : query) + suffix, MAX_BRIEF));
+            step(TOOL_INPUT, null, query, this.topK, text).ok(null, fields);
         }
 
         /**
