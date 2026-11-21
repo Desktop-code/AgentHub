@@ -4,6 +4,7 @@ import com.agenthub.common.error.BizException;
 import com.agenthub.common.error.ErrorCode;
 import com.agenthub.memory.domain.service.MemoryModelClient;
 import com.agenthub.runtime.domain.model.MeterScope;
+import com.agenthub.spi.llm.TextCompletionClient;
 import io.agentscope.core.message.ContentBlock;
 import io.agentscope.core.message.Msg;
 import io.agentscope.core.message.SystemMessage;
@@ -22,8 +23,15 @@ import java.util.ArrayList;
 import java.util.List;
 
 /**
- * 用已配置的模型实例做摘要和偏好抽取。所属域：runtime 的 infra。
+ * 用已配置的模型实例做摘要、偏好抽取与查询改写等「一次性文本生成」。所属域：runtime 的 infra。
  * 每次调用都套 BillingMeter 和 LLM span，渠道仍是 CONSOLE。
+ * <p>
+ * 同时实现两个端口：
+ * <ul>
+ *   <li>{@link MemoryModelClient}：memory 域的摘要 / 抽取；</li>
+ *   <li>{@link TextCompletionClient}：跨域「系统段 + 正文 → 文本」的通用出站口，
+ *       目前由 rag 的查询改写使用。两端口签名一致，这里只有一份实现，避免第二套出站逻辑。</li>
+ * </ul>
  *
  * <p>空回判定（排障重点）：只认 {@link TextBlock} 的正文。推理模型的思考是
  * {@link ThinkingBlock}，<b>不能</b>当答案用（思考里出现 store 也不代表用户要求记住）；
@@ -39,7 +47,7 @@ import java.util.List;
  * 必须保持不变（一次出站、不额外计费），本类不替它们做二次调用。
  */
 @Component
-public class AgentScopeMemoryModelClient implements MemoryModelClient {
+public class AgentScopeMemoryModelClient implements MemoryModelClient, TextCompletionClient {
 
     private static final Logger log = LoggerFactory.getLogger(AgentScopeMemoryModelClient.class);
 

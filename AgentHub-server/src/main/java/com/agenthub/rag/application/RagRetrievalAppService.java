@@ -6,6 +6,7 @@ import com.agenthub.rag.domain.repository.RagChunkRepository;
 import com.agenthub.rag.domain.repository.RagKnowledgeBaseRepository;
 import com.agenthub.rag.domain.service.KbSelector;
 import com.agenthub.rag.domain.service.RagAccessPolicy;
+import com.agenthub.rag.domain.service.RagQueryRewriter;
 import com.agenthub.rag.domain.service.RetrievalConfigResolver;
 import com.agenthub.rag.domain.service.RrfFusion;
 import com.agenthub.spi.rag.EmbeddingClient;
@@ -18,6 +19,7 @@ import com.agenthub.spi.rag.SearchQuery;
 import com.agenthub.spi.rag.SearchResult;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.stereotype.Service;
 
 import java.util.ArrayList;
@@ -31,12 +33,17 @@ import java.util.Map;
  * 知识库检索用例。所属域：rag。③ 期的核心，RAG 检索 Tool 直接调这里。
  * <p>
  * 检索链路：<br>
- * query → Embedding(按 KB 的模型) → 向量召回 ∥ BM25 召回（能力支持时）→ RRF 融合 → 截断 → MySQL 回填全文。
+ * query → 选库(按原问) → 可选查询改写 → Embedding(按 KB 的模型) → 向量召回 ∥ BM25 召回（能力支持时）
+ * → RRF 融合 → 截断 → MySQL 回填全文。
  * <p>
  * 关键约定：
  * <ul>
  *   <li><b>向量必做</b>；BM25 与 RRF 只在集合具备 DENSE_BM25 能力时才走，DENSE_ONLY 自动退化为纯向量，不报错；</li>
  *   <li><b>Rerank / 改写默认关</b>；Rerank 开启且配了模型时走 {@link RerankClient}（同连通测矩阵，DASHSCOPE text-rerank）；</li>
+ *   <li><b>改写两道门</b>：该库（或入选库之一）{@code rewriteEnabled=开} 且 Agent 的 {@code REWRITE}
+ *       用途槽有可用模型。缺一则不改写、按原问句检索且不报错；改写失败也回退原问句。
+ *       一次工具调用最多改写一次，且<b>不做</b>「原问 + 改写」双路融合——改写成功后该库召回、
+ *       RRF、重排都只用改写句；<b>选库永远用原问句</b>；</li>
  *   <li><b>无权限明确报错</b>：不可见 / 未初始化 / 已停用一律抛业务异常，**绝不返回空列表冒充「没查到」**；</li>
  *   <li><b>防爆</b>：条数上限、单条字符上限、总字符上限三层截断，避免把上下文挤爆；</li>
  *   <li><b>可观测</b>：工具调用内按检索链路写 obs 子步（{@link RagObsSpans}）；无 trace 时全部空操作，
@@ -61,6 +68,11 @@ public class RagRetrievalAppService {
     private final RagProvider provider;
     private final EmbeddingClient embeddings;
     private final RerankClient rerank;
+    /**
+     * 查询改写端口。为 null 表示当前装配没有改写能力（评测直调、单测），
+     * 此时开关打开也只按原问句检索并在 Trace 里说明原因。
+     */
+    private final RagQueryRewriter rewriter;
 
     /**
      * @param kbs        知识库
@@ -71,11 +83,29 @@ public class RagRetrievalAppService {
      */
     public RagRetrievalAppService(RagKnowledgeBaseRepository kbs, RagChunkRepository chunks,
                                   RagProvider provider, EmbeddingClient embeddings, RerankClient rerank) {
+        this(kbs, chunks, provider, embeddings, rerank, null);
+    }
+
+    /**
+     * 带查询改写的装配。改写是增强项：端口缺省时全链路仍按原问句工作。
+     *
+     * @param kbs        知识库
+     * @param chunks     切片
+     * @param provider   向量库
+     * @param embeddings 向量化
+     * @param rerank     可选精排
+     * @param rewriter   查询改写端口，可空
+     */
+    @Autowired
+    public RagRetrievalAppService(RagKnowledgeBaseRepository kbs, RagChunkRepository chunks,
+                                  RagProvider provider, EmbeddingClient embeddings, RerankClient rerank,
+                                  RagQueryRewriter rewriter) {
         this.kbs = kbs;
         this.chunks = chunks;
         this.provider = provider;
         this.embeddings = embeddings;
         this.rerank = rerank;
+        this.rewriter = rewriter;
     }
 
     /**
@@ -106,8 +136,8 @@ public class RagRetrievalAppService {
      */
     public List<SearchResult> retrieve(RagKnowledgeBase kb, String query, int topKOverride, String overridesJson,
                                       Long agentRerankModelId) {
-        emitRewriteSkip(kb, query, overridesJson, topKOverride);
-        return retrieveInternal(kb, query, topKOverride, overridesJson, agentRerankModelId, false);
+        String effectiveQuery = applyRewriteForSingle(kb, query, overridesJson, topKOverride);
+        return retrieveInternal(kb, effectiveQuery, topKOverride, overridesJson, agentRerankModelId, false);
     }
 
     /**
@@ -369,55 +399,171 @@ public class RagRetrievalAppService {
     }
 
     /**
-     * 写 run 级「查询改写」skip 子步：多库只写一条。
+     * 一次改写在检索链路里的结果。所属域：rag 的 application。
+     * <p>
+     * 只留检索侧真正需要的两项：实际生效的检索句、是否用上了改写句。
+     * 跳过 / 失败的原因已写进 Trace，不必在内存对象里再带一份。
      *
-     * @param kbs          本轮检索库
-     * @param query        原问
+     * @param query   实际生效的检索句（成功为改写句，否则原问句）
+     * @param applied 是否真的用上了改写句
+     */
+    private record RewriteOutcome(String query, boolean applied) {
+
+        /**
+         * 没有改动问句（门未开 / 模型缺失 / 失败回退）。
+         *
+         * @param original 原问句
+         * @return 结果
+         */
+        static RewriteOutcome unchanged(String original) {
+            return new RewriteOutcome(original, false);
+        }
+    }
+
+    /**
+     * 单库入口的改写：开关开 + REWRITE 槽有模型才出站，失败回退原问句。
+     * <p>
+     * 单库没有「选库」这一步，因此门禁就是「该库开关」+「模型可用」。
+     *
+     * @param kb           知识库
+     * @param query        用户原问句
+     * @param overridesJson 该库的覆盖项；可空
+     * @param topKOverride 工具入参 topK
+     * @return 实际生效的检索句；不需要或失败时就是原问句
+     */
+    private String applyRewriteForSingle(RagKnowledgeBase kb, String query, String overridesJson, int topKOverride) {
+        if (kb == null || query == null || query.isBlank()) {
+            return query;
+        }
+        boolean requested = RagObsSpans.rewriteRequested(kb.getRetrievalConfig(), overridesJson);
+        return executeRewrite(query, requested, topKOverride).query();
+    }
+
+    /**
+     * 多库入口的改写：先按原问选库（调用方已做完），只要入选库里有一个开了开关就改写一次。
+     * <p>
+     * 硬约束：<b>一次工具调用最多改写一次</b>。多库共享同一句改写结果，
+     * 不会按库各改一遍，也不做「原问 + 改写句」的双路融合。
+     *
+     * @param targets      选库后实际要检索的库
+     * @param query        用户原问句
      * @param overrides    各库覆盖项；可空
      * @param topKOverride 工具入参 topK
+     * @return 改写结果；未开门时 {@code applied=false} 且 query 为原问句
      */
-    private void emitRewriteSkip(List<RagKnowledgeBase> kbs, String query,
-                                 Map<Long, String> overrides, int topKOverride) {
-        RagObsSpans.Session obs = RagObsSpans.currentOrInactive();
-        if (!obs.isActive() || kbs == null || kbs.isEmpty() || query == null || query.isBlank()) {
-            return;
+    private RewriteOutcome applyRewriteForMulti(List<RagKnowledgeBase> targets, String query,
+                                                Map<Long, String> overrides, int topKOverride) {
+        if (targets == null || targets.isEmpty() || query == null || query.isBlank()) {
+            return RewriteOutcome.unchanged(query);
         }
         boolean requested = false;
-        for (RagKnowledgeBase kb : kbs) {
+        for (RagKnowledgeBase kb : targets) {
             String override = overrides == null ? null : overrides.get(kb.getId());
-            if (RagObsSpans.rewriteRequested(kb.getRetrievalConfig(), override)) {
+            if (kb != null && RagObsSpans.rewriteRequested(kb.getRetrievalConfig(), override)) {
                 requested = true;
                 break;
             }
         }
-        writeRewriteSkip(obs, query, topKOverride, requested);
+        // 入选库都不需要改写：根本不调改写模型（不是「调了没用」，是连出站都不发生）
+        return executeRewrite(query, requested, topKOverride);
     }
 
     /**
-     * 单库入口的改写 skip；与多库共用同一套原因口径。
+     * 真正执行一次改写并写 Trace；门未开、端口缺失、无模型、异常都在这里收口成「回退原问」。
+     * <p>
+     * Trace 口径：<b>每次工具调用只写一条 rewrite 子步</b>，三种终态互斥
+     * （成功 / 跳过 / 失败回退，见 {@link RagObsSpans.Session#rewrite}）。
      *
-     * @param kb           知识库
-     * @param query        原问
-     * @param overridesJson 覆盖项；可空
-     * @param topKOverride 工具入参 topK
+     * @param query        用户原问句
+     * @param requested    该次调用的入选库是否至少有一个开了改写开关（第一道门）
+     * @param topKOverride 工具入参 topK，仅用于 span 展示
+     * @return 改写结果，`query` 字段为实际生效的检索句
      */
-    private void emitRewriteSkip(RagKnowledgeBase kb, String query, String overridesJson, int topKOverride) {
+    private RewriteOutcome executeRewrite(String query, boolean requested, int topKOverride) {
+        String original = query == null ? "" : query.trim();
+        Integer topK = topKOverride > 0 ? Integer.valueOf(topKOverride) : null;
         RagObsSpans.Session obs = RagObsSpans.currentOrInactive();
-        if (!obs.isActive() || kb == null || query == null || query.isBlank()) {
-            return;
+        // 第一道门：开关没开就到此为止，连改写端口都不碰
+        if (!requested) {
+            obs.rewrite(original, original, false, false, "rewrite_disabled", null, null, topK);
+            return RewriteOutcome.unchanged(original);
         }
-        writeRewriteSkip(obs, query, topKOverride,
-                RagObsSpans.rewriteRequested(kb.getRetrievalConfig(), overridesJson));
+        if (rewriter == null) {
+            // 装配缺端口（评测直调、单测）：不是配置错误，也不该在 Trace 里冒充「试过但失败」
+            obs.rewrite(original, original, false, false, "rewrite_port_missing", null, null, topK);
+            return RewriteOutcome.unchanged(original);
+        }
+        Long agentId = RagToolContext.agentIdOrNull();
+        if (agentId == null) {
+            obs.rewrite(original, original, false, false, "rewrite_no_agent", null, null, topK);
+            return RewriteOutcome.unchanged(original);
+        }
+        // 第二道门（模型槽是否可用）在端口内判定：rag 只认 REWRITE 槽，绝不降级 CHAT
+        RagQueryRewriter.Caller caller = new RagQueryRewriter.Caller(agentId,
+                RagToolContext.sessionIdOrNull(), RagToolContext.operatorIdOrNull());
+        // 同一轮、同一 Agent、同一原问：直接复用上次结果，避免为同一句话重复出站与计费
+        SameTurnRetrievalMemo memo = SameTurnRetrievalMemo.current();
+        RagQueryRewriter.Result result = memo == null ? null : memo.findRewrite(agentId, original);
+        if (result != null) {
+            log.info("[RAG] 同轮复用查询改写 agentId={} applied={}", agentId, result.applied());
+        } else {
+            result = rewriter.rewrite(caller, original);
+            if (memo != null) {
+                memo.saveRewrite(agentId, original, result);
+            }
+        }
+        if (result == null) {
+            // 实现方违反「不返回 null」的契约时也不能连累检索
+            obs.rewrite(original, original, false, true, "rewrite_failed", null, null, topK);
+            return RewriteOutcome.unchanged(original);
+        }
+        boolean applied = result.applied() && result.query() != null && !result.query().isBlank();
+        // 失败回退 = 真的尝试过出站后没拿到可用改写句；与「本来就跳过」分开
+        boolean failed = !applied && (result.errorType() != null || requiresAttemptedReason(result.reason()));
+        String effective = applied ? result.query().trim() : original;
+        // 一次调用只写一条 rewrite 子步：成功 / 跳过 / 失败回退三态互斥
+        obs.rewrite(original, effective, applied, failed, result.reason(), result.errorType(),
+                result.modelInstanceId(), topK);
+        return new RewriteOutcome(effective, applied);
     }
 
     /**
-     * 本期运行时未接入查询改写：开关开着记「已开但未执行」，关着记「未开启」。
+     * 判断一个「未生效」原因是否属于「确实尝试过出站」。
+     * <p>
+     * 用来把「本来就跳过」（开关关 / 没模型）与「试了但失败回退」在 Trace 与日志里分开，
+     * 否则排障时只能看到一串 not applied，分不清配置问题还是模型问题。
+     *
+     * @param reason 机器可读原因
+     * @return true 表示属于失败回退
      */
-    private void writeRewriteSkip(RagObsSpans.Session obs, String query, int topKOverride, boolean requested) {
-        obs.skipOnce(RagObsSpans.REWRITE, null, query == null ? null : query.trim(),
-                topKOverride > 0 ? Integer.valueOf(topKOverride) : null,
-                requested ? "rewrite_not_executed" : "rewrite_disabled",
-                requested ? "跳过：改写开关已开，但运行时未执行改写" : "跳过：改写未开启");
+    private static boolean requiresAttemptedReason(String reason) {
+        if (reason == null) {
+            return false;
+        }
+        return switch (reason) {
+            case "rewrite_timeout", "rewrite_interrupted", "rewrite_model_error",
+                    "rewrite_empty_result", "rewrite_too_long", "rewrite_prompt_unavailable",
+                    "rewrite_failed" -> true;
+            default -> false;
+        };
+    }
+
+    /**
+     * 该库本次实际使用的检索句：开关开且改写成功才用改写句，否则一律原问句。
+     *
+     * @param kb       知识库
+     * @param override 该库覆盖项；可空
+     * @param original 用户原问句
+     * @param rewrite  本次改写结果
+     * @return 检索句
+     */
+    private static String queryForKb(RagKnowledgeBase kb, String override, String original, RewriteOutcome rewrite) {
+        if (rewrite == null || !rewrite.applied() || kb == null) {
+            return original;
+        }
+        // 开关关的库仍用原问：只有明确开了改写的库才换成改写句
+        boolean rewritable = RagObsSpans.rewriteRequested(kb.getRetrievalConfig(), override);
+        return rewritable ? rewrite.query() : original;
     }
 
     /**
@@ -487,19 +633,24 @@ public class RagRetrievalAppService {
         }
         // 先按描述选库：只查与问句相关的库，其它库不进召回、不进精排、不进上下文。
         // 兜底（单库、描述全空、全不匹配）都在 KbSelector 内落到「按绑定范围全搜」。
+        // 注意：选库始终用**用户原问句**，不使用改写句——改写只影响召回，不改选库口径。
         KbSelector.Selection selection = KbSelector.select(query, kbs);
         List<RagKnowledgeBase> targets = selection.selected();
         if (targets.isEmpty()) {
             targets = kbs;
         }
         recordSelection(kbs.size(), selection, query, topKOverride);
+        // 改写：选库之后、召回之前，一次调用最多一次。
+        // 只有「入选库里至少一个开了开关」且「REWRITE 槽有可用模型」才真正出站；
+        // 失败 / 未配模型 / 都没开 一律回退原问句继续检索，不让改写把检索打失败。
+        RewriteOutcome rewrite = applyRewriteForMulti(targets, query, overrides, topKOverride);
         // 整次多库调用的键按各库参数组成。命中则连合并后的重排都不再出站。
         // 库不同、查询不同、覆盖项或条数不同，键就不同，不会把两次该分开的检索并成一次。
         // 没有本轮 trace 时不组键，检索仍按原顺序逐库出站。
         SameTurnRetrievalMemo memo = SameTurnRetrievalMemo.current();
         List<SameTurnRetrievalMemo.Key> callKey = null;
         if (memo != null) {
-            List<SameTurnRetrievalMemo.Key> callKeys = callKeys(targets, query, topKOverride, overrides,
+            List<SameTurnRetrievalMemo.Key> callKeys = callKeys(targets, query, rewrite, topKOverride, overrides,
                     agentRerankModelId);
             if (callKeys != null) {
                 callKey = SameTurnRetrievalMemo.callKey(callKeys);
@@ -510,16 +661,16 @@ public class RagRetrievalAppService {
                 }
             }
         }
-        // run 级改写步骤：运行时不执行改写，按各库开关聚合出唯一的 skip 原因
-        emitRewriteSkip(targets, query, overrides, topKOverride);
         List<SearchResult> all = new ArrayList<>();
         int succeeded = 0;
         RuntimeException firstFailure = null;
         for (RagKnowledgeBase kb : targets) {
             try {
                 String override = overrides == null ? null : overrides.get(kb.getId());
+                // 逐库决定用哪句检索：开关关的库仍用原问句，开关开的库才用改写句
+                String kbQuery = queryForKb(kb, override, query, rewrite);
                 // Agent 级重排延后：多库各排一次会让出站次数与库数成正比，且各库精排分不可比
-                all.addAll(retrieveInternal(kb, query, topKOverride, override, agentRerankModelId, true));
+                all.addAll(retrieveInternal(kb, kbQuery, topKOverride, override, agentRerankModelId, true));
                 succeeded++;
             } catch (RuntimeException e) {
                 // 单库失败不影响其它库：知识库只是其中一个信息源
@@ -624,16 +775,21 @@ public class RagRetrievalAppService {
 
     /**
      * 为一次多库调用预计算各库的复用键。任一库没有 id 就不做整次复用，单库成功仍可按库复用。
+     * <p>
+     * 键里的查询文本必须是<b>该库实际使用的</b>那句：开关开的库用改写句，关的库用原问句。
+     * 否则「开关改了 / 改写结果变了」时会把不同检索并成一次。
      *
      * @param kbs                本次要查的库（已经过调用方的授权过滤）
-     * @param query              检索句
+     * @param query              用户原问句
+     * @param rewrite            本次改写结果
      * @param topKOverride       覆盖条数
      * @param overrides          各库覆盖项；可空
      * @param agentRerankModelId Agent 重排实例；可空
      * @return 与库列表等长的键；无法整次复用时为 null
      */
     private static List<SameTurnRetrievalMemo.Key> callKeys(List<RagKnowledgeBase> kbs, String query,
-                                                            int topKOverride, Map<Long, String> overrides,
+                                                            RewriteOutcome rewrite, int topKOverride,
+                                                            Map<Long, String> overrides,
                                                             Long agentRerankModelId) {
         List<SameTurnRetrievalMemo.Key> keys = new ArrayList<>(kbs.size());
         for (RagKnowledgeBase kb : kbs) {
@@ -641,8 +797,9 @@ public class RagRetrievalAppService {
                 return null;
             }
             String override = overrides == null ? null : overrides.get(kb.getId());
+            String kbQuery = queryForKb(kb, override, query, rewrite);
             // 与 retrieveInternal 同一套解析；多库路径的 Agent 重排固定延后
-            SearchQuery sq = resolveQuery(kb, query, topKOverride, override, agentRerankModelId);
+            SearchQuery sq = resolveQuery(kb, kbQuery, topKOverride, override, agentRerankModelId);
             keys.add(SameTurnRetrievalMemo.key(kb, sq, agentRerankModelId, true));
         }
         return keys;

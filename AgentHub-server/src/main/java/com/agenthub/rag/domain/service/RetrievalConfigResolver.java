@@ -93,6 +93,8 @@ public final class RetrievalConfigResolver {
         sq.setRrfEnabled(pickBool(over, kb, "rrfEnabled", true));
         // Rerank 默认关：未配模型或未显式打开时不打精排出站
         sq.setRerankEnabled(pickBool(over, kb, "rerankEnabled", false));
+        // 查询改写默认关；这里只解析「这个库要不要改写」，是否真改写还要求 REWRITE 槽有可用模型
+        sq.setRewriteEnabled(pickBool(over, kb, "rewriteEnabled", false));
         sq.setScoreThreshold(threshold);
         sq.setMaxChunksPerDoc(maxChunksPerDoc);
         sq.setMergedTopK(mergedTopK);
@@ -173,6 +175,7 @@ public final class RetrievalConfigResolver {
                 "scoreThreshold", DEFAULT_SCORE_THRESHOLD,
                 "maxChunksPerDoc", DEFAULT_MAX_CHUNKS_PER_DOC,
                 "rrfEnabled", true,
-                "rerankEnabled", false);
+                "rerankEnabled", false,
+                "rewriteEnabled", false);
     }
 }
