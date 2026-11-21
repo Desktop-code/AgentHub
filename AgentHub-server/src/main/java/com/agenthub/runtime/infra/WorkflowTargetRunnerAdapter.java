@@ -217,9 +217,29 @@ public class WorkflowTargetRunnerAdapter implements WorkflowTargetRunner {
          * @return 终态视图
          */
         private WorkflowRunView finish(WorkflowRun run, String answer) {
-            return new WorkflowRunView(nameOf(), codeOf(),
-                    run == null ? "FAILED" : run.getStatus(), settleAnswer(run, answer),
-                    List.copyOf(nodes.values()));
+            String status = run == null ? "FAILED" : run.getStatus();
+            List<WorkflowRunView.Node> viewNodes = List.copyOf(nodes.values());
+            /*
+             * 取消收口：库里已经把在途节点写成 CANCELLED，但本收集器是旁路，
+             * 取消接口不会回写它的内存视图。若原样落库，刷新时卡片头是「已取消」、
+             * 节点却仍显示「执行中」并转圈。这里按库里 cancelOpen 的同一口径补一次。
+             */
+            if ("CANCELLED".equalsIgnoreCase(status)) {
+                viewNodes = viewNodes.stream().map(NodeCollector::settleCancelledNode).toList();
+            }
+            return new WorkflowRunView(nameOf(), codeOf(), status, settleAnswer(run, answer), viewNodes);
+        }
+
+        /** 取消时把未收口节点落到与 {@code cancelOpen} 相同的终态；已完成 / 已失败的节点原样保留。 */
+        private static WorkflowRunView.Node settleCancelledNode(WorkflowRunView.Node node) {
+            String nodeStatus = node.status();
+            if ("RUNNING".equals(nodeStatus) || "WAITING_HUMAN".equals(nodeStatus)) {
+                return new WorkflowRunView.Node(node.code(), node.name(), node.type(), "CANCELLED", "已中断");
+            }
+            if ("PENDING".equals(nodeStatus)) {
+                return new WorkflowRunView.Node(node.code(), node.name(), node.type(), "SKIPPED", "已跳过");
+            }
+            return node;
         }
 
         /**

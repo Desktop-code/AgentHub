@@ -32,6 +32,9 @@ import com.agenthub.runtime.domain.service.TrialTexts;
 import com.agenthub.runtime.domain.service.TurnStillOpen;
 import com.agenthub.runtime.infra.agentscope.ReActTrialExecutor;
 import com.agenthub.runtime.infra.agentscope.TrialProperties;
+import com.agenthub.workflow.application.WorkflowRunAppService;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
@@ -49,6 +52,8 @@ import java.util.Set;
  */
 @Service
 public class TrialSessionAppService {
+
+    private static final Logger log = LoggerFactory.getLogger(TrialSessionAppService.class);
 
     private final RunSessionRepository sessions;
     private final RunEventRepository events;
@@ -68,6 +73,16 @@ public class TrialSessionAppService {
     /** 方案读源：虚拟根建会话必须校验方案启用；列表回显方案名 */
     private final MaTrialSpecLoader maSpecs;
     private final MaDefRepository mas;
+    /**
+     * 工作流取消端：停止工作台一轮时，除中断 ReAct 外还要停掉同会话正在跑的工作流实例。
+     * 反向依赖不存在（workflow 不依赖本类），不会形成循环。
+     */
+    private final WorkflowRunAppService workflowRuns;
+    /**
+     * 本轮 trace 收口：停止工作台一轮时把仍为 RUNNING 的 trace / 步骤收成 CANCELLED，
+     * 避免右上角明细里残留「执行中」。只对工作台入口调用，不改管理端试跑 / 多智能体的口径。
+     */
+    private final TrialObsHooks obs;
 
     /**
      * @param sessions        会话
@@ -87,13 +102,16 @@ public class TrialSessionAppService {
      * @param loader          只读模型槽解析，用于判定是否配了 VISION
      * @param maSpecs         方案读源：虚拟根建会话与执行共用同一套方案校验
      * @param mas             只读方案，列表回显 maCode / maName
+     * @param workflowRuns    工作流取消端：停止一轮时连带取消同会话正在跑的 run
+     * @param obs             trace 收口：停止工作台一轮时把残留 RUNNING 的 trace / 步骤收成 CANCELLED
      */
     public TrialSessionAppService(RunSessionRepository sessions, RunEventRepository events, AgentDefRepository agents,
                                   TrialAccess access, OperatorContext operatorContext, OperLogWriter operLogWriter,
                                   TrialFlight flight, TrialProperties properties, ReActTrialExecutor react,
                                   TrialMemoryCoordinator memory, TrialSessionCloser closer, TrialLiveBuffer live,
                                   PlanPendingRegistry pendingPlans, ChildPlanApprovalRegistry childApprovals,
-                                  TrialBindingLoader loader, MaTrialSpecLoader maSpecs, MaDefRepository mas) {
+                                  TrialBindingLoader loader, MaTrialSpecLoader maSpecs, MaDefRepository mas,
+                                  WorkflowRunAppService workflowRuns, TrialObsHooks obs) {
         this.sessions = sessions;
         this.events = events;
         this.agents = agents;
@@ -111,6 +129,8 @@ public class TrialSessionAppService {
         this.loader = loader;
         this.maSpecs = maSpecs;
         this.mas = mas;
+        this.workflowRuns = workflowRuns;
+        this.obs = obs;
     }
 
     /**
@@ -340,6 +360,8 @@ public class TrialSessionAppService {
         query.setCurrent(current);
         query.setSize(historySize(size));
         query.setEntryChannel(EntryChannel.WORKBENCH.name());
+        // 工作台分组读 update_time；列表也按它排，清空后「刚刚」才会真正落到今天第一条
+        query.setOrderByActivity(true);
         query.setUserId(operatorContext.requireUserId());
         PageResult<RunSession> page = sessions.page(query);
         Map<Long, MaDef> maCache = new HashMap<>();
@@ -360,23 +382,87 @@ public class TrialSessionAppService {
     public SessionResp cancel(Long id) {
         RunSession session = access.require(id);
         if (flight.running(id)) {
-            // 含「根停在等待子计划批准」：请求线程还在，但没有登记成可中断的模型/工具循环时仍拒绝
-            if (react.interrupt(id)) {
-                operLogWriter.write("runtime", "cancel", "agent_run_session", String.valueOf(id),
-                        "中断运行 " + id);
-                return toResp(sessions.findById(id).orElseThrow());
+            /*
+             * 先按会话取消工作流实例，再中断 ReAct：
+             * 工作流是同步引擎，只有库里变 CANCELLED 才会在下一节点前退出；
+             * 只中断 ReAct 会让工作流卡保持「运行中」、节点继续往下跑。
+             * 用独立短事务提交，避免引擎线程在本次大事务提交前读不到取消状态。
+             * 放在 interrupt 之前：只有工作流子（没有 ReAct 线程登记）的一轮也能真正停下。
+             */
+            int stoppedRuns = 0;
+            RuntimeException workflowFailure = null;
+            try {
+                stoppedRuns = workflowRuns.cancelActiveByWorkbenchSession(id);
+            } catch (RuntimeException ex) {
+                // 先记下失败但不在这里抛：宿主线程的模型 / 工具必须先停，否则停一次卡一次
+                workflowFailure = ex;
+                log.warn("停止时取消工作流失败 sessionId={} type={} cause={}",
+                        id, ex.getClass().getSimpleName(), ex.getMessage());
             }
-            throw new BizException(ErrorCode.BAD_REQUEST, "本轮正在执行，请等待结束后再取消");
+            // 含「根停在等待子计划批准」：请求线程还在，但没有登记成可中断的模型/工具循环时仍拒绝；
+            // 已经确认停掉工作流子时按「停整轮」处理，不再要求必须命中 ReAct 登记
+            boolean interrupted = react.interrupt(id);
+            if (!interrupted && stoppedRuns == 0) {
+                throw new BizException(ErrorCode.BAD_REQUEST, "本轮正在执行，请等待结束后再取消");
+            }
+            if (workflowFailure != null) {
+                // 工作流没收掉：如实说明，不把这一轮标成已停后又不封口。
+                // 只有真的命中了 ReAct 中继时才说「模型已中断」，纯工作流子的一轮不冒充
+                String cause = workflowFailure.getMessage() == null
+                        ? workflowFailure.getClass().getSimpleName() : workflowFailure.getMessage();
+                String prefix = interrupted ? "模型已中断，但工作流取消失败：" : "工作流取消失败：";
+                throw new BizException(ErrorCode.BAD_REQUEST, prefix + cause);
+            }
+            /*
+             * 把内存快照封成中断终态：执行线程可能还要一会儿才退出（工作流节点收尾 / 其它并行子），
+             * 不封口的话刷新时仍会把最后一张 RUNNING 快照画成运行中、并重新进入续订。
+             * 快照里已出现的过程与工作流进度保留，只把进行态改成中断终态。
+             *
+             * 只对工作台正式对话封口：管理端试跑 / 多智能体运行共用同一套取消与快照，
+             * 本刀不改变那些入口的现有回放口径；它们仍走原来的「中断写 error」收口。
+             */
+            if (EntryChannel.WORKBENCH.name().equals(session.getEntryChannel())) {
+                // 先把 trace / 步骤收成 CANCELLED：明细里残留的 RUNNING 会让用户以为还在执行。
+                // 执行线程稍后收口时 finishIfRunning 不会把已取消的 trace 再改回其它终态。
+                try {
+                    obs.cancel(id);
+                } catch (RuntimeException ex) {
+                    // 埋点是旁路：收不回也不能把一次已经生效的停止改成失败
+                    log.warn("停止时取消 trace 失败 sessionId={} type={}",
+                            id, ex.getClass().getSimpleName());
+                }
+                live.sealCancelled(id);
+            }
+            operLogWriter.write("runtime", "cancel", "agent_run_session", String.valueOf(id),
+                    "中断运行 " + id + (stoppedRuns > 0 ? "，已取消工作流 " + stoppedRuns + " 个" : ""));
+            return toResp(sessions.findById(id).orElseThrow());
         }
         if (!RunStatus.RUNNING.name().equals(session.getStatus())) {
             throw new BizException(ErrorCode.BAD_REQUEST, "只能取消尚未完成的会话");
+        }
+        // 请求线程已不在（重启 / 异常收尾）也要把仍在跑的工作流实例收掉，避免节点继续执行；
+        // 工作流取消失败不挡会话收口，否则会留下一个永远「运行中」的会话
+        try {
+            workflowRuns.cancelActiveByWorkbenchSession(id);
+        } catch (RuntimeException ex) {
+            log.warn("取消会话时连带取消工作流失败 sessionId={} type={} cause={}",
+                    id, ex.getClass().getSimpleName(), ex.getMessage());
+        }
+        /*
+         * 请求线程已不在时也要把工作台这一轮的内存快照封成终态：
+         * 执行线程可能已经不登记 ReAct，但快照里最后一张工作流卡仍是 RUNNING；
+         * 刷新后会先按运行中出站。trace / 步骤由 TrialSessionCloser.cancel 统一收口，
+         * 这里只补工作台快照，保持其它入口口径不变。
+         */
+        if (EntryChannel.WORKBENCH.name().equals(session.getEntryChannel())) {
+            live.sealCancelled(id);
         }
         // 取消即放弃待批准计划，避免之后还能批到一个已作废的会话上
         pendingPlans.drop(id);
         // 兜底清理可能残留的子计划待批与批准槽（根取消后不得再有线程等在那里）
         childApprovals.rejectAll(id);
         closer.cancel(session, operatorContext.requireUserId());
-        operLogWriter.write("runtime", "cancel", "agent_run_session", String.valueOf(id), "取消试跑会话 " + id);
+        operLogWriter.write("runtime", "cancel", "agent_run_session", String.valueOf(id), "取消运行会话 " + id);
         return toResp(sessions.findById(id).orElseThrow());
     }
 

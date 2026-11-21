@@ -153,6 +153,38 @@ public class TrialLiveBuffer {
     }
 
     /**
+     * 用户已停止本轮：把内存快照封成中断终态，供刷新后的只读轮询读到「已停」而不是「还在跑」。
+     *
+     * <p>为什么在快照上做：执行线程不会立刻结束（工作流节点、其它并行子还在收尾），
+     * 只把库里的 run 写成 CANCELLED 的话，刷新时页面仍会把最后一张 RUNNING 快照画成运行中。
+     * 这里先让快照与取消落库对齐，整轮真正结束时再由 {@code TrialRunAppService} 落成事件。
+     *
+     * <p>没有在跑的一轮时无操作；重复停止只封一次，不重复补闭环说明。
+     *
+     * @param sessionId 会话主键
+     */
+    public void sealCancelled(Long sessionId) {
+        LiveTurn turn = turns.get(sessionId);
+        if (turn != null) {
+            turn.sealCancelled();
+        }
+    }
+
+    /**
+     * 这一轮的快照是否已被用户停止封口。
+     *
+     * <p>调用方（{@code TrialRunAppService}）据此决定：整轮结束时除了普通事件，
+     * 还要不要把快照里已出现的过程与工作流卡片按中断终态补落库。
+     *
+     * @param sessionId 会话主键
+     * @return true 表示本轮已被用户停止
+     */
+    public boolean cancelled(Long sessionId) {
+        LiveTurn turn = turns.get(sessionId);
+        return turn != null && turn.cancelled;
+    }
+
+    /**
      * 结束本轮，丢掉快照。落库事件接管后由调用方在 finally 里调用。
      *
      * @param sessionId 会话主键
@@ -321,6 +353,9 @@ public class TrialLiveBuffer {
         private final List<EventResp> events = new ArrayList<>();
         /** 下一条事件用的序号。起始值由用户事件的真实 seq 推进 */
         private int nextSeq;
+        /** 用户是否已点停止：封口后快照按中断终态出站，不再表示「还在跑」 */
+        private boolean cancelled;
+
         private LiveTurn(Long sessionId) {
             this.sessionId = sessionId;
         }
@@ -343,6 +378,10 @@ public class TrialLiveBuffer {
          * @param content 视图 JSON
          */
         private synchronized void replaceWorkflow(String summary, String content) {
+            // 停止后快照已封口：迟到的 RUNNING / 完成帧不能把「已取消」卡片覆盖掉
+            if (cancelled) {
+                return;
+            }
             for (int i = events.size() - 1; i >= 0; i -= 1) {
                 if (EventType.WORKFLOW.code().equals(events.get(i).getEventType())) {
                     events.remove(i);
@@ -359,6 +398,10 @@ public class TrialLiveBuffer {
          * @param content 视图 JSON
          */
         private synchronized void replacePreprocess(String summary, String content) {
+            // 同上：停止后不再让迟到的预处理完成帧改写快照
+            if (cancelled) {
+                return;
+            }
             for (int i = events.size() - 1; i >= 0; i -= 1) {
                 if (EventType.PREPROCESS.code().equals(events.get(i).getEventType())) {
                     events.remove(i);
@@ -369,9 +412,65 @@ public class TrialLiveBuffer {
         }
 
         /**
+         * 把快照封成「用户已停止」的终态。
+         *
+         * <p>做两件事，缺一都会让刷新后的页面继续把这一轮画成运行中：
+         * <ol>
+         *   <li>工作流卡片改画 CANCELLED，在途节点与库里 {@code cancelOpen} 同口径落成
+         *       CANCELLED（未开始的落成 SKIPPED），工具胶囊不再按 RUNNING 转圈；</li>
+         *   <li>末尾补一条「已中断」闭环事件：前端 {@code hasOpenTurn} 看到它就不再续订，
+         *       直播投影也走现有「已中断」收口，不另写刷新特例。</li>
+         * </ol>
+         *
+         * <p>只改内存快照，不落库；整轮真正结束时由 {@code TrialRunAppService} 统一补写。
+         */
+        private synchronized void sealCancelled() {
+            if (cancelled) {
+                return;
+            }
+            cancelled = true;
+            for (EventResp item : events) {
+                if (!EventType.WORKFLOW.code().equals(item.getEventType())) {
+                    continue;
+                }
+                String sealed = WorkflowRunJson.cancelled(item.getContentText());
+                if (sealed != null && !sealed.isBlank()) {
+                    item.setContentText(sealed);
+                }
+            }
+            // 末尾已经是同一条中断说明时不重复补：重复点击停止只封一次
+            EventResp last = events.isEmpty() ? null : events.get(events.size() - 1);
+            String lastText = last == null ? "" : trim(last.getContentText());
+            if (lastText.isEmpty() && last != null) {
+                lastText = trim(last.getSummary());
+            }
+            boolean closed = last != null
+                    && EventType.ERROR.code().equals(last.getEventType())
+                    && "已中断".equals(lastText);
+            if (!closed) {
+                append(EventType.ERROR, "已中断", null);
+            }
+        }
+
+        /** 去空白；快照里正文与摘要都可能为空，判断闭环说明时两列都看。 */
+        private static String trim(String text) {
+            return text == null ? "" : text.trim();
+        }
+
+        /**
          * 摘要与正文不同的完整事件（计划 / 步骤：摘要是人话，正文是 JSON）。
          */
         private synchronized void append(EventType type, String summary, String content, Integer fixedSeq) {
+            /*
+             * 停止后快照只允许再写「已中断」闭环：执行线程可能还在收尾，迟到的正文 / 工具 / 工作流帧
+             * 若继续追加，会把末尾的闭环说明顶掉，刷新时 hasOpenTurn 又把这一轮当成还在跑。
+             * 用户已经点了停止，停止之后才产生的过程不再补进回放。
+             */
+            if (cancelled && !(type == EventType.ERROR
+                    && ((content != null && content.contains("已中断"))
+                    || (summary != null && summary.contains("已中断"))))) {
+                return;
+            }
             int seq = fixedSeq != null ? fixedSeq : nextSeq;
             nextSeq = seq + 1;
             EventResp resp = new EventResp();
@@ -390,6 +489,10 @@ public class TrialLiveBuffer {
          */
         private synchronized void appendDelta(EventType type, String delta) {
             if (delta == null || delta.isEmpty()) {
+                return;
+            }
+            // 停止后冻结快照：流式正文的尾巴不能把闭环说明顶下去
+            if (cancelled) {
                 return;
             }
             EventResp last = events.isEmpty() ? null : events.get(events.size() - 1);

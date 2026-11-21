@@ -1726,7 +1726,8 @@ function openTrial(row: MaDefRow) {
 }
 
 /**
- * 深链打开方案编辑：Agent「编排」Tab 的「打开方案编辑」会带 ?edit={id} 进本页。
+ * 深链打开方案编辑：Agent「编排」Tab 的「打开方案编辑」会带 ?edit={id} 进本页；
+ * 工作台的「去配置对话路由」再带 ?tab=model，直接落到判路由模型 / ROUTER 提示词。
  * 打开前先清掉 query：一是避免 KeepAlive 复用时同一 id 不再触发 watch，
  * 二是关闭抽屉后刷新页面不会又弹一次。
  */
@@ -1735,8 +1736,11 @@ async function openFromQuery() {
   if (!raw || !canView.value) return
   const id = Number(Array.isArray(raw) ? raw[0] : raw)
   if (!Number.isFinite(id) || id <= 0) return
+  // 工作台的「去配置对话路由」会带 tab=model，直接落到判路由模型 / ROUTER 提示词那一页
+  const rawTab = route.query.tab
+  const tab = normalizeDrawerTab(Array.isArray(rawTab) ? rawTab[0] : rawTab)
   await router.replace({ path: route.path, query: {} })
-  await openEdit({ id } as MaDefRow)
+  await openEdit({ id } as MaDefRow, tab)
 }
 
 onMounted(async () => {
@@ -1746,9 +1750,9 @@ onMounted(async () => {
 
 // 列表页是 KeepAlive 缓存的（cacheName=MaList）：再次深链只变 query，需要 watch 兜底
 watch(
-  () => route.query.edit,
-  (value) => {
-    if (value) void openFromQuery()
+  () => [route.query.edit, route.query.tab] as const,
+  ([edit]) => {
+    if (edit) void openFromQuery()
   }
 )
 </script>

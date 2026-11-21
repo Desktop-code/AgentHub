@@ -99,4 +99,15 @@ public interface WorkflowRunRepository {
      * @return 最近一条未结束 run；没有为空
      */
     Optional<WorkflowRun> findActiveByWorkbenchSession(Long workflowId, Long workbenchSessionId);
+
+    /**
+     * 工作台停止一轮时，找出该会话下全部未结束的 run（CREATED / RUNNING / PAUSED_HUMAN）。
+     *
+     * <p>为什么按会话而不是按工作流：一轮可能并行扇出多条工作流，用户点「停止」
+     * 的语义是停掉整轮，不是只停某一条；先找出全部再逐个走既有取消用例。
+     *
+     * @param workbenchSessionId 工作台会话 id
+     * @return 未结束的 run，按 id 倒序；没有返回空列表
+     */
+    List<WorkflowRun> listActiveByWorkbenchSession(Long workbenchSessionId);
 }

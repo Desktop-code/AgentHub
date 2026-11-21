@@ -27,4 +27,12 @@ public class SessionQuery {
      * 试跑列表不填，避免调用追踪的模糊条件进到对话抽屉。
      */
     private String keyword;
+    /**
+     * 是否按「最近活动」排序（update_time 倒序）。
+     *
+     * <p>工作台左栏按今天 / 7天内分组，分组口径本身就是 update_time；
+     * 若仍按 start_time 排序，清空旧会话后会「时间变刚刚、却排不到今天第一条」。
+     * 调试 / 调用追踪不传此标记，保持原来的开始时间倒序。
+     */
+    private boolean orderByActivity;
 }

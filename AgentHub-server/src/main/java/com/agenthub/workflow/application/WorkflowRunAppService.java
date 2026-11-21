@@ -33,6 +33,8 @@ import com.fasterxml.jackson.databind.node.ObjectNode;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.stereotype.Service;
+import org.springframework.transaction.annotation.Propagation;
+import org.springframework.transaction.annotation.Transactional;
 
 import java.time.LocalDateTime;
 import java.util.ArrayList;
@@ -369,7 +371,7 @@ public class WorkflowRunAppService {
     }
 
     /**
-     * 取消试跑。终态幂等返回；只允许 RUNNING / PAUSED_HUMAN 取消。
+     * 取消运行。终态幂等返回；允许 CREATED / RUNNING / PAUSED_HUMAN 取消。
      *
      * @param id run 主键
      * @return 取消后的详情
@@ -381,17 +383,36 @@ public class WorkflowRunAppService {
         if (status != null && status.terminal()) {
             return assembler.detail(run);
         }
-        if (status != WorkflowRunStatus.RUNNING && status != WorkflowRunStatus.PAUSED_HUMAN) {
+        // CREATED 也允许取消：run 已落库但调度线程还没起（或刚开始）时，停止必须能覆盖到它。
+        // 引擎侧用条件更新 CREATED→RUNNING，取消抢先落 CANCELLED 后不会再被启动覆盖。
+        if (status != WorkflowRunStatus.CREATED
+                && status != WorkflowRunStatus.RUNNING
+                && status != WorkflowRunStatus.PAUSED_HUMAN) {
             throw new BizException(ErrorCode.BAD_REQUEST,
                     "当前运行状态为 " + status + "，不可取消");
         }
         Long operatorId = operatorContext.requireUserId();
-        String error = "用户取消试跑";
+        // 产品用语统一为「运行」：这条摘要会进工作流结果正文与库，不再写「试跑」
+        String error = "用户取消运行";
         boolean changed = runs.updateStatusIfMatches(id, status.name(),
                 WorkflowRunStatus.CANCELLED.name(), error, null, LocalDateTime.now(), operatorId);
         if (!changed) {
-            // 与调度线程 / 人工处理并发：以库里的终态为准，不再重复写
-            return detail(id, tenantId);
+            /*
+             * 与调度线程并发：读到的 CREATED 可能刚被引擎条件更新成 RUNNING。
+             * 再读一次，若已进入未结束态就按新状态补一次取消；已经是终态才幂等返回。
+             */
+            WorkflowRun fresh = runs.findById(id).orElse(null);
+            WorkflowRunStatus freshStatus = fresh == null ? null
+                    : WorkflowRunStatus.parse(fresh.getStatus());
+            if (freshStatus == WorkflowRunStatus.RUNNING
+                    || freshStatus == WorkflowRunStatus.PAUSED_HUMAN) {
+                changed = runs.updateStatusIfMatches(id, freshStatus.name(),
+                        WorkflowRunStatus.CANCELLED.name(), error, null, LocalDateTime.now(), operatorId);
+            }
+            if (!changed) {
+                // 与调度线程 / 人工处理并发：以库里的终态为准，不再重复写
+                return detail(id, tenantId);
+            }
         }
         nodeRuns.cancelOpen(id);
         for (WorkflowHumanTask task : humanTaskService.openTasks(id)) {
@@ -407,8 +428,50 @@ public class WorkflowRunAppService {
         } catch (RuntimeException ex) {
             log.warn("取消后收口 trace 失败 runId={} type={}", id, ex.getClass().getSimpleName());
         }
-        operLogWriter.write("workflow", "run_cancel", "workflow_run", String.valueOf(id), "取消试跑");
+        operLogWriter.write("workflow", "run_cancel", "workflow_run", String.valueOf(id), "取消运行");
         return detail(id, tenantId);
+    }
+
+    /**
+     * 工作台停止一轮时，按会话取消全部未结束的工作流 run。
+     *
+     * <p>为什么需要这个入口：工作台的停止接口只中断 ReAct 循环，
+     * 工作流是同步跑在 ReAct 之外的引擎里、每节点前才重读库状态；
+     * 不把 run 写成 CANCELLED，用户看到的就是「子 Agent 已中断、工作流还在跑」。
+     * 这里复用 {@link #cancel(Long)}，不另造停止协议。
+     *
+     * <p>为什么用 REQUIRES_NEW：调用方（runtime 的会话取消）自己带事务，
+     * 若加入同一事务，引擎线程在提交前读不到 CANCELLED，节点会多跑一拍。
+     * 独立短事务先提交，引擎下一次检查即可退出。
+     *
+     * @param workbenchSessionId 工作台会话 id
+     * @return 实际落到 CANCELLED 的 run 数；查询后被别的线程先收成成功 / 失败的不计
+     */
+    @Transactional(propagation = Propagation.REQUIRES_NEW)
+    public int cancelActiveByWorkbenchSession(Long workbenchSessionId) {
+        if (workbenchSessionId == null) {
+            return 0;
+        }
+        List<WorkflowRun> active = runs.listActiveByWorkbenchSession(workbenchSessionId);
+        int canceled = 0;
+        for (WorkflowRun run : active) {
+            // 逐个走现网取消：终态幂等、人工待办一并收口、trace 由取消路径自己结
+            cancel(run.getId());
+            /*
+             * 只把真正落到 CANCELLED 的算进停止数量：
+             * 查询之后、取消之前 run 可能刚好被引擎收成 SUCCESS / FAILED，
+             * 这时 cancel() 幂等返回、不会抛错；若仍计 1，调用方会误以为这一轮已停下。
+             */
+            WorkflowRun fresh = runs.findById(run.getId()).orElse(null);
+            if (fresh != null
+                    && WorkflowRunStatus.parse(fresh.getStatus()) == WorkflowRunStatus.CANCELLED) {
+                canceled++;
+            }
+        }
+        if (canceled > 0) {
+            log.info("工作台停止连带取消工作流 sessionId={} count={}", workbenchSessionId, canceled);
+        }
+        return canceled;
     }
 
     /**

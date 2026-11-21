@@ -1,5 +1,14 @@
 <template>
-  <div class="chat" :class="{ 'is-workbench': isWorkbench, 'is-composer-only': composerOnly }">
+  <!--
+    正文加载中沿用 Element Plus 的 v-loading（与左栏历史列表同一套），不另做骨架：
+    只在「当前没有任何消息可展示」时铺遮罩，已有会话之间切换不会多闪一层；
+    加载期间不渲染空态。
+  -->
+  <div
+    class="chat"
+    :class="{ 'is-workbench': isWorkbench, 'is-composer-only': composerOnly }"
+    v-loading="threadLoading && !rows.length"
+  >
     <div v-if="!composerOnly" ref="scroller" class="messages" @scroll.passive="onScroll">
       <!--
         进行态粘在滚动容器顶，内容变长时仍可见；结束后整条不渲染。
@@ -15,7 +24,8 @@
         <span v-else class="wait">结束后自动补齐</span>
       </div>
 
-      <div v-if="!rows.length" class="empty">
+      <!-- 空态只在「确实没有消息、也不在加载」时出现：否则首屏 / 切会话会先闪一句空话 -->
+      <div v-if="!rows.length && !threadLoading" class="empty">
         <template v-if="isWorkbench">
           <h3>需要我帮您做什么？</h3>
           <p>我是 AgentHub 智能网关，我会为您自动分配合适的专家。</p>
@@ -82,6 +92,14 @@
             <span v-else>{{ assistantLook(row.turn).initial }}</span>
           </div>
         <article class="card">
+          <!-- 工作台常驻路由行：入口 → 方案 → 专家，数据来自本轮参与者投影，不另算判定 -->
+          <div v-if="isWorkbench && routeChainOf(row.turn).names.length" class="wb-route-chain">
+            <span class="wb-route-chain-label">{{ routeChainOf(row.turn).label }}</span>
+            <template v-for="(name, routeIndex) in routeChainOf(row.turn).names" :key="'route-' + routeIndex">
+              <span v-if="routeIndex > 0" class="wb-route-chain-arrow" aria-hidden="true">→</span>
+              <span class="wb-route-chain-node" :class="{ 'is-entry': routeIndex === 0 }">{{ name }}</span>
+            </template>
+          </div>
           <!-- 计划流同样不在卡片头挂展示名：名称只出现在终答气泡上方，避免和计划卡抢身份 -->
           <!-- Router 试跑的编排调度卡：在用户气泡之后、思考与终答之前，数据只读不落库 -->
           <RouterTimeline
@@ -224,6 +242,16 @@
             :class="isWorkbench ? 'wb-soft-error' : 'error'"
           >
             {{ displayErrorText(err) }}
+            <router-link
+              v-if="showModelConfigLink(err)"
+              class="wb-error-action"
+              to="/access/models"
+            >去绑定模型</router-link>
+            <router-link
+              v-if="showReceptionConfigLink(err)"
+              class="wb-error-action"
+              :to="receptionConfigHref"
+            >去配置对话路由</router-link>
           </p>
 
           <!-- 5. 产物：Agent 写进工作区的文件。排在终答之后，是「结果」而不是「过程」 -->
@@ -259,6 +287,14 @@
             <span v-else>{{ assistantLook(row.turn).initial }}</span>
           </div>
         <article class="card">
+          <!-- 工作台常驻路由行：入口 → 方案 → 专家，数据来自本轮参与者投影，不另算判定 -->
+          <div v-if="isWorkbench && routeChainOf(row.turn).names.length" class="wb-route-chain">
+            <span class="wb-route-chain-label">{{ routeChainOf(row.turn).label }}</span>
+            <template v-for="(name, routeIndex) in routeChainOf(row.turn).names" :key="'route-' + routeIndex">
+              <span v-if="routeIndex > 0" class="wb-route-chain-arrow" aria-hidden="true">→</span>
+              <span class="wb-route-chain-node" :class="{ 'is-entry': routeIndex === 0 }">{{ name }}</span>
+            </template>
+          </div>
           <!-- 展示名不再挂在卡片头：思考面板有自己的「智能网关 / 专家」两步身份，
                作答 Agent 的名称只在正文气泡上方出现，避免和思考面板抢身份 -->
           <!-- Router 试跑的编排调度卡：在用户气泡之后、思考与终答之前，数据只读不落库 -->
@@ -420,12 +456,12 @@
                           v-for="(node, nodeIndex) in card.workflow.nodes"
                           :key="node.code || ('wf-' + nodeIndex)"
                           class="wf-step-item"
-                          :class="'is-' + wfStepState(node)"
+                          :class="'is-' + wfStepState(node, card.closed)"
                         >
-                          <div class="wf-step-icon" :class="'is-' + wfStepState(node)">
-                            <span v-if="wfStepState(node) === 'active'" class="wf-spin" aria-hidden="true">⏳</span>
-                            <template v-else-if="wfStepState(node) === 'done'">✓</template>
-                            <template v-else-if="wfStepState(node) === 'failed'">✕</template>
+                          <div class="wf-step-icon" :class="'is-' + wfStepState(node, card.closed)">
+                            <span v-if="wfStepState(node, card.closed) === 'active'" class="wf-spin" aria-hidden="true">⏳</span>
+                            <template v-else-if="wfStepState(node, card.closed) === 'done'">✓</template>
+                            <template v-else-if="wfStepState(node, card.closed) === 'failed'">✕</template>
                             <template v-else>{{ nodeIndex + 1 }}</template>
                           </div>
                           <div class="wf-step-main">
@@ -433,10 +469,10 @@
                               {{ node.name || node.code }}
                               <span v-if="node.code && node.code !== node.name" class="wf-step-code">{{ node.code }}</span>
                             </div>
-                            <div class="wf-step-note">{{ wfStepNote(node) }}</div>
+                            <div class="wf-step-note">{{ wfStepNote(node, card.closed) }}</div>
                             <!-- 仅图上 TOOL 节点出胶囊；AGENT 内部工具未进快照，不编造 -->
                             <div
-                              v-for="pill in wfNodeToolPills(node)"
+                              v-for="pill in wfNodeToolPills(node, card.closed)"
                               :key="pill.key"
                               class="wb-tool-pills wf-step-tools"
                             >
@@ -446,7 +482,7 @@
                                   <template v-else-if="pill.state === 'done'">✓</template>
                                   <template v-else>✕</template>
                                 </span>
-                                <span class="wb-tool-label">{{ workflowNodeToolLabel(pill, node.status, toolFaceName(pill.name, toolTitleByName)) }}</span>
+                                <span class="wb-tool-label">{{ workflowNodeToolLabel(pill, wfNodeLabelStatus(node, card.closed), toolFaceName(pill.name, toolTitleByName)) }}</span>
                               </span>
                             </div>
                           </div>
@@ -454,7 +490,7 @@
                       </div>
                     </div>
                     <!--
-                      结果区：正文固定四行，框内滚动；移入后底部箭头展开。
+                      结果区：正文固定四行，框内滚动；被截断时底部常驻「展开全文」。
                       文件在正文下面单独一行，不进正文框。
                     -->
                     <div
@@ -490,6 +526,7 @@
                           :aria-label="bodyExpandActionOf(row.turn, card) === 'collapse' ? '收回四行' : '展开全文'"
                           @click.stop.prevent="toggleMidBoxExpand(row.turn.key, card.key)"
                         >
+                          <span class="wb-jump-label">{{ bodyExpandActionOf(row.turn, card) === 'collapse' ? '收起' : '展开全文' }}</span>
                           <span class="wb-jump-chevron" aria-hidden="true" />
                         </button>
                       </div>
@@ -504,19 +541,36 @@
                   <p v-if="card.terminalNote && !card.workflow" class="wb-terminal-note">{{ card.terminalNote }}</p>
                   <!--
                     内容框（气泡）：只放判定句、分流句、报错、正文和选项。
-                    正文默认四行，框内可滚；移入后底部箭头展开，再点收回。
+                    正文默认四行，框内可滚；被截断时底部常驻「展开全文」，再点收回。
                     文件不进这个框，在框下面单独一行。
                   -->
                   <div
                     v-if="actorHasBubble(row.turn, card)"
                     class="answer-block"
+                    :class="{ 'is-process-bubble': !card.answer }"
                   >
                     <p
                       v-for="(line, resultIndex) in actorResultLines(card)"
                       :key="'r-' + resultIndex"
                       class="wb-actor-result"
                     >{{ line }}</p>
-                    <p v-for="(err, errIndex) in card.errors" :key="'err-' + errIndex" class="wb-soft-error">{{ err }}</p>
+                    <p
+                      v-for="(err, errIndex) in card.errors"
+                      :key="'err-' + errIndex"
+                      class="wb-soft-error"
+                    >
+                      {{ err }}
+                      <router-link
+                        v-if="showModelConfigLink(err)"
+                        class="wb-error-action"
+                        to="/access/models"
+                      >去绑定模型</router-link>
+                      <router-link
+                        v-if="showReceptionConfigLink(err)"
+                        class="wb-error-action"
+                        :to="receptionConfigHref"
+                      >去配置对话路由</router-link>
+                    </p>
                     <div
                       v-if="card.answer"
                       class="wb-result-box"
@@ -543,6 +597,7 @@
                         :aria-label="bodyExpandActionOf(row.turn, card) === 'collapse' ? '收回四行' : '展开全文'"
                         @click.stop.prevent="toggleMidBoxExpand(row.turn.key, card.key)"
                       >
+                        <span class="wb-jump-label">{{ bodyExpandActionOf(row.turn, card) === 'collapse' ? '收起' : '展开全文' }}</span>
                         <span class="wb-jump-chevron" aria-hidden="true" />
                       </button>
                     </div>
@@ -556,13 +611,17 @@
                       <p class="wb-choice-question">{{ (card.choice.question || '').trim() || '请选择' }}</p>
                       <div class="wb-choice-options">
                         <button
-                          v-for="option in card.choice.options"
-                          :key="option.id"
+                          v-for="choiceRow in choiceRowsOf(card.choice.options)"
+                          :key="choiceRow.option.id"
                           type="button"
                           class="wb-choice-chip"
                           :disabled="!choiceClickable(row.turn)"
-                          @click.stop.prevent="onChoice(row.turn, option)"
-                        >{{ option.label }}</button>
+                          @click.stop.prevent="onChoice(row.turn, choiceRow.option)"
+                        >
+                          <span class="wb-choice-index" aria-hidden="true">{{ choiceRow.letter }}</span>
+                          <span class="wb-choice-label">{{ choiceRow.text }}</span>
+                          <span v-if="choiceRow.recommended" class="wb-choice-recommend">推荐</span>
+                        </button>
                       </div>
                     </div>
                   </div>
@@ -708,6 +767,16 @@
               :class="isWorkbench ? 'wb-soft-error' : 'error'"
             >
               {{ displayErrorText(block.text) }}
+              <router-link
+                v-if="showModelConfigLink(block.text)"
+                class="wb-error-action"
+                to="/access/models"
+              >去绑定模型</router-link>
+              <router-link
+                v-if="showReceptionConfigLink(block.text)"
+                class="wb-error-action"
+                :to="receptionConfigHref"
+              >去配置对话路由</router-link>
             </p>
             <!-- 产物卡片：工作台分块时跟在对应专家气泡里，这里只留给非工作台 -->
             <FileCard v-else-if="block.kind === 'file' && block.file && !participantFeedHasActor(row.turn)" :file="block.file" />
@@ -718,15 +787,6 @@
         </article>
         </div>
       </div>
-
-      <!--
-        消息流最底部的轻量步骤提示：只说明这一步在等什么（规划中 / 思考中 / 调用工具中 / 作答中）。
-        不做居中胶囊、不做粘性条；本轮结束或出错后整条消失。
-      -->
-      <p v-if="stepHint" class="wb-step-hint">
-        <span class="wb-step-hint-dot" aria-hidden="true" />
-        <span>{{ stepHint }}</span>
-      </p>
     </div>
 
     <div
@@ -869,22 +929,23 @@
             @change="onFilesPicked"
           />
           <!--
-            对话入口「自动匹配专家」徽标暂不显示。
-            @ 指定线路仍用上方提及片，不靠这行文案。
-          <span
-            v-if="isWorkbench && gatewayBadge"
-            class="gateway-badge"
-            :title="gatewayBadgeTitle"
-          >
-            ⚡ {{ gatewayBadge }}
-          </span>
+            工作台路由展示已换成每轮助手块顶部的常驻路由行（见 .wb-route-chain），
+            输入条不再保留仅注解的「自动匹配专家」徽标。
+            正文还在加载时同样不提示「请先新建会话」：那不是用户此刻的状态。
           -->
-          <span class="hint">{{ sessionReady ? '' : blockedHint || '请先新建会话或从左侧选择' }}</span>
+          <span class="hint">{{ threadLoading || sessionReady ? '' : blockedHint || '请先新建会话或从左侧选择' }}</span>
         </div>
+        <!--
+          停止按钮：管理端运行（非 workbench）保持原样；
+          工作台只有在显式传入 can-stop（运行态可停）时才出现，
+          复用同一个 skin 的 MA 运行输入条没有停止处理器，不能露出死按钮。
+        -->
         <el-button
-          v-if="canSend && sending && !isWorkbench"
+          v-if="canSend && sending && (!isWorkbench || canStop !== undefined)"
           type="danger"
           plain
+          :disabled="canStop === false"
+          :title="canStop === false ? '暂时不能停止，请稍候' : undefined"
           @click="requestStop"
         >
           停止
@@ -983,7 +1044,6 @@ import {
   tableFoldedByDefault,
   nextFoldValue
 } from '@/components/runtime/workbench/workbenchContentBox'
-import { liveStepHintOf } from '@/components/runtime/workbench/workbenchStepHint'
 import RouterTimeline from '@/components/runtime/RouterTimeline.vue'
 import FileCard from '@/components/runtime/FileCard.vue'
 import WorkbenchActorTree from '@/components/runtime/workbench/WorkbenchActorTree.vue'
@@ -1001,15 +1061,16 @@ import { listAllItems } from '@/api/tool'
 import { presentVisibleResult } from '@/components/runtime/workbench/workbenchVisibleText'
 import { renderMarkdownMemo } from '@/utils/simpleMarkdown'
 import {
+  classifyWorkbenchError,
   friendlyWorkbenchError,
-  stripWorkbenchLeadHeadings
+  stripWorkbenchLeadHeadings,
+  type WorkbenchErrorKind
 } from '@/utils/workbenchFriendlyError'
 import {
   detectWorkbenchAtTrigger,
   filterWorkbenchAtCandidates,
   stripWorkbenchAtFragment
 } from '@/utils/workbenchAtRoute'
-import { workbenchRouteBadgeTitle } from '@/utils/workbenchRouteBadge'
 import {
   resolveWorkbenchAgentName,
   stripRouteDecisionJson,
@@ -1031,6 +1092,21 @@ const props = defineProps<{
   sessionReady: boolean
   /** 不能发送时的说明。结案和未选会话用不同文案 */
   blockedHint?: string
+  /**
+   * 正文是否仍在加载（首屏拉历史 / 打开某条会话取事件期间）。
+   *
+   * <p>为 true 时不出空态、也不显示「请先新建会话或从左侧选择」：
+   * 状态还没落定，先闪一句空话再换成消息正是要消掉的那一下。
+   * 缺省 false：管理端运行与 MA 运行保持原样。
+   */
+  threadLoading?: boolean
+  /**
+   * 工作台输入草稿键：按会话隔离未发送正文与附件。
+   *
+   * <p>真实会话用主键、临时草稿用新建代次（见外层 WorkbenchChat）；缺省不启用，
+   * 管理端运行 / MA 运行仍是单一输入，行为与改前一致。
+   */
+  draftKey?: string
   /**
    * 是否已与后端断开、只能等落库。
    * 整页刷新后前端不再持有 SSE，增量拿不到；此时状态条如实标注，不假装还在思考。
@@ -1094,14 +1170,27 @@ const props = defineProps<{
   composerOnly?: boolean
   /** 工作台空状态快捷提问；点卡片即填入并发送 */
   quickPrompts?: string[]
-  /** 工作台输入区网关徽标文案，如「自动匹配专家」 */
-  gatewayBadge?: string
   /** @ 面板候选（本会话快照方案启用项）；只展示名，不暴露 route_key */
   routeCandidates?: WorkbenchRouteOption[]
   /** 已选定的下一轮强制线路（提及片） */
   selectedRoute?: WorkbenchRouteOption | null
   /** 是否允许打开 @ 面板 */
   canPickRoute?: boolean
+  /**
+   * 工作台运行中是否允许停止。
+   * 缺省（管理端运行）视为可用，保持既有「停止」行为不变；
+   * 工作台会话尚未创建完成时由外层传 false，按钮置灰而不是假装已停。
+   */
+  canStop?: boolean
+  /** 是否有模型配置权限：无权限时不渲染「去绑定模型」深链 */
+  canConfigModel?: boolean
+  /** 是否有对话路由配置权限：无权限时不渲染「去配置对话路由」深链 */
+  canConfigReception?: boolean
+  /**
+   * 「去配置对话路由」深链地址。由工作台按当前入口方案拼 `?edit=<id>&tab=model`；
+   * 缺省退回多智能体列表，管理端运行不受影响。
+   */
+  receptionConfigTo?: string
 }>()
 
 const emit = defineEmits<{
@@ -1125,7 +1214,7 @@ const emit = defineEmits<{
    * 不是再发一条普通消息——否则会被入口重新分流到别人身上。
    */
   'choice-selected': [optionId: string, label: string]
-  /** 管理端运行中点停止。工作台不发这个事件 */
+  /** 运行中点停止。管理端运行与工作台共用；工作台外层接 cancelWorkbenchSession */
   stop: []
 }>()
 
@@ -1277,15 +1366,12 @@ const filteredAtCandidates = computed(() =>
   filterWorkbenchAtCandidates(props.routeCandidates, atQuery.value)
 )
 
-/** 工作台占位：提示可用 @ 指定 */
+/** 工作台占位：恢复带「@ 指定线路」的原文，@ 的能力与列表逻辑都不改 */
 const composerPlaceholder = computed(() =>
   isWorkbench.value
     ? '输入问题，@ 指定线路；Enter 发送，Shift+Enter 换行'
     : '输入问题，Enter 发送，Shift+Enter 换行'
 )
-
-/** 徽标 hover：与文案同一口径（抽到纯函数，避免「写着自动匹配、提示却说已指定」） */
-const gatewayBadgeTitle = computed(() => workbenchRouteBadgeTitle(props.gatewayBadge || ''))
 
 /**
  * 根据 textarea 内容同步 @ 面板开闭与检索词。
@@ -1489,6 +1575,77 @@ const attachments = ref<Attachment[]>([])
 /** 自增 id，仅用于列表 key 与删除定位 */
 let attachmentSeq = 0
 
+/**
+ * 一条会话的未发送输入。
+ * 图片 / 文件带 base64，故只留在内存，且限制条目数（见 MAX_COMPOSER_DRAFTS）。
+ */
+interface ComposerDraft {
+  text: string
+  attachments: Attachment[]
+}
+
+/**
+ * 工作台按会话保存的未发送正文与附件（键见 ChatPanel 的 draftKey 入参）。
+ *
+ * <p>为什么必须有这一份：ChatPanel 在切会话时不卸载，单个 `text` / `attachments`
+ * 会把 A 的字带到 B。这里不新做协议，只是把同一份本地输入按会话分槽。
+ */
+const composerDrafts = new Map<string, ComposerDraft>()
+/** 草稿槽条数上限：长时间来回切会话时，不要为每条会话都留一份 */
+const MAX_COMPOSER_DRAFTS = 20
+/** 草稿槽总字符上限（附件是 base64）：条数不爆，但大附件仍可能把内存撑高，按量再兜一层 */
+const MAX_COMPOSER_DRAFT_CHARS = 32 * 1024 * 1024
+
+/** 一条草稿的近似占用：正文 + 各附件 dataUrl 长度（base64 已含在字符串长度里） */
+function composerDraftWeight(draft: ComposerDraft): number {
+  return draft.text.length + draft.attachments.reduce((sum, item) => sum + item.dataUrl.length, 0)
+}
+
+/**
+ * 把当前输入存进指定会话槽。
+ *
+ * <p>空正文 + 空附件不占槽：既避免无意义条目，也保证「手动清空后切走再回来」是空输入。
+ * Map 重新插入以刷新顺序，超条数或超总量时从最早的一条开始淘汰（不淘汰刚写入的这条）。
+ *
+ * @param key 会话槽键（真实会话 / 临时草稿各自唯一）
+ */
+function stashComposerDraft(key: string) {
+  const hasContent = text.value.trim().length > 0 || attachments.value.length > 0
+  composerDrafts.delete(key)
+  if (!hasContent) {
+    return
+  }
+  composerDrafts.set(key, { text: text.value, attachments: [...attachments.value] })
+  let totalChars = 0
+  for (const draft of composerDrafts.values()) {
+    totalChars += composerDraftWeight(draft)
+  }
+  while (composerDrafts.size > MAX_COMPOSER_DRAFTS || totalChars > MAX_COMPOSER_DRAFT_CHARS) {
+    const oldest = composerDrafts.keys().next().value
+    if (oldest === undefined || oldest === key) {
+      break
+    }
+    const oldestDraft = composerDrafts.get(oldest)
+    composerDrafts.delete(oldest)
+    if (oldestDraft) {
+      totalChars -= composerDraftWeight(oldestDraft)
+    }
+  }
+}
+
+/**
+ * 从会话槽恢复输入；没存过就回到空输入，绝不沿用上一条会话的内容。
+ *
+ * @param key 目标会话槽键
+ */
+function restoreComposerDraft(key: string) {
+  const saved = composerDrafts.get(key)
+  text.value = saved ? saved.text : ''
+  attachments.value = saved ? [...saved.attachments] : []
+  // 旧会话的 @ 检索态不属于新正文，切过来先收起候选面板
+  closeAtPanel()
+}
+
 /** 语音转写进行中：按钮转圈，避免用户连点重复上传 */
 const transcribing = ref(false)
 
@@ -1517,6 +1674,33 @@ const {
   onCancel: () => ElMessage.info('已取消录音'),
   onError: (message) => ElMessage.warning(message)
 })
+
+/**
+ * 草稿随会话切换：先存旧键、再读新键。
+ *
+ * <p>只在传入 draftKey 时生效；管理端运行 / MA 运行不传，单个输入的行为与改前一致。
+ * 之所以放在组件内而不是提到外层：正文、附件、粘贴 / 拖入都在这份本地输入里，
+ * 由外层持有再回传只会多一层容易走样的同步。
+ *
+ * <p>注册点必须在录音组合式之后：切会话要取消正在录的音，回调里用到该句柄。
+ */
+watch(
+  () => props.draftKey,
+  (nextKey, prevKey) => {
+    if (nextKey === prevKey) {
+      return
+    }
+    if (prevKey) {
+      stashComposerDraft(prevKey)
+    }
+    // 正在录的音不属于任何一条会话：切走先取消，避免录完后落进新会话的附件
+    cancelVoiceRecording()
+    if (nextKey) {
+      restoreComposerDraft(nextKey)
+    }
+  },
+  { immediate: true }
+)
 
 /** 入口始终摆麦克风；管理端工作台未绑 ASR 时仍隐藏，避免伪装可用 */
 const showMicBtn = computed(
@@ -1891,6 +2075,56 @@ function hasParticipantEvidence(blocks: AssistantBlock[]): boolean {
 }
 
 /**
+ * 整轮结束后，把仍标着 running 的工具步落到终态。
+ *
+ * <p>工具调用行以 SSE 的 tool_result 收口；连接中断、手动停止或历史里缺结果帧时，
+ * 这一行会永远停在「正在调用」并转圈。轮次已非 streaming 就说明它不会再等来结果，
+ * 此时按本轮终态收口：整轮失败 / 中断 → error，正常完成 → done。
+ *
+ * <p>递归到方案框内的子卡与汇总卡，避免只收口最外层。
+ *
+ * @param cards    本轮参与者卡片
+ * @param terminal 终态；只允许 done / error，与工具胶囊三态一致
+ */
+function settleRunningToolSteps(cards: ParticipantCard[], terminal: 'done' | 'error') {
+  for (const card of visitParticipantCards(cards)) {
+    for (const step of card.steps) {
+      if (step.type === 'tool_call' && step.state === 'running') {
+        step.state = terminal
+      }
+    }
+  }
+}
+
+/**
+ * 用户停止一轮后，把仍停在「运行中」的工作流卡落到中断终态。
+ *
+ * <p>停止时后端会取消工作流实例，但这一轮被中断后最终快照不一定还能送到页面：
+ * 卡片会保留在最后一帧「运行中」，节点仍按旧状态转圈。这里在展示层补
+ * {@code closed='aborted'}，只影响工作台投影出来的卡片，不改块里的原始快照；
+ * 后续真快照到达会重建卡片并覆盖它。普通断流不调用本函数——那时后端工作流
+ * 可能仍在执行，不能谎报成已取消。
+ *
+ * <p>只在工作流自身状态仍是非终态时补：SUCCESS / FAILED / CANCELLED 以快照为准，
+ * 不把真实失败改写成中断。
+ *
+ * @param cards 本轮参与者卡片（含方案框内的子卡）
+ */
+function settleRunningWorkflowCards(cards: ParticipantCard[]) {
+  for (const card of visitParticipantCards(cards)) {
+    if (!card.workflow || card.closed) {
+      continue
+    }
+    const status = (card.workflow.status || '').toUpperCase()
+    // 终态快照已经说清楚了，不再叠一个展示态
+    if (status === 'SUCCESS' || status === 'FAILED' || status === 'CANCELLED') {
+      continue
+    }
+    card.closed = 'aborted'
+  }
+}
+
+/**
  * 工作台消息流：入口块、方案块、专家块同一种聊天块，按真实顺序排。
  *
  * <p>形象仍走 lookOf。拼接终答不挂到最后一位，也不再在块下面重复贴一整段。
@@ -1931,6 +2165,18 @@ function participantFeedOf(turn: ChatTurn): ParticipantCard[] {
         lookOf,
         descriptionOf
       })
+      // 本轮已收口：没有等到 tool_result 的调用行必须落到终态，否则会一直「正在调用」转圈
+      if (turn.status !== 'streaming') {
+        settleRunningToolSteps(cards, turn.status === 'error' ? 'error' : 'done')
+        /*
+         * 工作流卡只在「用户停止」这一种收口上补中断态：
+         * 停止后最后一张快照可能仍是「运行中」，节点会继续转圈；
+         * 而普通断流不代表后端工作流已停，不能把它谎报成已取消。
+         */
+        if (turn.blocks.some((block) => block.kind === 'error' && /已中断|已停止|已取消/.test(block.text))) {
+          settleRunningWorkflowCards(cards)
+        }
+      }
       // 没有 begin 身份、只剩状态句的卡在收尾丢掉。框里的子卡同一口径，不能只滤根上那一层。
       return omitFinishedShells(cards, turn.status === 'streaming')
     } catch (error) {
@@ -1940,6 +2186,124 @@ function participantFeedOf(turn: ChatTurn): ParticipantCard[] {
       return []
     }
   })
+}
+
+/** 一轮可展示的路由链：入口 + 方案 + 专家，名字全部来自已有投影，不另算判定 */
+interface WorkbenchRouteChain {
+  /** 有入口卡时写「入口」，续作轮没有入口时写「交给」 */
+  label: '入口' | '交给'
+  /** 依次是入口、方案（可能多层）、真正执行的专家；数据不足时为空 */
+  names: string[]
+}
+
+/**
+ * 从现网参与者投影里取「这轮交给谁」，不重新发明路由判定。
+ *
+ * <p>口径：
+ * <ul>
+ *   <li>入口卡（kind=gateway）的标题就是配置里的入口名（如 Router）；</li>
+ *   <li>方案卡按 begin 收在 children 里，先方案后其子专家；</li>
+ *   <li>方案汇总（kind=conclusion / summary）不是路由节点，跳过；</li>
+ *   <li>名字只取投影已有的 title，数据不足时返回空数组，绝不编造专家名。</li>
+ * </ul>
+ *
+ * @param turn 本轮助手消息
+ * @return 路由链；不是工作台或还没有参与者投影时 names 为空
+ */
+function routeChainOf(turn: ChatTurn): WorkbenchRouteChain {
+  const empty: WorkbenchRouteChain = { label: '交给', names: [] }
+  if (!isWorkbench.value) {
+    return empty
+  }
+  const cards = participantFeedOf(turn)
+  if (!cards.length) {
+    return empty
+  }
+  const gateway = cards.find((card) => card.kind === 'gateway')
+  const names: string[] = []
+  const push = (title: string) => {
+    const name = (title || '').trim()
+    // 同名相邻只留一次：单 Agent 时入口与执行者同名，不能画成 Router → Router
+    if (name && names[names.length - 1] !== name) {
+      names.push(name)
+    }
+  }
+  if (gateway) {
+    push(gateway.title)
+  }
+  const walk = (list: ParticipantCard[]) => {
+    for (const card of list) {
+      if (card.kind === 'gateway') {
+        // 入口自身已入链；它的子卡（若有）仍是真正的下游
+        if (card.children?.length) {
+          walk(card.children)
+        }
+        continue
+      }
+      // 方案汇总不是「交给谁」，否则会出现「方案 → 方案结论」这种假链路
+      if (card.kind === 'conclusion') {
+        continue
+      }
+      push(card.title)
+      if (card.children?.length) {
+        walk(card.children)
+      }
+    }
+  }
+  walk(cards)
+  return { label: gateway ? '入口' : '交给', names }
+}
+
+/**
+ * 错误分类：模板里按原始文案实时判定，深链与展示共用同一口径。
+ *
+ * @param text 原始错误文案
+ * @return 展示分类
+ */
+function workbenchErrorKindOf(text: string): WorkbenchErrorKind {
+  return classifyWorkbenchError(text)
+}
+
+/** 「去配置对话路由」的实际地址：工作台传具体方案的抽屉，其它入口退回列表 */
+const receptionConfigHref = computed(
+  () => (props.receptionConfigTo || '').trim() || '/orchestration/multi-agent'
+)
+
+/**
+ * 该条错误是否该给「去配置对话路由」。
+ *
+ * <p>只认分类为 route 的可行动错误；手动停止 / 中断留下的「判路由失败：已中断」
+ * 不应再引导去改配置——那是本轮被打断，不是配置缺失。
+ *
+ * @param text 原始错误文案
+ * @return true 表示渲染路由配置深链
+ */
+function showReceptionConfigLink(text: string): boolean {
+  if (!isWorkbench.value || !props.canConfigReception) {
+    return false
+  }
+  if (/已?中断|已?中止|已?取消|已停止/.test(text || '')) {
+    return false
+  }
+  return workbenchErrorKindOf(text) === 'route'
+}
+
+/**
+ * 该条错误是否该给「去绑定模型」。
+ *
+ * <p>与路由同一口径：中断不是模型没配，保留原话即可，不再挂深链。
+ *
+ * @param text 原始错误文案
+ * @return true 表示渲染模型中心深链
+ */
+function showModelConfigLink(text: string): boolean {
+  if (!isWorkbench.value || !props.canConfigModel) {
+    return false
+  }
+  if (/已?中断|已?中止|已?取消|已停止/.test(text || '')) {
+    return false
+  }
+  return workbenchErrorKindOf(text) === 'model'
 }
 
 /**
@@ -2305,15 +2669,16 @@ function wfStatusClass(workflow: TrialWorkflowView, closed?: string): string {
  *
  * <p>只用后端给的真实状态，不在前端推算「下一步该亮了」。
  *
- * @param node 节点视图
+ * @param node   节点视图
+ * @param closed 这一位的终态；整轮已收口时由投影补 aborted，用来停掉残留的进行态
  * @return done / active / failed / pending
  */
-function wfStepState(node: TrialWorkflowNodeView): string {
+function wfStepState(node: TrialWorkflowNodeView, closed?: string): string {
   const status = (node.status || '').toUpperCase()
   if (status === 'SUCCESS') {
     return 'done'
   }
-  if (status === 'RUNNING') {
+  if (status === 'RUNNING' && closed !== 'aborted') {
     return 'active'
   }
   if (status === 'FAILED') {
@@ -2325,15 +2690,25 @@ function wfStepState(node: TrialWorkflowNodeView): string {
 /**
  * 节点下方的一句说明：优先用后端已脱敏的 note，缺失时按真实状态给中性文案。
  *
- * @param node 节点视图
+ * @param node   节点视图
+ * @param closed 这一位的终态；中断时把「执行中」改成「已中断」
  * @return 非空说明
  */
-function wfStepNote(node: TrialWorkflowNodeView): string {
+function wfStepNote(node: TrialWorkflowNodeView, closed?: string): string {
+  const status = (node.status || '').toUpperCase()
+  // 快照没来得及改口（仍是 RUNNING）但本轮已中断：说明句不能继续写「执行中」
+  if (status === 'RUNNING' && closed === 'aborted') {
+    return '已中断'
+  }
+  // 后端已把在途节点标成 CANCELLED：不再沿用「等待前置节点」，直接说明被中断
+  if (status === 'CANCELLED') {
+    return '已中断'
+  }
   const note = (node.note || '').trim()
   if (note) {
     return note
   }
-  const state = wfStepState(node)
+  const state = wfStepState(node, closed)
   if (state === 'done') {
     return '已完成'
   }
@@ -2424,12 +2799,35 @@ function wfOutputTip(card: ParticipantCard): string {
 /**
  * 节点上的工具胶囊列表：0 或 1 条（仅 TOOL 节点）。
  *
- * @param node 工作流卡节点
+ * <p>整轮已中断但节点快照仍写 RUNNING 时，胶囊必须停转，不能继续「正在调用」。
+ *
+ * @param node   工作流卡节点
+ * @param closed 这一位的终态
  * @return 可直接 v-for 的数组
  */
-function wfNodeToolPills(node: TrialWorkflowNodeView) {
+function wfNodeToolPills(node: TrialWorkflowNodeView, closed?: string) {
   const pill = workflowNodeToolPill(node)
-  return pill ? [pill] : []
+  if (!pill) {
+    return []
+  }
+  if (closed === 'aborted' && pill.state === 'running') {
+    return [{ ...pill, state: 'done' as const }]
+  }
+  return [pill]
+}
+
+/**
+ * 工具胶囊标签用的节点状态：中断后把残留的 RUNNING 当作已取消，句子落到终态。
+ *
+ * @param node   工作流卡节点
+ * @param closed 这一位的终态
+ * @return 节点原始状态或替换后的 CANCELLED
+ */
+function wfNodeLabelStatus(node: TrialWorkflowNodeView, closed?: string): string | undefined {
+  if (closed === 'aborted' && (node.status || '').toUpperCase() === 'RUNNING') {
+    return 'CANCELLED'
+  }
+  return node.status
 }
 
 /**
@@ -3144,6 +3542,84 @@ const lastAssistantTurnKey = computed(() => {
 })
 
 /**
+ * 选项序号：A / B / C…。协议上限 6 项，不会越过 Z。
+ *
+ * <p>纯展示：不参与 option.id，也不写回 label；点击回传的仍是后端原始选项。
+ *
+ * @param index 选项在列表中的位置（0 起）
+ * @return 对应的单字母序号
+ */
+function choiceLetter(index: number): string {
+  return String.fromCharCode(65 + index)
+}
+
+/**
+ * 文案尾部的推荐标记：只认「括号包裹」或「分隔符引导」的显式写法，
+ * 不做关键词猜测——没有这类标记就绝不产出推荐标签。
+ *
+ * <p>示例（命中）：`方案A（推荐）`、`方案A (推荐)`、`方案A【推荐】`、`方案A - 推荐`。
+ * 之所以限定形态：`推荐使用 Vue3` 这类句子里的「推荐」是正文语义，删掉会改变选项含义。
+ */
+const CHOICE_RECOMMEND_TRAIL =
+  /(?:\s*[（(【\[]\s*(?:推荐|建议|首选|recommend(?:ed)?)\s*[）)】\]]|\s*[-·—|｜]\s*(?:推荐|建议|首选|recommend(?:ed)?))\s*$/i
+
+/**
+ * 文案开头的推荐标记：括号包裹，或「推荐：」这类冒号前缀。
+ *
+ * <p>同样只做展示层归一，不改写后端 label，也不影响续作时写进用户气泡的内容。
+ */
+const CHOICE_RECOMMEND_LEAD =
+  /^\s*(?:[（(【\[]\s*(?:推荐|建议|首选|recommend(?:ed)?)\s*[）)】\]]|(?:推荐|建议|首选)\s*[:：])\s*/i
+
+/**
+ * 把选项文案拆成「展示文案 + 是否推荐」。
+ *
+ * <p>只影响渲染：点击仍回传后端给的原始 label（用户气泡与续作入参都保持改前口径）。
+ * 文案里没有显式标记时 recommended 为 false；前端不猜哪一项是推荐。
+ *
+ * @param label 服务端给的选项展示文案
+ * @return 去掉标记后的展示文案，以及是否带推荐标记
+ */
+function choiceLabelOf(label: string): { text: string; recommended: boolean } {
+  const raw = (label || '').trim()
+  if (!raw) {
+    return { text: '', recommended: false }
+  }
+  let text = raw
+  let recommended = false
+  // 先摘尾部（最常见：`方案A（推荐）`），再摘开头（`推荐：方案A`）
+  const trailing = text.match(CHOICE_RECOMMEND_TRAIL)
+  if (trailing && trailing.index != null) {
+    text = text.slice(0, trailing.index).trim()
+    recommended = true
+  }
+  const leading = text.match(CHOICE_RECOMMEND_LEAD)
+  if (leading) {
+    text = text.slice(leading[0].length).trim()
+    recommended = true
+  }
+  // 标记单独成句（如整条文案只有「（推荐）」）时保留原文，避免出现空白行
+  return { text: text || raw, recommended }
+}
+
+/**
+ * 选项展示行：字母序号 + 展示文案 + 推荐标记。
+ *
+ * <p>`option` 保留原始对象，点击时原样交给 {@link onChoice}，
+ * 保证发送内容与改前一致（展示层不重排、不改写 label）。
+ *
+ * @param options 后端给出的选项列表
+ * @return 渲染用的行视图
+ */
+function choiceRowsOf(options: ParticipantChoiceOption[]) {
+  return options.map((option, index) => ({
+    option,
+    letter: choiceLetter(index),
+    ...choiceLabelOf(option.label)
+  }))
+}
+
+/**
  * 这个选项块现在能不能点。
  *
  * <p>四个前提缺一不可：本轮已停止流式、没有正在发送、当前允许发送、且它就是最后一条助手消息。
@@ -3459,30 +3935,6 @@ const liveTurn = computed(() => {
     }
   }
   return null
-})
-
-/**
- * 消息流最底部的步骤提示：只说明当前这一步在等什么。
- *
- * <p>取最后一轮助手消息：它还在流式才给提示，结束 / 出错 / 待批准一律为空（提示消失）。
- * 未进入工作台（调试皮肤）不显示，避免改动原有试跑界面的版式。
- */
-const stepHint = computed(() => {
-  // 断线时顶部已有「连接已断开」，这里不再假装还在思考
-  if (!isWorkbench.value || props.detached) {
-    return ''
-  }
-  for (let i = props.turns.length - 1; i >= 0; i -= 1) {
-    const turn = props.turns[i]
-    if (!turn || turn.role !== 'assistant') {
-      continue
-    }
-    if (turn.status !== 'streaming') {
-      return ''
-    }
-    return liveStepHintOf(turn.blocks, turn.status === 'streaming', turn.planPending === true)
-  }
-  return ''
 })
 
 /**
@@ -4043,6 +4495,11 @@ function submit() {
   )
   text.value = ''
   attachments.value = []
+  // 发出即丢掉这条会话的未发送槽：失败轮自己已有气泡可重试，输入框里不再留副本；
+  // 草稿会话随后会换成真实主键，新键同样是空输入
+  if (props.draftKey) {
+    composerDrafts.delete(props.draftKey)
+  }
 }
 
 /**
@@ -4641,14 +5098,18 @@ function removeAttachment(index: number) {
   border-radius: 0;
 }
 
-/* AI 正文气泡：与思考框、工作流卡同一档宽度，不按字数各自收缩 */
+/*
+ * 结果框（答案）：白底 + 正文墨色，是整段对话里最“实”的一块。
+ * 过程块（折叠思考 / 工具胶囊 / 工作流卡）统一降一档底与描边，
+ * 让读者不用费力分辨哪块是最终回答；色值只取 DESIGN 已有令牌。
+ */
 .chat.is-workbench .answer-block {
   position: relative;
   width: 100%;
   box-sizing: border-box;
-  background-color: #f8fafc;
+  background-color: var(--ah-surface, #fff);
   padding: 16px 20px;
-  border: 1px solid #e5e7eb;
+  border: 1px solid var(--ah-border, #ebeef5);
   border-radius: 12px;
   border-bottom-left-radius: 4px;
 }
@@ -4682,7 +5143,7 @@ function removeAttachment(index: number) {
   line-height: 1.6;
 }
 
-/* 结果框：复制图标和底部箭头都只在移入文本框时出现 */
+/* 结果框：复制图标仍只在移入时出现；展开入口由 .wb-result-jump 常驻在框底 */
 .wb-result-box {
   position: relative;
 }
@@ -4719,30 +5180,40 @@ function removeAttachment(index: number) {
   color: #374151;
 }
 
+/*
+ * 结果超出四行后的展开入口：不再依赖 hover，作为结果框底部的常驻文字按钮。
+ * 键盘 Tab 能聚焦（:focus-visible 有明确描边）；展开/收起只改显示范围，不动正文。
+ */
 .wb-result-jump {
-  position: absolute;
-  left: 50%;
-  bottom: 2px;
-  z-index: 1;
-  display: grid;
-  place-items: center;
-  width: 28px;
-  height: 18px;
-  margin: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 4px;
+  width: 100%;
+  height: 24px;
+  margin: 4px 0 0;
   padding: 0;
   border: 0;
-  border-radius: 999px;
-  background: rgba(255, 255, 255, 0.92);
-  box-shadow: 0 1px 4px rgba(15, 23, 42, 0.12);
-  transform: translateX(-50%);
-  opacity: 0;
-  pointer-events: none;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--ah-primary, #635bff);
+  font-size: 12px;
+  font-weight: 600;
+  line-height: 1;
   cursor: pointer;
 }
 
-.wb-result-box:hover .wb-result-jump {
-  opacity: 1;
-  pointer-events: auto;
+.wb-result-jump:hover {
+  background: #f4f4ff;
+}
+
+.wb-result-jump:focus-visible {
+  outline: 2px solid var(--ah-primary, #635bff);
+  outline-offset: 1px;
+}
+
+.wb-jump-label {
+  white-space: nowrap;
 }
 
 .wb-jump-chevron {
@@ -4750,12 +5221,12 @@ function removeAttachment(index: number) {
   height: 0;
   border-left: 5px solid transparent;
   border-right: 5px solid transparent;
-  border-top: 6px solid #111;
+  border-top: 6px solid currentColor;
 }
 
 .wb-result-jump.is-up .wb-jump-chevron {
   border-top: 0;
-  border-bottom: 6px solid #111;
+  border-bottom: 6px solid currentColor;
 }
 
 /* 文件在正文框下面单独一行，宽度跟结果框对齐，不进气泡，也不替换正文 */
@@ -4777,14 +5248,14 @@ function removeAttachment(index: number) {
 }
 
 /*
- * Agent 需要用户拍板时的可点选项：正文下方一组 chips（机器块已从正文摘掉）。
+ * Agent 需要用户拍板时的可点选项：正文下方一组分行条目（机器块已从正文摘掉）。
  * 与正文同一条左缘，不做成居中的对话框——它仍然属于这位参与者的那块结果。
  */
 .chat.is-workbench .wb-choice {
   margin-top: 12px;
 }
 
-/* 一句话问题：比正文略小、略浅，让 chips 成为视觉落点 */
+/* 一句话问题：比正文略小、略浅，让选项行成为视觉落点 */
 .chat.is-workbench .wb-choice-question {
   margin: 0 0 8px;
   color: #4b5563;
@@ -4806,36 +5277,101 @@ function removeAttachment(index: number) {
   max-width: 680px;
 }
 
-/* 选项按钮：白底细边 + 紫 hover，与工作台 primary 一致；不做实心主按钮（多个选项地位相同） */
+/*
+ * 选项行：白底 + 轻发丝边 + 8px 小圆角（对话气泡本体仍是 12px），
+ * 与气泡同一套气质：平铺、浅色、少阴影；静止不上浮、不发光。
+ * 紫色只在 hover / 键盘聚焦时出现，服从 The One Violet Rule。
+ */
 .chat.is-workbench .wb-choice-chip {
-  display: block;
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
   width: 100%;
-  padding: 10px 14px;
-  border: 1px solid #d1d5db;
-  border-radius: 10px;
+  padding: 10px 12px;
+  border: 1px solid #e5e7eb;
+  border-radius: 8px;
   background: #fff;
-  color: #374151;
-  font-size: 13px;
+  color: #1f2937;
+  font: inherit;
+  font-size: 14px;
   line-height: 1.5;
-  /* 长文案左对齐、自然折行：一行一项，行首对齐才好扫读 */
+  /* 长文案左对齐、自然折行：一行一项，行首对齐才好扫读；不截省略号 */
   text-align: left;
   overflow-wrap: anywhere;
   cursor: pointer;
-  transition: border-color 0.15s, color 0.15s, background-color 0.15s;
+  transition: border-color 0.15s, background-color 0.15s, color 0.15s;
 }
 
-.chat.is-workbench .wb-choice-chip:hover:not(:disabled) {
+/* 字母序号：静止是中性灰小方块，不抢正文；长文案换行时仍与首行对齐 */
+.chat.is-workbench .wb-choice-index {
+  display: grid;
+  flex: none;
+  place-items: center;
+  width: 20px;
+  height: 20px;
+  margin-top: 1px;
+  border-radius: 5px;
+  background: #f3f4f6;
+  color: #6b7280;
+  font-size: 11px;
+  font-weight: 600;
+  line-height: 1;
+  transition: background-color 0.15s, color 0.15s;
+}
+
+/* 选项文案：完整换行，不截断；与序号同一行起读 */
+.chat.is-workbench .wb-choice-label {
+  flex: 1;
+  min-width: 0;
+  white-space: normal;
+  word-break: break-word;
+}
+
+/* 推荐标识：仅在文案自带「推荐」等显式标记时出现，克制的小标签，不做色块 */
+.chat.is-workbench .wb-choice-recommend {
+  flex: none;
+  margin-top: 1px;
+  padding: 1px 6px;
+  border-radius: 4px;
+  background: #f4f3ff;
+  color: #5146f5;
+  font-size: 11px;
+  font-weight: 600;
+  line-height: 1.5;
+}
+
+/* hover / 键盘聚焦：浅紫底 + 信号紫描边，不用遗留蓝 */
+.chat.is-workbench .wb-choice-chip:hover:not(:disabled),
+.chat.is-workbench .wb-choice-chip:focus-visible:not(:disabled) {
   border-color: #635bff;
-  color: #635bff;
-  background: #f5f3ff;
+  background: #f4f3ff;
+  color: #1f2937;
+  outline: none;
+}
+
+/* 序号随选项一起点亮，但不做成实心紫块（避免一屏出现一排强紫） */
+.chat.is-workbench .wb-choice-chip:hover:not(:disabled) .wb-choice-index,
+.chat.is-workbench .wb-choice-chip:focus-visible:not(:disabled) .wb-choice-index {
+  background: #e9e5ff;
+  color: #5146f5;
+}
+
+/* 键盘聚焦加 DESIGN 规定的 2px 紫光；鼠标点击不触发（:focus-visible） */
+.chat.is-workbench .wb-choice-chip:focus-visible {
+  box-shadow: 0 0 0 2px rgba(99, 91, 255, 0.2);
 }
 
 /* 已过期（历史轮）或正在发送：置灰且不可点，避免续作到已翻页的上下文 */
 .chat.is-workbench .wb-choice-chip:disabled {
-  border-color: #e5e7eb;
-  color: #9ca3af;
+  border-color: #eef0f4;
   background: #f9fafb;
+  color: #9ca3af;
   cursor: not-allowed;
+}
+
+.chat.is-workbench .wb-choice-chip:disabled .wb-choice-index {
+  background: #f3f4f6;
+  color: #b6bac3;
 }
 
 /* 兜底：若文首 heading 仍进了 HTML，不展示（strip 函数是主路径） */
@@ -4902,6 +5438,43 @@ function removeAttachment(index: number) {
 }
 
 /*
+ * 本轮路由行：常驻在助手块顶部，默认可见。
+ * 名字全部来自参与者投影（入口 / 方案 / 专家），数据不足时外层不渲染。
+ */
+.chat.is-workbench .wb-route-chain {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+  margin: 0 0 8px;
+  color: #6b7280;
+  font-size: 12px;
+  line-height: 1.6;
+}
+
+.wb-route-chain-label {
+  flex: none;
+  padding: 1px 8px;
+  border-radius: 999px;
+  background: #f4f4ff;
+  color: var(--ah-primary, #635bff);
+  font-weight: 600;
+}
+
+.wb-route-chain-node {
+  color: #374151;
+  font-weight: 600;
+}
+
+.wb-route-chain-node.is-entry {
+  color: var(--ah-primary, #635bff);
+}
+
+.wb-route-chain-arrow {
+  color: #9ca3af;
+}
+
+/*
  * 方案外框：专家卡画在这只框里面，头像和思考仍是原来的专家卡。
  * 方案自己的思考在框的上半，汇总卡在专家后面，不写进专家正文。
  */
@@ -4931,38 +5504,10 @@ function removeAttachment(index: number) {
 }
 
 /*
- * 消息流底部的步骤提示：一行浅灰小字 + 呼吸点，左对齐到参与者内容列。
- * 不做胶囊、不做居中、不粘顶——它只回答「下一步在等什么」。
+ * 原先消息流底部的「四拍提示」已移除：它与右上角按钮上的
+ * 「执行中 · 12.3s」重复播报同一件事，留着会让两处抢注意力。
+ * 过程状态仍由各参与者自己的银圈、折叠思考与工具胶囊承担。
  */
-.wb-step-hint {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  margin: 10px 0 2px 48px;
-  color: #9ca3af;
-  font-size: 12px;
-  line-height: 1.6;
-}
-
-.wb-step-hint-dot {
-  flex: none;
-  width: 6px;
-  height: 6px;
-  border-radius: 50%;
-  background: #a5a3ff;
-  animation: wb-step-breathe 1.4s ease-in-out infinite;
-}
-
-@keyframes wb-step-breathe {
-  0%,
-  100% {
-    opacity: 0.25;
-  }
-
-  50% {
-    opacity: 0.9;
-  }
-}
 
 .wb-actor {
   display: flex;
@@ -4986,6 +5531,59 @@ function removeAttachment(index: number) {
   /* 36px 头像 + 12px 间距，与名称列左缘对齐 */
   margin-left: 48px;
   max-width: min(100%, 640px);
+}
+
+/*
+ * ===== 过程块降一档 =====
+ * 结果框（.answer-block）是白底 + 正文墨色；思考、工具胶囊、工作流卡与方案外框
+ * 用更轻的底 / 描边，避免和答案同权重。全部限定在 .chat.is-workbench，
+ * 不改管理端运行与多智能体运行共用的默认皮肤。
+ */
+.chat.is-workbench .wb-actor-thought:not(.is-folded) {
+  /* 折叠思考：静灰底 + 发丝线，读起来是「可展开的过程」，不是答案 */
+  background: var(--ah-input-fill, #f5f7fa);
+  border-color: var(--ah-border-soft, #f2f6fc);
+}
+
+.chat.is-workbench .wb-actor-thought.is-folded:hover {
+  background: var(--ah-border-soft, #f2f6fc);
+  border-color: var(--ah-border, #ebeef5);
+}
+
+/* 网关判定 / 方案分流的「过程气泡」：只有分流句、没有正文答案，降回过程档 */
+.chat.is-workbench .answer-block.is-process-bubble {
+  background: var(--ah-input-fill, #f5f7fa);
+  border-color: var(--ah-border-soft, #f2f6fc);
+}
+
+/* 工具胶囊：完成态从整块绿底收到白底 + 绿字，只保留状态语义，不抢结果 */
+.chat.is-workbench .wb-tool-pill:not(.is-running):not(.is-error) {
+  background: var(--ah-surface, #fff);
+  border-color: var(--ah-border-soft, #f2f6fc);
+  color: #047857;
+}
+
+/* 工作流卡是过程：边框与标题栏回到中性灰，状态徽标仍走原有语义色 */
+.chat.is-workbench .wf-card {
+  border-color: var(--ah-border, #ebeef5);
+}
+
+.chat.is-workbench .wf-card-header {
+  background: var(--ah-input-fill, #f5f7fa);
+  border-bottom-color: var(--ah-border-soft, #f2f6fc);
+}
+
+.chat.is-workbench .wf-title {
+  color: var(--ah-text, #1f2937);
+}
+
+.chat.is-workbench .wf-result {
+  border-top-color: var(--ah-border-soft, #f2f6fc);
+}
+
+/* 方案外框只当分组框：描边回到发丝线，不再用紫调强调 */
+.chat.is-workbench .wb-scheme-frame {
+  border-color: var(--ah-border-soft, #f2f6fc);
 }
 
 .wb-actor-head {
@@ -5379,6 +5977,21 @@ function removeAttachment(index: number) {
   margin-top: 10px;
 }
 
+/* 卡内失败句后面的深链：跟正文同一条流，不加第二块红条 */
+.wb-error-action {
+  margin-left: 8px;
+  color: var(--ah-primary, #635bff);
+  font-size: 13px;
+  font-weight: 600;
+  text-decoration: none;
+  white-space: nowrap;
+}
+
+.wb-error-action:hover,
+.wb-error-action:focus-visible {
+  text-decoration: underline;
+}
+
 /* ===== 思考框（对齐 temp/test.html 的 .thought-box）===== */
 
 /* 整块是一个浅灰圆角框。思考文字自己限高四行并在框内滚动，标题不跟着滚 */
@@ -5650,30 +6263,6 @@ function removeAttachment(index: number) {
   }
 }
 
-
-/* 硬核不可用：柔和灰字系统提示，不用刺眼红字 */
-.wb-soft-error {
-  margin: 8px 0 0;
-  padding: 0;
-  color: #9ca3af;
-  font-size: 13px;
-  line-height: 1.5;
-}
-
-.gateway-badge {
-  display: inline-flex;
-  align-items: center;
-  gap: 4px;
-  flex: none;
-  padding: 2px 8px;
-  border-radius: 999px;
-  background: #eef2ff;
-  color: var(--ah-primary, #635bff);
-  font-size: 12px;
-  font-weight: 600;
-  line-height: 1.4;
-  white-space: nowrap;
-}
 
 .mention-chip-row {
   display: flex;

@@ -160,9 +160,28 @@ public class WorkflowEngine {
     private void executeInternal(WorkflowRun run, long operatorId) {
         WorkflowRunStatus current = WorkflowRunStatus.parse(run.getStatus());
         if (current == WorkflowRunStatus.CREATED) {
-            // 首次调度：CREATED → RUNNING，并补开始时间
-            transitionRun(run, WorkflowRunStatus.CREATED, WorkflowRunStatus.RUNNING,
-                    null, null, operatorId);
+            /*
+             * 首次调度：CREATED → RUNNING。用条件更新而不是无条件写：
+             * 取消接口可能在调度线程启动前就把 run 写成 CANCELLED，无条件写会把取消覆盖回 RUNNING，
+             * 之后节点继续跑，刷新时库里仍是运行中——这正是「停止只在当时生效」的一种来源。
+             */
+            // 条件更新也照样过状态机，避免将来状态表收紧后这里成为绕过口
+            WorkflowStateMachine.requireRun(WorkflowRunStatus.CREATED, WorkflowRunStatus.RUNNING);
+            boolean started = runs.updateStatusIfMatches(run.getId(),
+                    WorkflowRunStatus.CREATED.name(), WorkflowRunStatus.RUNNING.name(),
+                    null, null, null, operatorId);
+            if (!started) {
+                WorkflowRun fresh = runs.findById(run.getId()).orElse(null);
+                WorkflowRunStatus freshStatus = fresh == null ? null
+                        : WorkflowRunStatus.parse(fresh.getStatus());
+                if (freshStatus != WorkflowRunStatus.RUNNING) {
+                    // 已经被取消（或收成其它终态）：不再启动，内存对象与库对齐
+                    run.setStatus(fresh == null
+                            ? WorkflowRunStatus.CANCELLED.name() : fresh.getStatus());
+                    return;
+                }
+            }
+            run.setStatus(WorkflowRunStatus.RUNNING.name());
             run.setStartTime(LocalDateTime.now());
         } else if (current != WorkflowRunStatus.RUNNING) {
             throw new BizException(ErrorCode.BAD_REQUEST,
@@ -224,6 +243,20 @@ public class WorkflowEngine {
                 }
             }
         } finally {
+            /*
+             * 取消与调度并发时的节点兜底：取消接口先到、节点行后由 ensureNodeRuns 建出来时，
+             * 取消那边的一次 cancelOpen 会漏掉这些行，库里留下 PENDING / RUNNING。
+             * 引擎退出前按 run 的终态再收一次，与取消口径一致（在途 → CANCELLED，未开始 → SKIPPED）。
+             */
+            if (WorkflowRunStatus.CANCELLED.name().equalsIgnoreCase(run.getStatus())) {
+                try {
+                    nodeRuns.cancelOpen(run.getId());
+                } catch (RuntimeException ex) {
+                    // 收口失败不改 run 的终态：取消已落库，节点明细最多晚一拍
+                    log.warn("取消后收口节点失败 runId={} type={}",
+                            run.getId(), ex.getClass().getSimpleName());
+                }
+            }
             // 只有终态才收口；PAUSED_HUMAN 保持 RUNNING，等人工通过后续写
             traceSafely("finishRun", run.getId(), () -> traces.finishRun(run));
         }
@@ -712,9 +745,41 @@ public class WorkflowEngine {
                 truncate(reason), null, operatorId);
     }
 
+    /**
+     * run 状态迁移：所有引擎内迁移都走条件更新，避免覆盖并发的取消终态。
+     *
+     * <p>为什么不能无条件 {@code updateStatus}：取消接口在另一线程写库，可能在
+     * 「循环已判定可以收口」与「真正写 SUCCESS / FAILED」之间把当前状态改成 CANCELLED。
+     * 无条件写会把取消覆盖成成功 / 失败，刷新后库里又是一条「正常结束」的 run。
+     *
+     * <p>条件更新失败时以库里的状态为准，把内存对象对齐后直接返回；
+     * 取消是用户动作，优先级高于引擎自己的收口结论。
+     *
+     * @param run         已落库的 run
+     * @param from        期望的当前状态（引擎内正常流程恒为 RUNNING）
+     * @param to          目标状态
+     * @param errorSummary 失败 / 等待摘要；可空
+     * @param outputJson  终态输出；可空
+     * @param operatorId  操作人
+     */
     private void transitionRun(WorkflowRun run, WorkflowRunStatus from, WorkflowRunStatus to,
                                String errorSummary, String outputJson, long operatorId) {
         WorkflowStateMachine.requireRun(from, to);
+        LocalDateTime end = to.terminal() ? LocalDateTime.now() : null;
+        // 条件迁移：库里仍是 from 才写入；已被取消或他人改写则放弃本次收口
+        boolean changed = runs.updateStatusIfMatches(run.getId(), from.name(), to.name(),
+                errorSummary, outputJson, end, operatorId);
+        if (!changed) {
+            // 以库为准：可能是取消，也可能是人工入口已收口；内存对象不能保留错的终态
+            WorkflowRun fresh = runs.findById(run.getId()).orElse(null);
+            if (fresh != null) {
+                run.setStatus(fresh.getStatus());
+                run.setErrorSummary(fresh.getErrorSummary());
+                run.setOutputJson(fresh.getOutputJson());
+                run.setEndTime(fresh.getEndTime());
+            }
+            return;
+        }
         run.setStatus(to.name());
         if (errorSummary != null) {
             run.setErrorSummary(errorSummary);
@@ -722,11 +787,9 @@ public class WorkflowEngine {
         if (outputJson != null) {
             run.setOutputJson(outputJson);
         }
-        LocalDateTime end = to.terminal() ? LocalDateTime.now() : null;
         if (end != null) {
             run.setEndTime(end);
         }
-        runs.updateStatus(run.getId(), to.name(), errorSummary, outputJson, end, operatorId);
     }
 
     /**

@@ -175,6 +175,25 @@ public class WorkflowRunRepositoryImpl implements WorkflowRunRepository {
         return entity == null ? Optional.empty() : Optional.of(toDomain(entity));
     }
 
+    /** {@inheritDoc} */
+    @Override
+    public List<WorkflowRun> listActiveByWorkbenchSession(Long workbenchSessionId) {
+        if (workbenchSessionId == null) {
+            return List.of();
+        }
+        // 未结束三态：CREATED 也要算——run 已落库但调度线程还没起时，停止必须能覆盖到它；
+        // 终态 run 不需要取消，也不应让停止请求因它失败
+        return mapper.selectList(new LambdaQueryWrapper<WorkflowRunEntity>()
+                        .eq(WorkflowRunEntity::getWorkbenchSessionId, workbenchSessionId)
+                        .in(WorkflowRunEntity::getStatus,
+                                WorkflowRunStatus.CREATED.name(),
+                                WorkflowRunStatus.RUNNING.name(), WorkflowRunStatus.PAUSED_HUMAN.name())
+                        .orderByDesc(WorkflowRunEntity::getId))
+                .stream()
+                .map(this::toDomain)
+                .toList();
+    }
+
     private WorkflowRun toDomain(WorkflowRunEntity entity) {
         WorkflowRun run = new WorkflowRun();
         run.setId(entity.getId());

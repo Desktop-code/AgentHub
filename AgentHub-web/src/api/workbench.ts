@@ -149,7 +149,12 @@ export function clearWorkbenchSession(id: number) {
   return request.post<Result<TrialSession>>(`${PREFIX}/sessions/${id}/clear`)
 }
 
-/** 取消尚未完成的会话（不打断正在执行的一轮）。 */
+/**
+ * 停止 / 取消会话。
+ *
+ * <p>本轮仍在执行时，后端走中断：停掉模型与工具、会话保持可继续发送；
+ * 未在执行但仍是 RUNNING 的会话按原取消入口收成 CANCELLED。
+ */
 export function cancelWorkbenchSession(id: number) {
   return request.post<Result<TrialSession>>(`${PREFIX}/sessions/${id}/cancel`)
 }
