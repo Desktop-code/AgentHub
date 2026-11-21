@@ -117,123 +117,141 @@
       <TablePager v-model:current="query.current" v-model:size="query.size" :total="total" @change="load" />
     </el-card>
 
-    <!-- 新建：Embedding 与维度在此确定，建库后不可改；点遮罩 / ESC 即可关闭 -->
-    <el-dialog v-model="create.open" title="新建知识库" width="560px">
-      <el-form label-width="96px">
-        <el-form-item label="名称" required>
-          <el-input v-model="create.form.name" maxlength="100" show-word-limit />
-        </el-form-item>
-        <el-form-item label="描述" required>
-          <el-input v-model="create.form.description" type="textarea" :rows="2" maxlength="512" show-word-limit />
-          <div class="hint">必填；多库时按描述判断哪些库与问句相关，只检索相关的库</div>
-        </el-form-item>
-        <el-form-item label="Embedding" required>
-          <el-select
-            v-model="create.form.embeddingModelId"
-            class="full"
-            placeholder="选择用途为 EMBEDDING 的模型实例"
-            filterable
-            @change="onEmbeddingChange"
-          >
-            <el-option
-              v-for="item in embeddingOptions"
-              :key="item.id"
-              :label="`${item.displayName}（${item.modelId}）`"
-              :value="item.id"
-            />
-          </el-select>
-          <div class="hint">维度由模型返回，选中后自动带出；建库后锁定不可修改。</div>
-        </el-form-item>
-        <!--
-          维度只在选中模型后出现：没选模型时没有任何来源可算，提前摆一个数字反而像在让人手填。
-          值全部由模型侧给出（连通测试返回的维度 → 扩展 JSON → 无），用户不可编辑。
-        -->
-        <el-form-item v-if="create.form.embeddingModelId" label="维度">
-          <el-input :model-value="dimensionText" disabled class="dimension-input" />
-          <div class="hint" :class="{ 'hint-error': !dimensionResolved }">{{ dimensionHint }}</div>
-        </el-form-item>
-        <el-form-item label="Rerank">
-          <el-select v-model="create.form.rerankModelId" class="full" clearable placeholder="可选，用途为 RERANK 的实例">
-            <el-option
-              v-for="item in rerankOptions"
-              :key="item.id"
-              :label="`${item.displayName}（${item.modelId}）`"
-              :value="item.id"
-            />
-          </el-select>
-        </el-form-item>
-        <el-form-item label="隔离模式">
-          <el-radio-group v-model="create.form.isolationMode">
-            <el-radio value="PHYSICAL">物理隔离</el-radio>
-            <el-radio value="PUBLIC">公开池</el-radio>
-          </el-radio-group>
-        </el-form-item>
-        <el-form-item label="可见性">
-          <el-radio-group v-model="create.form.visibility">
-            <el-radio value="PRIVATE">私有</el-radio>
-            <el-radio value="PUBLIC">公开</el-radio>
-          </el-radio-group>
-        </el-form-item>
-        <el-form-item label="检索参数">
-          <el-input v-model="create.form.retrievalConfig" type="textarea" :rows="3" class="mono" />
-          <div class="hint">
-            JSON；留空用平台默认（topK=5、向量/BM25 各 20、RRF k=60、同篇最多 3 段、改写与 Rerank 关）。
-            返回条数以这里为准，对话里的模型不再决定条数。
-          </div>
-        </el-form-item>
-      </el-form>
+    <!--
+      新建：三个 Tab（基础信息 / 入库与切片 / 检索与重排），底部按钮固定不跟 Tab 走。
+      Embedding 与维度在此确定，建库后不可改；不做脏保护，点遮罩 / ESC 即可关闭。
+    -->
+    <el-dialog v-model="create.open" title="新建知识库" width="760px" class="kb-param-dialog">
+      <KbConfigTabs
+        v-model:tab="create.tab"
+        :retrieval="create.form.retrieval"
+        :ingest="create.form.ingest"
+        @update:retrieval="(next) => (create.form.retrieval = next)"
+        @update:ingest="(next) => (create.form.ingest = next)"
+      >
+        <template #base>
+          <el-form label-width="96px">
+            <el-form-item label="名称" required>
+              <el-input v-model="create.form.name" maxlength="100" show-word-limit />
+            </el-form-item>
+            <el-form-item label="描述" required>
+              <el-input v-model="create.form.description" type="textarea" :rows="2" maxlength="512" show-word-limit />
+              <div class="hint">必填；多库时按描述判断哪些库与问句相关，只检索相关的库</div>
+            </el-form-item>
+            <!-- Embedding 与 Rerank 同排两列，与视觉稿一致 -->
+            <div class="base-grid">
+              <el-form-item label="Embedding" required>
+                <el-select
+                  v-model="create.form.embeddingModelId"
+                  class="full"
+                  placeholder="选择用途为 EMBEDDING 的模型实例"
+                  filterable
+                  @change="onEmbeddingChange"
+                >
+                  <!--
+                    未就绪（未测过连通 / 测试失败 / 无维度）的实例仍列出来，但置灰不可选：
+                    说明直接写进选项文案，只把「选不了」摆明，不在本弹窗测连通、也不把人跳去模型管理页。
+                  -->
+                  <el-option
+                    v-for="item in embeddingOptions"
+                    :key="item.id"
+                    :label="embeddingOptionLabel(item)"
+                    :value="item.id"
+                    :disabled="!isEmbeddingReady(item)"
+                  />
+                </el-select>
+                <div class="hint">维度由模型连通测试结果带出；建库后锁定不可修改。</div>
+              </el-form-item>
+              <el-form-item label="Rerank">
+                <el-select v-model="create.form.rerankModelId" class="full" clearable placeholder="不启用">
+                  <el-option
+                    v-for="item in rerankOptions"
+                    :key="item.id"
+                    :label="`${item.displayName}（${item.modelId}）`"
+                    :value="item.id"
+                  />
+                </el-select>
+                <div class="hint">可选；检索与重排 Tab 的「启用本库重排」需选中实例才生效。</div>
+              </el-form-item>
+            </div>
+            <!--
+              维度只在选中模型后出现：没选模型时没有任何来源可算，提前摆一个数字反而像在让人手填。
+              值全部由模型侧给出（连通测试返回的维度 → 扩展 JSON → 无），用户不可编辑。
+            -->
+            <el-form-item v-if="create.form.embeddingModelId" label="维度">
+              <el-input :model-value="dimensionText" disabled class="dimension-input" />
+              <div class="hint" :class="{ 'hint-error': !dimensionResolved }">{{ dimensionHint }}</div>
+            </el-form-item>
+            <el-form-item label="隔离模式">
+              <el-radio-group v-model="create.form.isolationMode">
+                <el-radio value="PHYSICAL">物理隔离</el-radio>
+                <el-radio value="PUBLIC">公开池</el-radio>
+              </el-radio-group>
+            </el-form-item>
+            <el-form-item label="可见性">
+              <el-radio-group v-model="create.form.visibility">
+                <el-radio value="PRIVATE">私有</el-radio>
+                <el-radio value="PUBLIC">公开</el-radio>
+              </el-radio-group>
+            </el-form-item>
+          </el-form>
+        </template>
+      </KbConfigTabs>
       <template #footer>
         <el-button @click="create.open = false">取消</el-button>
         <el-button type="primary" :loading="create.saving" @click="saveCreate">创建并初始化集合</el-button>
       </template>
     </el-dialog>
 
-    <!-- 编辑：不含 Embedding / 维度 / 隔离模式；点遮罩可关闭，但有未保存修改时先确认 -->
+    <!-- 编辑：与新建同一套三 Tab 结构；Embedding / 维度 / 隔离模式锁定不可改 -->
     <el-dialog
       v-model="edit.open"
       title="编辑知识库"
-      width="560px"
+      width="760px"
+      class="kb-param-dialog"
       :before-close="beforeEditClose"
     >
-      <el-form label-width="96px">
-        <el-form-item label="名称" required>
-          <el-input v-model="edit.form.name" maxlength="100" show-word-limit />
-        </el-form-item>
-        <el-form-item label="描述" required>
-          <el-input v-model="edit.form.description" type="textarea" :rows="2" maxlength="512" show-word-limit />
-          <div class="hint">必填；已有空描述的老库在此补上后才能保存</div>
-        </el-form-item>
-        <el-form-item label="Embedding">
-          <!-- 已锁定：换模型必须新建库，这里只展示 -->
-          <span>{{ edit.embeddingLabel }}</span>
-        </el-form-item>
-        <el-form-item label="Rerank">
-          <el-select v-model="edit.form.rerankModelId" class="full" clearable placeholder="不启用">
-            <el-option
-              v-for="item in rerankOptions"
-              :key="item.id"
-              :label="`${item.displayName}（${item.modelId}）`"
-              :value="item.id"
-            />
-          </el-select>
-        </el-form-item>
-        <el-form-item label="可见性">
-          <el-radio-group v-model="edit.form.visibility">
-            <el-radio value="PRIVATE">私有</el-radio>
-            <el-radio value="PUBLIC">公开</el-radio>
-          </el-radio-group>
-        </el-form-item>
-        <el-form-item label="检索参数">
-          <el-input v-model="edit.form.retrievalConfig" type="textarea" :rows="3" class="mono" />
-          <div class="hint">
-            可配 topK / maxChunksPerDoc（同篇最多几段，默认 3）/ mergedTopK（多库合并后条数）/ rrfK 等
-          </div>
-        </el-form-item>
-        <el-form-item label="入库参数">
-          <el-input v-model="edit.form.ingestConfig" type="textarea" :rows="3" class="mono" />
-          <div class="hint">JSON；② 期入库使用（chunkSize / chunkOverlap / minChunkSize）</div>
-        </el-form-item>
-      </el-form>
+      <KbConfigTabs
+        v-model:tab="edit.tab"
+        :retrieval="edit.form.retrieval"
+        :ingest="edit.form.ingest"
+        @update:retrieval="(next) => (edit.form.retrieval = next)"
+        @update:ingest="(next) => (edit.form.ingest = next)"
+      >
+        <template #base>
+          <el-form label-width="96px">
+            <el-form-item label="名称" required>
+              <el-input v-model="edit.form.name" maxlength="100" show-word-limit />
+            </el-form-item>
+            <el-form-item label="描述" required>
+              <el-input v-model="edit.form.description" type="textarea" :rows="2" maxlength="512" show-word-limit />
+              <div class="hint">必填；已有空描述的老库在此补上后才能保存</div>
+            </el-form-item>
+            <div class="base-grid">
+              <el-form-item label="Embedding">
+                <!-- 已锁定：换模型必须新建库，这里只展示，保持原样 -->
+                <span class="locked-text">{{ edit.embeddingLabel }}</span>
+              </el-form-item>
+              <el-form-item label="Rerank">
+                <el-select v-model="edit.form.rerankModelId" class="full" clearable placeholder="不启用">
+                  <el-option
+                    v-for="item in rerankOptions"
+                    :key="item.id"
+                    :label="`${item.displayName}（${item.modelId}）`"
+                    :value="item.id"
+                  />
+                </el-select>
+              </el-form-item>
+            </div>
+            <el-form-item label="可见性">
+              <el-radio-group v-model="edit.form.visibility">
+                <el-radio value="PRIVATE">私有</el-radio>
+                <el-radio value="PUBLIC">公开</el-radio>
+              </el-radio-group>
+            </el-form-item>
+          </el-form>
+        </template>
+      </KbConfigTabs>
       <template #footer>
         <!-- 未改任何字段时取消 / 保存都不可点：打开即回填基线 -->
         <el-button :disabled="!editDirty" @click="edit.open = false">取消</el-button>
@@ -262,11 +280,22 @@ import { createKb, deleteKb, pageKbs, rebuildKb, updateKb } from '@/api/rag'
 import { pageInstances } from '@/api/model'
 import PageHeader from '@/components/PageHeader.vue'
 import TablePager from '@/components/TablePager.vue'
+import KbConfigTabs from '@/components/rag/KbConfigTabs.vue'
 import { useListIndexColumn } from '@/composables/listIndex'
 import { useObjectDirty } from '@/composables/useFormDirty'
 import { useUserStore } from '@/stores/user'
 import { confirmDiscardUnsaved } from '@/utils/unsavedConfirm'
 import { formatDateTime } from '@/utils/datetime'
+import {
+  buildIngestConfig,
+  buildRetrievalConfig,
+  defaultIngestParams,
+  defaultRetrievalParams,
+  parseIngestConfig,
+  parseRetrievalConfig,
+  validateKbParams
+} from '@/utils/ragKbParams'
+import type { IngestParams, RetrievalParams } from '@/utils/ragKbParams'
 import type { InstanceRow } from '@/types/model'
 import {
   KB_CAPABILITY_LABEL,
@@ -275,11 +304,55 @@ import {
   type RagKbRow
 } from '@/types/rag'
 
-/** 默认检索参数，与后端 RagKbChecks 保持一致（maxChunksPerDoc 见「按文档限段」） */
-const DEFAULT_RETRIEVAL_CONFIG =
-  '{"topK":5,"vectorTopK":20,"bm25TopK":20,"rrfK":60,"rrfTopN":20,"scoreThreshold":0.5,"maxChunksPerDoc":3,"rewriteEnabled":false,"rerankEnabled":false}'
-/** 默认入库参数，② 期使用 */
-const DEFAULT_INGEST_CONFIG = '{"chunkSize":450,"chunkOverlap":100,"minChunkSize":150}'
+/**
+ * 表单里的参数部分：表单值 + 库中原有但表单未展示的其它合法键。
+ * extra 保存时原样带回，避免「打开再保存」把解析器仍认识的其它键清掉。
+ */
+interface KbParamFields {
+  retrieval: RetrievalParams
+  ingest: IngestParams
+  retrievalExtra: Record<string, unknown>
+  ingestExtra: Record<string, unknown>
+}
+
+/**
+ * 按库里 JSON 生成参数表单字段；空串 / 缺键都回落平台默认。
+ *
+ * @param retrievalConfig 库里的 retrieval_config，可空
+ * @param ingestConfig    库里的 ingest_config，可空
+ * @return 可直接塞进表单的参数部分
+ */
+function buildParamFields(retrievalConfig?: string | null, ingestConfig?: string | null): KbParamFields {
+  const retrieval = parseRetrievalConfig(retrievalConfig)
+  const ingest = parseIngestConfig(ingestConfig)
+  return {
+    retrieval: retrieval.params,
+    ingest: ingest.params,
+    retrievalExtra: retrieval.extra,
+    ingestExtra: ingest.extra
+  }
+}
+
+/**
+ * 新建弹窗的参数初值。
+ *
+ * <p>与「库里 JSON 缺失时的解析默认值」刻意分开：解析默认值（{@code ragKbParams}）必须与后端
+ * {@code RetrievalConfigResolver.defaults()} 一致，不能因为界面偏好去改它；但**新建**是一个未落库的
+ * 新库，产品口径是「查询改写」「本库重排」两个开关默认打开，让用户先带着更强的检索能力跑起来，
+ * 不合适再手动关。因此这里只覆盖表单初值，保存时照常写进 retrieval_config。
+ *
+ * @return 新建表单的参数部分（检索开关已置开，入库用平台默认）
+ */
+function buildNewParamFields(): KbParamFields {
+  return {
+    retrieval: { ...defaultRetrievalParams(), rerankEnabled: true, rewriteEnabled: true },
+    ingest: defaultIngestParams(),
+    // 新库没有历史 JSON，不存在需要带回的其它键
+    retrievalExtra: {},
+    ingestExtra: {}
+  }
+}
+
 /** 维度初始占位：0 表示「还没选模型 / 模型未返回」，提交前必须 > 0 */
 const UNKNOWN_DIMENSION = 0
 
@@ -308,6 +381,8 @@ const optionsLoaded = ref(false)
 const create = reactive({
   open: false,
   saving: false,
+  /** 当前 Tab：base / ingest / retrieval；每次打开弹窗重置回基础信息 */
+  tab: 'base',
   form: {
     name: '',
     description: '',
@@ -316,7 +391,7 @@ const create = reactive({
     rerankModelId: undefined as number | undefined,
     isolationMode: 'PHYSICAL',
     visibility: 'PRIVATE',
-    retrievalConfig: DEFAULT_RETRIEVAL_CONFIG
+    ...buildNewParamFields()
   }
 })
 
@@ -325,13 +400,14 @@ const edit = reactive({
   saving: false,
   id: 0,
   embeddingLabel: '',
+  /** 当前 Tab：base / ingest / retrieval；每次打开弹窗重置回基础信息 */
+  tab: 'base',
   form: {
     name: '',
     description: '',
     visibility: 'PRIVATE',
     rerankModelId: undefined as number | undefined,
-    retrievalConfig: DEFAULT_RETRIEVAL_CONFIG,
-    ingestConfig: DEFAULT_INGEST_CONFIG
+    ...buildParamFields()
   }
 })
 
@@ -361,7 +437,7 @@ async function beforeEditClose(done: () => void) {
  * 维度提示文案。维度有三个来源，按可信度取第一个命中的：
  * ① 模型连通测试返回的 embeddingDim（模型真实回答的维度）；
  * ② 模型实例扩展 JSON 里登记的 dimension；
- * ③ 都没有 → 不猜，提示去模型管理做一次连通测试。
+ * ③ 都没有 → 视为未就绪（下拉里本就点不进来）。
  */
 const dimensionHint = computed(() => {
   if (!create.form.embeddingModelId) {
@@ -372,9 +448,9 @@ const dimensionHint = computed(() => {
     return '由模型连通测试返回；建库后锁定，不可修改'
   }
   if (parseDimension(target?.extraJson)) {
-    return '取自模型实例的扩展 JSON（未测过连通性）；建议先在模型管理测一次'
+    return '取自模型实例的扩展 JSON；建库后锁定，不可修改'
   }
-  return '该模型实例还没有维度：请先在「模型管理」对它做一次连通测试'
+  return '该实例还没有可用维度，请先在「模型管理」页做一次连通测试'
 })
 
 /** 维度是否已确定；未确定时不允许提交，避免建出写不进向量的集合 */
@@ -484,6 +560,44 @@ function probedDimension(instance?: InstanceRow) {
   return typeof value === 'number' && value > 0 ? value : undefined
 }
 
+/**
+ * Embedding 选项文案。未就绪的实例仍显示，但在文案里标注去模型管理页测通，
+ * 配合 disabled 让「看得到、点不了」这件事自解释。
+ * 未测过与测试失败共用同一句标注：两者在可用性上是同一档，不值得再分两种说法。
+ *
+ * @param instance 模型实例行
+ * @return 下拉显示文案
+ */
+function embeddingOptionLabel(instance: InstanceRow) {
+  const base = `${instance.displayName}（${instance.modelId}）`
+  return isEmbeddingReady(instance) ? base : `${base} · 未连通，请到模型管理页测通`
+}
+
+/**
+ * Embedding 实例是否可选。沿用现网已有的判断，不新造状态位：
+ * <ol>
+ *   <li><b>已连通</b>：最近一次连通测试成功，即 {@code lastTestOk === 1}。
+ *       与模型管理页「设为平台级」的前置条件同源。</li>
+ *   <li><b>维度就绪</b>：维度能解析出来 —— 成功快照 {@code embeddingDim} 优先，其次扩展 JSON 登记的 dimension，
+ *       与 {@link parseDimension}、后端 {@code RagModelLookup#resolveDimension} 同口径。</li>
+ * </ol>
+ * <b>测试失败（{@code lastTestOk === 0}）与从未测过（空）同等处理，一律不可选</b>：
+ * 后端失败时不会覆盖上一次成功的 {@code embeddingDim} 快照，若只按「有维度」放行，
+ * 就会把刚测失败的实例当成可用，建出连不上的集合。所以这里必须再卡一道连通结果。
+ * <p>
+ * 未就绪的仍列在下拉里但置灰；本函数不发请求、不做探活。
+ *
+ * @param instance 模型实例行
+ * @return true 表示可选
+ */
+function isEmbeddingReady(instance: InstanceRow) {
+  // 未测过与测试失败都不放行：两者的可判定结果都是「当前不可用」
+  if (instance.lastTestOk !== 1) {
+    return false
+  }
+  return (probedDimension(instance) ?? parseDimension(instance.extraJson)) != null
+}
+
 /** 从模型实例 extraJson 读取维度，兼容三个键名，与后端 RagModelLookup 一致 */
 function parseDimension(extraJson?: string | null) {
   if (!extraJson?.trim()) {
@@ -505,6 +619,8 @@ function parseDimension(extraJson?: string | null) {
 
 async function openCreate() {
   await loadModelOptions()
+  // 每次打开都回到基础信息，参数重置为「新建」初值（改写 / 重排默认打开）
+  create.tab = 'base'
   create.form = {
     name: '',
     description: '',
@@ -513,12 +629,53 @@ async function openCreate() {
     rerankModelId: undefined,
     isolationMode: 'PHYSICAL',
     visibility: 'PRIVATE',
-    retrievalConfig: DEFAULT_RETRIEVAL_CONFIG
+    ...buildNewParamFields()
   }
   create.open = true
   if (!hasOptions.value) {
     ElMessage.warning('还没有可用的 EMBEDDING 模型实例，请先到「模型管理」创建')
+    return
   }
+  // 有实例但一个都不可选（未测过 / 测试失败 / 无维度）：只提示一次，下拉里仍可见并置灰
+  if (!embeddingOptions.value.some(isEmbeddingReady)) {
+    ElMessage.warning('现有 EMBEDDING 实例都还没连通测试成功，请先在「模型管理」测通后再建库')
+  }
+}
+
+/**
+ * 按 Tab 归类参数校验错误：检索参数错误归「检索与重排」，入库参数错误归「入库与切片」。
+ * 复用 {@link validateKbParams}，另一侧传默认值（必然合法），不另写一套区间。
+ *
+ * @param retrieval 检索参数
+ * @param ingest    入库参数
+ * @return 两块各自的错误文案列表
+ */
+function splitParamErrors(retrieval: RetrievalParams, ingest: IngestParams) {
+  return {
+    retrieval: validateKbParams(retrieval, defaultIngestParams()),
+    ingest: validateKbParams(defaultRetrievalParams(), ingest)
+  }
+}
+
+/**
+ * 保存前的参数校验：有错就切到出错的那个 Tab 再提示，避免提示落在看不见的页面上。
+ *
+ * @param target 承载 tab 与参数的弹窗状态（新建或编辑）
+ * @return true 表示通过
+ */
+function checkParams(target: { tab: string; form: KbParamFields }) {
+  const errors = splitParamErrors(target.form.retrieval, target.form.ingest)
+  if (errors.retrieval.length) {
+    target.tab = 'retrieval'
+    ElMessage.warning(errors.retrieval[0])
+    return false
+  }
+  if (errors.ingest.length) {
+    target.tab = 'ingest'
+    ElMessage.warning(errors.ingest[0])
+    return false
+  }
+  return true
 }
 
 async function saveCreate() {
@@ -535,9 +692,13 @@ async function saveCreate() {
     ElMessage.warning('请选择 Embedding 模型')
     return
   }
-  // 维度必须由模型侧给出：宁可拦下并引导去测连通性，也不猜一个值建出写不进向量的集合
+  // 维度必须由模型侧给出：宁可拦下，也不猜一个值建出写不进向量的集合
   if (!dimensionResolved.value) {
-    ElMessage.warning('该 Embedding 模型还没有维度，请先到「模型管理」对它做一次连通测试')
+    ElMessage.warning('所选 Embedding 实例还没有可用维度，请改选已连通的实例')
+    return
+  }
+  // 参数区间与后端解析器一致：超界直接拦下，避免后端静默夹紧后与界面显示不一致
+  if (!checkParams(create)) {
     return
   }
   create.saving = true
@@ -551,7 +712,9 @@ async function saveCreate() {
       rerankModelId: create.form.rerankModelId,
       isolationMode: create.form.isolationMode,
       visibility: create.form.visibility,
-      retrievalConfig: create.form.retrievalConfig.trim() || undefined
+      // 没切到某个 Tab 也照常提交当前值（默认或已回填），不会写回空对象
+      retrievalConfig: buildRetrievalConfig(create.form.retrieval, create.form.retrievalExtra),
+      ingestConfig: buildIngestConfig(create.form.ingest, create.form.ingestExtra)
     })
     create.open = false
     const result = data.data
@@ -572,13 +735,15 @@ async function openEdit(row: RagKbRow) {
   await loadModelOptions()
   edit.id = row.id
   edit.embeddingLabel = `${row.embeddingModelName || `#${row.embeddingModelId}`}（维度 ${row.vectorDimension}，建库后锁定）`
+  // 每次打开都回到基础信息；已回填的参数在切 Tab 后仍在
+  edit.tab = 'base'
   edit.form = {
     name: row.name,
     description: row.description || '',
     visibility: row.visibility,
     rerankModelId: row.rerankModelId ?? undefined,
-    retrievalConfig: row.retrievalConfig || DEFAULT_RETRIEVAL_CONFIG,
-    ingestConfig: row.ingestConfig || DEFAULT_INGEST_CONFIG
+    // 已有 JSON 按表单回填；缺键显示默认值，其它合法键留在 extra 里保存时带回
+    ...buildParamFields(row.retrievalConfig, row.ingestConfig)
   }
   edit.open = true
   // 回填完成即定为干净基线：打开弹窗不该显示可保存
@@ -595,6 +760,9 @@ async function saveEdit() {
     ElMessage.warning('请填写描述')
     return
   }
+  if (!checkParams(edit)) {
+    return
+  }
   edit.saving = true
   try {
     // 清空 Rerank 用 0 表示，与后端约定一致
@@ -603,8 +771,9 @@ async function saveEdit() {
       description: edit.form.description.trim() || undefined,
       visibility: edit.form.visibility,
       rerankModelId: edit.form.rerankModelId ?? 0,
-      retrievalConfig: edit.form.retrievalConfig.trim() || undefined,
-      ingestConfig: edit.form.ingestConfig.trim() || undefined
+      // 没切到某个 Tab 也用当前值重建 JSON，保持与界面显示一致
+      retrievalConfig: buildRetrievalConfig(edit.form.retrieval, edit.form.retrievalExtra),
+      ingestConfig: buildIngestConfig(edit.form.ingest, edit.form.ingestExtra)
     })
     edit.open = false
     ElMessage.success('已保存')
@@ -700,14 +869,29 @@ onMounted(load)
 
 .hint {
   margin-top: 4px;
-  color: var(--ah-text-muted, #9ca3af);
+  color: var(--ah-text-muted, #6b7280);
   font-size: 12px;
   line-height: 1.5;
 }
 
-.mono :deep(textarea) {
-  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
-  font-size: 12px;
+/* 基础信息里 Embedding / Rerank 同排两列；窄屏单列堆叠，Tab 与表单都不横向溢出 */
+.base-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 0 16px;
+}
+
+@media (max-width: 680px) {
+  .base-grid {
+    grid-template-columns: minmax(0, 1fr);
+  }
+}
+
+/* 编辑态 Embedding 已锁定：按正文色展示，不用禁用输入框的灰，避免看着像坏了 */
+.locked-text {
+  color: var(--ah-text, #1f2937);
+  font-size: 13px;
+  line-height: 1.5;
 }
 
 .tag-on {
@@ -726,5 +910,27 @@ onMounted(load)
   --el-tag-text-color: #6b7280;
   --el-tag-border-color: #e5e7eb;
   --el-tag-bg-color: #f3f4f6;
+}
+</style>
+
+<!--
+  弹窗本体由 Element Plus teleport 到 body，不在本组件的 scoped 作用域内，
+  所以这两条用非 scoped 样式；选择器都带 kb-param-dialog 前缀，不会外溢到其它弹窗。
+-->
+<style>
+/*
+  Tab 内容长短不一（检索与重排最长），限制体高并内部滚动，底部取消 / 保存始终留在视口内；
+  Tab 条本身放在滚动区里，内容长时一起滚，不会把页脚顶出去。
+*/
+.kb-param-dialog .el-dialog__body {
+  max-height: 68vh;
+  overflow-y: auto;
+}
+
+/* 窄屏兜底：760px 在小屏会溢出，退化为近满宽；两栏 / 三栏由组件内断点改成单列 */
+@media (max-width: 820px) {
+  .kb-param-dialog.el-dialog {
+    width: 94vw !important;
+  }
 }
 </style>
