@@ -38,6 +38,9 @@ public class BuiltinToolkitAssembler {
     /**
      * 按目录调用名注册。同一个 Bean 只注册一次，但每个名字都必须能在 Toolkit 里查到。
      *
+     * <p>spec 带 {@code descriptionOverride} 时（目前只有内置检索工具用），
+     * 注册后把模型看到的说明换成装配期生成的那份；清单随本轮绑定变化，注解写不出来。
+     *
      * @param specs 已过滤为绑定且启用的 BUILTIN；可以是空
      * @return 只含这些实现的工具箱
      * @throws TrialFailure 某个调用名没有对应 Bean，或注册后引擎仍看不到该工具
@@ -66,8 +69,29 @@ public class BuiltinToolkitAssembler {
             }
             // 引擎默认扫描没有 minimum/maximum/default；用注解生成结果盖住，库表空或旧都不影响模型约束
             overlayJavaSchema(toolkit, bean, name);
+            // 说明覆盖放在 schema 覆盖之后：最终对外的是「原实现 → Java schema → 本轮说明」
+            overlayDescription(toolkit, spec, name);
         }
         return toolkit;
+    }
+
+    /**
+     * 用装配期生成的说明替换工具自带描述；spec 没带覆盖文本时不做任何包装。
+     *
+     * @param toolkit 已注册该调用名的工具箱
+     * @param spec    目录项，可空
+     * @param name    调用名
+     */
+    private void overlayDescription(Toolkit toolkit, BuiltinToolSpec spec, String name) {
+        String description = spec == null ? null : spec.getDescriptionOverride();
+        if (description == null || description.isBlank()) {
+            return;
+        }
+        AgentTool current = toolkit.getTool(name);
+        if (current == null || current instanceof DescriptionOverrideAgentTool) {
+            return;
+        }
+        toolkit.registerAgentTool(new DescriptionOverrideAgentTool(current, description));
     }
 
     /**

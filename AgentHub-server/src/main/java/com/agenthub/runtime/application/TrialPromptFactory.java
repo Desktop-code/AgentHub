@@ -7,6 +7,7 @@ import com.agenthub.agent.domain.repository.AgentSkillBindRepository;
 import com.agenthub.agent.domain.repository.AgentToolBindRepository;
 import com.agenthub.agent.infra.PromptBudgetProperties;
 import com.agenthub.prompt.domain.model.PromptLayout;
+import com.agenthub.rag.application.KbSearchToolExposure;
 import com.agenthub.runtime.domain.model.BuiltinToolSpec;
 import com.agenthub.runtime.domain.model.McpToolSpec;
 import com.agenthub.runtime.domain.model.PromptInjectionStats;
@@ -58,6 +59,11 @@ public class TrialPromptFactory {
     private final SystemPromptAssembler prompts;
     private final PromptBudgetProperties budgets;
     private final BuiltinSchemaSource builtinSchemas;
+    /**
+     * 内置检索工具的出场判定。放在装配而不是工具内部：没有可用知识库时整条不交给模型，
+     * 模型才不会先调一次、再拿到「未绑定」白跑一轮。
+     */
+    private final KbSearchToolExposure kbExposure;
 
     /**
      * @param toolBinds      工具绑定
@@ -66,16 +72,19 @@ public class TrialPromptFactory {
      * @param prompts        平台前缀、锁定段在业务段之前
      * @param budgets        三类字符预算
      * @param builtinSchemas BUILTIN 的 Java schema；MCP 用库表 schema
+     * @param kbExposure     知识库检索工具出场判定与说明清单
      */
     public TrialPromptFactory(AgentToolBindRepository toolBinds, AgentSkillBindRepository skillBinds,
                               AgentDictionaryReader dictionary, SystemPromptAssembler prompts,
-                              PromptBudgetProperties budgets, BuiltinSchemaSource builtinSchemas) {
+                              PromptBudgetProperties budgets, BuiltinSchemaSource builtinSchemas,
+                              KbSearchToolExposure kbExposure) {
         this.toolBinds = toolBinds;
         this.skillBinds = skillBinds;
         this.dictionary = dictionary;
         this.prompts = prompts;
         this.budgets = budgets;
         this.builtinSchemas = builtinSchemas;
+        this.kbExposure = kbExposure;
     }
 
     /**
@@ -182,6 +191,8 @@ public class TrialPromptFactory {
             } else {
                 BuiltinToolSpec spec = new BuiltinToolSpec();
                 spec.setName(tool.name());
+                // 装配期生成的工具说明（目前只有检索工具会带）；空则注册时沿用注解原文
+                spec.setDescriptionOverride(prepared.descriptions().get(tool.name()));
                 builtins.add(spec);
             }
         }
@@ -236,10 +247,15 @@ public class TrialPromptFactory {
 
     /**
      * 按绑定 id 升序收集可调用工具；MCP / BUILTIN 都进同一列表，供预算按序记账。
+     *
+     * <p>内置检索工具在这里多一道「有没有可用知识库」的闸：当前 Agent 未绑、绑定全关、
+     * 或绑的库都不可检索时整条不交出——既不进工具目录，也不注册进 Toolkit。
+     * 否则模型会先调一次，拿到「未绑定」话术，白跑一轮。
      */
     private PreparedTools toolsOf(Long agentId, List<String> notices) {
         List<PromptInjectionComposer.ToolInput> rows = new ArrayList<>();
         Map<String, McpPending> mcpByName = new HashMap<>();
+        Map<String, String> descriptions = new HashMap<>();
         Set<String> names = new HashSet<>();
         for (AgentToolBind bind : toolBinds.listByAgentId(agentId)) {
             // 绑定关：整条排除，不进目录也不进 schema
@@ -273,6 +289,16 @@ public class TrialPromptFactory {
                 notices.add("跳过工具 " + name + "：未知源类型");
                 continue;
             }
+            // 内置检索工具：没有可检索的知识库就不交出；有则把当前绑定库清单写进工具说明。
+            // 刻意不写进装配说明：notices 会以 SYSTEM 事件进对话时间线，
+            // 「本 Agent 没绑知识库」属于配置事实，不该每轮都往用户面前刷一条。
+            if (builtin && KbSearchToolExposure.isKnowledgeTool(name)) {
+                Optional<String> kbDescription = kbExposure.descriptionIfExposed(agentId);
+                if (kbDescription.isEmpty()) {
+                    continue;
+                }
+                descriptions.put(name, kbDescription.get());
+            }
             String schema;
             if (builtin) {
                 // BUILTIN：Java 注解优先，库表只是退路
@@ -285,7 +311,7 @@ public class TrialPromptFactory {
             }
             rows.add(new PromptInjectionComposer.ToolInput(name, oneLiner, schema, true));
         }
-        return new PreparedTools(rows, mcpByName);
+        return new PreparedTools(rows, mcpByName, descriptions);
     }
 
     private static String blank(String raw) {
@@ -293,10 +319,12 @@ public class TrialPromptFactory {
     }
 
     /**
-     * @param inputs    按绑定序的可调用工具
-     * @param mcpByName MCP 名 → 源与库表 schema；内置不在此 map
+     * @param inputs       按绑定序的可调用工具
+     * @param mcpByName    MCP 名 → 源与库表 schema；内置不在此 map
+     * @param descriptions 内置名 → 装配期生成的工具说明；没有覆盖的不在此 map
      */
-    private record PreparedTools(List<PromptInjectionComposer.ToolInput> inputs, Map<String, McpPending> mcpByName) {
+    private record PreparedTools(List<PromptInjectionComposer.ToolInput> inputs, Map<String, McpPending> mcpByName,
+                                 Map<String, String> descriptions) {
     }
 
     /**
