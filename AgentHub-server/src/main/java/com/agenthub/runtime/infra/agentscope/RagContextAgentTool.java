@@ -31,6 +31,13 @@ public final class RagContextAgentTool implements AgentTool {
     private final AgentTool delegate;
     private final Long agentId;
     /**
+     * 本轮运行会话与平台用户。查询改写要按本轮记账（Token 流水 / Trace 关联），
+     * 这两项在工具线程读不到任何 ThreadLocal，只能在组装时随包装对象带下去。
+     * 均为可空：评测 / 接口直调没有会话，计量退化为不带会话维。
+     */
+    private final Long sessionId;
+    private final Long operatorId;
+    /**
      * 组装工具时（ReAct 主线程，trace 已 bind）捕获的 trace。
      * <p>为什么不在 {@link #callAsync} 里读 {@link ObsTraceHolder}：AgentScope 的工具调用
      * 组装/下标都在 boundedElastic 上，那里没有 bind 过 trace，读出来恒为 null，
@@ -43,7 +50,7 @@ public final class RagContextAgentTool implements AgentTool {
      * @param agentId  本轮试跑 Agent；空则不绑（调用方应避免）
      */
     public RagContextAgentTool(AgentTool delegate, Long agentId) {
-        this(delegate, agentId, ObsTraceHolder.current());
+        this(delegate, agentId, null, null, ObsTraceHolder.current());
     }
 
     /**
@@ -54,8 +61,24 @@ public final class RagContextAgentTool implements AgentTool {
      * @param trace    本轮 trace；可空（评测 / 接口直调无 trace）
      */
     public RagContextAgentTool(AgentTool delegate, Long agentId, ObsTraceScope trace) {
+        this(delegate, agentId, null, null, trace);
+    }
+
+    /**
+     * 完整构造：把记账所需的会话与操作者一并带到工具线程。
+     *
+     * @param delegate   已装配的工具
+     * @param agentId    本轮试跑 Agent；可空
+     * @param sessionId  本轮运行会话；可空
+     * @param operatorId 平台用户；可空
+     * @param trace      本轮 trace；可空
+     */
+    public RagContextAgentTool(AgentTool delegate, Long agentId, Long sessionId, Long operatorId,
+                               ObsTraceScope trace) {
         this.delegate = delegate;
         this.agentId = agentId;
+        this.sessionId = sessionId;
+        this.operatorId = operatorId;
         this.trace = trace;
     }
 
@@ -118,7 +141,7 @@ public final class RagContextAgentTool implements AgentTool {
                 ? null
                 : param.getToolUseBlock().getName();
         return Mono.defer(() -> {
-            RagToolContext.bind(agentId);
+            RagToolContext.bind(agentId, sessionId, operatorId);
             // 工具线程重新绑定本次 TOOL 行：知识库检索子步据此挂到父 span
             ObsTraceScope toolScope = trace != null ? trace : ObsTraceHolder.current();
             Long toolSpanId = toolScope == null ? null : toolScope.toolSpanOf(callId);

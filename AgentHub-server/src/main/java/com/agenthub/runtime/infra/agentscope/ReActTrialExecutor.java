@@ -216,8 +216,9 @@ public class ReActTrialExecutor {
         toolkit = ToolkitFileMarker.wrap(toolkit, generated, offload,
                 trialProperties.offloadChars(),
                 plan.getInjection());
-        // 最外层重绑 RagToolContext：ToolExecutor 在 boundedElastic 上跑工具，主线程 ThreadLocal 不可见
-        toolkit = ToolkitRagContext.wrap(toolkit, plan.getAgentId());
+        // 最外层重绑 RagToolContext：ToolExecutor 在 boundedElastic 上跑工具，主线程 ThreadLocal 不可见。
+        // 带上本轮会话与用户：查询改写的出站要按这一轮记账（计量与 Trace 关联）。
+        toolkit = ToolkitRagContext.wrap(toolkit, plan.getAgentId(), sessionId, userId);
         /*
          * 可点选项：只有编排侧显式开启、且请求线程已放采集槽时才安装。
          *

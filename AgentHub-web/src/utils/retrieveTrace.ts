@@ -50,7 +50,16 @@ const STEP_META: Record<string, RetrieveStepMeta> = {
 /** 跳过原因的机器码 → 人话；未知码原样展示，便于发现后端新增口径 */
 const SKIP_REASONS: Record<string, string> = {
   rewrite_disabled: '未开启查询改写',
-  rewrite_not_executed: '改写已开，但运行时未执行',
+  rewrite_model_missing: '改写已开，但 Agent 未配 REWRITE 模型',
+  rewrite_prompt_unavailable: '改写提示词不可用，已回退原问句',
+  rewrite_timeout: '改写超时，已回退原问句',
+  rewrite_model_error: '改写模型报错，已回退原问句',
+  rewrite_empty_result: '改写返回空结果，已回退原问句',
+  rewrite_too_long: '改写结果过长，已回退原问句',
+  rewrite_interrupted: '改写被中断，已回退原问句',
+  rewrite_port_missing: '改写能力未装配',
+  rewrite_no_agent: '缺少 Agent 上下文，未改写',
+  rewrite_failed: '改写失败，已回退原问句',
   rrf_disabled: '未开启双路召回',
   provider_no_bm25: '向量库不支持 BM25',
   bm25_empty: 'BM25 无命中，保留向量结果',

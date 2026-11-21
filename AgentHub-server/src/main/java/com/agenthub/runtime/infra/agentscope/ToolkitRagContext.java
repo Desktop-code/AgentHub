@@ -25,6 +25,20 @@ public final class ToolkitRagContext {
      * @return 同一 toolkit
      */
     public static Toolkit wrap(Toolkit toolkit, Long agentId) {
+        return wrap(toolkit, agentId, null, null);
+    }
+
+    /**
+     * 带上本轮会话与操作者：查询改写出站要按这一轮的会话 / 用户记账，
+     * 工具线程读不到请求线程的上下文，只能在组装时随包装带下去。
+     *
+     * @param toolkit    已装配工具集
+     * @param agentId    本轮 Agent
+     * @param sessionId  本轮运行会话，可空
+     * @param operatorId 平台用户，可空
+     * @return 同一 toolkit
+     */
+    public static Toolkit wrap(Toolkit toolkit, Long agentId, Long sessionId, Long operatorId) {
         if (toolkit == null || agentId == null) {
             return toolkit;
         }
@@ -37,7 +51,7 @@ public final class ToolkitRagContext {
                 continue;
             }
             toolkit.removeTool(name);
-            toolkit.registerAgentTool(new RagContextAgentTool(original, agentId, trace));
+            toolkit.registerAgentTool(new RagContextAgentTool(original, agentId, sessionId, operatorId, trace));
         }
         return toolkit;
     }

@@ -6,8 +6,8 @@ import com.agenthub.obs.domain.model.ObsStatus;
 import com.agenthub.obs.domain.model.SpanClose;
 import com.agenthub.obs.domain.model.SpanType;
 import com.agenthub.obs.domain.service.ObsAttrs;
+import com.agenthub.rag.domain.service.RetrievalConfigResolver;
 import com.agenthub.spi.rag.SearchResult;
-import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -16,8 +16,6 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
-import java.util.Set;
-import java.util.concurrent.ConcurrentHashMap;
 
 /**
  * 知识库检索的 Trace 子步埋点。所属域：rag 的 application。
@@ -41,7 +39,7 @@ public final class RagObsSpans {
 
     /** 工具入参：原问、kb、topK、覆盖项、Agent 重排实例 */
     public static final String TOOL_INPUT = "tool.input";
-    /** 查询改写：本期运行时未执行，只记 skip 原因 */
+    /** 查询改写：选库之后、召回之前执行一次；跳过 / 成功 / 失败回退写不同原因 */
     public static final String REWRITE = "rewrite";
     /** 选库：按问句与各库描述决定本次检索哪些库 */
     public static final String SELECT_KB = "select.kb";
@@ -132,38 +130,17 @@ public final class RagObsSpans {
 
     /**
      * 判断某知识库是否开了查询改写（覆盖项优先于 KB 配置）。
-     * <p>运行时并不执行改写，这里只用于给出准确的 skip 原因。
+     * <p>
+     * 口径只有一份：直接复用 {@link RetrievalConfigResolver#resolve}，与真正的检索参数解析
+     * 用同一段代码，避免 Trace 说「已开启」而检索链路按「未开启」跑这类双口径漂移。
      *
      * @param kbConfigJson  KB retrieval_config，可空
      * @param overridesJson Agent 绑定覆盖项，可空
      * @return 是否开启
      */
     public static boolean rewriteRequested(String kbConfigJson, String overridesJson) {
-        Boolean over = boolField(overridesJson, "rewriteEnabled");
-        if (over != null) {
-            return over;
-        }
-        Boolean kb = boolField(kbConfigJson, "rewriteEnabled");
-        return kb != null && kb;
-    }
-
-    /**
-     * 读取 JSON 对象里的布尔字段；非法 JSON / 非布尔值都按「未配置」处理。
-     */
-    private static Boolean boolField(String json, String key) {
-        if (json == null || json.isBlank()) {
-            return null;
-        }
-        try {
-            JsonNode node = JSON.readTree(json);
-            if (node != null && node.isObject() && node.has(key) && node.get(key).isBoolean()) {
-                return node.get(key).asBoolean();
-            }
-        } catch (Exception ex) {
-            // 配置坏值不应打断检索，也不该在 trace 里伪造开关
-            return null;
-        }
-        return null;
+        return RetrievalConfigResolver.resolve(kbConfigJson, overridesJson, 0, null, "", null)
+                .isRewriteEnabled();
     }
 
     /**
@@ -179,8 +156,6 @@ public final class RagObsSpans {
         /** 本次工具调用的 TOOL 行 id；为空说明没拿到锚点，整段埋点空操作 */
         private final Long toolSpanId;
         private final Long agentId;
-        /** 同名 skip 只写一次（多库场景的 run 级步骤） */
-        private final Set<String> skippedOnce = ConcurrentHashMap.newKeySet();
         /** tool.input 记录的检索句 / topK，供 tool.output 对齐 */
         private String query;
         private Integer topK;
@@ -264,20 +239,58 @@ public final class RagObsSpans {
         }
 
         /**
-         * 同名步骤只记一次 skip；用于多库共享的 run 级步骤（如 rewrite）。
+         * 记一次查询改写的终态：成功写改写句，跳过与失败回退写清原因。
+         * <p>
+         * 三态口径（一次工具调用只写一条 rewrite 子步）：
+         * <ul>
+         *   <li><b>成功</b>：状态 OK，{@code applied=true}，output 同时给出原问与改写句；</li>
+         *   <li><b>跳过</b>：状态 OK，{@code skipped=true} + {@code skipReason}
+         *       （{@code rewrite_disabled} / {@code rewrite_model_missing} …）；</li>
+         *   <li><b>失败回退</b>：状态 OK（检索本身没失败），{@code skipped=true}、
+         *       {@code fallback=true}、{@code skipReason}（{@code rewrite_timeout} 等），
+         *       并把异常类型写进 {@code errorType}，与「本来就没开」区分开。</li>
+         * </ul>
          *
-         * @param name   稳定步骤名
-         * @param kbId   知识库；可空
-         * @param query  检索句；可空
-         * @param topK   条数；可空
-         * @param reason 机器可读原因
-         * @param text   人话说明
+         * @param original        用户原问句
+         * @param effective       实际生效的检索句
+         * @param applied         是否用上了改写句
+         * @param failed          是否属于「执行了但失败、已回退原问」
+         * @param reason          机器可读原因；成功时为空
+         * @param errorType       异常类型简名；可空
+         * @param modelInstanceId 实际使用的模型实例；跳过时为空
+         * @param topK            工具入参条数；可空
          */
-        public void skipOnce(String name, Long kbId, String query, Integer topK, String reason, String text) {
-            if (!isActive() || !skippedOnce.add(name)) {
+        public void rewrite(String original, String effective, boolean applied, boolean failed,
+                            String reason, String errorType, Long modelInstanceId, Integer topK) {
+            if (!isActive()) {
                 return;
             }
-            skip(name, kbId, query, topK, reason, text);
+            Map<String, Object> fields = new LinkedHashMap<>();
+            fields.put("applied", applied);
+            fields.put("fallback", !applied);
+            if (modelInstanceId != null) {
+                fields.put("modelInstanceId", modelInstanceId);
+            }
+            if (errorType != null && !errorType.isBlank()) {
+                fields.put("errorType", errorType);
+            }
+            String input = "query: " + (original == null ? "" : original)
+                    + (applied ? "\nrewritten: " + effective : "");
+            Step step = step(REWRITE, null, original, topK, input);
+            if (applied) {
+                fields.put("brief", clip("改写后：" + effective, MAX_BRIEF));
+                fields.put("rewrittenQuery", clip(effective, MAX_QUERY));
+                step.ok(effective, fields);
+                return;
+            }
+            // 跳过与失败回退都走 skip（检索仍以原问句正常执行），用 failed 位与原因区分
+            if (failed) {
+                fields.put("failed", true);
+            }
+            String text = failed
+                    ? "改写失败，回退原问句检索（" + reason + "）"
+                    : "跳过：未执行改写（" + reason + "）";
+            step.skip(reason, text, fields);
         }
 
         /**

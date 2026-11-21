@@ -24,6 +24,13 @@ public class SearchQuery {
     private boolean rrfEnabled;
     /** 是否调用 Rerank 模型精排；默认关，且需 KB 配置了 rerankModelId */
     private boolean rerankEnabled;
+    /**
+     * 该库是否开启查询改写；默认关。
+     * <p>
+     * 只表达「这个库要不要用改写句去召回」，真正的改写由检索链路在选库之后统一做一次
+     * （模型槽为空 / 调用失败时仍按原问句检索）。
+     */
+    private boolean rewriteEnabled;
     /** 向量分下限；≤0 表示不过滤（0 分也可能是合法命中） */
     private double scoreThreshold;
     /** 单篇文档最多保留的切片数；≤0 表示不限段（默认 3，防止一篇吃光 topK） */
@@ -157,6 +164,20 @@ public class SearchQuery {
      */
     public void setRerankEnabled(boolean rerankEnabled) {
         this.rerankEnabled = rerankEnabled;
+    }
+
+    /**
+     * @return 该库是否开启查询改写
+     */
+    public boolean isRewriteEnabled() {
+        return rewriteEnabled;
+    }
+
+    /**
+     * @param rewriteEnabled 该库是否开启查询改写
+     */
+    public void setRewriteEnabled(boolean rewriteEnabled) {
+        this.rewriteEnabled = rewriteEnabled;
     }
 
     /**

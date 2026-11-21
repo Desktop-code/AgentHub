@@ -3,6 +3,7 @@ package com.agenthub.rag.application;
 import com.agenthub.obs.domain.ObsTraceHolder;
 import com.agenthub.obs.domain.ObsTraceScope;
 import com.agenthub.rag.domain.model.RagKnowledgeBase;
+import com.agenthub.rag.domain.service.RagQueryRewriter;
 import com.agenthub.spi.rag.SearchQuery;
 import com.agenthub.spi.rag.SearchResult;
 
@@ -38,6 +39,14 @@ final class SameTurnRetrievalMemo {
      * 库集合或参数不同则键不同，不会把别人的库带出去。
      */
     private final ConcurrentHashMap<List<Key>, List<SearchResult>> byCall = new ConcurrentHashMap<>();
+    /**
+     * 本轮已做过的查询改写：键是「Agent + 原问句」。
+     * <p>
+     * 为什么值得单独缓存：改写是唯一一次真实模型出站，比嵌入更贵；
+     * 同一轮里多个专家问同一句时，没有这层缓存就会为同一句话重复出站与计费。
+     * 改写结果与具体知识库无关（开关只决定用不用它），因此键里不需要库。
+     */
+    private final ConcurrentHashMap<RewriteKey, RagQueryRewriter.Result> rewrites = new ConcurrentHashMap<>();
 
     private SameTurnRetrievalMemo() {
     }
@@ -135,6 +144,37 @@ final class SameTurnRetrievalMemo {
     }
 
     /**
+     * 取本轮已做过的同一条改写。没有则 null，由调用方决定是否真正出站。
+     *
+     * @param agentId Agent
+     * @param query   用户原问句
+     * @return 上次的改写结果；没做过为 null
+     */
+    RagQueryRewriter.Result findRewrite(Long agentId, String query) {
+        if (agentId == null || query == null) {
+            return null;
+        }
+        return rewrites.get(new RewriteKey(agentId, query));
+    }
+
+    /**
+     * 记下本轮的一次改写结果（成功与失败回退都记）。
+     * <p>
+     * 失败的也记：同一轮里同一句话再问一次时，没必要再等一次模型超时；
+     * 下一轮是新 scope，自然重新尝试。
+     *
+     * @param agentId Agent
+     * @param query   用户原问句
+     * @param result  改写结果
+     */
+    void saveRewrite(Long agentId, String query, RagQueryRewriter.Result result) {
+        if (agentId == null || query == null || result == null) {
+            return;
+        }
+        rewrites.put(new RewriteKey(agentId, query), result);
+    }
+
+    /**
      * 一个知识库在一组检索参数下的键。所属域：rag。
      *
      * @param kbId                知识库
@@ -159,6 +199,17 @@ final class SameTurnRetrievalMemo {
                int mergedTopK, Long tenantId,
                Long embeddingModelId, Integer vectorDimension, Long kbRerankModelId,
                Long agentRerankModelId, boolean deferAgentRerank) {
+    }
+
+    /**
+     * 本轮改写结果的键：Agent + 原问句。所属域：rag。
+     * <p>
+     * 不含知识库：改写结果与具体库无关，开关只决定「用不用它」，因此同一轮里多库可共用一次改写。
+     *
+     * @param agentId Agent
+     * @param query   用户原问句（已 trim）
+     */
+    private record RewriteKey(Long agentId, String query) {
     }
 
     /**
