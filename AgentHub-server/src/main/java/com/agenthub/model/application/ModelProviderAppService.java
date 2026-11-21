@@ -76,10 +76,13 @@ public class ModelProviderAppService {
                 .collect(Collectors.groupingBy(ModelCredential::getProviderId));
         // 一次取「含平台级实例」的供应商集合：卡片用它在右上角显示锁，避免逐卡计数
         Set<Long> lockedProviderIds = instances.platformLockedProviderIds();
+        // 凭证「能否删除」同样要一次算清：把所有凭证 id 交给仓储批量计数，避免逐卡逐凭证查询
+        Map<Long, Integer> referenceCounts = instances.countByCredentialIds(
+                grouped.values().stream().flatMap(List::stream).map(ModelCredential::getId).toList());
         List<ProviderResp> result = new ArrayList<>();
         for (ModelProvider provider : providers.listAll()) {
             List<ModelCredential> rows = grouped.getOrDefault(provider.getId(), List.of());
-            ProviderResp resp = toResp(provider, rows);
+            ProviderResp resp = toResp(provider, rows, referenceCounts);
             resp.setPlatformLocked(lockedProviderIds.contains(provider.getId()));
             result.add(resp);
         }
@@ -92,7 +95,10 @@ public class ModelProviderAppService {
      */
     public ProviderResp get(Long id) {
         ModelProvider provider = lookup.requireProvider(id);
-        ProviderResp resp = toResp(provider, credentials.listByProviderId(id));
+        List<ModelCredential> rows = credentials.listByProviderId(id);
+        Map<Long, Integer> referenceCounts = instances.countByCredentialIds(
+                rows.stream().map(ModelCredential::getId).toList());
+        ProviderResp resp = toResp(provider, rows, referenceCounts);
         resp.setPlatformLocked(instances.countPlatformLockedByProvider(id) > 0);
         return resp;
     }
@@ -214,7 +220,8 @@ public class ModelProviderAppService {
         return credential;
     }
 
-    private ProviderResp toResp(ModelProvider provider, List<ModelCredential> rows) {
+    private ProviderResp toResp(ModelProvider provider, List<ModelCredential> rows,
+                                Map<Long, Integer> referenceCounts) {
         ProviderResp resp = new ProviderResp();
         resp.setId(provider.getId());
         resp.setName(provider.getName());
@@ -228,19 +235,27 @@ public class ModelProviderAppService {
         resp.setUpdateTime(provider.getUpdateTime());
         List<CredentialResp> views = new ArrayList<>();
         for (ModelCredential row : rows) {
-            views.add(toCredential(row));
+            views.add(toCredential(row, referenceCounts.getOrDefault(row.getId(), 0)));
         }
         resp.setCredentials(views);
         return resp;
     }
 
-    private CredentialResp toCredential(ModelCredential row) {
+    /**
+     * 凭证行出参：掩码 + 实例引用数。
+     *
+     * @param row            凭证
+     * @param referenceCount 引用它的未删除实例数；0 表示可删除
+     * @return 不含明文的出参
+     */
+    private CredentialResp toCredential(ModelCredential row, int referenceCount) {
         CredentialResp resp = new CredentialResp();
         resp.setId(row.getId());
         resp.setProviderId(row.getProviderId());
         resp.setName(row.getName());
         resp.setApiKeyMask(row.getApiKeyMask());
         resp.setStatus(row.getStatus());
+        resp.setInstanceCount(referenceCount);
         resp.setCreateTime(row.getCreateTime());
         return resp;
     }

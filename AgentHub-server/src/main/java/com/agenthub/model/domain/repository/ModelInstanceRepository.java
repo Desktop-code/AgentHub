@@ -6,7 +6,9 @@ import com.agenthub.model.domain.model.ModelCapability;
 import com.agenthub.model.domain.model.ModelInstance;
 
 import java.time.LocalDateTime;
+import java.util.Collection;
 import java.util.List;
+import java.util.Map;
 import java.util.Optional;
 import java.util.Set;
 
@@ -80,6 +82,17 @@ public interface ModelInstanceRepository {
      * @return 未删除实例数，用于删除凭证前的引用检查
      */
     int countByCredentialId(Long credentialId);
+
+    /**
+     * 批量统计「凭证 → 引用它的未删除实例数」。
+     * <p>
+     * 凭证弹窗一次要展示多条凭证的「能否删除」，逐条调用 {@link #countByCredentialId} 会变成 N 次查询；
+     * 这里一次取回，只按凭证分组计数。返回值里没有的凭证即 0。
+     *
+     * @param credentialIds 凭证 id 集合；空集合直接返回空 Map
+     * @return 凭证 id → 实例数；无引用不出现在 Map 中
+     */
+    Map<Long, Integer> countByCredentialIds(Collection<Long> credentialIds);
 
     /**
      * 展示名是否已被<b>同一供应商</b>下的未删除实例占用。

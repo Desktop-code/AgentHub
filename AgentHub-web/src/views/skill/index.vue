@@ -269,229 +269,259 @@
                   <el-button link type="danger" size="small" @click="retryDetail">重试</el-button>
                 </div>
               </el-alert>
-              <!-- 表单体可滚，底栏取消/保存始终贴底可见 -->
+              <!-- 表单体可滚；两块各自带保存/取消，不再共用一条底部栏 -->
               <el-form v-if="form" label-width="96px" class="detail-form">
                 <div class="detail-form__body">
-                  <!-- 第一行：名称 10 / 标题 8 / 版本 3 / 状态 3；开关即时启停，不计入脏标记 -->
-                  <el-row :gutter="12">
-                    <el-col :span="10">
-                      <el-form-item label="名称" required>
-                        <el-input v-model="form.name" maxlength="64" :disabled="!canEdit" />
-                      </el-form-item>
-                    </el-col>
-                    <el-col :span="8">
-                      <el-form-item label="标题" required>
-                        <el-input v-model="form.title" maxlength="128" :disabled="!canEdit" />
-                      </el-form-item>
-                    </el-col>
-                    <el-col :span="3">
-                      <!-- 版本号为只读派生：当前生效已发布版本；升版只能走「发布」，禁止手改 -->
-                      <el-form-item label="版本" label-width="42px">
-                        <el-input :model-value="activeVersionLabel" disabled />
-                      </el-form-item>
-                    </el-col>
-                    <el-col :span="3">
-                      <!-- 状态开关居右，与下两行按钮列对齐 -->
-                      <el-form-item label="状态" label-width="42px" class="status-item">
-                        <StatusSwitch
-                          :status="form.status"
-                          :disabled="!user.hasPerm('skill:enable')"
-                          :commit="commitStatus"
-                        />
-                      </el-form-item>
-                    </el-col>
-                  </el-row>
                   <!--
-                    定义层第二、三行：触发关键词、备注各占一行。
-                    每行右侧（状态开关正下方）各放一个按钮：关键词行=取消，备注行=保存；
-                    定义层只保存名称/标题/触发词/备注，简介与正文由版本编辑器负责。
+                    基本信息块：名称/标题/触发关键词/备注。
+                    块头只放标题与脏标；取消/保存收在块底部一行（左取消、右保存），
+                    与版本内容块同一位置、同一顺序，避免「保存的是哪一块」靠猜。
                   -->
-                  <el-row :gutter="12">
-                    <el-col :span="21">
-                      <el-form-item label="触发关键词">
-                        <TagInput v-model="keywordTags" :disabled="!canEdit" />
-                      </el-form-item>
-                    </el-col>
-                    <el-col :span="3">
-                      <!-- 无编辑权限整套定义层按钮不出现，避免只读用户看到无效操作 -->
-                      <el-form-item v-if="canEdit" label-width="0" class="inline-action">
-                        <el-button :disabled="!dirty || saving" @click="cancelDetail">取消</el-button>
-                      </el-form-item>
-                    </el-col>
-                  </el-row>
-                  <el-row :gutter="12">
-                    <el-col :span="21">
-                      <el-form-item label="备注">
-                        <el-input
-                          v-model="form.remark"
-                          maxlength="500"
-                          class="remark-input"
-                          placeholder="仅内部可见，不注入模型"
-                          :disabled="!canEdit"
-                        />
-                      </el-form-item>
-                    </el-col>
-                    <el-col :span="3">
-                      <el-form-item v-if="canEdit" label-width="0" class="inline-action">
-                        <el-button type="primary" :disabled="!dirty" :loading="saving" @click="saveDetail">
-                          保存
-                        </el-button>
-                      </el-form-item>
-                    </el-col>
-                  </el-row>
-
-                  <!-- 版本工作区：左侧版本列表（号/状态/生效/时间），右侧当前版本编辑器 -->
-                  <div class="version-workspace">
-                    <aside class="version-list">
-                      <div class="version-list__head">
-                        <span class="version-list__title">版本</span>
-                        <el-button
-                          link
-                          type="primary"
-                          class="version-list__add"
-                          :disabled="!canEdit || hasDraft"
-                          :title="hasDraft ? '已有草稿，先发布或继续编辑' : '新建草稿'"
-                          @click="createDraft()"
-                        >
-                          新建草稿
-                        </el-button>
+                  <section class="form-block">
+                    <header class="form-block__head">
+                      <div class="form-block__title">
+                        <span class="form-block__name">基本信息</span>
+                        <!-- 定义层未保存标记：不再只靠保存按钮灰着来传达 -->
+                        <el-tag v-if="dirty" size="small" effect="plain" type="warning">未保存</el-tag>
+                        <span class="form-block__hint">名称 / 标题 / 触发关键词 / 备注；保存只写这四项</span>
                       </div>
-                      <div v-loading="versionLoading" class="version-list__body">
-                        <el-empty
-                          v-if="!versionLoading && !versionRows.length"
-                          description="尚无版本"
-                          :image-size="56"
-                        />
-                        <!-- 版本项用 div（内含下拉操作，button 不能嵌套 button）；键盘同样可切换 -->
-                        <div
-                          v-for="row in versionRows"
-                          :key="row.id"
-                          class="version-item"
-                          :class="{ 'is-current': row.id === activeVersionId }"
-                          role="button"
-                          tabindex="0"
-                          @click="selectVersion(row.id)"
-                          @keyup.enter="selectVersion(row.id)"
-                        >
-                          <span class="version-item__no">v{{ row.versionNo }}</span>
-                          <el-tag
-                            size="small"
-                            effect="plain"
-                            :type="row.publishStatus === 1 ? 'success' : 'info'"
-                          >
-                            {{ row.publishStatus === 1 ? '已发布' : '草稿' }}
-                          </el-tag>
-                          <el-tag v-if="row.isActive === 1" size="small" effect="dark" type="success">
-                            生效
-                          </el-tag>
-                          <span class="version-item__time">{{ row.updateTime || row.createTime || '' }}</span>
-                          <!--
-                            版本操作收进「⋯」下拉：复制为草稿 / 设置为生效 / 删除。
-                            复制为草稿：同 Skill 已有草稿时不可用；设置为生效：仅已发布且未生效；删除：仅草稿。
-                          -->
-                          <el-dropdown
-                            v-if="canEdit"
-                            trigger="click"
-                            class="version-item__more"
-                            :disabled="versionSaving"
-                            @command="(cmd: VersionCommand) => onVersionCommand(cmd, row)"
-                            @click.stop
-                          >
-                            <button
-                              type="button"
-                              class="version-item__more-btn"
-                              aria-label="版本操作"
-                              title="版本操作"
-                              @click.stop
-                            >
-                              ⋯
-                            </button>
-                            <template #dropdown>
-                              <el-dropdown-menu>
-                                <el-dropdown-item command="copy" :disabled="hasDraft">
-                                  复制为草稿
-                                </el-dropdown-item>
-                                <el-dropdown-item
-                                  command="activate"
-                                  :disabled="row.publishStatus !== 1 || row.isActive === 1"
-                                >
-                                  设置为生效
-                                </el-dropdown-item>
-                                <el-dropdown-item command="delete" divided :disabled="row.publishStatus !== 0">
-                                  删除
-                                </el-dropdown-item>
-                              </el-dropdown-menu>
-                            </template>
-                          </el-dropdown>
-                        </div>
-                      </div>
-                    </aside>
+                    </header>
+                    <!-- 第一行：名称 10 / 标题 8 / 版本 3 / 状态 3；开关即时启停，不计入脏标记 -->
+                    <el-row :gutter="12">
+                      <el-col :span="10">
+                        <el-form-item label="名称" required>
+                          <el-input v-model="form.name" maxlength="64" :disabled="!canEdit" />
+                        </el-form-item>
+                      </el-col>
+                      <el-col :span="8">
+                        <el-form-item label="标题" required>
+                          <el-input v-model="form.title" maxlength="128" :disabled="!canEdit" />
+                        </el-form-item>
+                      </el-col>
+                      <el-col :span="3">
+                        <!-- 版本号为只读派生：当前生效已发布版本；升版只能走「发布」，禁止手改 -->
+                        <el-form-item label="版本" label-width="42px">
+                          <el-input :model-value="activeVersionLabel" disabled />
+                        </el-form-item>
+                      </el-col>
+                      <el-col :span="3">
+                        <!-- 状态开关居右，与下两行输入框右边界对齐 -->
+                        <el-form-item label="状态" label-width="42px" class="status-item">
+                          <StatusSwitch
+                            :status="form.status"
+                            :disabled="!user.hasPerm('skill:enable')"
+                            :commit="commitStatus"
+                          />
+                        </el-form-item>
+                      </el-col>
+                    </el-row>
+                    <el-row :gutter="12">
+                      <el-col :span="24">
+                        <el-form-item label="触发关键词">
+                          <TagInput v-model="keywordTags" :disabled="!canEdit" />
+                        </el-form-item>
+                      </el-col>
+                    </el-row>
+                    <el-row :gutter="12">
+                      <el-col :span="24">
+                        <el-form-item label="备注">
+                          <el-input
+                            v-model="form.remark"
+                            maxlength="500"
+                            class="remark-input"
+                            placeholder="仅内部可见，不注入模型"
+                            :disabled="!canEdit"
+                          />
+                        </el-form-item>
+                      </el-col>
+                    </el-row>
 
-                    <section class="version-editor">
-                      <template v-if="versionDetail">
-                        <div class="version-editor__head">
-                          <span class="version-editor__title">v{{ versionDetail.versionNo }}</span>
-                          <el-tag
-                            size="small"
-                            effect="plain"
-                            :type="versionDetail.publishStatus === 1 ? 'success' : 'info'"
+                    <!--
+                      基本信息块动作行：只写名称/标题/触发词/备注，不动版本内容。
+                      取消在左、保存在右，与版本块同一位置与顺序。
+                    -->
+                    <footer v-if="canEdit" class="form-block__actions form-block__actions--footer">
+                      <!-- 取消不跟脏态联动：干净时点它等于什么也没发生，不应表现为「按钮坏了」 -->
+                      <el-button :disabled="saving" @click="cancelDetail">取消</el-button>
+                      <el-button
+                        type="primary"
+                        :disabled="!dirty"
+                        :loading="saving"
+                        @click="saveDetail"
+                      >
+                        保存基本信息
+                      </el-button>
+                    </footer>
+                  </section>
+
+                  <!--
+                    版本内容块：左侧版本列表 + 右侧当前版本编辑器。
+                    保存/取消/发布只作用于当前草稿版本，与上方基本信息块完全分开。
+                    块头只留标题与脏标；三个动作收在块底部一行（左取消、右保存→发布），
+                    与基本信息块的「取消 / 保存」同一顺序，不需要猜「这次保存的是哪一块」。
+                  -->
+                  <section class="form-block form-block--version">
+                    <header class="form-block__head">
+                      <div class="form-block__title">
+                        <span class="form-block__name">版本内容</span>
+                        <!-- 版本层未保存标记：与基本信息块各自独立，两边都脏时两个标同时出现 -->
+                        <el-tag v-if="versionDirty" size="small" effect="plain" type="warning">未保存</el-tag>
+                        <span class="form-block__hint">简介 + 正文；保存草稿不影响线上，发布后才生效</span>
+                      </div>
+                    </header>
+
+                    <!-- 版本工作区：左侧版本列表（号/状态/生效/时间），右侧当前版本编辑器 -->
+                    <div class="version-workspace">
+                      <aside class="version-list">
+                        <div class="version-list__head">
+                          <span class="version-list__title">版本</span>
+                          <el-button
+                            link
+                            type="primary"
+                            class="version-list__add"
+                            :disabled="!canEdit || hasDraft"
+                            :title="hasDraft ? '已有草稿，先发布或继续编辑' : '新建草稿'"
+                            @click="createDraft()"
                           >
-                            {{ versionDetail.publishStatus === 1 ? '已发布' : '草稿' }}
-                          </el-tag>
-                          <el-tag v-if="versionDetail.isActive === 1" size="small" effect="dark" type="success">
-                            生效中
-                          </el-tag>
-                          <!-- 有无改动改由这里的「未保存」标提示，避免只靠按钮禁用态传达 -->
-                          <el-tag v-if="versionDirty" size="small" effect="plain" type="warning">
-                            未保存
-                          </el-tag>
-                          <span class="version-editor__hint">{{ versionHint }}</span>
-                          <el-button link type="primary" class="preview-link" @click="previewOpen = true">
-                            预览效果
+                            新建草稿
                           </el-button>
                         </div>
-                        <!-- 版本编辑器：label 居左，简介与正文左对齐；简介 label 在输入框左侧 -->
-                        <el-form class="version-form" label-width="56px" @submit.prevent>
-                          <el-form-item label="简介" class="version-field">
-                            <el-input
-                              v-model="versionDetail.description"
-                              type="textarea"
-                              maxlength="1000"
-                              :rows="2"
-                              :disabled="!versionEditable"
-                              placeholder="供大模型判断何时加载此技能"
-                            />
-                          </el-form-item>
-                          <el-form-item label="正文" class="field-content">
-                            <el-input
-                              v-model="versionDetail.contentMd"
-                              type="textarea"
-                              :rows="1"
-                              class="markdown"
-                              placeholder="Markdown 正文；保存草稿不会影响线上"
-                              :disabled="!versionEditable"
-                            />
-                          </el-form-item>
-                        </el-form>
-                      </template>
-                      <el-empty v-else description="请选择左侧版本，或新建草稿" />
-                    </section>
-                  </div>
-                </div>
-                <!-- 底栏只留草稿的保存/发布；复制、设生效、删除都收进版本行「⋯」 -->
-                <div v-if="canEdit && versionEditable" class="detail-actions">
-                  <div class="detail-actions__group">
+                        <div v-loading="versionLoading" class="version-list__body">
+                          <el-empty
+                            v-if="!versionLoading && !versionRows.length"
+                            description="尚无版本"
+                            :image-size="56"
+                          />
+                          <!-- 版本项用 div（内含下拉操作，button 不能嵌套 button）；键盘同样可切换 -->
+                          <div
+                            v-for="row in versionRows"
+                            :key="row.id"
+                            class="version-item"
+                            :class="{ 'is-current': row.id === activeVersionId }"
+                            role="button"
+                            tabindex="0"
+                            @click="selectVersion(row.id)"
+                            @keyup.enter="selectVersion(row.id)"
+                          >
+                            <span class="version-item__no">v{{ row.versionNo }}</span>
+                            <el-tag
+                              size="small"
+                              effect="plain"
+                              :type="row.publishStatus === 1 ? 'success' : 'info'"
+                            >
+                              {{ row.publishStatus === 1 ? '已发布' : '草稿' }}
+                            </el-tag>
+                            <el-tag v-if="row.isActive === 1" size="small" effect="dark" type="success">
+                              生效
+                            </el-tag>
+                            <span class="version-item__time">{{ row.updateTime || row.createTime || '' }}</span>
+                            <!--
+                              版本操作收进「⋯」下拉：复制为草稿 / 设置为生效 / 删除。
+                              复制为草稿：同 Skill 已有草稿时不可用；设置为生效：仅已发布且未生效；删除：仅草稿。
+                            -->
+                            <el-dropdown
+                              v-if="canEdit"
+                              trigger="click"
+                              class="version-item__more"
+                              :disabled="versionSaving"
+                              @command="(cmd: VersionCommand) => onVersionCommand(cmd, row)"
+                              @click.stop
+                            >
+                              <button
+                                type="button"
+                                class="version-item__more-btn"
+                                aria-label="版本操作"
+                                title="版本操作"
+                                @click.stop
+                              >
+                                ⋯
+                              </button>
+                              <template #dropdown>
+                                <el-dropdown-menu>
+                                  <el-dropdown-item command="copy" :disabled="hasDraft">
+                                    复制为草稿
+                                  </el-dropdown-item>
+                                  <el-dropdown-item
+                                    command="activate"
+                                    :disabled="row.publishStatus !== 1 || row.isActive === 1"
+                                  >
+                                    设置为生效
+                                  </el-dropdown-item>
+                                  <el-dropdown-item command="delete" divided :disabled="row.publishStatus !== 0">
+                                    删除
+                                  </el-dropdown-item>
+                                </el-dropdown-menu>
+                              </template>
+                            </el-dropdown>
+                          </div>
+                        </div>
+                      </aside>
+
+                      <section class="version-editor">
+                        <template v-if="versionDetail">
+                          <div class="version-editor__head">
+                            <span class="version-editor__title">v{{ versionDetail.versionNo }}</span>
+                            <el-tag
+                              size="small"
+                              effect="plain"
+                              :type="versionDetail.publishStatus === 1 ? 'success' : 'info'"
+                            >
+                              {{ versionDetail.publishStatus === 1 ? '已发布' : '草稿' }}
+                            </el-tag>
+                            <el-tag v-if="versionDetail.isActive === 1" size="small" effect="dark" type="success">
+                              生效中
+                            </el-tag>
+                            <span class="version-editor__hint">{{ versionHint }}</span>
+                            <el-button link type="primary" class="preview-link" @click="previewOpen = true">
+                              预览效果
+                            </el-button>
+                          </div>
+                          <!-- 版本编辑器：label 居左，简介与正文左对齐；简介 label 在输入框左侧 -->
+                          <el-form class="version-form" label-width="56px" @submit.prevent>
+                            <el-form-item label="简介" class="version-field">
+                              <el-input
+                                v-model="versionDetail.description"
+                                type="textarea"
+                                maxlength="1000"
+                                :rows="2"
+                                :disabled="!versionEditable"
+                                placeholder="供大模型判断何时加载此技能"
+                              />
+                            </el-form-item>
+                            <el-form-item label="正文" class="field-content">
+                              <el-input
+                                v-model="versionDetail.contentMd"
+                                type="textarea"
+                                :rows="1"
+                                class="markdown"
+                                placeholder="Markdown 正文；保存草稿不会影响线上"
+                                :disabled="!versionEditable"
+                              />
+                            </el-form-item>
+                          </el-form>
+                        </template>
+                        <el-empty v-else description="请选择左侧版本，或新建草稿" />
+                      </section>
+                    </div>
+
                     <!--
-                      保存按钮不跟脏标记联动：复制来的草稿内容与来源版一致，脏标记为 false，
-                      若据此禁用会被误解为「按钮坏了」。是否真的有改动在提交时判断。
+                      版本块动作行：与基本信息块同一个顺序（取消在左、保存与发布在右）。
+                      只对可编辑草稿出现；已发布版本只读，不给无效按钮。
                     -->
-                    <el-button :disabled="versionSaving" :loading="versionSaving" @click="saveVersionDraft">
-                      保存草稿
-                    </el-button>
-                    <el-button type="primary" :loading="versionSaving" @click="publishVersion">
-                      发布
-                    </el-button>
-                  </div>
+                    <footer v-if="canEdit && versionEditable" class="form-block__actions form-block__actions--footer">
+                      <el-button :disabled="versionSaving" @click="cancelVersionDraft">取消</el-button>
+                      <!--
+                        保存按钮不跟脏标记联动：复制来的草稿内容与来源版一致，脏标记为 false，
+                        若据此禁用会被误解为「按钮坏了」。是否真的有改动在提交时判断。
+                      -->
+                      <el-button :disabled="versionSaving" :loading="versionSaving" @click="saveVersionDraft">
+                        保存版本草稿
+                      </el-button>
+                      <el-button type="primary" :loading="versionSaving" @click="publishVersion">
+                        发布
+                      </el-button>
+                    </footer>
+                  </section>
                 </div>
               </el-form>
             </div>
@@ -521,7 +551,9 @@ defineOptions({ name: 'SkillManage' })
 /**
  * Skill 管理页。所属域：skill。
  * 网格↔主从飞卡复用 viewFlip / FlipGhost / ViewModeToggle / browse-workspace，禁止本页另写动画。
- * 无路由 id：仅本地 viewMode + activeId；保存/取消跟正文脏标记，启停开关即时提交。
+ * 无路由 id：仅本地 viewMode + activeId。
+ * 详情拆成「基本信息」（名称/标题/触发词/备注）与「版本内容」（简介/正文/版本操作）两块，
+ * 各自独立的保存、取消与脏标记；启停开关即时提交，不计入任何一块的脏态。
  */
 import { computed, nextTick, onMounted, reactive, ref, watch } from 'vue'
 import { Plus, RefreshRight, Search } from '@element-plus/icons-vue'
@@ -601,8 +633,16 @@ const versionDetail = ref<SkillVersionDetail | null>(null)
 const versionLoading = ref(false)
 const versionSaving = ref(false)
 const activeVersionId = ref(0)
-/** 版本编辑器基准：只含可改字段，用于脏检查与取消回退 */
-const versionBaseline = ref('')
+/**
+ * 版本编辑器基准：只含草稿可改的两项（简介 + 正文）。
+ * 用对象而不是 JSON 串，取消时可直接写回字段，不用反序列化。
+ */
+interface VersionSnapshot {
+  description: string
+  contentMd: string
+}
+
+const versionBaseline = ref<VersionSnapshot | null>(null)
 /**
  * 详情表单里的触发关键词（Tag 数组）。
  * 用 computed 兜住 SkillDetail.triggerKeywords 的可选类型，同时保持与 form 同源：
@@ -774,10 +814,12 @@ const versionEditable = computed(() => !!versionDetail.value && versionDetail.va
 
 /** 版本编辑器脏标记：只比简介与正文 */
 const versionDirty = computed(() => {
-  if (!versionDetail.value || !versionEditable.value) {
+  if (!versionDetail.value || !versionEditable.value || !versionBaseline.value) {
     return false
   }
-  return versionSignature(versionDetail.value) !== versionBaseline.value
+  const current = versionSignature(versionDetail.value)
+  const base = versionBaseline.value
+  return current.description !== base.description || current.contentMd !== base.contentMd
 })
 
 /** 编辑器右上提示：已发布说明只读与「⋯」菜单入口，草稿说明保存不影响线上 */
@@ -838,16 +880,16 @@ function snapshotOf(detail: SkillDetail, keywords: string[]) {
 }
 
 /**
- * 版本编辑器快照：只含草稿可改的简介与正文，用于脏检查。
+ * 版本编辑器快照：只含草稿可改的简介与正文，用于脏检查与取消回退。
  *
  * @param version 版本详情
- * @return 可比较的字符串
+ * @return 纯数据的快照
  */
-function versionSignature(version: SkillVersionDetail) {
-  return JSON.stringify({
+function versionSignature(version: SkillVersionDetail): VersionSnapshot {
+  return {
     description: version.description || '',
     contentMd: version.contentMd || ''
-  })
+  }
 }
 
 /**
@@ -887,7 +929,7 @@ function clearDetail() {
   baseline.value = null
   versionRows.value = []
   versionDetail.value = null
-  versionBaseline.value = ''
+  versionBaseline.value = null
   activeVersionId.value = 0
   detailError.value = ''
   detailErrorReason.value = ''
@@ -1068,13 +1110,13 @@ async function loadVersions(skillId: number, preferVersionId = 0) {
       await fetchVersion(picked.id)
     } else {
       versionDetail.value = null
-      versionBaseline.value = ''
+      versionBaseline.value = null
       activeVersionId.value = 0
     }
   } catch {
     versionRows.value = []
     versionDetail.value = null
-    versionBaseline.value = ''
+    versionBaseline.value = null
     activeVersionId.value = 0
   } finally {
     versionLoading.value = false
@@ -1205,6 +1247,22 @@ async function saveVersionDraft() {
     ElMessage.success('草稿已保存')
   } finally {
     versionSaving.value = false
+  }
+}
+
+/**
+ * 取消版本内容改动：只把简介与正文回滚到当前版本的已落库内容。
+ * 基本信息块的未保存修改不动，反之取消基本信息也不碰这里。
+ */
+function cancelVersionDraft() {
+  const snap = versionBaseline.value
+  if (!versionDetail.value || !snap) {
+    return
+  }
+  versionDetail.value = {
+    ...versionDetail.value,
+    description: snap.description,
+    contentMd: snap.contentMd
   }
 }
 
@@ -1372,7 +1430,11 @@ async function saveCreate(payload: Record<string, unknown>, done: () => void) {
   }
 }
 
-/** 保存定义层字段（名称/标题/触发词/备注）；简介、正文与版本号走版本接口。 */
+/**
+ * 保存「基本信息」块：只写名称/标题/触发词/备注（updateSkill）。
+ * 简介、正文与版本号走版本内容块，两套保存互不覆盖。
+ * 成功后只刷新定义层基线，版本层的未保存改动原样保留。
+ */
 async function saveDetail() {
   if (!form.value || !activeId.value || !dirty.value) {
     return
@@ -1603,8 +1665,8 @@ onMounted(loadRows)
   flex: 1;
   flex-direction: column;
   min-height: 0;
-  /* 正文用 flex 吃满剩余高度，外层不滚，避免首屏内部滚动条 */
-  overflow: hidden;
+  /* 两块合计超出详情卡时整块滚动；正常情况下版本编辑器仍吃满剩余高度 */
+  overflow: auto;
   padding: 14px 16px 4px;
 }
 
@@ -1652,16 +1714,76 @@ onMounted(loadRows)
   background-color: #f5f7fa;
 }
 
-/* 底栏固定在详情卡底部，长正文滚动时始终可见 */
-.detail-actions {
+/*
+ * 两个保存块：基本信息（固定高度）与版本内容（吃满剩余高度）。
+ * 各自标题行右侧成对放取消/保存，避免「保存的是哪一块」靠猜。
+ */
+.form-block {
   display: flex;
   flex: none;
-  justify-content: flex-end;
-  gap: 8px;
-  margin-top: 0;
-  padding: 12px 16px;
+  flex-direction: column;
+  min-width: 0;
+}
+
+.form-block--version {
+  flex: 1;
+  /* 两块同屏时版本编辑器至少保留一屏可用高度；不足部分由外层滚动消化 */
+  min-height: 360px;
+  margin-top: 4px;
+  padding-top: 10px;
   border-top: 1px solid var(--ah-border);
-  background: var(--ah-surface);
+}
+
+.form-block__head {
+  display: flex;
+  flex: none;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  min-height: 28px;
+  margin-bottom: 4px;
+}
+
+.form-block__title {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}
+
+.form-block__name {
+  flex: none;
+  font-size: 13px;
+  font-weight: 600;
+}
+
+.form-block__hint {
+  overflow: hidden;
+  color: var(--ah-text-secondary);
+  font-size: 12px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.form-block__actions {
+  display: flex;
+  flex: none;
+  align-items: center;
+  gap: 8px;
+}
+
+/*
+ * 两块的动作行共用一套：只做右对齐，不加分隔线。
+ * 块间分隔由 .form-block--version 的顶边线负责，避免出现两条相距 10px 的横线。
+ */
+.form-block__actions--footer {
+  justify-content: flex-end;
+  margin-top: 8px;
+}
+
+/* 基本信息块字段更密：块头已占一行，这里收一档，避免把版本区挤到首屏之外 */
+.form-block:not(.form-block--version) :deep(.el-form-item) {
+  margin-bottom: 12px;
 }
 
 /* 正文框撑满版本编辑器剩余高度；字多时只在框内滚 */
@@ -1728,15 +1850,6 @@ onMounted(loadRows)
   min-height: 0;
   overflow-y: auto;
   padding-right: 2px;
-}
-
-/* 定义层右侧按钮列：与状态开关同列，按钮贴右 */
-.inline-action {
-  margin-bottom: 18px;
-}
-
-.inline-action :deep(.el-form-item__content) {
-  justify-content: flex-end;
 }
 
 /* 状态整组（含「状态」两字）一起贴右：el-form-item 本身是 flex，直接右对齐即可 */
@@ -1835,7 +1948,7 @@ onMounted(loadRows)
   min-height: 0;
 }
 
-/* 版本编辑器标题行：v3 版本号用黑框高亮，与简介区隔开 */
+/* 版本编辑器标题行：v3 版本号用中性药丸与简介区隔开 */
 .version-editor__head {
   display: flex;
   flex: none;
@@ -1844,15 +1957,20 @@ onMounted(loadRows)
   padding-bottom: 6px;
 }
 
-/* v3 版本号：黑框高亮，明确当前正在编辑哪一版 */
+/*
+ * v3 版本号药丸：原来用 #1f2937 黑色描边，是全站唯一的黑框控件，权重盖过主操作。
+ * 按 DESIGN 的描边层级收到发丝线（--ah-border）+ 中性浅底，文字用可读灰；
+ * 识别「正在编辑哪一版」靠位置与字号，不靠加重描边。
+ */
 .version-editor__title {
   padding: 0 7px;
-  border: 1px solid #1f2937;
+  border: 1px solid var(--ah-border);
   border-radius: 4px;
-  color: #1f2937;
-  font-size: 13px;
-  font-weight: 650;
-  line-height: 20px;
+  background: #f3f4f6;
+  color: var(--ah-text-secondary);
+  font-size: 12px;
+  font-weight: 600;
+  line-height: 18px;
 }
 
 .version-editor__hint {
@@ -1867,11 +1985,6 @@ onMounted(loadRows)
 /* 版本字段间距收紧，正文仍吃掉剩余高度 */
 .version-field {
   margin-bottom: 8px;
-}
-
-.detail-actions__group {
-  display: flex;
-  gap: 8px;
 }
 
 .draft-tag {

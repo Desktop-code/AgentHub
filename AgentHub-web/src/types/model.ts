@@ -9,6 +9,11 @@ export interface CredentialRow {
   name: string
   apiKeyMask: string
   status: number
+  /**
+   * 仍引用本凭证的未删除模型实例数（后端与删除校验同源）。
+   * 大于 0 时该凭证不可删除，只能「重置 Key」替换密钥。
+   */
+  instanceCount?: number
   createTime?: string
 }
 
