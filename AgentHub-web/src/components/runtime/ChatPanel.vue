@@ -530,6 +530,15 @@
                           <span class="wb-jump-chevron" aria-hidden="true" />
                         </button>
                       </div>
+                      <!--
+                        工作流结果附近的引用：只读这张卡上已经投影好的工具结果。
+                        没有出处时不挂，避免在结果下面空摆一块。
+                      -->
+                      <WorkbenchCitations
+                        v-if="showWorkflowCitations(card)"
+                        attached
+                        :items="workbenchCitations(card)"
+                      />
                       <div v-if="wfFilesOf(card).length" class="wb-file-row">
                         <FileCard v-for="file in wfFilesOf(card)" :key="file.fileName" :file="file" />
                       </div>
@@ -602,6 +611,15 @@
                       </button>
                     </div>
                     <!--
+                      引用贴在结果框内部、正文下面。数据是卡片上已有的 tool_result，
+                      直播和回放同一份投影；这里不改正文，也不在没有出处时占位。
+                    -->
+                    <WorkbenchCitations
+                      v-if="showAnswerCitations(card)"
+                      attached
+                      :items="workbenchCitations(card)"
+                    />
+                    <!--
                       可点选项：模型需要用户拍板时给的 chips（机器块已从正文里摘掉）。
                       只有「整轮最后一条助手消息」上的选项可点：历史轮次的选项已失效，
                       再点会续作到已经翻页的上下文里。点击走断点续作，不重走判词。
@@ -625,6 +643,14 @@
                       </div>
                     </div>
                   </div>
+                  <!--
+                    这一步已经结束、但没有成文正文时，出处仍挂在原卡上。
+                    进行中且正文还没落地时不提前摆出来，免得插在过程和结果中间。
+                  -->
+                  <WorkbenchCitations
+                    v-if="showOrphanCitations(card)"
+                    :items="workbenchCitations(card)"
+                  />
                   <div v-if="!card.workflow && card.files.length" class="wb-file-row">
                     <FileCard v-for="file in card.files" :key="file.fileName" :file="file" />
                   </div>
@@ -1048,6 +1074,7 @@ import RouterTimeline from '@/components/runtime/RouterTimeline.vue'
 import FileCard from '@/components/runtime/FileCard.vue'
 import WorkbenchActorTree from '@/components/runtime/workbench/WorkbenchActorTree.vue'
 import WorkbenchActorNest from '@/components/runtime/workbench/WorkbenchActorNest.vue'
+import WorkbenchCitations from '@/components/runtime/workbench/WorkbenchCitations.vue'
 import ElapsedSeconds from '@/components/runtime/ElapsedSeconds.vue'
 import AgentLookArt from '@/components/agent/AgentLookArt.vue'
 import WorkflowGearGlyph from '@/components/runtime/workbench/WorkflowGearGlyph.vue'
@@ -1059,6 +1086,7 @@ import { WORKFLOW_AVATAR_COLOR, isWorkflowAvatarCard } from '@/components/runtim
 import { resolveFollowAfterScroll } from '@/components/runtime/chatFollow'
 import { listAllItems } from '@/api/tool'
 import { presentVisibleResult } from '@/components/runtime/workbench/workbenchVisibleText'
+import { citationsFromToolSteps, type WorkbenchCitationView } from '@/components/runtime/workbench/workbenchCitations'
 import { renderMarkdownMemo } from '@/utils/simpleMarkdown'
 import {
   classifyWorkbenchError,
@@ -2744,6 +2772,69 @@ function wfFilesOf(card: ParticipantCard): TrialFileView[] {
  */
 function wfAnswerOf(card: ParticipantCard): string {
   return (card.workflow?.answer || '').trim()
+}
+
+/**
+ * 一张卡上的引用缓存。
+ *
+ * <p>投影按内容签名重建卡片，签名变了就是新对象，缓存跟着失效。
+ * 同一帧模板会问多次，不必把工具结果再解析几遍。
+ */
+const citationMemo = new WeakMap<ParticipantCard, WorkbenchCitationView[]>()
+
+/**
+ * 读这张卡上已经投影好的工具结果，抽出出处。
+ *
+ * <p>只在工作台皮肤计算。管理端运行不走这条模板，这里再挡一次，避免共用组件时带出去。
+ * 直播和回放都读 card.steps，不另拼一层、不改 turns。
+ *
+ * @param card 参与者卡片
+ * @return 可点来源；没有时为空数组
+ */
+function workbenchCitations(card: ParticipantCard): WorkbenchCitationView[] {
+  if (!isWorkbench.value) {
+    return []
+  }
+  const cached = citationMemo.get(card)
+  if (cached) {
+    return cached
+  }
+  const items = citationsFromToolSteps(card.steps)
+  citationMemo.set(card, items)
+  return items
+}
+
+/**
+ * 正文已经落地时，引用贴在结果框里。
+ *
+ * @param card 参与者卡片
+ * @return true 表示画在结果框内部
+ */
+function showAnswerCitations(card: ParticipantCard): boolean {
+  return !!card.answer && workbenchCitations(card).length > 0
+}
+
+/**
+ * 工作流产物区已经有正文时，引用贴在那一块结果下面。
+ *
+ * @param card 参与者卡片
+ * @return true 表示画在工作流结果区
+ */
+function showWorkflowCitations(card: ParticipantCard): boolean {
+  return !!wfAnswerOf(card) && workbenchCitations(card).length > 0
+}
+
+/**
+ * 这一步已经结束，但没有成文正文。出处仍挂在原卡上，不插进还在生成的过程里。
+ *
+ * @param card 参与者卡片
+ * @return true 表示在结果框外单独挂引用
+ */
+function showOrphanCitations(card: ParticipantCard): boolean {
+  if (card.answer || wfAnswerOf(card) || card.pending === true) {
+    return false
+  }
+  return workbenchCitations(card).length > 0
 }
 
 /**
