@@ -18,11 +18,12 @@ public final class RagKbChecks {
 
     /**
      * 一期默认检索参数。写进 retrieval_config，③ 期检索 Tool 直接读这份。
-     * 取值参考 mall-swarm 调优结论：向量 20 / BM25 20 / RRF k=60 / 输出 5，改写与 Rerank 默认关。
+     * 取值参考 mall-swarm 调优结论：向量 20 / BM25 20 / RRF k=60 / 输出 5，改写与 Rerank 默认关；
+     * maxChunksPerDoc=3 表示同一篇文档在每个库里最多占 3 段，防止一篇长文吃光 topK。
      */
     public static final String DEFAULT_RETRIEVAL_CONFIG = """
             {"topK":5,"vectorTopK":20,"bm25TopK":20,"rrfK":60,"rrfTopN":20,\
-            "scoreThreshold":0.5,"rewriteEnabled":false,"rerankEnabled":false}""";
+            "scoreThreshold":0.5,"maxChunksPerDoc":3,"rewriteEnabled":false,"rerankEnabled":false}""";
 
     /**
      * 一期默认入库参数。② 期使用，与 mall-swarm 的 450/100/150 对齐。

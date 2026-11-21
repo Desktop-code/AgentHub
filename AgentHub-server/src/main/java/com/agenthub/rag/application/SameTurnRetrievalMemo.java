@@ -73,7 +73,8 @@ final class SameTurnRetrievalMemo {
     static Key key(RagKnowledgeBase kb, SearchQuery sq, Long agentRerankModelId, boolean deferAgentRerank) {
         return new Key(kb.getId(), sq.getQuery(), sq.getTopK(), sq.getVectorTopK(), sq.getBm25TopK(),
                 sq.getRrfK(), sq.getRrfTopN(), sq.isRrfEnabled(), sq.isRerankEnabled(),
-                Double.doubleToLongBits(sq.getScoreThreshold()), sq.getTenantId(),
+                Double.doubleToLongBits(sq.getScoreThreshold()), sq.getMaxChunksPerDoc(), sq.getMergedTopK(),
+                sq.getTenantId(),
                 kb.getEmbeddingModelId(), kb.getVectorDimension(), kb.getRerankModelId(),
                 agentRerankModelId, deferAgentRerank);
     }
@@ -154,7 +155,8 @@ final class SameTurnRetrievalMemo {
      * @param deferAgentRerank    Agent 重排是否延后到多库合并
      */
     record Key(long kbId, String query, int topK, int vectorTopK, int bm25TopK, int rrfK, int rrfTopN,
-               boolean rrfEnabled, boolean rerankEnabled, long scoreBits, Long tenantId,
+               boolean rrfEnabled, boolean rerankEnabled, long scoreBits, int maxChunksPerDoc,
+               int mergedTopK, Long tenantId,
                Long embeddingModelId, Integer vectorDimension, Long kbRerankModelId,
                Long agentRerankModelId, boolean deferAgentRerank) {
     }

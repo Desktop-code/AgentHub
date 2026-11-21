@@ -123,8 +123,9 @@
         <el-form-item label="名称" required>
           <el-input v-model="create.form.name" maxlength="100" show-word-limit />
         </el-form-item>
-        <el-form-item label="描述">
+        <el-form-item label="描述" required>
           <el-input v-model="create.form.description" type="textarea" :rows="2" maxlength="512" show-word-limit />
+          <div class="hint">必填；多库时按描述判断哪些库与问句相关，只检索相关的库</div>
         </el-form-item>
         <el-form-item label="Embedding" required>
           <el-select
@@ -175,7 +176,10 @@
         </el-form-item>
         <el-form-item label="检索参数">
           <el-input v-model="create.form.retrievalConfig" type="textarea" :rows="3" class="mono" />
-          <div class="hint">JSON；留空用平台默认（topK=5、向量/BM25 各 20、RRF k=60、改写与 Rerank 关）</div>
+          <div class="hint">
+            JSON；留空用平台默认（topK=5、向量/BM25 各 20、RRF k=60、同篇最多 3 段、改写与 Rerank 关）。
+            返回条数以这里为准，对话里的模型不再决定条数。
+          </div>
         </el-form-item>
       </el-form>
       <template #footer>
@@ -195,8 +199,9 @@
         <el-form-item label="名称" required>
           <el-input v-model="edit.form.name" maxlength="100" show-word-limit />
         </el-form-item>
-        <el-form-item label="描述">
+        <el-form-item label="描述" required>
           <el-input v-model="edit.form.description" type="textarea" :rows="2" maxlength="512" show-word-limit />
+          <div class="hint">必填；已有空描述的老库在此补上后才能保存</div>
         </el-form-item>
         <el-form-item label="Embedding">
           <!-- 已锁定：换模型必须新建库，这里只展示 -->
@@ -220,6 +225,9 @@
         </el-form-item>
         <el-form-item label="检索参数">
           <el-input v-model="edit.form.retrievalConfig" type="textarea" :rows="3" class="mono" />
+          <div class="hint">
+            可配 topK / maxChunksPerDoc（同篇最多几段，默认 3）/ mergedTopK（多库合并后条数）/ rrfK 等
+          </div>
         </el-form-item>
         <el-form-item label="入库参数">
           <el-input v-model="edit.form.ingestConfig" type="textarea" :rows="3" class="mono" />
@@ -267,9 +275,9 @@ import {
   type RagKbRow
 } from '@/types/rag'
 
-/** 默认检索参数，与后端 RagKbChecks 保持一致 */
+/** 默认检索参数，与后端 RagKbChecks 保持一致（maxChunksPerDoc 见「按文档限段」） */
 const DEFAULT_RETRIEVAL_CONFIG =
-  '{"topK":5,"vectorTopK":20,"bm25TopK":20,"rrfK":60,"rrfTopN":20,"scoreThreshold":0.5,"rewriteEnabled":false,"rerankEnabled":false}'
+  '{"topK":5,"vectorTopK":20,"bm25TopK":20,"rrfK":60,"rrfTopN":20,"scoreThreshold":0.5,"maxChunksPerDoc":3,"rewriteEnabled":false,"rerankEnabled":false}'
 /** 默认入库参数，② 期使用 */
 const DEFAULT_INGEST_CONFIG = '{"chunkSize":450,"chunkOverlap":100,"minChunkSize":150}'
 /** 维度初始占位：0 表示「还没选模型 / 模型未返回」，提交前必须 > 0 */
@@ -518,6 +526,11 @@ async function saveCreate() {
     ElMessage.warning('请填写名称')
     return
   }
+  // 描述必填：运行时靠它挑库，空描述会让该库在多库场景下无法参与相关性判断
+  if (!create.form.description.trim()) {
+    ElMessage.warning('请填写描述')
+    return
+  }
   if (!create.form.embeddingModelId) {
     ElMessage.warning('请选择 Embedding 模型')
     return
@@ -575,6 +588,11 @@ async function openEdit(row: RagKbRow) {
 async function saveEdit() {
   if (!edit.form.name.trim()) {
     ElMessage.warning('请填写名称')
+    return
+  }
+  // 描述必填：老库允许先保持空，但一旦编辑保存就要补齐
+  if (!edit.form.description.trim()) {
+    ElMessage.warning('请填写描述')
     return
   }
   edit.saving = true

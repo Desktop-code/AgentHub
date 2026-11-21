@@ -4,6 +4,7 @@ import com.agenthub.rag.domain.model.RagChunk;
 import com.agenthub.rag.domain.model.RagKnowledgeBase;
 import com.agenthub.rag.domain.repository.RagChunkRepository;
 import com.agenthub.rag.domain.repository.RagKnowledgeBaseRepository;
+import com.agenthub.rag.domain.service.KbSelector;
 import com.agenthub.rag.domain.service.RagAccessPolicy;
 import com.agenthub.rag.domain.service.RetrievalConfigResolver;
 import com.agenthub.rag.domain.service.RrfFusion;
@@ -221,9 +222,12 @@ public class RagRetrievalAppService {
             fused = vectorHits;
         }
 
-        // 4) 截断到 topK（精排前先收窄，避免 documents 过大）
-        List<SearchResult> top = fused.size() > sq.getTopK()
-                ? new ArrayList<>(fused.subList(0, sq.getTopK())) : fused;
+        // 4) 单篇文档限段：必须先于 topK 截断，否则一篇长文占满名额后，其它文档再相关也补不进来
+        List<SearchResult> capped = capPerDoc(fused, sq.getMaxChunksPerDoc());
+
+        // 4.5) 截断到 topK（精排前先收窄，避免 documents 过大）
+        List<SearchResult> top = capped.size() > sq.getTopK()
+                ? new ArrayList<>(capped.subList(0, sq.getTopK())) : capped;
 
         // 5) 用 MySQL 回填完整正文（Milvus 里只是截断副本）
         List<SearchResult> hydrated = hydrateAndClip(top);
@@ -481,13 +485,21 @@ public class RagRetrievalAppService {
         if (kbs == null || kbs.isEmpty() || query == null || query.isBlank()) {
             return List.of();
         }
+        // 先按描述选库：只查与问句相关的库，其它库不进召回、不进精排、不进上下文。
+        // 兜底（单库、描述全空、全不匹配）都在 KbSelector 内落到「按绑定范围全搜」。
+        KbSelector.Selection selection = KbSelector.select(query, kbs);
+        List<RagKnowledgeBase> targets = selection.selected();
+        if (targets.isEmpty()) {
+            targets = kbs;
+        }
+        recordSelection(kbs.size(), selection, query, topKOverride);
         // 整次多库调用的键按各库参数组成。命中则连合并后的重排都不再出站。
         // 库不同、查询不同、覆盖项或条数不同，键就不同，不会把两次该分开的检索并成一次。
         // 没有本轮 trace 时不组键，检索仍按原顺序逐库出站。
         SameTurnRetrievalMemo memo = SameTurnRetrievalMemo.current();
         List<SameTurnRetrievalMemo.Key> callKey = null;
         if (memo != null) {
-            List<SameTurnRetrievalMemo.Key> callKeys = callKeys(kbs, query, topKOverride, overrides,
+            List<SameTurnRetrievalMemo.Key> callKeys = callKeys(targets, query, topKOverride, overrides,
                     agentRerankModelId);
             if (callKeys != null) {
                 callKey = SameTurnRetrievalMemo.callKey(callKeys);
@@ -499,11 +511,11 @@ public class RagRetrievalAppService {
             }
         }
         // run 级改写步骤：运行时不执行改写，按各库开关聚合出唯一的 skip 原因
-        emitRewriteSkip(kbs, query, overrides, topKOverride);
+        emitRewriteSkip(targets, query, overrides, topKOverride);
         List<SearchResult> all = new ArrayList<>();
         int succeeded = 0;
         RuntimeException firstFailure = null;
-        for (RagKnowledgeBase kb : kbs) {
+        for (RagKnowledgeBase kb : targets) {
             try {
                 String override = overrides == null ? null : overrides.get(kb.getId());
                 // Agent 级重排延后：多库各排一次会让出站次数与库数成正比，且各库精排分不可比
@@ -522,31 +534,92 @@ public class RagRetrievalAppService {
             throw firstFailure;
         }
         all.sort(Comparator.comparingDouble((SearchResult r) -> r.primaryScore()).reversed());
-        // 合并后按总量截断：避免 N 个库把上下文挤爆，也把精排输入控制在一次出站内
-        List<SearchResult> merged = clipTotal(all);
+        // 合并后先按条数、再按总字符截断：条数上限来自配置（mergedTopK），
+        // 未配时用各库生效 topK 之和，不再只靠 6000 字反推条数
+        List<SearchResult> merged = clipMerged(all, mergedTopKOf(targets, overrides), targets);
         // Agent 级重排在合并后统一做一次：同一批候选内比分才有意义，出站次数也固定为 1 次
         if (agentRerankModelId == null || agentRerankModelId <= 0) {
-            rememberCall(memo, callKey, merged, succeeded, kbs.size());
+            rememberCall(memo, callKey, merged, succeeded, targets.size());
             return merged;
         }
         if (rerank == null) {
             RagObsSpans.currentOrInactive().skip(RagObsSpans.RERANK, null, query.trim(),
                     topKOverride > 0 ? Integer.valueOf(topKOverride) : null, "rerank_client_missing",
                     "跳过：精排客户端不可用");
-            rememberCall(memo, callKey, merged, succeeded, kbs.size());
+            rememberCall(memo, callKey, merged, succeeded, targets.size());
             return merged;
         }
         // 合并后为空时各库的 maybeRerank 已记 no_candidates，这里不再重复
         if (merged.isEmpty()) {
-            rememberCall(memo, callKey, merged, succeeded, kbs.size());
+            rememberCall(memo, callKey, merged, succeeded, targets.size());
             return merged;
         }
         SearchQuery probe = new SearchQuery();
         probe.setQuery(query.trim());
-        probe.setTopK(Math.max(1, topKOverride > 0 ? topKOverride : RetrievalConfigResolver.DEFAULT_TOP_K));
+        // 精排 top_n 跟实际候选数走：合并后已被条数/字符闸门收窄，多要只会白等
+        probe.setTopK(Math.max(1, merged.size()));
         List<SearchResult> ranked = rerankHits(agentRerankModelId, probe, merged, null);
-        rememberCall(memo, callKey, ranked, succeeded, kbs.size());
+        rememberCall(memo, callKey, ranked, succeeded, targets.size());
         return ranked;
+    }
+
+    /**
+     * 取本次多库调用的条数上限配置。
+     * <p>
+     * 逐库解析后取第一个显式配置的 {@code mergedTopK}：多库共用一次合并闸门，
+     * 各库给出不同值时以先出现者为准（正常配置下应一致，不一致属于配置错误，
+     * 这里不抛异常，避免一条坏配置让整次检索失败）。
+     *
+     * @param kbs       本次检索的库
+     * @param overrides 各库覆盖项；可空
+     * @return 合并条数上限；全部未配时为 0（由 clipMerged 用各库 topK 之和兜底）
+     */
+    private static int mergedTopKOf(List<RagKnowledgeBase> kbs, Map<Long, String> overrides) {
+        if (kbs == null) {
+            return 0;
+        }
+        for (RagKnowledgeBase kb : kbs) {
+            if (kb == null) {
+                continue;
+            }
+            String override = overrides == null ? null : overrides.get(kb.getId());
+            SearchQuery sq = RetrievalConfigResolver.resolve(kb.getRetrievalConfig(), override, 0,
+                    kb.getId(), "", kb.getTenantId());
+            if (sq.getMergedTopK() > 0) {
+                return sq.getMergedTopK();
+            }
+        }
+        return 0;
+    }
+
+    /**
+     * 写一条「选库」可观察记录：沿用现有 Trace 检索明细，不新做管理页。
+     * <p>
+     * 只在命中部分库时给出命中清单；兜底全搜时写清原因，便于事后区分
+     * 「描述没配」与「配了都不相关」，而不是看起来像选库没生效。
+     *
+     * @param boundCount   绑定库总数
+     * @param selection    选库结果
+     * @param query        检索句
+     * @param topKOverride 工具入参条数（仅用于 span 的 topK 列）
+     */
+    private static void recordSelection(int boundCount, KbSelector.Selection selection, String query,
+                                        int topKOverride) {
+        RagObsSpans.Session obs = RagObsSpans.currentOrInactive();
+        if (!obs.isActive() || selection == null) {
+            return;
+        }
+        Integer topK = topKOverride > 0 ? Integer.valueOf(topKOverride) : null;
+        Map<String, Object> attrs = new LinkedHashMap<>();
+        attrs.put("boundKbCount", boundCount);
+        attrs.put("describedKbCount", selection.describedCount());
+        attrs.put("outcome", selection.outcome().code());
+        if (!selection.matchedIds().isEmpty()) {
+            attrs.put("kbIds", selection.matchedIds().stream().map(String::valueOf)
+                    .reduce((a, b) -> a + "," + b).orElse(""));
+        }
+        obs.step(RagObsSpans.SELECT_KB, null, query, topK, null)
+                .ok(KbSelector.describe(selection), attrs);
     }
 
     /**
@@ -672,9 +745,110 @@ public class RagRetrievalAppService {
     }
 
     /**
+     * 单篇文档限段：同一 docId 最多保留 {@code maxPerDoc} 条，超出按原序丢弃。
+     * <p>
+     * 为什么在回填前做：此时 Milvus 已给出 docId，不必先把正文从 MySQL 搬回来再丢；
+     * 且保持原有相关度顺序，留下的是该文档得分最高的几段。
+     * 判重键优先 docId；缺 docId 的旧数据退回「标题 + 来源」，避免同一篇被当成多篇。
+     *
+     * @param hits      候选命中，已按相关度降序
+     * @param maxPerDoc 单篇上限；≤0 表示不限段
+     * @return 限段后的命中，顺序不变
+     */
+    private static List<SearchResult> capPerDoc(List<SearchResult> hits, int maxPerDoc) {
+        if (hits == null || hits.isEmpty() || maxPerDoc <= 0) {
+            return hits == null ? List.of() : hits;
+        }
+        Map<String, Integer> used = new HashMap<>();
+        List<SearchResult> out = new ArrayList<>(hits.size());
+        for (SearchResult hit : hits) {
+            String key = docKeyOf(hit);
+            // 完全无法识别文档的条目（无 docId 且无标题来源）不参与限段，照常保留
+            if (key == null) {
+                out.add(hit);
+                continue;
+            }
+            int seen = used.getOrDefault(key, 0);
+            if (seen >= maxPerDoc) {
+                continue;
+            }
+            used.put(key, seen + 1);
+            out.add(hit);
+        }
+        return out;
+    }
+
+    /**
+     * 限段用的文档标识：docId 最可靠；缺失时退回标题/来源，两者都空则返回 null。
+     *
+     * @param hit 命中
+     * @return 文档键；无法识别时为 null
+     */
+    private static String docKeyOf(SearchResult hit) {
+        if (hit == null) {
+            return null;
+        }
+        if (hit.getDocId() != null) {
+            return "id:" + hit.getDocId();
+        }
+        String title = hit.getTitle() == null ? "" : hit.getTitle().trim();
+        String source = hit.getSource() == null ? "" : hit.getSource().trim();
+        if (title.isEmpty() && source.isEmpty()) {
+            return null;
+        }
+        return "t:" + title + "|" + source;
+    }
+
+    /**
+     * 合并后的条数闸门：先按条数截，再按总字符截。
+     * <p>
+     * 条数上限来源（优先级从高到低）：
+     * <ol>
+     *   <li>配置里的 {@code mergedTopK}（KB 检索参数或 Agent 绑定覆盖项）；</li>
+     *   <li>未配时用各库生效 topK 之和 —— 这是「按配置能拿到的最多条数」，
+     *       比原先只靠 6000 字反推更可预期。</li>
+     * </ol>
+     *
+     * @param hits       合并后的命中，已按分数降序
+     * @param mergedTopK 配置的合并上限；≤0 表示按各库 topK 之和
+     * @param kbs        本次检索的库，用于求和
+     * @return 截断后的命中
+     */
+    private static List<SearchResult> clipMerged(List<SearchResult> hits, int mergedTopK,
+                                                 List<RagKnowledgeBase> kbs) {
+        if (hits == null || hits.isEmpty()) {
+            return List.of();
+        }
+        int limit = mergedTopK > 0 ? mergedTopK : mergedLimitOf(kbs);
+        return clipTotal(limit > 0 && hits.size() > limit ? new ArrayList<>(hits.subList(0, limit)) : hits);
+    }
+
+    /**
+     * 各库生效 topK 之和，作为未配 {@code mergedTopK} 时的条数上限。
+     *
+     * @param kbs 本次检索的库；可空
+     * @return 条数上限；无法计算时为 0（调用方退化为只按字符截）
+     */
+    private static int mergedLimitOf(List<RagKnowledgeBase> kbs) {
+        if (kbs == null || kbs.isEmpty()) {
+            return 0;
+        }
+        int sum = 0;
+        for (RagKnowledgeBase kb : kbs) {
+            if (kb == null) {
+                continue;
+            }
+            int topK = RetrievalConfigResolver.resolve(kb.getRetrievalConfig(), null, 0,
+                    kb.getId(), "", kb.getTenantId()).getTopK();
+            sum += Math.max(1, topK);
+        }
+        return sum;
+    }
+
+    /**
      * 多库合并后的总量截断。
      */
-    private List<SearchResult> clipTotal(List<SearchResult> hits) {
+    private static List<SearchResult> clipTotal(List<SearchResult> hits) {
         List<SearchResult> out = new ArrayList<>();
         int total = 0;
         for (SearchResult hit : hits) {
