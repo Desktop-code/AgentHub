@@ -299,9 +299,9 @@ function onVisible(value: boolean) {
 /* 段卡片：一段 = run 级单步，或一个知识库的全部检索步；段间距由容器 gap 控制 */
 .seg {
   padding: 12px 14px;
-  background: #fff;
+  background: var(--ah-surface);
   border: 1px solid var(--ah-border);
-  border-radius: 12px;
+  border-radius: 8px;
 }
 
 .seg__head {
@@ -313,10 +313,10 @@ function onVisible(value: boolean) {
 
 .seg__badge {
   padding: 1px 8px;
-  color: #5b21b6;
-  background: #ede9fe;
+  color: var(--ah-primary);
+  background: var(--ah-primary-tint);
   border-radius: 999px;
-  font-size: 11px;
+  font-size: 12px;
   font-weight: 600;
 }
 
@@ -336,7 +336,7 @@ function onVisible(value: boolean) {
 }
 
 .step + .step {
-  border-top: 1px solid #e4e7ec;
+  border-top: 1px solid var(--ah-border);
 }
 
 .step__head {
@@ -351,19 +351,19 @@ function onVisible(value: boolean) {
   width: 8px;
   height: 8px;
   border-radius: 50%;
-  background: #12b76a;
+  background: var(--ah-success);
 }
 
 .step__dot.is-skip {
-  background: #98a2b3;
+  background: var(--ah-text-faint);
 }
 
 .step__dot.is-error {
-  background: #f04438;
+  background: var(--ah-danger);
 }
 
 .step__dot.is-running {
-  background: #f79009;
+  background: var(--ah-warning);
 }
 
 .step__idx {
@@ -375,7 +375,7 @@ function onVisible(value: boolean) {
 .step__title {
   color: var(--ah-text);
   font-size: 13px;
-  font-weight: 650;
+  font-weight: 600;
 }
 
 /* 跳过的步骤弱化标题：仍可读，但不与真实跑过的步骤抢注意力 */
@@ -385,22 +385,22 @@ function onVisible(value: boolean) {
 
 /* 失败步骤的说明走警示色：抽屉里一眼能定位炸在哪一步 */
 .step.is-error .step__note {
-  color: #b42318;
+  color: var(--ah-danger);
 }
 
 /* 稳定步骤名直接露出：和评测检索链 / 后端日志同一串，便于对照 */
 .step__name {
   padding: 1px 6px;
-  color: #475467;
-  background: #f2f4f7;
+  color: var(--ah-text-regular);
+  background: var(--ah-neutral-tint);
   border-radius: 4px;
   font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
-  font-size: 11px;
+  font-size: 12px;
 }
 
 .step__latency {
   margin-left: auto;
-  color: #475467;
+  color: var(--ah-text-regular);
   font-size: 12px;
   font-weight: 600;
   font-variant-numeric: tabular-nums;
@@ -415,7 +415,7 @@ function onVisible(value: boolean) {
 
 .step__note {
   margin: 6px 0 0;
-  color: #475467;
+  color: var(--ah-text-regular);
   font-size: 12px;
   line-height: 1.5;
   word-break: break-word;
@@ -443,13 +443,13 @@ function onVisible(value: boolean) {
 .chunk__table td {
   padding: 6px 8px;
   text-align: left;
-  border-bottom: 1px solid #f2f4f7;
+  border-bottom: 1px solid var(--ah-border-soft);
   white-space: nowrap;
 }
 
 .chunk__table th {
   color: var(--ah-text-secondary);
-  background: #f9fafb;
+  background: var(--ah-surface-muted);
   font-weight: 600;
 }
 

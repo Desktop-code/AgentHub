@@ -198,8 +198,8 @@
             工具结果已落盘 {{ span.toolResultsOffloaded }} 条
             （原文 {{ span.toolResultsOffloadedChars ?? 0 }} 字，对话内只留摘要 + 路径）
           </li>
-          <li v-if="span.startTime">开始：{{ span.startTime }}</li>
-          <li v-if="span.endTime">结束：{{ span.endTime }}</li>
+          <li v-if="span.startTime">开始：{{ formatDateTime(span.startTime) }}</li>
+          <li v-if="span.endTime">结束：{{ formatDateTime(span.endTime) }}</li>
           <li v-if="span.id != null">id：{{ span.id }}</li>
           <li v-if="span.parentId != null">parentId：{{ span.parentId }}</li>
           <li v-if="span.stepNo">stepNo：{{ span.stepNo }}</li>
@@ -235,6 +235,7 @@ import type { SpanBar } from '@/utils/traceParallel'
 import { traceTypeAccent } from '@/utils/tracePalette'
 import { routeDecisionLabel, spanTypeLabel } from '@/utils/spanTypeLabel'
 import { tryPrettyJson } from '@/utils/codeDisplay'
+import { formatDateTime } from '@/utils/datetime'
 import FoldableCodeBlock from '@/components/obs/FoldableCodeBlock.vue'
 
 const props = withDefaults(
@@ -541,9 +542,9 @@ function agentLabel(name: string | null | undefined, id: number | null | undefin
   margin-bottom: 12px;
   padding: 12px 14px;
   /* 白卡，不上类型底色；左侧色条由 paletteStyle 注入的 CSS 变量决定（半透明同色相） */
-  background: #fff;
+  background: var(--ah-surface);
   border: 1px solid var(--ah-border);
-  border-radius: 10px;
+  border-radius: 8px;
   border-left: 3px solid var(--span-accent, var(--ah-border));
 }
 
@@ -558,7 +559,7 @@ function agentLabel(name: string | null | undefined, id: number | null | undefin
  * 这样「同一类型同色」在图与列表都不破，失败另由红字 + 淡红外框表达。
  */
 .span-card.is-error {
-  border-color: #fda29b;
+  border-color: var(--el-color-danger-light-5);
   border-left-color: var(--span-accent, var(--ah-border));
 }
 
@@ -567,15 +568,15 @@ function agentLabel(name: string | null | undefined, id: number | null | undefin
  * 不用位移/缩放，避免滚动落点后再抖一下。
  */
 .span-card.is-hit {
-  border-color: #a5b4fc;
+  border-color: var(--ah-primary);
   box-shadow: 0 0 0 3px rgba(99, 91, 255, 0.16);
 }
 
 /* TOOL 卡尾右下角小红字；只报错误，不占 Header 注意力 */
 .error-tail {
   margin: 8px 0 0;
-  color: #d92d20;
-  font-size: 11px;
+  color: var(--ah-danger);
+  font-size: 12px;
   line-height: 1.4;
   text-align: right;
   word-break: break-word;
@@ -583,8 +584,8 @@ function agentLabel(name: string | null | undefined, id: number | null | undefin
 
 /* 与拓扑图同口径的 ERROR 小字：10～11px 红字，不做大红块 */
 .err-flag {
-  color: #dc2626;
-  font-size: 11px;
+  color: var(--ah-danger);
+  font-size: 12px;
   font-weight: 600;
   letter-spacing: 0.02em;
 }
@@ -601,7 +602,7 @@ function agentLabel(name: string | null | undefined, id: number | null | undefin
 .gantt__track {
   position: relative;
   height: 8px;
-  background: #e4e7ec;
+  background: var(--ah-border);
   border-radius: 999px;
   overflow: hidden;
 }
@@ -614,15 +615,15 @@ function agentLabel(name: string | null | undefined, id: number | null | undefin
 }
 
 .gantt__bar.is-ok {
-  background: #12b76a;
+  background: var(--ah-success);
 }
 
 .gantt__bar.is-warn {
-  background: #f79009;
+  background: var(--ah-warning);
 }
 
 .gantt__bar.is-danger {
-  background: #f04438;
+  background: var(--ah-danger);
 }
 
 /* 父子树：左侧极细竖线 */
@@ -632,7 +633,7 @@ function agentLabel(name: string | null | undefined, id: number | null | undefin
   bottom: -8px;
   left: -12px;
   width: 0;
-  border-left: 1px solid #d0d5dd;
+  border-left: 1px solid var(--ah-border);
 }
 
 .span-card__rail::after {
@@ -641,7 +642,7 @@ function agentLabel(name: string | null | undefined, id: number | null | undefin
   top: 22px;
   left: 0;
   width: 10px;
-  border-top: 1px solid #d0d5dd;
+  border-top: 1px solid var(--ah-border);
 }
 
 .span-card__head {
@@ -688,7 +689,7 @@ function agentLabel(name: string | null | undefined, id: number | null | undefin
 
 .span-card__name {
   font-size: 13px;
-  font-weight: 650;
+  font-weight: 600;
   color: var(--ah-text);
 }
 
@@ -702,7 +703,7 @@ function agentLabel(name: string | null | undefined, id: number | null | undefin
 }
 
 .chip--tok {
-  color: #363f72;
+  color: var(--ah-text-regular);
   font-variant-numeric: tabular-nums;
 }
 
@@ -721,15 +722,15 @@ function agentLabel(name: string | null | undefined, id: number | null | undefin
 }
 
 .latency--ok {
-  color: #039855;
+  color: var(--ah-success);
 }
 
 .latency--warn {
-  color: #dc6803;
+  color: var(--ah-warning);
 }
 
 .latency--danger {
-  color: #d92d20;
+  color: var(--ah-danger);
 }
 
 .latency--na {
@@ -740,9 +741,9 @@ function agentLabel(name: string | null | undefined, id: number | null | undefin
 .error-box {
   margin: 10px 0 0;
   padding: 8px 10px;
-  color: #b42318;
-  background: #fef3f2;
-  border: 1px solid #fecdca;
+  color: var(--ah-danger);
+  background: var(--ah-danger-tint);
+  border: 1px solid var(--el-color-danger-light-5);
   border-radius: 8px;
   white-space: pre-wrap;
   word-break: break-word;
@@ -753,8 +754,8 @@ function agentLabel(name: string | null | undefined, id: number | null | undefin
 .spec-block {
   margin-top: 8px;
   padding: 8px 10px;
-  background: #f8fafc;
-  border: 1px dashed #d0d5dd;
+  background: var(--ah-surface-muted);
+  border: 1px dashed var(--ah-border);
   border-radius: 8px;
   font-size: 12px;
   line-height: 1.5;
@@ -794,7 +795,7 @@ function agentLabel(name: string | null | undefined, id: number | null | undefin
 
 .io--wide .io__cell:first-child {
   padding-right: 14px;
-  border-right: 1px solid #d0d5dd;
+  border-right: 1px solid var(--ah-border);
 }
 
 .io--wide .io__cell:last-child {
@@ -832,6 +833,6 @@ function agentLabel(name: string | null | undefined, id: number | null | undefin
 
 /* 强制 Skill 被硬上限截断：属于「规则不完整」，用警示色而非普通灰字 */
 .extra__warn {
-  color: #b54708;
+  color: var(--ah-warning);
 }
 </style>

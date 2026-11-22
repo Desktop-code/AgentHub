@@ -171,7 +171,7 @@ function effectiveOf(row: ModelBind) {
 
 .group-note {
   margin-left: 8px;
-  color: var(--ah-text-muted, #9ca3af);
+  color: var(--ah-text-secondary, #6b7280);
   font-size: 12px;
 }
 
@@ -188,14 +188,14 @@ function effectiveOf(row: ModelBind) {
   gap: 6px;
   margin-top: 16px;
   padding: 8px 10px;
-  background: #fffbf5;
-  border: 1px solid #fbe6c8;
+  background: var(--ah-warning-tint);
+  border: 1px solid var(--el-color-warning-light-5);
   border-radius: 6px;
   font-size: 12px;
 }
 
 .legacy-text {
-  color: #a8741a;
+  color: var(--ah-warning);
 }
 
 .legacy-chip {
@@ -204,14 +204,14 @@ function effectiveOf(row: ModelBind) {
   gap: 4px;
   padding: 1px 6px;
   color: var(--ah-text-secondary, #6b7280);
-  background: #fff;
-  border: 1px solid #f0e2cc;
+  background: var(--ah-surface);
+  border: 1px solid var(--el-color-warning-light-5);
   border-radius: 4px;
 }
 
 .legacy-remove {
   padding: 0 2px;
-  color: #c0c4cc;
+  color: var(--ah-text-faint);
   font-size: 13px;
   line-height: 1;
   background: transparent;
@@ -220,6 +220,6 @@ function effectiveOf(row: ModelBind) {
 }
 
 .legacy-remove:hover {
-  color: var(--el-color-danger, #f56c6c);
+  color: var(--ah-danger);
 }
 </style>

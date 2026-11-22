@@ -190,12 +190,12 @@ const html = computed(() => {
   min-height: 0;
   overflow: auto;
   padding: 16px 18px;
-  color: #303133;
+  color: var(--ah-text);
   font-size: 14px;
   line-height: 1.7;
   word-break: break-word;
-  background: #f5f7fa;
-  border: 1px solid #e4e7ed;
+  background: var(--ah-bg);
+  border: 1px solid var(--ah-border);
   border-radius: 8px;
   /* 滚动条走全局 index.css 统一样式，此处不另写 */
 }
@@ -214,22 +214,22 @@ const html = computed(() => {
 .preview-body :deep(h3),
 .preview-body :deep(h4) {
   margin: 0.8em 0 0.4em;
-  font-weight: 650;
+  font-weight: 600;
   line-height: 1.35;
 }
 
 .preview-body :deep(h1) {
-  font-size: 22px;
+  font-size: 13px;
 }
 
 .preview-body :deep(h2) {
-  font-size: 18px;
+  font-size: 14px;
   padding-bottom: 4px;
-  border-bottom: 1px solid #ebeef5;
+  border-bottom: 1px solid var(--ah-border);
 }
 
 .preview-body :deep(h3) {
-  font-size: 16px;
+  font-size: 13px;
 }
 
 .preview-body :deep(p) {
@@ -250,8 +250,8 @@ const html = computed(() => {
   margin: 0.6em 0;
   padding: 4px 12px;
   color: var(--ah-text-secondary, #6b7280);
-  border-left: 3px solid #d0d5dd;
-  background: #fafafa;
+  border-left: 3px solid var(--ah-border);
+  background: var(--ah-surface-muted);
 }
 
 .preview-body :deep(pre) {
@@ -259,7 +259,7 @@ const html = computed(() => {
   padding: 10px 12px;
   overflow: auto;
   border-radius: 8px;
-  background: #f3f4f8;
+  background: var(--ah-neutral-tint);
 }
 
 .preview-body :deep(pre code) {
@@ -270,7 +270,7 @@ const html = computed(() => {
 .preview-body :deep(code) {
   padding: 1px 5px;
   border-radius: 4px;
-  background: #f3f4f8;
+  background: var(--ah-neutral-tint);
   font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
   font-size: 13px;
 }
@@ -283,31 +283,31 @@ const html = computed(() => {
 
 .preview-body :deep(table) {
   border-collapse: collapse;
-  border: 1px solid #d0d5dd;
-  background: #fff;
+  border: 1px solid var(--ah-border);
+  background: var(--ah-surface);
   font-size: 13px;
 }
 
 .preview-body :deep(th),
 .preview-body :deep(td) {
   padding: 6px 10px;
-  border: 1px solid #d0d5dd;
+  border: 1px solid var(--ah-border);
   text-align: left;
   vertical-align: top;
 }
 
 .preview-body :deep(th) {
-  background: #f3f4f8;
+  background: var(--ah-neutral-tint);
   font-weight: 600;
 }
 
 .preview-body :deep(hr) {
   margin: 1em 0;
   border: 0;
-  border-top: 1px solid #ebeef5;
+  border-top: 1px solid var(--ah-border);
 }
 
 .preview-body :deep(a) {
-  color: #635bff;
+  color: var(--ah-primary);
 }
 </style>

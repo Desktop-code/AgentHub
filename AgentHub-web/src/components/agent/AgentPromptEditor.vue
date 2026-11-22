@@ -266,8 +266,8 @@ defineExpose({ reveal })
   justify-content: space-between;
   gap: 12px;
   padding: 8px 12px;
-  background: #fafbfd;
-  border: 1px solid var(--ah-border, #e6e8ef);
+  background: var(--ah-surface-muted);
+  border: 1px solid var(--ah-border, #ebeef5);
   border-radius: 6px;
 }
 
@@ -281,7 +281,7 @@ defineExpose({ reveal })
 
 .entry-label {
   overflow: hidden;
-  color: var(--ah-text, #1f2430);
+  color: var(--ah-text, #1f2937);
   font-size: 13px;
   font-weight: 600;
   text-overflow: ellipsis;

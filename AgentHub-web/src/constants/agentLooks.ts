@@ -179,7 +179,7 @@ export const AGENT_LOOK_OPTIONS: AgentLookOption[] = [
 /** 固定色板（含主题紫）；即线稿可选的颜色集合，背景不受影响 */
 export const AGENT_COLOR_OPTIONS: string[] = [
   '#635BFF',
-  '#3B82F6',
+  '#38BDF8',
   '#10B981',
   '#F59E0B',
   '#EF4444',

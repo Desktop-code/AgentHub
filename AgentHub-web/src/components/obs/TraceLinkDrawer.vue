@@ -176,7 +176,7 @@ function copyText(text: string) {
 
 .empty {
   margin: 24px 0;
-  color: var(--ah-text-secondary, #64748b);
+  color: var(--ah-text-secondary, #6b7280);
   font-size: 13px;
   text-align: center;
 }
@@ -185,7 +185,7 @@ function copyText(text: string) {
   list-style: none;
   margin: 0;
   padding: 0;
-  color: #64748b;
+  color: var(--ah-text-secondary);
   font-size: 13px;
   line-height: 1.8;
 }

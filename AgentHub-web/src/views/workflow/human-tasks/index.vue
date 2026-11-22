@@ -323,13 +323,13 @@ onMounted(loadRows)
 }
 
 .panel-title {
-  color: var(--ah-text-primary, #111827);
+  color: var(--ah-text-primary, #1f2937);
   font-size: 13px;
   font-weight: 600;
 }
 
 .panel-hint {
-  color: var(--ah-text-muted, #9ca3af);
+  color: var(--ah-text-secondary, #6b7280);
   font-size: 12px;
 }
 

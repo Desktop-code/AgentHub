@@ -32,7 +32,9 @@
         <el-table-column prop="targetId" label="资源ID" min-width="100" align="center" />
         <el-table-column prop="detailJson" label="摘要" min-width="220" align="center" show-overflow-tooltip />
         <el-table-column prop="ip" label="IP" min-width="140" align="center" />
-        <el-table-column prop="createTime" label="时间" min-width="180" align="center" />
+        <el-table-column prop="createTime" label="时间" min-width="180" align="center">
+          <template #default="{ row }">{{ formatDateTime(row.createTime) }}</template>
+        </el-table-column>
       </el-table>
       <TablePager
         v-model:current="query.current"
@@ -57,6 +59,7 @@ import PageHeader from '@/components/PageHeader.vue'
 import TablePager from '@/components/TablePager.vue'
 import { useListIndexColumn } from '@/composables/listIndex'
 import { pageOperLogs } from '@/api/log'
+import { formatDateTime } from '@/utils/datetime'
 import type { OperLogRow } from '@/types'
 
 const loading = ref(false)

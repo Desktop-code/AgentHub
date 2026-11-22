@@ -155,10 +155,10 @@ const ariaLabel = 'AgentHub'
   font-weight: 700;
   line-height: 1;
   letter-spacing: 0.01em;
-  color: #1e293b;
+  color: var(--ah-text);
 }
 
 .word-hub {
-  color: #635bff;
+  color: var(--ah-primary);
 }
 </style>

@@ -629,8 +629,8 @@ defineExpose({
   position: relative;
   width: 100%;
   padding: 10px 12px;
-  background: #f5f6fa;
-  border: 1px solid var(--ah-border, #e6e8ef);
+  background: var(--ah-neutral-tint);
+  border: 1px solid var(--ah-border, #ebeef5);
   border-radius: 6px;
   box-sizing: border-box;
 }
@@ -643,7 +643,7 @@ defineExpose({
   font-family: inherit;
   font-size: 12px;
   line-height: 1.55;
-  color: #4b5563;
+  color: var(--ah-text-regular);
 }
 
 .core-badge {
@@ -651,10 +651,10 @@ defineExpose({
   top: 8px;
   right: 10px;
   padding: 1px 6px;
-  color: #9ca3af;
-  background: #eef0f6;
+  color: var(--ah-text-faint);
+  background: var(--ah-neutral-tint);
   border-radius: 4px;
-  font-size: 11px;
+  font-size: 12px;
   line-height: 18px;
 }
 
@@ -713,8 +713,8 @@ defineExpose({
   margin: 0;
   overflow: auto;
   padding: 12px;
-  background: #fafbfd;
-  border: 1px solid var(--ah-border, #e6e8ef);
+  background: var(--ah-surface-muted);
+  border: 1px solid var(--ah-border, #ebeef5);
   border-radius: 6px;
   white-space: pre-wrap;
   word-break: break-word;

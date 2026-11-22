@@ -501,8 +501,8 @@ function setIngestInt(key: 'chunkOverlap' | 'minChunkSize', value: number | unde
 .kb-notice {
   margin: 0 0 14px;
   padding: 0 0 0 10px;
-  border-left: 2px solid var(--el-color-warning, #e6a23c);
-  color: var(--el-color-warning-dark-2, #b88230);
+  border-left: 2px solid var(--ah-warning);
+  color: var(--ah-warning);
   font-size: 12px;
   line-height: 1.6;
 }
@@ -558,14 +558,14 @@ function setIngestInt(key: 'chunkOverlap' | 'minChunkSize', value: number | unde
 .kb-key {
   color: var(--ah-text-muted, #6b7280);
   font-family: ui-monospace, Consolas, monospace;
-  font-size: 11px;
+  font-size: 12px;
 }
 
 .kb-range {
   margin-left: auto;
   color: var(--ah-text-muted, #6b7280);
   font-family: ui-monospace, Consolas, monospace;
-  font-size: 11px;
+  font-size: 12px;
 }
 
 .kb-number {
@@ -639,7 +639,7 @@ function setIngestInt(key: 'chunkOverlap' | 'minChunkSize', value: number | unde
   display: block;
   margin-top: 2px;
   color: var(--ah-text-muted, #6b7280);
-  font-size: 11px;
+  font-size: 12px;
 }
 
 /* 重叠区：宽度按 overlap / chunkSize 走，压在右缘，最后一篇不画 */

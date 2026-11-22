@@ -243,7 +243,7 @@ X-App-Secret: ********
         <div v-for="item in releases" :key="item.id" class="release-item">
           <div class="release-item__head">
             <el-tag size="small" type="primary" effect="plain">v{{ item.version }}</el-tag>
-            <span class="release-item__time">{{ item.publishTime }}</span>
+            <span class="release-item__time">{{ formatTime(item.publishTime) }}</span>
           </div>
           <div class="release-item__note">{{ item.publishNote || '无发布说明' }}</div>
           <div class="release-item__fp" :title="item.fingerprint">指纹 {{ item.fingerprint.slice(0, 12) }}…</div>
@@ -719,7 +719,7 @@ onDeactivated(() => {
 
 .cell-name {
   overflow: hidden;
-  color: var(--ah-text-primary, #111827);
+  color: var(--ah-text-primary, #1f2937);
   font-size: 14px;
   font-weight: 600;
   line-height: 1.5;
@@ -758,9 +758,9 @@ onDeactivated(() => {
 .release-item {
   padding: 12px;
   margin-bottom: 10px;
-  border: 1px solid var(--ah-border, #e5e7eb);
-  border-radius: 10px;
-  background: #fff;
+  border: 1px solid var(--ah-border, #ebeef5);
+  border-radius: 8px;
+  background: var(--ah-surface);
 }
 
 .release-item__head {
@@ -815,10 +815,10 @@ onDeactivated(() => {
 .invoke-doc__code {
   margin: 0 0 10px;
   padding: 12px;
-  border: 1px solid var(--ah-border, #e5e7eb);
+  border: 1px solid var(--ah-border, #ebeef5);
   border-radius: 8px;
-  background: #f8fafc;
-  color: #1f2937;
+  background: var(--ah-surface-muted);
+  color: var(--ah-text);
   font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
   font-size: 12px;
   line-height: 1.7;

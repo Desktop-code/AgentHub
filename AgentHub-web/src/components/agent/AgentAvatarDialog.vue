@@ -262,9 +262,9 @@ function onClosed() {
   align-items: center;
   gap: 14px;
   padding: 14px 16px;
-  border: 1px solid #ebe9f5;
-  border-radius: 12px;
-  background: #faf9ff;
+  border: 1px solid var(--ah-border);
+  border-radius: 8px;
+  background: var(--ah-surface-muted);
 }
 
 .preview-meta {
@@ -276,13 +276,14 @@ function onClosed() {
 }
 
 .preview-meta strong {
-  font-size: 15px;
-  color: #1f1b33;
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--ah-text);
 }
 
 .preview-hint {
   font-size: 12px;
-  color: #8a86a3;
+  color: var(--ah-text-secondary);
 }
 
 .block {
@@ -293,13 +294,13 @@ function onClosed() {
   margin: 0 0 10px;
   font-size: 13px;
   font-weight: 600;
-  color: #3d3759;
+  color: var(--ah-text-regular);
 }
 
 .block-hint {
   margin: 8px 0 0;
   font-size: 12px;
-  color: #8a86a3;
+  color: var(--ah-text-secondary);
 }
 
 .look-grid {
@@ -314,9 +315,9 @@ function onClosed() {
   align-items: center;
   gap: 6px;
   padding: 8px 2px 6px;
-  border: 1px solid #eceaf5;
-  border-radius: 10px;
-  background: #fff;
+  border: 1px solid var(--ah-border);
+  border-radius: 8px;
+  background: var(--ah-surface);
   cursor: pointer;
   transition: border-color 0.15s, box-shadow 0.15s;
 }
@@ -330,16 +331,16 @@ function onClosed() {
 }
 
 .look-cell span {
-  font-size: 11px;
-  color: #6b6783;
+  font-size: 12px;
+  color: var(--ah-text-secondary);
 }
 
 .look-cell:hover {
-  border-color: #c9c2f5;
+  border-color: var(--el-color-primary-light-5);
 }
 
 .look-cell.active {
-  border-color: #635bff;
+  border-color: var(--ah-primary);
   box-shadow: 0 0 0 2px rgba(99, 91, 255, 0.12);
 }
 
@@ -352,10 +353,10 @@ function onClosed() {
 .color-dot {
   width: 24px;
   height: 24px;
-  border: 2px solid #fff;
+  border: 2px solid var(--ah-surface);
   border-radius: 50%;
   cursor: pointer;
-  box-shadow: 0 0 0 1px #e2dff0;
+  box-shadow: 0 0 0 1px var(--ah-border);
   transition: transform 0.12s, box-shadow 0.12s;
 }
 
@@ -364,7 +365,7 @@ function onClosed() {
 }
 
 .color-dot.active {
-  box-shadow: 0 0 0 2px #635bff;
+  box-shadow: 0 0 0 2px var(--ah-primary);
 }
 
 .upload-row {

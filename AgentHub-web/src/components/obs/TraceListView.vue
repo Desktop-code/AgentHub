@@ -210,9 +210,9 @@ function keyOf(item: TraceLayoutItem, idx: number): string {
 /* 并行容器：浅紫底 + 淡紫虚线，弱于内容本身，不抢 AGENT 卡 */
 .par {
   padding: 10px 12px 12px;
-  background: #faf9ff;
-  border: 1px dashed #c7c2f5;
-  border-radius: 12px;
+  background: var(--ah-primary-tint);
+  border: 1px dashed var(--el-color-primary-light-5);
+  border-radius: 8px;
 }
 
 .par__head {
@@ -230,19 +230,19 @@ function keyOf(item: TraceLayoutItem, idx: number): string {
   align-items: center;
   padding: 1px 8px;
   border-radius: 999px;
-  background: #ede9fe;
-  color: #5b21b6;
-  font-size: 11px;
+  background: var(--ah-primary-tint);
+  color: var(--ah-primary);
+  font-size: 12px;
   font-weight: 600;
 }
 
 .par__count {
-  color: var(--ah-text-secondary, #667085);
+  color: var(--ah-text-secondary, #6b7280);
 }
 
 .par__wall {
   margin-left: auto;
-  color: var(--ah-text-secondary, #667085);
+  color: var(--ah-text-secondary, #6b7280);
   font-variant-numeric: tabular-nums;
 }
 

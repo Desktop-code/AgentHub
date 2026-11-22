@@ -2262,7 +2262,7 @@ async function removeSkill(row: SkillBind) {
   gap: 8px;
   margin: 12px -16px -16px;
   padding: 12px 16px;
-  background: #fff;
+  background: var(--ah-surface);
   border-top: 1px solid var(--ah-border);
   border-radius: 0 0 8px 8px;
 }
@@ -2352,8 +2352,8 @@ async function removeSkill(row: SkillBind) {
 .title-main h2 {
   margin: 0;
   overflow: hidden;
-  font-size: 18px;
-  font-weight: 650;
+  font-size: 16px;
+  font-weight: 600;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
@@ -2365,16 +2365,17 @@ async function removeSkill(row: SkillBind) {
   font-size: 13px;
 }
 
+/* 「运行」是页面唯一主操作：主色按钮，不再用遗留蓝 */
 .talk-btn {
   flex: none;
-  --el-button-bg-color: #3b82f6;
-  --el-button-border-color: #3b82f6;
+  --el-button-bg-color: var(--ah-primary);
+  --el-button-border-color: var(--ah-primary);
   --el-button-text-color: #fff;
-  --el-button-hover-bg-color: #2563eb;
-  --el-button-hover-border-color: #2563eb;
+  --el-button-hover-bg-color: var(--ah-primary-hover);
+  --el-button-hover-border-color: var(--ah-primary-hover);
   --el-button-hover-text-color: #fff;
-  --el-button-active-bg-color: #1d4ed8;
-  --el-button-active-border-color: #1d4ed8;
+  --el-button-active-bg-color: var(--ah-primary-active);
+  --el-button-active-border-color: var(--ah-primary-active);
   --el-button-active-text-color: #fff;
 }
 
@@ -2386,7 +2387,7 @@ async function removeSkill(row: SkillBind) {
   display: inline-block;
   max-width: 36em;
   margin-left: 12px;
-  color: var(--ah-text-secondary, #8b90a0);
+  color: var(--ah-text-secondary, #6b7280);
   font-size: 12px;
   line-height: 1.5;
   vertical-align: middle;
@@ -2401,7 +2402,7 @@ async function removeSkill(row: SkillBind) {
 
 .tab-sub {
   margin-left: 12px;
-  color: var(--ah-text-secondary, #8b90a0);
+  color: var(--ah-text-secondary, #6b7280);
   font-size: 12px;
 }
 
@@ -2433,7 +2434,7 @@ async function removeSkill(row: SkillBind) {
 .tab-bar h3 {
   margin: 0;
   font-size: 14px;
-  font-weight: 650;
+  font-weight: 600;
 }
 
 .block-alert {
@@ -2506,14 +2507,14 @@ async function removeSkill(row: SkillBind) {
 
 /* 多行输入用浅灰底 + 细边框，跟纯白页面区分开，一眼能看出是可编辑区 */
 .basic-main :deep(.el-textarea__inner) {
-  background: #f9fafb;
-  border: 1px solid #ebeef5;
+  background: var(--ah-input-fill);
+  border: 1px solid var(--ah-border);
   box-shadow: none;
 }
 
 /* 聚焦时恢复白底，避免文字与浅灰底叠在一起看不清 */
 .basic-main :deep(.el-textarea__inner:focus) {
-  background: #fff;
+  background: var(--ah-surface);
   border-color: var(--ah-primary, #635bff);
 }
 
@@ -2539,9 +2540,9 @@ async function removeSkill(row: SkillBind) {
   /* 上内边距压到最小，让头像贴着卡片顶边，不在上方留大片空白 */
   padding: 6px 16px 16px;
   box-sizing: border-box;
-  border: 1px solid #ebeef5;
+  border: 1px solid var(--ah-border);
   border-radius: 8px;
-  background: #fff;
+  background: var(--ah-surface);
   text-align: center;
 }
 
@@ -2565,7 +2566,7 @@ async function removeSkill(row: SkillBind) {
   display: block;
   font-family: var(--ah-font-mono, ui-monospace, SFMono-Regular, Menlo, Consolas, monospace);
   font-size: 13px;
-  color: var(--ah-text-secondary, #9ca3af);
+  color: var(--ah-text-secondary, #6b7280);
   word-break: break-all;
 }
 
@@ -2589,7 +2590,7 @@ async function removeSkill(row: SkillBind) {
   gap: 6px;
   margin: 14px 0 0;
   padding-top: 12px;
-  border-top: 1px dashed #f0f2f5;
+  border-top: 1px dashed var(--ah-border-soft);
   text-align: left;
 }
 
@@ -2604,12 +2605,12 @@ async function removeSkill(row: SkillBind) {
 
 .identity-card__meta dt {
   flex: none;
-  color: #b0b4bf;
+  color: var(--ah-text-faint);
 }
 
 .identity-card__meta dd {
   margin: 0;
-  color: #6b7280;
+  color: var(--ah-text-secondary);
   text-align: right;
   word-break: break-word;
 }
@@ -2693,7 +2694,7 @@ async function removeSkill(row: SkillBind) {
 .plan-runtime-title {
   margin: 0 0 12px;
   font-size: 14px;
-  font-weight: 650;
+  font-weight: 600;
   color: var(--ah-text-primary);
 }
 
@@ -2720,7 +2721,7 @@ async function removeSkill(row: SkillBind) {
 .limits-group-title {
   margin: 0 0 12px;
   font-size: 14px;
-  font-weight: 650;
+  font-weight: 600;
   color: var(--ah-text-primary);
 }
 
@@ -2782,10 +2783,10 @@ async function removeSkill(row: SkillBind) {
   height: 18px;
   margin-left: 6px;
   padding: 0 5px;
-  border-radius: 9px;
-  background: #f3f4f6;
+  border-radius: 999px;
+  background: var(--ah-neutral-tint);
   color: var(--ah-text-secondary, #6b7280);
-  font-size: 11px;
+  font-size: 12px;
   font-weight: 600;
   line-height: 1;
   vertical-align: middle;

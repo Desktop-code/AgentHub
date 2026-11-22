@@ -55,7 +55,7 @@
             @click="pickSession(row)"
           >
             <span class="item-title">{{ row.sessionTitle || row.lastMsgPreview || '未命名会话' }}</span>
-            <span class="item-meta">{{ agentLabel(row.agentName, row.agentId) }} · {{ row.startTime || '—' }}</span>
+            <span class="item-meta">{{ agentLabel(row.agentName, row.agentId) }} · {{ formatDateTime(row.startTime) }}</span>
           </button>
           <p v-if="!sessionLoading && sessions.length === 0" class="empty">没有会话</p>
         </div>
@@ -149,7 +149,7 @@
             />
             <span class="item-meta">
               <el-tag size="small" :type="statusType(row.status)">{{ statusLabel(row.status) }}</el-tag>
-              {{ row.startTime || '—' }}
+              {{ formatDateTime(row.startTime) }}
               <template v-if="row.latencyMs != null">
                 · <span :class="latencyClass(row.latencyMs)">{{ latency(row.latencyMs) }}</span>
               </template>
@@ -308,6 +308,7 @@ import type { EvalSuiteRow } from '@/types/eval'
 import type { ObsSession, ObsSpan, ObsTrace } from '@/types/obs'
 import type { WorkflowDefRow } from '@/types/workflow'
 import { useUserStore } from '@/stores/user'
+import { formatDateTime } from '@/utils/datetime'
 import PageHeader from '@/components/PageHeader.vue'
 import ClampText from '@/components/common/ClampText.vue'
 import TraceLinkDrawer from '@/components/obs/TraceLinkDrawer.vue'
@@ -1001,7 +1002,7 @@ watch(
 .col-head h2 {
   margin: 0;
   font-size: 16px;
-  font-weight: 650;
+  font-weight: 600;
   min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
@@ -1063,9 +1064,9 @@ watch(
   margin: 0 0 8px;
   padding: 10px 12px;
   text-align: left;
-  background: #fff;
+  background: var(--ah-surface);
   border: 1px solid var(--ah-border);
-  border-radius: 10px;
+  border-radius: 8px;
   cursor: pointer;
 }
 
@@ -1089,18 +1090,19 @@ watch(
   font-weight: 400;
 }
 
+/* 耗时等级只走语义色令牌：通过绿 / 待办琥珀 / 故障红 */
 .lat-ok {
-  color: #039855;
+  color: var(--ah-success);
   font-weight: 600;
 }
 
 .lat-warn {
-  color: #dc6803;
+  color: var(--ah-warning);
   font-weight: 600;
 }
 
 .lat-danger {
-  color: #d92d20;
+  color: var(--ah-danger);
   font-weight: 600;
 }
 
@@ -1162,7 +1164,7 @@ watch(
   padding: 0 4px;
   border: 1px solid var(--ah-border);
   border-radius: 6px;
-  background: #fff;
+  background: var(--ah-surface);
   color: var(--ah-text);
   font-size: 12px;
   text-align: center;

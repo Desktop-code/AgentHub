@@ -575,8 +575,8 @@ defineExpose({ save, cancel, isDirty, saving, load, deactivate })
   gap: 8px;
   margin-top: 16px;
   padding: 12px 0;
-  background: #fff;
-  border-top: 1px solid var(--ah-border, #e8eaf0);
+  background: var(--ah-surface);
+  border-top: 1px solid var(--ah-border, #ebeef5);
 }
 
 .block-alert {
@@ -594,8 +594,8 @@ defineExpose({ save, cancel, isDirty, saving, load, deactivate })
 .section-title {
   margin: 16px 0 12px;
   font-size: 14px;
-  font-weight: 650;
-  color: var(--ah-text-primary, #1f2430);
+  font-weight: 600;
+  color: var(--ah-text-primary, #1f2937);
 }
 
 .block:first-child .section-title {
@@ -614,15 +614,15 @@ defineExpose({ save, cancel, isDirty, saving, load, deactivate })
   margin: 8px 0 0;
   padding: 8px 10px;
   border-radius: 6px;
-  background: var(--ah-fill-light, #f7f8fc);
-  color: var(--ah-text-secondary, #8b90a0);
+  background: var(--ah-surface-muted);
+  color: var(--ah-text-secondary, #6b7280);
   font-size: 12px;
   line-height: 1.6;
 }
 
 .switch-note {
   margin-left: 12px;
-  color: var(--ah-text-secondary, #8b90a0);
+  color: var(--ah-text-secondary, #6b7280);
   font-size: 12px;
 }
 
@@ -630,7 +630,7 @@ defineExpose({ save, cancel, isDirty, saving, load, deactivate })
 .trigger-hint {
   max-width: 420px;
   margin: -4px 0 12px;
-  color: var(--ah-text-secondary, #8b90a0);
+  color: var(--ah-text-secondary, #6b7280);
   font-size: 12px;
   line-height: 1.6;
 }
@@ -667,9 +667,9 @@ defineExpose({ save, cancel, isDirty, saving, load, deactivate })
 .long-block {
   margin-bottom: 8px;
   padding: 12px 14px 4px;
-  border: 1px solid var(--ah-border, #e8eaf0);
-  border-radius: 10px;
-  background: #fafafc;
+  border: 1px solid var(--ah-border, #ebeef5);
+  border-radius: 8px;
+  background: var(--ah-surface-muted);
 }
 
 @media (max-width: 900px) {

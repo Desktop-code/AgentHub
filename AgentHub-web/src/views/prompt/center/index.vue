@@ -1484,7 +1484,7 @@ onMounted(() => {
   border: 1px solid var(--ah-border);
   border-left: 3px solid transparent;
   border-radius: 6px;
-  background: #fff;
+  background: var(--ah-surface);
   color: var(--ah-text);
   font: inherit;
   cursor: pointer;
@@ -1503,20 +1503,20 @@ onMounted(() => {
 .obj-card.is-selected {
   border-color: var(--ah-primary);
   border-left: 3px solid var(--ah-primary);
-  background: #f4f3ff;
+  background: var(--ah-primary-tint);
 }
 
 /* L1 系统级：只用中性灰阶区分层级，不借故障红（红在本系统专指失败 / 危险操作） */
 .obj-l1 {
   border-color: var(--ah-border);
   border-left: 3px solid var(--ah-text-faint);
-  background: #fafafa;
+  background: var(--ah-surface-muted);
 }
 
 .obj-l1.is-selected {
   border-color: var(--ah-primary);
   border-left: 3px solid var(--ah-primary);
-  background: #f4f3ff;
+  background: var(--ah-primary-tint);
 }
 
 .obj-head {
@@ -1569,9 +1569,9 @@ onMounted(() => {
 .rail-gap-label {
   flex: none;
   color: var(--ah-text-muted);
-  font-size: 11px;
-  font-weight: 700;
-  letter-spacing: 0.04em;
+  font-size: 12px;
+  font-weight: 600;
+  letter-spacing: 0.02em;
 }
 
 .rail-head {
@@ -1689,7 +1689,7 @@ onMounted(() => {
 
 /* 焦点行与生效行是两种语义：焦点浅紫底，生效用左侧绿条 */
 :deep(.el-table .is-focus-row > td.el-table__cell) {
-  background: #f7f6ff;
+  background: var(--ah-primary-tint);
 }
 
 :deep(.el-table .is-active-row > td.el-table__cell:first-child) {
@@ -1732,9 +1732,9 @@ onMounted(() => {
 .memory-lock-hint {
   margin: 8px 0 12px;
   padding: 8px 10px;
-  border-left: 3px solid var(--el-color-danger);
+  border-left: 3px solid var(--ah-danger);
   border-radius: 4px;
-  background: #fff5f5;
+  background: var(--ah-danger-tint);
   color: var(--ah-text-secondary);
   font-size: 12px;
   line-height: 1.7;
@@ -1753,7 +1753,7 @@ onMounted(() => {
 .seg-card {
   margin-bottom: 12px;
   padding: 12px 12px 4px;
-  background: #fafbff;
+  background: var(--ah-surface-muted);
   border: 1px solid var(--ah-border);
   border-radius: 8px;
 }
@@ -1830,19 +1830,19 @@ onMounted(() => {
   margin: 0;
   padding: 14px 16px;
   overflow: auto;
-  background: #f7f8fc;
+  background: var(--ah-surface-muted);
   border: 1px solid var(--ah-border);
   border-radius: 8px;
   color: var(--ah-text);
   font-family: 'Consolas', 'Menlo', 'Microsoft YaHei', monospace;
-  font-size: 12.5px;
+  font-size: 12px;
   line-height: 1.7;
   white-space: pre-wrap;
   word-break: break-word;
 }
 
 .muted {
-  color: #c0c4cc;
+  color: var(--ah-text-faint);
 }
 
 .locale-select {

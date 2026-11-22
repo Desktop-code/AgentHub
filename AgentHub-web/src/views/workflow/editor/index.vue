@@ -156,7 +156,7 @@
           @nodes-initialized="onNodesInitialized"
           @error="onVueFlowError"
         >
-          <Background :gap="16" color="#e5e7eb" />
+          <Background :gap="16" color="#ebeef5" />
         </VueFlow>
 
         <!-- 底部悬浮胶囊：缩放 / 自适应 / 试跑；空白处穿透，不挡画布拖拽 -->
@@ -2115,9 +2115,9 @@ onActivated(() => {
   flex: none;
   margin-bottom: 10px;
   padding: 8px 10px;
-  border: 1px solid var(--ah-border, #e5e7eb);
-  border-radius: 10px;
-  background: #fff;
+  border: 1px solid var(--ah-border, #ebeef5);
+  border-radius: 8px;
+  background: var(--ah-surface);
 }
 
 .wf-issues__title {
@@ -2128,7 +2128,7 @@ onActivated(() => {
 }
 
 .wf-issues__stale {
-  color: #b45309;
+  color: var(--ah-warning);
 }
 
 .wf-issues__list {
@@ -2146,29 +2146,29 @@ onActivated(() => {
   gap: 6px;
   max-width: 420px;
   padding: 4px 8px;
-  border: 1px solid #e5e7eb;
+  border: 1px solid var(--ah-border);
   border-radius: 8px;
-  background: #fff;
+  background: var(--ah-surface);
   font-size: 12px;
   cursor: pointer;
 }
 
 .wf-issue.is-error {
-  border-color: #fecaca;
-  background: #fef2f2;
-  color: #b91c1c;
+  border-color: var(--el-color-danger-light-5);
+  background: var(--ah-danger-tint);
+  color: var(--ah-danger);
 }
 
 .wf-issue.is-warn {
-  border-color: #fde68a;
-  background: #fffbeb;
-  color: #b45309;
+  border-color: var(--el-color-warning-light-5);
+  background: var(--ah-warning-tint);
+  color: var(--ah-warning);
 }
 
 .wf-issue__code {
   color: inherit;
   font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
-  font-size: 11px;
+  font-size: 12px;
   opacity: 0.75;
 }
 
@@ -2191,9 +2191,9 @@ onActivated(() => {
   position: relative;
   min-width: 0;
   overflow: hidden;
-  border: 1px solid var(--ah-border, #e5e7eb);
-  border-radius: 12px;
-  background: #fff;
+  border: 1px solid var(--ah-border, #ebeef5);
+  border-radius: 8px;
+  background: var(--ah-surface);
   transition: flex-basis 0.22s ease, width 0.22s ease, margin 0.22s ease, border-color 0.22s ease;
 }
 
@@ -2241,7 +2241,7 @@ onActivated(() => {
   gap: 8px;
   margin: 0;
   min-width: 0;
-  color: var(--ah-text-primary, #111827);
+  color: var(--ah-text-primary, #1f2937);
   font-size: 13px;
   font-weight: 600;
 }
@@ -2258,14 +2258,14 @@ onActivated(() => {
   border: 0;
   border-radius: 6px;
   background: transparent;
-  color: #9ca3af;
+  color: var(--ah-text-faint);
   cursor: pointer;
   transition: background 0.15s ease, color 0.15s ease;
 }
 
 .wf-panel__fold:hover {
-  background: #f3f4f6;
-  color: #4b5563;
+  background: var(--ah-neutral-tint);
+  color: var(--ah-text-regular);
 }
 
 /*
@@ -2288,8 +2288,8 @@ onActivated(() => {
   border: 1px solid rgb(15 23 42 / 8%);
   /* 半透明浅灰底 + 轻阴影：比纯白描边更显眼，又不喧宾夺主 */
   background: rgb(243 244 246 / 92%);
-  color: #4b5563;
-  box-shadow: 0 2px 10px rgb(15 23 42 / 12%);
+  color: var(--ah-text-regular);
+  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.08);
   cursor: pointer;
   white-space: nowrap;
   transform: translateY(-50%);
@@ -2299,8 +2299,8 @@ onActivated(() => {
 .wf-edge-wake:hover,
 .wf-edge-wake:focus-visible {
   width: 104px;
-  background: #fff;
-  color: #635bff;
+  background: var(--ah-surface);
+  color: var(--ah-primary);
   box-shadow: 0 6px 18px rgb(99 91 255 / 22%);
 }
 
@@ -2317,7 +2317,7 @@ onActivated(() => {
 /* 文字默认收起，hover 时随宽度一起浮现 */
 .wf-edge-wake__label {
   flex: none;
-  font-size: 11px;
+  font-size: 12px;
   font-weight: 600;
   opacity: 0;
   transition: opacity 0.16s ease;
@@ -2388,46 +2388,46 @@ onActivated(() => {
   align-items: center;
   gap: 6px;
   padding: 7px 9px;
-  border: 1px solid #e5e7eb;
+  border: 1px solid var(--ah-border);
   border-radius: 8px;
-  background: #fafafa;
+  background: var(--ah-surface-muted);
   font-size: 12px;
   cursor: grab;
   user-select: none;
 }
 
 .wf-palette__item:hover {
-  border-color: #c7c3ff;
-  background: #f5f4ff;
+  border-color: var(--el-color-primary-light-6);
+  background: var(--ah-primary-tint);
 }
 
 .wf-palette__item.is-p1 {
   border-style: dashed;
-  color: #9ca3af;
+  color: var(--ah-text-faint);
   cursor: not-allowed;
 }
 
 .wf-palette__label {
-  color: var(--ah-text-primary, #111827);
+  color: var(--ah-text-primary, #1f2937);
   font-weight: 600;
 }
 
 .wf-palette__item.is-p1 .wf-palette__label {
-  color: #9ca3af;
+  color: var(--ah-text-faint);
 }
 
 .wf-palette__p1 {
   padding: 0 4px;
-  border: 1px solid #e5e7eb;
+  border: 1px solid var(--ah-border);
   border-radius: 4px;
-  font-size: 10px;
+  font-size: 12px;
   line-height: 14px;
 }
 
 .wf-palette__hint {
   flex: 1 0 100%;
-  color: #9ca3af;
-  font-size: 11px;
+  color: var(--ah-text-faint);
+  font-size: 12px;
   line-height: 1.4;
 }
 
@@ -2439,9 +2439,9 @@ onActivated(() => {
   min-height: 0;
   height: auto;
   overflow: hidden;
-  border: 1px solid var(--ah-border, #e5e7eb);
-  border-radius: 12px;
-  background: #fbfbfd;
+  border: 1px solid var(--ah-border, #ebeef5);
+  border-radius: 8px;
+  background: var(--ah-surface-muted);
 }
 
 .canvas-alert {
@@ -2464,8 +2464,8 @@ onActivated(() => {
   padding: 5px 8px;
   border: 1px solid rgb(15 23 42 / 8%);
   border-radius: 999px;
-  background: #fff;
-  box-shadow: 0 10px 26px rgb(15 23 42 / 14%);
+  background: var(--ah-surface);
+  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.08);
   transform: translateX(-50%);
   /* 胶囊留白处穿透：节点拖到工具栏下方时仍能被抓住 */
   pointer-events: none;
@@ -2486,21 +2486,21 @@ onActivated(() => {
   border: 0;
   border-radius: 50%;
   background: transparent;
-  color: #4b5563;
+  color: var(--ah-text-regular);
   font-size: 14px;
   cursor: pointer;
   transition: background 0.15s ease, color 0.15s ease;
 }
 
 .wf-dock__btn:hover {
-  background: #f3f4f6;
-  color: #635bff;
+  background: var(--ah-neutral-tint);
+  color: var(--ah-primary);
 }
 
 .wf-dock__zoom {
   min-width: 42px;
-  color: #6b7280;
-  font-size: 11px;
+  color: var(--ah-text-secondary);
+  font-size: 12px;
   font-variant-numeric: tabular-nums;
   text-align: center;
 }
@@ -2509,7 +2509,7 @@ onActivated(() => {
   width: 1px;
   height: 16px;
   margin: 0 4px;
-  background: #e5e7eb;
+  background: var(--ah-border);
 }
 
 /* 试跑是工具栏唯一主色按钮，视觉权重高于缩放 */
@@ -2519,7 +2519,7 @@ onActivated(() => {
   padding: 0 14px;
   border: 0;
   border-radius: 999px;
-  background: #635bff;
+  background: var(--ah-primary);
   color: #fff;
   font-size: 12px;
   font-weight: 600;
@@ -2528,11 +2528,11 @@ onActivated(() => {
 }
 
 .wf-dock__run:hover {
-  background: #5147e6;
+  background: var(--ah-primary-hover);
 }
 
 .wf-dock__run:disabled {
-  background: #c7c3ff;
+  background: var(--el-color-primary-light-5);
   cursor: not-allowed;
 }
 
@@ -2568,13 +2568,13 @@ onActivated(() => {
 
 .wf-tip {
   margin: -4px 0 10px;
-  color: #9ca3af;
-  font-size: 11px;
+  color: var(--ah-text-faint);
+  font-size: 12px;
   line-height: 1.5;
 }
 
 .wf-tip--error {
-  color: #dc2626;
+  color: var(--ah-danger);
 }
 
 .wf-delete {
@@ -2583,14 +2583,14 @@ onActivated(() => {
 
 .wf-props__empty {
   padding: 18px 6px;
-  color: #9ca3af;
+  color: var(--ah-text-faint);
   font-size: 12px;
   line-height: 1.7;
   text-align: center;
 }
 
 .wf-props__empty-hint {
-  font-size: 11px;
+  font-size: 12px;
 }
 
 .wf-footer {
@@ -2601,9 +2601,9 @@ onActivated(() => {
   gap: 12px;
   margin-top: 10px;
   padding: 8px 12px;
-  border: 1px solid var(--ah-border, #e5e7eb);
-  border-radius: 10px;
-  background: #fff;
+  border: 1px solid var(--ah-border, #ebeef5);
+  border-radius: 8px;
+  background: var(--ah-surface);
   color: var(--ah-text-secondary, #6b7280);
   font-size: 12px;
 }
@@ -2613,15 +2613,15 @@ onActivated(() => {
 }
 
 .wf-footer__dirty {
-  color: #b45309;
+  color: var(--ah-warning);
 }
 
 .wf-footer .is-error {
-  color: #dc2626;
+  color: var(--ah-danger);
 }
 
 .wf-footer .is-warn {
-  color: #b45309;
+  color: var(--ah-warning);
 }
 
 /* VueFlow 铺满容器 */

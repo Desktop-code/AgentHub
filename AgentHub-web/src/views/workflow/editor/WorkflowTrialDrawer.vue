@@ -1271,16 +1271,16 @@ function formatTime(value?: string | null): string {
 /* ==================== 配置区 ==================== */
 .wf-exec__config {
   flex: none;
-  border: 1px solid #e5e7eb;
-  border-radius: 10px;
-  background: #fff;
+  border: 1px solid var(--ah-border);
+  border-radius: 8px;
+  background: var(--ah-surface);
   overflow: hidden;
   transition: border-color 0.2s ease;
 }
 
 .wf-exec__config.is-collapsed {
-  border-color: #ddd9ff;
-  background: #fbfaff;
+  border-color: var(--el-color-primary-light-6);
+  background: var(--ah-primary-tint);
 }
 
 /* 关键折叠动画：1fr → 0fr，内容高度自适应，无需写死 max-height */
@@ -1317,7 +1317,7 @@ function formatTime(value?: string | null): string {
 }
 
 .wf-exec__label {
-  color: #374151;
+  color: var(--ah-text-regular);
   font-size: 13px;
   font-weight: 600;
 }
@@ -1333,7 +1333,7 @@ function formatTime(value?: string | null): string {
 }
 
 .wf-exec__error {
-  color: #dc2626;
+  color: var(--ah-danger);
   font-size: 12px;
 }
 
@@ -1353,7 +1353,7 @@ function formatTime(value?: string | null): string {
   padding: 0;
   border: 0;
   background: none;
-  color: #635bff;
+  color: var(--ah-primary);
   font-size: 12px;
   cursor: pointer;
 }
@@ -1388,21 +1388,21 @@ function formatTime(value?: string | null): string {
 
 .wf-exec__brief-version {
   flex: none;
-  color: #4c1d95;
+  color: var(--ah-primary-active);
   font-size: 12px;
-  font-weight: 700;
+  font-weight: 600;
 }
 
 .wf-exec__brief-sep {
   flex: none;
-  color: #c4b5fd;
+  color: var(--el-color-primary-light-5);
 }
 
 .wf-exec__brief-input {
   flex: 1;
   min-width: 0;
   overflow: hidden;
-  color: #6b7280;
+  color: var(--ah-text-secondary);
   font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
   font-size: 12px;
   text-overflow: ellipsis;
@@ -1411,7 +1411,7 @@ function formatTime(value?: string | null): string {
 
 .wf-exec__brief-toggle {
   flex: none;
-  color: #635bff;
+  color: var(--ah-primary);
   font-size: 12px;
   font-weight: 600;
 }
@@ -1435,9 +1435,9 @@ function formatTime(value?: string | null): string {
   align-items: center;
   gap: 8px;
   padding: 8px 12px;
-  border: 1px solid #e5e7eb;
-  border-radius: 10px;
-  background: #fafafb;
+  border: 1px solid var(--ah-border);
+  border-radius: 8px;
+  background: var(--ah-surface-muted);
 }
 
 .wf-exec__status-dot {
@@ -1445,40 +1445,40 @@ function formatTime(value?: string | null): string {
   width: 8px;
   height: 8px;
   border-radius: 50%;
-  background: #9ca3af;
+  background: var(--ah-text-faint);
 }
 
 .wf-exec__statusbar.is-running {
-  border-color: #ddd9ff;
-  background: #f6f4ff;
+  border-color: var(--el-color-primary-light-6);
+  background: var(--ah-primary-tint);
 }
 
 .wf-exec__statusbar.is-running .wf-exec__status-dot {
-  background: #635bff;
+  background: var(--ah-primary);
   animation: wf-exec-pulse 1.4s ease-out infinite;
 }
 
 .wf-exec__statusbar.is-success .wf-exec__status-dot {
-  background: #10b981;
+  background: var(--ah-success);
 }
 
 .wf-exec__statusbar.is-failed .wf-exec__status-dot {
-  background: #ef4444;
+  background: var(--ah-danger);
 }
 
 .wf-exec__status-text {
-  color: #111827;
+  color: var(--ah-text);
   font-size: 13px;
   font-weight: 600;
 }
 
 .wf-exec__statusbar.is-running .wf-exec__status-text {
-  color: #4c1d95;
+  color: var(--ah-primary-active);
 }
 
 .wf-exec__status-meta {
   margin-left: auto;
-  color: #9ca3af;
+  color: var(--ah-text-faint);
   font-size: 12px;
 }
 
@@ -1496,13 +1496,13 @@ function formatTime(value?: string | null): string {
 
 .wf-exec__blank {
   padding: 40px 8px;
-  color: #9ca3af;
+  color: var(--ah-text-faint);
   text-align: center;
 }
 
 .wf-exec__blank-title {
   margin-bottom: 6px;
-  color: #6b7280;
+  color: var(--ah-text-secondary);
   font-size: 13px;
   font-weight: 600;
 }
@@ -1517,9 +1517,9 @@ function formatTime(value?: string | null): string {
   align-items: center;
   gap: 10px;
   padding: 16px 12px;
-  border: 1px dashed #ddd9ff;
-  border-radius: 10px;
-  color: #4c1d95;
+  border: 1px dashed var(--el-color-primary-light-6);
+  border-radius: 8px;
+  color: var(--ah-primary-active);
   font-size: 13px;
 }
 
@@ -1528,7 +1528,7 @@ function formatTime(value?: string | null): string {
   width: 9px;
   height: 9px;
   border-radius: 50%;
-  background: #635bff;
+  background: var(--ah-primary);
 }
 
 /* ---------- 纵向时间轴 ---------- */
@@ -1562,8 +1562,8 @@ function formatTime(value?: string | null): string {
   width: 9px;
   height: 9px;
   border-radius: 50%;
-  background: #d1d5db;
-  box-shadow: 0 0 0 2px #f3f4f6;
+  background: var(--ah-border);
+  box-shadow: 0 0 0 2px var(--ah-neutral-tint);
   transition: background 0.2s ease;
 }
 
@@ -1573,7 +1573,7 @@ function formatTime(value?: string | null): string {
   bottom: 0;
   left: 5px;
   width: 2px;
-  background: #e4e7ef;
+  background: var(--ah-border);
 }
 
 .wf-exec__step:last-child .wf-exec__line {
@@ -1581,19 +1581,19 @@ function formatTime(value?: string | null): string {
 }
 
 .wf-exec__step.is-success .wf-exec__dot {
-  background: #10b981;
-  box-shadow: 0 0 0 2px #d1fae5;
+  background: var(--ah-success);
+  box-shadow: 0 0 0 2px var(--ah-success-tint);
 }
 
 .wf-exec__step.is-failed .wf-exec__dot {
-  background: #ef4444;
-  box-shadow: 0 0 0 2px #fee2e2;
+  background: var(--ah-danger);
+  box-shadow: 0 0 0 2px var(--ah-danger-tint);
 }
 
 /* 运行中的紫色呼吸灯 */
 .wf-exec__step.is-running .wf-exec__dot {
-  background: #635bff;
-  box-shadow: 0 0 0 2px #e9e6ff;
+  background: var(--ah-primary);
+  box-shadow: 0 0 0 2px var(--ah-primary-tint);
   animation: wf-exec-pulse 1.4s ease-out infinite;
 }
 
@@ -1601,21 +1601,21 @@ function formatTime(value?: string | null): string {
   flex: 1;
   min-width: 0;
   margin-bottom: 10px;
-  border: 1px solid #e5e7eb;
-  border-radius: 10px;
-  background: #fff;
+  border: 1px solid var(--ah-border);
+  border-radius: 8px;
+  background: var(--ah-surface);
   transition:
     border-color 0.2s ease,
     box-shadow 0.2s ease;
 }
 
 .wf-exec__step.is-failed .wf-exec__card {
-  border-color: #fecaca;
-  background: #fffbfb;
+  border-color: var(--el-color-danger-light-5);
+  background: var(--ah-danger-tint);
 }
 
 .wf-exec__step.is-running .wf-exec__card {
-  border-color: #ddd9ff;
+  border-color: var(--el-color-primary-light-6);
 }
 
 /* 状态跃迁时闪一下，替代 SSE 推送的「新事件」提示 */
@@ -1630,7 +1630,7 @@ function formatTime(value?: string | null): string {
   width: 100%;
   padding: 9px 11px;
   border: 0;
-  border-radius: 10px;
+  border-radius: 8px;
   background: transparent;
   text-align: left;
   cursor: pointer;
@@ -1640,9 +1640,9 @@ function formatTime(value?: string | null): string {
   flex: none;
   padding: 1px 6px;
   border-radius: 4px;
-  background: #f3f4f6;
-  color: #6b7280;
-  font-size: 11px;
+  background: var(--ah-neutral-tint);
+  color: var(--ah-text-secondary);
+  font-size: 12px;
   font-weight: 600;
 }
 
@@ -1650,7 +1650,7 @@ function formatTime(value?: string | null): string {
   flex: 1;
   min-width: 0;
   overflow: hidden;
-  color: #111827;
+  color: var(--ah-text);
   font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
   font-size: 12px;
   text-overflow: ellipsis;
@@ -1659,13 +1659,13 @@ function formatTime(value?: string | null): string {
 
 .wf-exec__card-time {
   flex: none;
-  color: #9ca3af;
-  font-size: 11px;
+  color: var(--ah-text-faint);
+  font-size: 12px;
 }
 
 .wf-exec__card-chevron {
   flex: none;
-  color: #9ca3af;
+  color: var(--ah-text-faint);
   font-size: 12px;
   transition: transform 0.2s ease;
 }
@@ -1688,22 +1688,22 @@ function formatTime(value?: string | null): string {
 }
 
 .wf-exec__block-title {
-  color: #6b7280;
-  font-size: 11px;
+  color: var(--ah-text-secondary);
+  font-size: 12px;
   font-weight: 600;
 }
 
 .wf-exec__card-error {
   padding: 6px 8px;
   border-radius: 6px;
-  background: #fef2f2;
-  color: #b91c1c;
+  background: var(--ah-danger-tint);
+  color: var(--ah-danger);
   font-size: 12px;
   line-height: 1.5;
 }
 
 .wf-exec__muted {
-  color: #9ca3af;
+  color: var(--ah-text-faint);
   font-size: 12px;
 }
 
@@ -1713,8 +1713,8 @@ function formatTime(value?: string | null): string {
   overflow: auto;
   padding: 8px;
   border-radius: 8px;
-  background: #f9fafb;
-  color: #111827;
+  background: var(--ah-surface-muted);
+  color: var(--ah-text);
   font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
   font-size: 12px;
   white-space: pre-wrap;
@@ -1729,7 +1729,7 @@ function formatTime(value?: string | null): string {
   padding: 0;
   border: 0;
   background: none;
-  color: #dc2626;
+  color: var(--ah-danger);
   font-size: 12px;
   cursor: pointer;
 }
@@ -1756,10 +1756,10 @@ function formatTime(value?: string | null): string {
   align-items: center;
   gap: 8px;
   padding: 6px 8px;
-  border: 1px solid #e5e7eb;
+  border: 1px solid var(--ah-border);
   border-radius: 8px;
-  background: #fff;
-  color: #374151;
+  background: var(--ah-surface);
+  color: var(--ah-text-regular);
   font-size: 12px;
   text-align: left;
   cursor: pointer;
@@ -1767,8 +1767,8 @@ function formatTime(value?: string | null): string {
 
 .wf-exec__history-row:hover,
 .wf-exec__history-row.is-active {
-  border-color: #635bff;
-  background: #f5f3ff;
+  border-color: var(--ah-primary);
+  background: var(--ah-primary-tint);
 }
 
 .wf-exec__history-id {
@@ -1776,12 +1776,12 @@ function formatTime(value?: string | null): string {
 }
 
 .wf-exec__history-version {
-  color: #6b7280;
+  color: var(--ah-text-secondary);
 }
 
 .wf-exec__history-time {
   margin-left: auto;
-  color: #9ca3af;
+  color: var(--ah-text-faint);
 }
 
 /* ---------- 人工待办 ---------- */
@@ -1790,7 +1790,7 @@ function formatTime(value?: string | null): string {
   flex-direction: column;
   gap: 8px;
   padding: 12px 0 4px;
-  border-top: 1px dashed #e5e7eb;
+  border-top: 1px dashed var(--ah-border);
   margin-top: 4px;
 }
 
@@ -1799,16 +1799,16 @@ function formatTime(value?: string | null): string {
   flex-direction: column;
   gap: 8px;
   padding: 10px;
-  border: 1px solid #fde68a;
+  border: 1px solid var(--el-color-warning-light-5);
   border-radius: 8px;
-  background: #fffbeb;
+  background: var(--ah-warning-tint);
 }
 
 .wf-exec__human-head {
   display: flex;
   flex-wrap: wrap;
   gap: 10px;
-  color: #92400e;
+  color: var(--ah-warning);
   font-size: 12px;
 }
 
@@ -1818,7 +1818,7 @@ function formatTime(value?: string | null): string {
 }
 
 .wf-exec__human-tip {
-  color: #b45309;
+  color: var(--ah-warning);
   font-size: 12px;
   line-height: 1.5;
 }
@@ -1827,8 +1827,8 @@ function formatTime(value?: string | null): string {
 .wf-exec__md {
   padding: 8px 10px;
   border-radius: 8px;
-  background: #f9fafb;
-  color: #374151;
+  background: var(--ah-surface-muted);
+  color: var(--ah-text-regular);
   font-size: 12px;
   line-height: 1.6;
   overflow-wrap: anywhere;
@@ -1843,7 +1843,7 @@ function formatTime(value?: string | null): string {
 .wf-exec__md :deep(h3) {
   margin: 0.45em 0 0.25em;
   font-size: 1.05em;
-  font-weight: 650;
+  font-weight: 600;
 }
 
 .wf-exec__md :deep(ul),
@@ -1861,7 +1861,7 @@ function formatTime(value?: string | null): string {
   padding: 8px 10px;
   overflow: auto;
   border-radius: 8px;
-  background: #eef0f6;
+  background: var(--ah-surface-muted);
 }
 
 .wf-exec__md :deep(.md-table-wrap) {
@@ -1876,20 +1876,20 @@ function formatTime(value?: string | null): string {
   width: auto;
   max-width: 100%;
   border-collapse: collapse;
-  border: 1px solid #d0d5dd;
-  background: #fff;
+  border: 1px solid var(--ah-border);
+  background: var(--ah-surface);
 }
 
 .wf-exec__md :deep(.md-table th),
 .wf-exec__md :deep(.md-table td) {
   padding: 4px 8px;
-  border: 1px solid #d0d5dd;
+  border: 1px solid var(--ah-border);
   text-align: left;
   vertical-align: top;
 }
 
 .wf-exec__md :deep(.md-table th) {
-  background: #f3f4f8;
+  background: var(--ah-neutral-tint);
   font-weight: 600;
 }
 
@@ -1922,15 +1922,15 @@ function formatTime(value?: string | null): string {
 /* 状态跃迁高亮：卡片边框由紫回到常态 */
 @keyframes wf-exec-flash {
   0% {
-    border-color: #635bff;
+    border-color: var(--ah-primary);
     box-shadow: 0 0 0 3px rgba(99, 91, 255, 0.18);
   }
   60% {
-    border-color: #635bff;
+    border-color: var(--ah-primary);
     box-shadow: 0 0 0 3px rgba(99, 91, 255, 0.12);
   }
   100% {
-    border-color: #e5e7eb;
+    border-color: var(--ah-border);
     box-shadow: none;
   }
 }

@@ -206,7 +206,7 @@ const emit = defineEmits<{
 .pc-notice-icon {
   margin-top: 2px;
   flex: 0 0 auto;
-  font-size: 15px;
+  font-size: 14px;
 }
 
 .pc-notice-text {

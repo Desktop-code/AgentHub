@@ -908,11 +908,11 @@ onMounted(load)
 
 /* 维度未获取时用警示色，和普通灰色说明区分 */
 .hint-error {
-  color: var(--el-color-warning, #e6a23c);
+  color: var(--ah-warning);
 }
 
 .muted {
-  color: var(--ah-text-muted, #9ca3af);
+  color: var(--ah-text-secondary, #6b7280);
   font-size: 12px;
 }
 
@@ -944,21 +944,21 @@ onMounted(load)
 }
 
 .tag-on {
-  --el-tag-text-color: #10b981;
-  --el-tag-border-color: #a7f3d0;
-  --el-tag-bg-color: #ecfdf5;
+  --el-tag-text-color: var(--ah-success);
+  --el-tag-border-color: var(--el-color-success-light-5);
+  --el-tag-bg-color: var(--ah-success-tint);
 }
 
 .tag-error {
-  --el-tag-text-color: #ef4444;
-  --el-tag-border-color: #fecaca;
-  --el-tag-bg-color: #fef2f2;
+  --el-tag-text-color: var(--ah-danger);
+  --el-tag-border-color: var(--el-color-danger-light-5);
+  --el-tag-bg-color: var(--ah-danger-tint);
 }
 
 .tag-off {
-  --el-tag-text-color: #6b7280;
-  --el-tag-border-color: #e5e7eb;
-  --el-tag-bg-color: #f3f4f6;
+  --el-tag-text-color: var(--ah-neutral);
+  --el-tag-border-color: var(--ah-border);
+  --el-tag-bg-color: var(--ah-neutral-tint);
 }
 </style>
 

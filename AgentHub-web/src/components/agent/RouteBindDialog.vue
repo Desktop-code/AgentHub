@@ -179,7 +179,7 @@ function submit() {
   height: 36px;
   line-height: 36px;
   font-size: 13px;
-  color: #6b7280;
+  color: var(--ah-text-secondary);
   border: none;
 }
 .advanced :deep(.el-collapse-item__wrap) {
@@ -188,13 +188,13 @@ function submit() {
 .hint {
   margin-top: 4px;
   font-size: 12px;
-  color: #9ca3af;
+  color: var(--ah-text-faint);
   line-height: 1.4;
 }
 
 .hidden-hint {
   margin: 4px 0 0;
-  color: #b45309;
+  color: var(--ah-warning);
   font-size: 12px;
   line-height: 1.5;
 }

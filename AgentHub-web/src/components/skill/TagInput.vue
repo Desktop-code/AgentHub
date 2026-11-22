@@ -224,14 +224,14 @@ function onBlur() {
   min-height: 32px;
   padding: 2px 8px;
   background: var(--el-fill-color-blank, #fff);
-  border: 1px solid var(--el-border-color, #dcdfe6);
+  border: 1px solid var(--el-border-color, #ebeef5);
   border-radius: 4px;
   cursor: text;
   transition: border-color 0.2s ease;
 }
 
 .tag-input:hover {
-  border-color: var(--el-border-color-hover, #c0c4cc);
+  border-color: var(--el-border-color-hover, #9ca3af);
 }
 
 .tag-input.is-focus {
@@ -240,7 +240,7 @@ function onBlur() {
 
 .tag-input.is-disabled {
   background: var(--el-disabled-bg-color, #f5f7fa);
-  border-color: var(--el-border-color-light, #e4e7ed);
+  border-color: var(--el-border-color-light, #f2f6fc);
   cursor: not-allowed;
 }
 
@@ -254,7 +254,7 @@ function onBlur() {
   min-width: 120px;
   height: 24px;
   padding: 0;
-  color: var(--el-text-color-regular, #606266);
+  color: var(--el-text-color-regular, #374151);
   font-size: 14px;
   line-height: 24px;
   background: transparent;
@@ -281,7 +281,7 @@ function onBlur() {
   width: 16px;
   height: 16px;
   padding: 0;
-  color: var(--el-text-color-placeholder, #a8abb2);
+  color: var(--el-text-color-placeholder, #9ca3af);
   font-size: 14px;
   line-height: 1;
   background: transparent;
@@ -292,11 +292,11 @@ function onBlur() {
 }
 
 .tag-input__clear:hover {
-  color: var(--el-text-color-secondary, #909399);
+  color: var(--el-text-color-secondary, #6b7280);
   background: var(--el-fill-color-light, #f5f7fa);
 }
 
 .tag-input__input::placeholder {
-  color: var(--el-text-color-placeholder, #a8abb2);
+  color: var(--el-text-color-placeholder, #9ca3af);
 }
 </style>

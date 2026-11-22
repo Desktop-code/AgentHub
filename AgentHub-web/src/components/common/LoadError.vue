@@ -49,9 +49,9 @@ const emit = defineEmits<{
   gap: 10px;
   min-height: 72px;
   padding: 14px 16px;
-  border: 1px solid #fecaca;
+  border: 1px solid var(--el-color-danger-light-5);
   border-radius: 8px;
-  background: #fef2f2;
+  background: var(--ah-danger-tint);
 }
 
 /* 居中态：占满列表区域并纵向居中，避免错误条孤零零贴在角落 */
@@ -65,7 +65,7 @@ const emit = defineEmits<{
 
 .load-error__icon {
   flex: none;
-  color: #dc2626;
+  color: var(--ah-danger);
 }
 
 .load-error__text {
@@ -75,7 +75,7 @@ const emit = defineEmits<{
 
 .load-error__title {
   margin: 0;
-  color: #b91c1c;
+  color: var(--ah-danger);
   font-size: 14px;
   font-weight: 600;
   line-height: 1.5;
@@ -83,7 +83,7 @@ const emit = defineEmits<{
 
 .load-error__reason {
   margin: 2px 0 0;
-  color: #7f1d1d;
+  color: var(--ah-text-regular);
   font-size: 12px;
   line-height: 1.6;
   word-break: break-word;

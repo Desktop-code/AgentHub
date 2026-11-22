@@ -696,7 +696,7 @@ async function onAccountCommand(command: string | number) {
   margin: 2px 12px;
   padding: 0 12px;
   border-radius: var(--ah-radius-md);
-  color: #4b5563;
+  color: var(--ah-text-regular);
   text-decoration: none;
 }
 
@@ -719,7 +719,7 @@ async function onAccountCommand(command: string | number) {
   padding: 0 12px;
   color: var(--ah-text-muted, #9ca3af);
   font-size: 12px;
-  font-weight: 700;
+  font-weight: 600;
   letter-spacing: 0.02em;
   pointer-events: none;
   user-select: none;
@@ -743,7 +743,7 @@ async function onAccountCommand(command: string | number) {
 
 .dir-btn:hover,
 .nav-link:hover {
-  background: #f3f4f6;
+  background: var(--ah-neutral-tint);
 }
 
 .dir-btn.is-current {
@@ -811,7 +811,7 @@ async function onAccountCommand(command: string | number) {
 }
 
 .account:hover {
-  background: #f5f6fa;
+  background: var(--ah-neutral-tint);
 }
 
 .avatar {
@@ -822,10 +822,10 @@ async function onAccountCommand(command: string | number) {
   overflow: hidden;
   flex: none;
   border-radius: 50%;
-  background: #e4e2ff;
+  background: var(--el-color-primary-light-8, #e4e2ff);
   color: var(--ah-primary-hover);
   font-size: 13px;
-  font-weight: 650;
+  font-weight: 600;
 }
 
 .avatar.has-photo {
@@ -864,8 +864,8 @@ async function onAccountCommand(command: string | number) {
 
 .role-tag {
   overflow: hidden;
-  color: var(--ah-text-muted, #9ca3af);
-  font-size: 11px;
+  color: var(--ah-text-secondary, #6b7280);
+  font-size: 12px;
   font-weight: 500;
   line-height: 1.2;
   text-overflow: ellipsis;
@@ -884,7 +884,7 @@ async function onAccountCommand(command: string | number) {
 }
 
 .collapse-btn:hover {
-  background: #f3f4f6;
+  background: var(--ah-neutral-tint);
   color: var(--ah-text);
 }
 
@@ -1001,39 +1001,39 @@ async function onAccountCommand(command: string | number) {
 <style>
 .aside-flyout.el-popper {
   padding: 6px;
-  border: 1px solid var(--ah-border, #e5e7eb);
-  border-radius: 10px;
-  box-shadow: 0 8px 24px rgba(15, 23, 42, 0.12);
+  border: 1px solid var(--ah-border, #ebeef5);
+  border-radius: 8px;
+  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.08);
 }
 
 .aside-flyout .flyout-title {
   padding: 6px 10px 8px;
-  color: var(--ah-text-muted, #9ca3af);
+  color: var(--ah-text-secondary, #6b7280);
   font-size: 12px;
-  font-weight: 700;
+  font-weight: 600;
   letter-spacing: 0.02em;
 }
 
 .aside-flyout .flyout-group-title {
   padding: 8px 10px 4px;
-  color: var(--ah-text-muted, #9ca3af);
-  font-size: 11px;
-  font-weight: 700;
+  color: var(--ah-text-secondary, #6b7280);
+  font-size: 12px;
+  font-weight: 600;
 }
 
 .aside-flyout .flyout-link {
   display: block;
   padding: 8px 10px;
   border-radius: 8px;
-  color: #4b5563;
+  color: var(--ah-text-regular);
   font-size: 13px;
   text-decoration: none;
   line-height: 1.3;
 }
 
 .aside-flyout .flyout-link:hover {
-  background: #f3f4f6;
-  color: var(--ah-text, #111827);
+  background: var(--ah-neutral-tint);
+  color: var(--ah-text, #1f2937);
 }
 
 .aside-flyout .flyout-link.is-current {

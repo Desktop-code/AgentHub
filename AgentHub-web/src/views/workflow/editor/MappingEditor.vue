@@ -115,8 +115,8 @@ function sameMap(left: Record<string, string>, right: Record<string, string>): b
 
 .mapping__hint {
   margin-top: 4px;
-  color: #9ca3af;
-  font-size: 11px;
+  color: var(--ah-text-faint);
+  font-size: 12px;
   line-height: 1.5;
 }
 </style>

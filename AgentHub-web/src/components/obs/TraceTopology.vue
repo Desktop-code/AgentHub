@@ -39,7 +39,7 @@
         role="img"
         aria-label="执行拓扑"
       >
-        <g fill="none" stroke="#d0d5dd" stroke-width="1.5">
+        <g fill="none" stroke="#ebeef5" stroke-width="1.5">
           <path v-for="(d, i) in layout.edges" :key="`e-${i}`" :d="d" />
         </g>
         <g
@@ -59,22 +59,22 @@
             stroke-width="1.5"
           />
           <rect :width="4" :height="NODE_H" rx="2" :fill="node.stroke" />
-          <text x="14" y="22" fill="#667085" font-size="11">#{{ node.stepLabel }} {{ node.typeLabel }}</text>
+          <text x="14" y="22" fill="#6b7280" font-size="12">#{{ node.stepLabel }} {{ node.typeLabel }}</text>
           <text
             v-if="node.latency"
             :x="NODE_W - 10"
             y="22"
             text-anchor="end"
-            fill="#667085"
-            font-size="11"
+            fill="#6b7280"
+            font-size="12"
           >{{ node.latency }}</text>
-          <text x="14" y="40" fill="#101828" font-size="13" font-weight="600">{{ node.name }}</text>
+          <text x="14" y="40" fill="#1f2937" font-size="13" font-weight="600">{{ node.name }}</text>
           <!-- 角标贴在框外：框内空间已给序号/耗时/名称，塞进去必然重叠 -->
           <text
             v-if="node.summaryLabel"
             x="2"
             :y="NODE_H + 12"
-            fill="#6366F1"
+            fill="#635BFF"
             font-size="10"
             font-weight="600"
           >{{ node.summaryLabel }}</text>
@@ -82,7 +82,7 @@
             v-if="node.retryLabel"
             x="2"
             :y="NODE_H + 12"
-            fill="#DC6803"
+            fill="#b45309"
             font-size="10"
             font-weight="600"
           >{{ node.retryLabel }}</text>
@@ -92,7 +92,7 @@
             :x="NODE_W"
             :y="NODE_H + 12"
             text-anchor="end"
-            fill="#DC2626"
+            fill="#b91c1c"
             font-size="10"
             font-weight="600"
           >ERROR</text>
@@ -889,9 +889,9 @@ function typeLabel(span: ObsSpan): string {
   margin-bottom: 16px;
   padding: 8px;
   max-width: 100%;
-  background: #f8fafc;
+  background: var(--ah-surface-muted);
   border: 1px solid var(--ah-border);
-  border-radius: 12px;
+  border-radius: 8px;
 }
 
 /* 标题行固定在卡片顶部，图横向滚动时导出按钮仍停在右上角 */
@@ -904,14 +904,14 @@ function typeLabel(span: ObsSpan): string {
 }
 
 .topo__title {
-  color: var(--ah-text-secondary, #667085);
+  color: var(--ah-text-secondary, #6b7280);
   font-size: 12px;
 }
 
 /* 纯图标按钮：收紧内边距，让下载图标贴着右上角 */
 .topo__export {
   padding: 2px;
-  color: var(--ah-text-secondary, #667085);
+  color: var(--ah-text-secondary, #6b7280);
 }
 
 .topo__export:hover {

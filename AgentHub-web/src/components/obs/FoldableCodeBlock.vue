@@ -97,7 +97,7 @@ watch(
 
 .fold-code__meta {
   color: var(--ah-text-secondary);
-  font-size: 11px;
+  font-size: 12px;
   font-weight: 400;
   font-variant-numeric: tabular-nums;
 }
@@ -105,7 +105,7 @@ watch(
 .fold-code__pre {
   margin: 0;
   padding: 10px 12px;
-  background: #0f172a0a;
+  background: var(--ah-surface-muted);
   border: 1px solid var(--ah-border);
   border-radius: 8px;
   font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
@@ -132,19 +132,19 @@ watch(
 }
 
 .fold-code__code :deep(.cd-key) {
-  color: #635bff;
+  color: var(--ah-primary);
 }
 
 .fold-code__code :deep(.cd-str) {
-  color: #067647;
+  color: var(--ah-success);
 }
 
 .fold-code__code :deep(.cd-num) {
-  color: #b54708;
+  color: var(--ah-warning);
 }
 
 .fold-code__code :deep(.cd-lit) {
-  color: #026aa2;
+  color: var(--ah-text-regular);
 }
 
 .fold-code__code :deep(.cd-empty) {

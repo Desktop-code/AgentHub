@@ -335,13 +335,13 @@ watch(
   width: 36px;
   height: 36px;
   background: rgba(255, 255, 255, 0.92);
-  border-color: var(--ah-border, #e4e7ec);
-  box-shadow: 0 4px 12px rgba(16, 24, 40, 0.12);
+  border-color: var(--ah-border, #ebeef5);
+  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.08);
   backdrop-filter: blur(2px);
 }
 
 .trace-flow__totop-btn:hover {
   color: var(--ah-primary, #635bff);
-  border-color: #c7c2f5;
+  border-color: var(--el-color-primary-light-5);
 }
 </style>

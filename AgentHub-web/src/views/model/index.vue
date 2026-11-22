@@ -495,7 +495,7 @@
                         <el-tag :type="row.lastTestOk === 1 ? 'success' : 'danger'" size="small">
                           {{ row.lastTestOk === 1 ? '成功' : '失败' }}
                         </el-tag>
-                        <span>{{ row.lastTestTime }}</span>
+                        <span>{{ formatDateTime(row.lastTestTime) }}</span>
                         <span v-if="row.lastTestMsg"> · {{ row.lastTestMsg }}</span>
                       </span>
                     </template>
@@ -629,6 +629,7 @@ import { useBrowseFlip } from '@/composables/useBrowseFlip'
 import { useListIndexColumn } from '@/composables/listIndex'
 import { requestErrorText } from '@/utils/requestError'
 import { useUserStore } from '@/stores/user'
+import { formatDateTime } from '@/utils/datetime'
 import type { ConnectivityResult, InstanceRow, ProviderCard } from '@/types/model'
 import type { ConfirmNotice, ConfirmRow } from '@/types'
 import type {
@@ -1871,24 +1872,25 @@ onUnmounted(() => {
   overflow: hidden;
 }
 
+/* 提示条底色只用令牌语义浅底：琥珀 / 故障 / 停用灰 / 通过绿，不引入蓝色 info 底 */
 .vector-alert.el-alert--warning {
-  --el-alert-bg-color: #fffbeb;
-  background-color: #fffbeb;
+  --el-alert-bg-color: var(--ah-warning-tint);
+  background-color: var(--ah-warning-tint);
 }
 
 .vector-alert.el-alert--error {
-  --el-alert-bg-color: #fef2f2;
-  background-color: #fef2f2;
+  --el-alert-bg-color: var(--ah-danger-tint);
+  background-color: var(--ah-danger-tint);
 }
 
 .vector-alert.el-alert--info {
-  --el-alert-bg-color: #f0f5ff;
-  background-color: #f0f5ff;
+  --el-alert-bg-color: var(--ah-neutral-tint);
+  background-color: var(--ah-neutral-tint);
 }
 
 .vector-alert.el-alert--success {
-  --el-alert-bg-color: #ecfdf5;
-  background-color: #ecfdf5;
+  --el-alert-bg-color: var(--ah-success-tint);
+  background-color: var(--ah-success-tint);
 }
 
 .vector-alert-body {
@@ -1933,8 +1935,8 @@ onUnmounted(() => {
 }
 
 .card-del:hover:not(:disabled) {
-  color: #ef4444;
-  background: #fef2f2;
+  color: var(--ah-danger);
+  background: var(--ah-danger-tint);
 }
 
 .card-del:disabled {
@@ -1954,7 +1956,7 @@ onUnmounted(() => {
   width: 28px;
   height: 28px;
   border-radius: 6px;
-  color: #b8860b;
+  color: var(--ah-warning);
   font-size: 16px;
   cursor: help;
 }
@@ -1963,8 +1965,8 @@ onUnmounted(() => {
   margin: 0;
   padding-right: 32px;
   overflow: hidden;
-  font-size: 15px;
-  font-weight: 650;
+  font-size: 14px;
+  font-weight: 600;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
@@ -2007,7 +2009,7 @@ onUnmounted(() => {
 .detail-title-row h2 {
   margin: 0;
   font-size: 16px;
-  font-weight: 650;
+  font-weight: 600;
 }
 
 .detail-actions {

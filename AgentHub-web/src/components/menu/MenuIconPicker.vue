@@ -197,7 +197,7 @@ function pick(name: string) {
   border: 1px solid transparent;
   border-radius: var(--ah-radius-md);
   color: var(--ah-text);
-  font-size: 10px;
+  font-size: 12px;
   line-height: 1.2;
 }
 

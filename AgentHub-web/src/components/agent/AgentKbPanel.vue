@@ -434,28 +434,28 @@ onMounted(() => {
 }
 
 .tag-on {
-  --el-tag-text-color: #10b981;
-  --el-tag-border-color: #a7f3d0;
-  --el-tag-bg-color: #ecfdf5;
+  --el-tag-text-color: var(--ah-success);
+  --el-tag-border-color: var(--el-color-success-light-5);
+  --el-tag-bg-color: var(--ah-success-tint);
 }
 
 .tag-error {
-  --el-tag-text-color: #ef4444;
-  --el-tag-border-color: #fecaca;
-  --el-tag-bg-color: #fef2f2;
+  --el-tag-text-color: var(--ah-danger);
+  --el-tag-border-color: var(--el-color-danger-light-5);
+  --el-tag-bg-color: var(--ah-danger-tint);
 }
 
 .tag-off {
-  --el-tag-text-color: #6b7280;
-  --el-tag-border-color: #e5e7eb;
-  --el-tag-bg-color: #f3f4f6;
+  --el-tag-text-color: var(--ah-neutral);
+  --el-tag-border-color: var(--ah-border);
+  --el-tag-bg-color: var(--ah-neutral-tint);
 }
 
 /* 检索链路块：与知识库列表用分隔线隔开，明确是同一 Tab 的另一段配置 */
 .chain-block {
   margin-top: 4px;
   padding-top: 14px;
-  border-top: 1px solid var(--ah-border, #e8eaf0);
+  border-top: 1px solid var(--ah-border, #ebeef5);
 }
 
 .chain-head {
