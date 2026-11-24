@@ -196,7 +196,7 @@ function judgeModelLabel(item: MaJudgeModelOption): string {
 .form-block {
   margin-top: 18px;
   padding-top: 18px;
-  border-top: 1px solid var(--ah-border, #e8eaf0);
+  border-top: 1px solid var(--ah-border, #ebeef5);
 }
 
 .form-block--first {
@@ -209,9 +209,9 @@ function judgeModelLabel(item: MaJudgeModelOption): string {
   display: flex;
   align-items: center;
   margin: 0 0 16px;
-  color: var(--ah-text-primary, #1f2430);
+  color: var(--ah-text-primary, #1f2937);
   font-size: 14px;
-  font-weight: 700;
+  font-weight: 600;
   letter-spacing: 0.02em;
 }
 
@@ -227,7 +227,7 @@ function judgeModelLabel(item: MaJudgeModelOption): string {
 .form-block__note {
   margin: -4px 0 0;
   padding-left: 112px;
-  color: var(--ah-text-muted, #9ca3af);
+  color: var(--ah-text-secondary, #6b7280);
   font-size: 12px;
   line-height: 1.6;
 }
@@ -235,7 +235,7 @@ function judgeModelLabel(item: MaJudgeModelOption): string {
 /* 协议说明图标：跟在标题右侧，弱化成辅助色，hover 才出完整口径 */
 .form-block__info {
   margin-left: 6px;
-  color: var(--ah-text-muted, #9ca3af);
+  color: var(--ah-text-secondary, #6b7280);
   font-size: 14px;
   cursor: help;
 }
@@ -243,7 +243,7 @@ function judgeModelLabel(item: MaJudgeModelOption): string {
 /* 下拉为空时的兜底提示：跟在控件下方，别和占位文案抢行 */
 .field-hint {
   margin: 4px 0 0;
-  color: var(--ah-text-muted, #9ca3af);
+  color: var(--ah-text-secondary, #6b7280);
   font-size: 12px;
   line-height: 1.5;
 }
@@ -260,7 +260,7 @@ function judgeModelLabel(item: MaJudgeModelOption): string {
 }
 
 .tip-icon {
-  color: var(--ah-text-muted, #9ca3af);
+  color: var(--ah-text-secondary, #6b7280);
   font-size: 14px;
   cursor: help;
 }
@@ -276,8 +276,8 @@ function judgeModelLabel(item: MaJudgeModelOption): string {
   justify-content: space-between;
   gap: 12px;
   padding: 8px 12px;
-  background: #fafbfd;
-  border: 1px solid var(--ah-border, #e6e8ef);
+  background: var(--ah-surface-muted);
+  border: 1px solid var(--ah-border, #ebeef5);
   border-radius: 6px;
 }
 
@@ -291,7 +291,7 @@ function judgeModelLabel(item: MaJudgeModelOption): string {
 
 .entry-label {
   overflow: hidden;
-  color: var(--ah-text, #1f2430);
+  color: var(--ah-text, #1f2937);
   font-size: 13px;
   font-weight: 600;
   text-overflow: ellipsis;
@@ -310,7 +310,7 @@ function judgeModelLabel(item: MaJudgeModelOption): string {
 
 .entry-hint {
   margin: 6px 0 0;
-  color: var(--ah-text-muted, #9ca3af);
+  color: var(--ah-text-secondary, #6b7280);
   font-size: 12px;
   line-height: 1.5;
 }

@@ -214,10 +214,10 @@ async function onSave() {
   height: 64px;
   overflow: hidden;
   border-radius: 50%;
-  background: #e4e2ff;
-  color: #635bff;
+  background: var(--ah-primary-tint);
+  color: var(--ah-primary);
   font-size: 22px;
-  font-weight: 650;
+  font-weight: 600;
   flex: none;
 }
 

@@ -392,14 +392,14 @@ function resetDrag() {
 }
 
 .slot-count {
-  color: var(--ah-text-muted, #9ca3af);
+  color: var(--ah-text-secondary, #6b7280);
   font-size: 12px;
 }
 
 /* 槽位说明：灰字一行，语义固定，避免用户在错误的位置找配置入口 */
 .slot-hint {
   margin: -2px 0 8px;
-  color: var(--ah-text-muted, #9ca3af);
+  color: var(--ah-text-secondary, #6b7280);
   font-size: 12px;
   line-height: 1.5;
 }
@@ -416,19 +416,19 @@ function resetDrag() {
   align-items: center;
   gap: 10px;
   padding: 7px 10px;
-  background: #fff;
+  background: var(--ah-surface);
   border: 1px solid var(--ah-border, #ebeef5);
   border-radius: 6px;
   transition: border-color 0.15s ease, box-shadow 0.15s ease, opacity 0.15s ease;
 }
 
 .bind-row:hover {
-  border-color: #d9dcea;
-  box-shadow: 0 1px 4px rgba(15, 23, 42, 0.06);
+  border-color: var(--el-color-primary-light-5);
+  box-shadow: var(--ah-shadow);
 }
 
 .bind-row.is-locked {
-  background: #fcfcfd;
+  background: var(--ah-surface-muted);
 }
 
 .bind-row.is-dragging {
@@ -443,7 +443,7 @@ function resetDrag() {
 
 .drag-handle {
   flex: none;
-  color: var(--ah-text-muted, #9ca3af);
+  color: var(--ah-text-secondary, #6b7280);
   font-size: 14px;
   line-height: 1;
   cursor: grab;
@@ -472,7 +472,7 @@ function resetDrag() {
 
 .rank-tag.is-backup {
   color: var(--ah-text-secondary, #6b7280);
-  background: #f2f3f7;
+  background: var(--ah-neutral-tint);
 }
 
 .bind-name {
@@ -492,7 +492,7 @@ function resetDrag() {
   overflow: hidden;
   padding: 1px 8px;
   color: var(--ah-text-secondary, #6b7280);
-  background: #f4f5f9;
+  background: var(--ah-neutral-tint);
   border-radius: 4px;
   font-size: 12px;
   line-height: 20px;
@@ -501,8 +501,8 @@ function resetDrag() {
 }
 
 .prompt-summary.is-empty {
-  color: var(--ah-text-muted, #9ca3af);
-  background: #fafafc;
+  color: var(--ah-text-secondary, #6b7280);
+  background: var(--ah-surface-muted);
 }
 
 /* 提示词摘要条：槽级独立一行，位于绑定卡片之上，与槽名同列对齐 */
@@ -514,8 +514,8 @@ function resetDrag() {
   gap: 8px;
   margin-bottom: 8px;
   padding: 6px 10px;
-  background: #fafbfd;
-  border: 1px solid var(--ah-border, #e6e8ef);
+  background: var(--ah-surface-muted);
+  border: 1px solid var(--ah-border, #ebeef5);
   border-radius: 6px;
 }
 
@@ -529,7 +529,7 @@ function resetDrag() {
 
 .prompt-bar-label {
   flex: none;
-  color: var(--ah-text-muted, #9ca3af);
+  color: var(--ah-text-secondary, #6b7280);
   font-size: 12px;
 }
 
@@ -555,7 +555,7 @@ function resetDrag() {
   width: 20px;
   height: 20px;
   padding: 0;
-  color: var(--ah-text-muted, #9ca3af);
+  color: var(--ah-text-secondary, #6b7280);
   background: transparent;
   border: none;
   border-radius: 4px;
@@ -568,7 +568,7 @@ function resetDrag() {
 }
 
 .arrow-btn:disabled {
-  color: #d5d8e2;
+  color: var(--ah-text-faint);
   cursor: not-allowed;
 }
 
@@ -578,8 +578,8 @@ function resetDrag() {
   padding: 9px 12px;
   color: var(--ah-text-secondary, #6b7280);
   font-size: 13px;
-  background: #fcfcfd;
-  border: 1px dashed var(--ah-border, #d9dcea);
+  background: var(--ah-surface-muted);
+  border: 1px dashed var(--ah-border, #ebeef5);
   border-radius: 6px;
   cursor: pointer;
   transition: color 0.15s ease, border-color 0.15s ease, background 0.15s ease;
@@ -593,7 +593,7 @@ function resetDrag() {
 
 .empty-text {
   margin: 0;
-  color: var(--ah-text-muted, #9ca3af);
+  color: var(--ah-text-secondary, #6b7280);
   font-size: 12px;
 }
 </style>

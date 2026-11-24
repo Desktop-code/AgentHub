@@ -217,7 +217,7 @@ onMounted(() => {
   height: 40px;
   max-height: 45px;
   padding: 0 8px 0 12px;
-  background: #f5f7fa;
+  background: var(--ah-bg);
   border-bottom: 1px solid var(--ah-border-soft, #f2f6fc);
   box-sizing: border-box;
 }
@@ -272,7 +272,7 @@ onMounted(() => {
 }
 
 .tag-close {
-  font-size: 11px;
+  font-size: 12px;
   border-radius: 50%;
   color: inherit;
   opacity: 0.55;

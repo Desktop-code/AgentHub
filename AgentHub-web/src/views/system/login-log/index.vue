@@ -28,7 +28,9 @@
           <template #default="{ row }">{{ row.success === 1 ? '成功' : '失败' }}</template>
         </el-table-column>
         <el-table-column prop="message" label="说明" min-width="180" align="center" />
-        <el-table-column prop="createTime" label="时间" min-width="180" align="center" />
+        <el-table-column prop="createTime" label="时间" min-width="180" align="center">
+          <template #default="{ row }">{{ formatDateTime(row.createTime) }}</template>
+        </el-table-column>
       </el-table>
       <TablePager
         v-model:current="query.current"
@@ -53,6 +55,7 @@ import PageHeader from '@/components/PageHeader.vue'
 import TablePager from '@/components/TablePager.vue'
 import { useListIndexColumn } from '@/composables/listIndex'
 import { pageLoginLogs } from '@/api/log'
+import { formatDateTime } from '@/utils/datetime'
 import type { LoginLogRow } from '@/types'
 
 const loading = ref(false)

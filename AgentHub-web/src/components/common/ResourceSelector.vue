@@ -405,7 +405,7 @@ function cancel(): void {
   align-items: center;
   gap: 6px;
   font-size: 13px;
-  font-weight: 650;
+  font-weight: 600;
   color: var(--ah-text);
 }
 
@@ -423,17 +423,17 @@ function cancel(): void {
   min-width: 18px;
   height: 18px;
   padding: 0 5px;
-  border-radius: 9px;
+  border-radius: 999px;
   background: var(--ah-primary);
   color: #fff;
-  font-size: 11px;
+  font-size: 12px;
   font-weight: 600;
   line-height: 1;
 }
 
 .rs-badge.is-empty {
-  background: #e5e7eb;
-  color: #6b7280;
+  background: var(--ah-border);
+  color: var(--ah-neutral);
 }
 
 .rs-clear {
@@ -489,9 +489,9 @@ function cancel(): void {
 .rs-group-count {
   padding: 0 6px;
   border-radius: 8px;
-  background: #f3f4f6;
+  background: var(--ah-neutral-tint);
   color: var(--ah-text-muted);
-  font-size: 11px;
+  font-size: 12px;
   font-weight: 500;
 }
 
@@ -508,13 +508,13 @@ function cancel(): void {
 }
 
 .rs-option:hover:not(.is-disabled) {
-  background: #f7f7ff;
-  border-color: #e4e2ff;
+  background: var(--ah-primary-tint);
+  border-color: var(--el-color-primary-light-8);
 }
 
 .rs-option.is-checked {
-  background: #f4f3ff;
-  border-color: #d5d3ff;
+  background: var(--ah-primary-tint);
+  border-color: var(--el-color-primary-light-7);
 }
 
 .rs-option.is-disabled {
@@ -538,7 +538,7 @@ function cancel(): void {
   overflow: hidden;
   color: var(--ah-text);
   font-size: 13px;
-  font-weight: 650;
+  font-weight: 600;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
@@ -547,7 +547,7 @@ function cancel(): void {
   overflow: hidden;
   color: var(--ah-text-muted);
   font-family: ui-monospace, Consolas, monospace;
-  font-size: 11px;
+  font-size: 12px;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
@@ -579,7 +579,7 @@ function cancel(): void {
   padding: 7px 8px 7px 10px;
   border: 1px solid var(--ah-border);
   border-radius: 8px;
-  background: #fff;
+  background: var(--ah-surface);
 }
 
 .rs-chip + .rs-chip {
@@ -587,12 +587,12 @@ function cancel(): void {
 }
 
 .rs-chip:hover {
-  border-color: #c5c2ff;
+  border-color: var(--el-color-primary-light-5);
 }
 
 .rs-chip.is-missing {
   border-style: dashed;
-  background: #fffbf5;
+  background: var(--ah-warning-tint);
 }
 
 .rs-chip-body {
@@ -615,7 +615,7 @@ function cancel(): void {
   overflow: hidden;
   color: var(--ah-text-muted);
   font-family: ui-monospace, Consolas, monospace;
-  font-size: 11px;
+  font-size: 12px;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
@@ -631,15 +631,15 @@ function cancel(): void {
   border: 0;
   border-radius: 6px;
   background: transparent;
-  color: #9ca3af;
+  color: var(--ah-text-faint);
   font-size: 16px;
   line-height: 1;
   cursor: pointer;
 }
 
 .rs-chip-remove:hover {
-  color: #ef4444;
-  background: #fef2f2;
+  color: var(--ah-danger);
+  background: var(--ah-danger-tint);
 }
 
 .rs-empty {

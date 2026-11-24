@@ -129,7 +129,7 @@ function submit(ids: (number | string)[]): void {
   overflow: hidden;
   color: var(--ah-text);
   font-size: 13px;
-  font-weight: 650;
+  font-weight: 600;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
@@ -138,7 +138,7 @@ function submit(ids: (number | string)[]): void {
   overflow: hidden;
   color: var(--ah-text-muted);
   font-family: ui-monospace, Consolas, monospace;
-  font-size: 11px;
+  font-size: 12px;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
@@ -153,7 +153,7 @@ function submit(ids: (number | string)[]): void {
 
 .tool-source {
   flex: none;
-  --el-tag-font-size: 11px;
+  --el-tag-font-size: 12px;
   --el-tag-padding: 0 5px;
   --el-tag-height: 18px;
 }
@@ -180,7 +180,7 @@ function submit(ids: (number | string)[]): void {
   overflow: hidden;
   color: var(--ah-text-muted);
   font-family: ui-monospace, Consolas, monospace;
-  font-size: 11px;
+  font-size: 12px;
   text-overflow: ellipsis;
   white-space: nowrap;
 }

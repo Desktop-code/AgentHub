@@ -593,7 +593,7 @@ function submit() {
 .temp-value {
   flex: none;
   min-width: 36px;
-  color: var(--ah-text, #1f2430);
+  color: var(--ah-text, #1f2937);
   font-variant-numeric: tabular-nums;
   text-align: right;
 }
@@ -608,7 +608,7 @@ function submit() {
 /* 红字提示：建议区间 / 该用途不使用温度；始终占一行，避免切换用途时表单高度跳动 */
 .temp-hint {
   margin: 2px 0 0;
-  color: #ef4444;
+  color: var(--ah-danger);
   font-size: 12px;
   line-height: 18px;
 }
@@ -616,7 +616,7 @@ function submit() {
 /* 视觉输出上限说明：灰字，与红字告警区分开（这是提示而非错误） */
 .max-tokens-hint {
   margin: 0;
-  color: #6b7280;
+  color: var(--ah-text-secondary);
   font-size: 12px;
   line-height: 18px;
 }
@@ -629,7 +629,7 @@ function submit() {
 }
 
 .max-tokens-unit {
-  color: #6b7280;
+  color: var(--ah-text-secondary);
   font-size: 12px;
 }
 
@@ -647,14 +647,14 @@ function submit() {
 /* 灰字说明与红字错误分成两行：说明常驻，错误只在非法时出现 */
 .speech-params-hint {
   margin: 4px 0 0;
-  color: #6b7280;
+  color: var(--ah-text-secondary);
   font-size: 12px;
   line-height: 18px;
 }
 
 .speech-params-error {
   margin: 2px 0 0;
-  color: #ef4444;
+  color: var(--ah-danger);
   font-size: 12px;
   line-height: 18px;
 }

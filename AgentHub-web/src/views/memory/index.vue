@@ -133,7 +133,9 @@
           </template>
         </el-table-column>
         <el-table-column prop="sessionId" label="Session" width="100" />
-        <el-table-column prop="expiredTime" label="过期时间" min-width="170" />
+        <el-table-column prop="expiredTime" label="过期时间" min-width="170">
+          <template #default="{ row }">{{ formatDateTime(row.expiredTime) }}</template>
+        </el-table-column>
         <el-table-column label="操作" width="140" fixed="right">
           <template #default="{ row }">
             <el-button link type="primary" @click="openDetail(row)">详情</el-button>
@@ -179,9 +181,9 @@
             {{ detailRow.vectorSyncError || '—' }}
           </el-descriptions-item>
           <el-descriptions-item label="Session">{{ detailRow.sessionId ?? '—' }}</el-descriptions-item>
-          <el-descriptions-item label="过期时间">{{ detailRow.expiredTime || '—' }}</el-descriptions-item>
-          <el-descriptions-item label="创建时间">{{ detailRow.createTime || '—' }}</el-descriptions-item>
-          <el-descriptions-item label="更新时间">{{ detailRow.updateTime || '—' }}</el-descriptions-item>
+          <el-descriptions-item label="过期时间">{{ formatDateTime(detailRow.expiredTime) }}</el-descriptions-item>
+          <el-descriptions-item label="创建时间">{{ formatDateTime(detailRow.createTime) }}</el-descriptions-item>
+          <el-descriptions-item label="更新时间">{{ formatDateTime(detailRow.updateTime) }}</el-descriptions-item>
           <el-descriptions-item label="记忆内容" :span="2">
             <div class="detail-content">{{ detailRow.content }}</div>
           </el-descriptions-item>
@@ -207,6 +209,7 @@ import { pageUsers } from '@/api/user'
 import PageHeader from '@/components/PageHeader.vue'
 import TablePager from '@/components/TablePager.vue'
 import { useListIndexColumn } from '@/composables/listIndex'
+import { formatDateTime } from '@/utils/datetime'
 import { useUserStore } from '@/stores/user'
 import type { AgentCard } from '@/types/agent'
 import type { UserRow } from '@/types'

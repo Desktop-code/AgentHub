@@ -66,7 +66,7 @@ function buildOption() {
   const labels = props.points.map((point) => point.date.slice(5))
   // 只有 1 天时柱宽按类目自适应会撑满，这里给柱子限宽
   return {
-    color: ['#b9b4ff', '#635bff', '#f59e0b'],
+    color: ['#b1adff', '#635bff', '#b45309'],
     grid: { left: 8, right: 16, top: 36, bottom: 4, containLabel: true },
     tooltip: {
       trigger: 'axis',
@@ -84,18 +84,18 @@ function buildOption() {
       type: 'category',
       data: labels,
       axisTick: { show: false },
-      axisLine: { lineStyle: { color: '#e4e7ed' } },
+      axisLine: { lineStyle: { color: '#ebeef5' } },
       axisLabel: {
-        color: '#8b90a0',
-        fontSize: 11,
+        color: '#6b7280',
+        fontSize: 12,
         // 点多时按间隔抽稀，避免标签重叠
         interval: labels.length > 15 ? 'auto' : 0
       }
     },
     yAxis: {
       type: 'value',
-      splitLine: { lineStyle: { color: '#f2f3f7' } },
-      axisLabel: { color: '#8b90a0', fontSize: 11, formatter: compactAxis }
+      splitLine: { lineStyle: { color: '#f2f6fc' } },
+      axisLabel: { color: '#6b7280', fontSize: 12, formatter: compactAxis }
     },
     series: [
       {
@@ -103,7 +103,7 @@ function buildOption() {
         type: 'bar',
         stack: 'token',
         barMaxWidth: 22,
-        itemStyle: { color: '#b9b4ff' },
+        itemStyle: { color: '#b1adff' },
         data: props.points.map((point) => point.prompt)
       },
       {
@@ -111,7 +111,7 @@ function buildOption() {
         type: 'bar',
         stack: 'token',
         barMaxWidth: 22,
-        itemStyle: { color: '#635bff', borderRadius: [3, 3, 0, 0] },
+        itemStyle: { color: '#635bff', borderRadius: [4, 4, 0, 0] },
         data: props.points.map((point) => point.completion)
       },
       {
@@ -120,8 +120,8 @@ function buildOption() {
         smooth: true,
         symbol: 'circle',
         symbolSize: 5,
-        lineStyle: { width: 2, color: '#f59e0b' },
-        itemStyle: { color: '#f59e0b' },
+        lineStyle: { width: 2, color: '#b45309' },
+        itemStyle: { color: '#b45309' },
         data: props.points.map((point) => point.total)
       }
     ]

@@ -1156,20 +1156,20 @@ watch(
 
 /* 方案接管提示：与卡片同宽，不额外加边框，保持浅灰底上的轻提示 */
 .ma-bind-tip {
-  border-radius: 10px;
+  border-radius: 8px;
 }
 
 /* 摘要里的分隔点：只做视觉分隔，不参与文案语义 */
 .ma-tip-sep {
   margin: 0 4px;
-  color: var(--ah-text-3, #9aa0b4);
+  color: var(--ah-text-faint, #9ca3af);
 }
 
 .orch-card {
   padding: 14px 16px;
   background: var(--ah-surface, #fff);
-  border: 1px solid var(--ah-border, #e8e9ef);
-  border-radius: 10px;
+  border: 1px solid var(--ah-border, #ebeef5);
+  border-radius: 8px;
 }
 
 .orch-head {
@@ -1182,7 +1182,7 @@ watch(
 .head-main h3 {
   margin: 0 0 6px;
   font-size: 16px;
-  font-weight: 650;
+  font-weight: 600;
 }
 
 .head-sub {
@@ -1215,11 +1215,11 @@ watch(
 .card-head h4 {
   margin: 0 0 2px;
   font-size: 14px;
-  font-weight: 650;
+  font-weight: 600;
 }
 
 .hint {
-  color: var(--ah-text-secondary, #8b90a0);
+  color: var(--ah-text-secondary, #6b7280);
   font-size: 12px;
   line-height: 1.5;
 }
@@ -1244,9 +1244,9 @@ watch(
   margin: 0 auto;
   padding: 10px 12px;
   text-align: center;
-  background: #f7f7ff;
-  border: 1px solid #dedcff;
-  border-radius: 10px;
+  background: var(--ah-primary-tint);
+  border: 1px solid var(--el-color-primary-light-5);
+  border-radius: 8px;
 }
 
 .root-node strong {
@@ -1254,13 +1254,13 @@ watch(
 }
 
 .root-node span {
-  color: var(--ah-text-secondary, #8b90a0);
+  color: var(--ah-text-secondary, #6b7280);
   font-size: 12px;
 }
 
 .root-node.off {
-  background: #f5f6fa;
-  border-color: #e5e7eb;
+  background: var(--ah-neutral-tint);
+  border-color: var(--ah-border);
 }
 
 /* 直角折线第一段：根节点底部中心 → 汇流线，始终竖直 */
@@ -1268,7 +1268,7 @@ watch(
   width: 2px;
   height: 18px;
   margin: 0 auto;
-  background: #d9dbe7;
+  background: var(--ah-border);
 }
 
 .map-children {
@@ -1295,7 +1295,7 @@ watch(
   max-width: 84%;
   height: 2px;
   transform: translateX(-50%);
-  background: #d9dbe7;
+  background: var(--ah-border);
 }
 
 .child-node {
@@ -1305,9 +1305,9 @@ watch(
   gap: 2px;
   width: var(--map-child-w);
   padding: 10px 12px;
-  background: #fff;
-  border: 1px solid var(--ah-border, #e8e9ef);
-  border-radius: 10px;
+  background: var(--ah-surface);
+  border: 1px solid var(--ah-border, #ebeef5);
+  border-radius: 8px;
 }
 
 /* 直角折线第三段：汇流线 → 子节点顶部中心；每个子节点各画一条，天然随节点动态生成 */
@@ -1318,7 +1318,7 @@ watch(
   left: 50%;
   width: 2px;
   height: 18px;
-  background: #d9dbe7;
+  background: var(--ah-border);
 }
 
 .child-node strong {
@@ -1329,13 +1329,13 @@ watch(
 }
 
 .child-node.off {
-  background: #f7f8fa;
+  background: var(--ah-surface-muted);
   border-style: dashed;
 }
 
 /* 子被关掉「允许被编排调用」：边框提示但不整块变灰，仍能看到它的其它状态 */
 .child-node.blocked {
-  border-color: #f0c78a;
+  border-color: var(--el-color-warning-light-5);
 }
 
 /* 评审环轻量示意：执行者 → 评审专家 → 虚线回修；只用静态节点，不引入 X6 */
@@ -1346,7 +1346,7 @@ watch(
   gap: 8px;
   margin-top: 12px;
   padding-top: 12px;
-  border-top: 1px dashed var(--ah-border, #e8e9ef);
+  border-top: 1px dashed var(--ah-border, #ebeef5);
 }
 
 .critic-chip {
@@ -1354,25 +1354,25 @@ watch(
   align-items: baseline;
   gap: 6px;
   padding: 6px 10px;
-  background: #f6f5ff;
-  border: 1px solid #ddd9ff;
+  background: var(--ah-primary-tint);
+  border: 1px solid var(--el-color-primary-light-5);
   border-radius: 8px;
   font-size: 12px;
 }
 
 .critic-chip.off {
-  background: #f6f7fa;
-  border-color: #e5e7eb;
-  color: #9ca3af;
+  background: var(--ah-surface-muted);
+  border-color: var(--ah-border);
+  color: var(--ah-text-faint);
 }
 
 .critic-role {
-  color: #8b84ff;
-  font-size: 11px;
+  color: var(--el-color-primary-light-3);
+  font-size: 12px;
 }
 
 .critic-arrow {
-  color: #8b84ff;
+  color: var(--el-color-primary-light-3);
   font-size: 12px;
   white-space: nowrap;
 }
@@ -1385,7 +1385,7 @@ watch(
   overflow: hidden;
   color: var(--ah-text-muted, #9ca3af);
   font-family: ui-monospace, Consolas, monospace;
-  font-size: 11px;
+  font-size: 12px;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
@@ -1464,7 +1464,7 @@ watch(
   position: sticky;
   top: 0;
   z-index: 10;
-  background: #fff;
+  background: var(--ah-surface);
 }
 
 .cand-table {
@@ -1493,12 +1493,12 @@ watch(
 
 .cand-sub {
   margin-top: 2px;
-  color: var(--ah-text-secondary, #8b90a0);
+  color: var(--ah-text-secondary, #6b7280);
   font-size: 12px;
 }
 
 .cand-blocked {
-  color: #b45309;
+  color: var(--ah-warning);
 }
 
 /*
@@ -1529,12 +1529,12 @@ watch(
   gap: 16px;
   min-height: 32px;
   padding-top: 14px;
-  border-top: 1px solid var(--ah-border, #e8e9ef);
+  border-top: 1px solid var(--ah-border, #ebeef5);
 }
 
 .switch-row__label {
   font-size: 14px;
-  color: var(--el-text-color-regular, #606266);
+  color: var(--ah-text-regular, #374151);
 }
 
 /* Label 旁问号：解释性长文只在悬浮时出现，界面保持干净 */
@@ -1545,7 +1545,7 @@ watch(
 }
 
 .tip-icon {
-  color: var(--el-text-color-placeholder, #a8abb2);
+  color: var(--ah-text-faint, #9ca3af);
   font-size: 13px;
   cursor: help;
 }
@@ -1559,7 +1559,7 @@ watch(
 
 .field-warn {
   margin-left: 8px;
-  color: #b45309;
+  color: var(--ah-warning);
   font-size: 12px;
   line-height: 1.5;
 }
@@ -1589,9 +1589,9 @@ watch(
   justify-content: space-between;
   gap: 8px;
   padding: 10px 14px;
-  border: 1px dashed var(--ah-border, #e5e7eb);
-  border-radius: 10px;
-  background: #fafbfc;
+  border: 1px dashed var(--ah-border, #ebeef5);
+  border-radius: 8px;
+  background: var(--ah-surface-muted);
 }
 
 /* 底栏右侧两个按钮成组，窄屏换行时不散开 */

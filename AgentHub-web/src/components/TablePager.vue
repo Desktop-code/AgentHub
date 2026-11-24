@@ -198,14 +198,14 @@ function onSizeChange(next: number) {
 }
 
 .pager-total {
-  color: var(--ah-text-secondary, #909399);
+  color: var(--ah-text-secondary, #6b7280);
   font-size: 13px;
   line-height: 32px;
   white-space: nowrap;
 }
 
 .pager-total strong {
-  color: var(--ah-text, #303133);
-  font-weight: 650;
+  color: var(--ah-text, #1f2937);
+  font-weight: 600;
 }
 </style>

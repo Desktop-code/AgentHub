@@ -60,6 +60,7 @@ import {
   appendTool,
   appendToolStart,
   appendWorkflow,
+  absorbWaitingWorkflowCards,
   completeTool,
   appendPreprocess,
   appendVision,
@@ -238,12 +239,163 @@ export function useWorkbenchChat(pageActive: Ref<boolean>) {
    */
   const canStopRun = computed(
     () =>
-      sending.value &&
+      (sending.value || waitingReply.value) &&
       !halted.value &&
       !stopping.value &&
       !!session.value &&
       !isTempSession(session.value)
   )
+
+  /**
+   * 本会话当前是否有工作流停在「等待用户回复」。
+   *
+   * <p>为什么从时间线推、不另调接口：等待状态已经落在最后一条助手轮的工作流卡上
+   * （SSE `workflow` 帧 / 落库 WORKFLOW 事件同形），前端按它就能决定「下一句送到哪」——
+   * 有等待时输入框那句回复会由后端送回同一条运行，停止按钮也要能停掉挂起的运行。
+   *
+   * <p>只认最后一条助手轮：更早轮次里已经续过的等待不应再影响输入区。
+   *
+   * @param turns 当前会话时间线
+   * @return true 表示最后一条助手轮里有工作流卡停在等待回复
+   */
+  function detectWaitingReply(turns: ChatTurn[]): boolean {
+    for (let i = turns.length - 1; i >= 0; i -= 1) {
+      const turn = turns[i]
+      if (turn?.role !== 'assistant') {
+        continue
+      }
+      const blocks = Array.isArray(turn.blocks) ? turn.blocks : []
+      /*
+       * 判等待不能只看卡片头：直播里节点先落 WAITING_REPLY、卡片收口稍后才到，
+       * 这一拍卡片头仍是 RUNNING。只要任一节点在等待，就必须按「回复」发送，
+       * 否则输入框会走普通一轮的入口判路由。
+       */
+      const found = blocks.some((block) => {
+        // 方案停在子专家询问处：CHOICE 标了 waiting，下一句是该成员的回复而不是新问题
+        if (block?.kind === 'choice' && block.choice?.waiting === true) {
+          return true
+        }
+        if (block?.kind !== 'workflow') {
+          return false
+        }
+        if ((block.workflow?.status || '').toUpperCase() === 'WAITING_REPLY') {
+          return true
+        }
+        return (block.workflow?.nodes || []).some(
+          (node) => (node?.status || '').toUpperCase() === 'WAITING_REPLY'
+        )
+      })
+      // 只看最近一条助手轮：它没有等待就说明这一轮已收口
+      return found
+    }
+    return false
+  }
+
+  /** 输入区是否处于「有挂起运行等你回复」：发送即回复，停止可中断这条运行 */
+  const waitingReply = computed(() => detectWaitingReply(turns.value))
+
+  /**
+   * 方案停等的那条助手轮：最后一条助手轮里有 waiting 的选项块时返回它。
+   *
+   * <p>工作流等待没有这种选项块（它走卡片头 / 节点 WAITING_REPLY），因此不会被误认。
+   * 有值时，回复要在这一轮的同一张子专家卡上继续，不再另起助手轮。
+   *
+   * @param turns 当前会话时间线
+   * @return 等待中的助手轮；没有时 undefined
+   */
+  function waitingChoiceTurn(turns: ChatTurn[]): ChatTurn | undefined {
+    for (let i = turns.length - 1; i >= 0; i -= 1) {
+      const turn = turns[i]
+      if (turn?.role !== 'assistant') {
+        continue
+      }
+      const found = (Array.isArray(turn.blocks) ? turn.blocks : []).some(
+        (block) => block?.kind === 'choice' && block.choice?.waiting === true
+      )
+      return found ? turn : undefined
+    }
+    return undefined
+  }
+
+  /**
+   * 把等待中的方案选项改成「已答复」：清掉选项、在卡内记下这次选择。
+   *
+   * <p>为什么在发送 / 点选的当下就写：续跑要等后端跑完才会有回放数据，
+   * 这段时间里卡片不能还停在「等你回复」；先写回复行，选项同时消失，
+   * 后续增量直接接在同一张卡上。
+   *
+   * @param turn      等待中的助手轮
+   * @param replyText 用户选择 / 输入原文（与后端 replied 文案同源）
+   * @return true 表示确实改写了一块
+   */
+  function markWaitingChoiceReplied(turn: ChatTurn, replyText: string): boolean {
+    const text = (replyText || '').trim()
+    for (const block of Array.isArray(turn.blocks) ? turn.blocks : []) {
+      if (block?.kind === 'choice' && block.choice?.waiting === true) {
+        block.choice = {
+          question: block.choice.question || '',
+          options: [],
+          reply: text,
+          waiting: false
+        }
+        // 块被就地改写：已结算轮的签名缓存过，换代次让投影立刻重算
+        turn.revision = (turn.revision ?? 0) + 1
+        return true
+      }
+    }
+    return false
+  }
+
+  /**
+   * 把最后一条助手轮里等待卡上的可点选项摘掉。
+   *
+   * <p>为什么在发送 / 点选的当下就摘：续跑要等后端推来第一帧工作流快照才会把旧卡收走，
+   * 这中间可能隔几百毫秒；旧选项若还留着，用户会以为「刚才那下没点中」而重复点。
+   * 只摘选项、不动卡片与问句——问句属于已经流出的内容，不能清空重来。
+   */
+  function clearWaitingChoice() {
+    for (let i = turns.value.length - 1; i >= 0; i -= 1) {
+      const turn = turns.value[i]
+      if (turn?.role !== 'assistant') {
+        continue
+      }
+      let cleared = false
+      for (const block of Array.isArray(turn.blocks) ? turn.blocks : []) {
+        // 方案停等的询问：摘掉 chips、保留问句，等后端回复事件把选择写回卡内
+        if (block?.kind === 'choice' && block.choice?.waiting === true) {
+          block.choice = {
+            question: block.choice.question || '',
+            options: [],
+            waiting: false
+          }
+          cleared = true
+          continue
+        }
+        const view = block?.kind === 'workflow' ? block.workflow : undefined
+        if (!view || !view.choice) {
+          continue
+        }
+        // 与 detectWaitingReply 同口径：卡片头或任一节点仍等待，才说明这组选项还有效
+        const waiting = (view.status || '').toUpperCase() === 'WAITING_REPLY'
+          || (Array.isArray(view.nodes) ? view.nodes : [])
+            .some((node) => (node?.status || '').toUpperCase() === 'WAITING_REPLY')
+        if (waiting) {
+          view.choice = undefined
+          cleared = true
+        }
+      }
+      if (cleared) {
+        /*
+         * 摘选项也是一次「块被就地改写」：已结算轮的签名被缓存过，不换代次就仍命中旧签名，
+         * chips 会一直留在页面上。代次加一，签名必变，投影立即重算。
+         */
+        turn.revision = (turn.revision ?? 0) + 1
+        break
+      }
+      // 只看最后一条助手轮：更早轮次里已经续过的等待不该再影响输入区
+      return
+    }
+  }
 
   /** 不能发送时的说明。未就绪优先于「会话已取消」。 */
   const blockedHint = computed(() => {
@@ -918,15 +1070,18 @@ export function useWorkbenchChat(pageActive: Ref<boolean>) {
    */
   async function stopRun() {
     const current = session.value
-    if (!sending.value || stopping.value || !current || isTempSession(current)) {
+    // 等待回复时没有在途流（sending=false），但挂起的运行仍要能停：两者任一即可
+    if ((!sending.value && !waitingReply.value) || stopping.value || !current || isTempSession(current)) {
       return
     }
     const id = current.id
     stopping.value = true
     try {
       await cancelWorkbenchSession(id)
-      // 请求返回时这一轮可能刚好自己结束：不再补「已中断」，避免误标成功轮
+      // 等待回复的停止：这一轮不在流式中，按现网「中断」收口即可，不补 markHaltedTurn
       if (!sending.value) {
+        // 重读一次事件，把库里补写的「已中断」卡片与闭环取回页面
+        await openHistory(id, true)
         return
       }
       halted.value = true
@@ -936,10 +1091,7 @@ export function useWorkbenchChat(pageActive: Ref<boolean>) {
       // 停止是低频操作，强制同步写一次，避免用户立刻刷新时还读到旧的 streaming 快照
       saveSnapshot(id, true)
     } catch (error) {
-      // 失败时保持 sending=true、halted=false：按钮仍可点，不假装已经停掉
-      if (!sending.value) {
-        return
-      }
+      // 失败时不假装已经停掉：按钮仍可点，说明失败原因
       const raw = error instanceof Error && error.message ? error.message.trim() : ''
       pageError.value = raw ? `停止失败：${raw}` : '停止失败，请稍后重试'
     } finally {
@@ -964,6 +1116,25 @@ export function useWorkbenchChat(pageActive: Ref<boolean>) {
     if (sending.value || !canSend.value) {
       return
     }
+    /*
+     * 本会话有等待中的运行时，这一句是「回复」而不是新问题：
+     * 后端会把它写进同一条运行（方案：当前子专家；工作流：input.reply）。
+     * 方案停等还要回到**同一张子专家卡**，所以先定位那条助手轮。
+     * 带附件时后端按普通新问题处理（附件不能被静默丢掉），这里也不当成回复，
+     * 且不改动等待中的那张卡——这条运行仍然在等。
+     */
+    const hasAttachments = !!((images?.length) || (files?.length))
+    const waitingTurn = waitingChoiceTurn(turns.value)
+    const maContinuing = !!waitingTurn && !hasAttachments
+    const workflowContinuing = !waitingTurn && waitingReply.value
+    const continuingWaiting = maContinuing || workflowContinuing
+    if (maContinuing && waitingTurn) {
+      // 方案停等：卡内先记下这次回复（选项清空），后续增量接在这一轮
+      markWaitingChoiceReplied(waitingTurn, content)
+    } else if (workflowContinuing) {
+      // 工作流等待：先把旧选项摘掉，避免用户以为没点中而重复选
+      clearWaitingChoice()
+    }
     const runId = ++runSeq
     sending.value = true
     halted.value = false
@@ -973,22 +1144,48 @@ export function useWorkbenchChat(pageActive: Ref<boolean>) {
     childPending.value = null
     // 手动发问接管展示：只停轮询，本轮改由 SSE 驱动
     stopPolling()
-    turns.value = [
-      ...turns.value,
-      {
-        key: `wb-u-${Date.now()}`,
-        role: 'user',
-        text: content,
-        images: images?.length ? [...images] : undefined,
-        attachments: pendingAttachments(images, files, order),
-        blocks: [],
-        phase: 'done',
-        status: 'done',
-        startTime: 0
+    /*
+     * 等待回复时的输入是「对询问的回复」而不是新一轮提问：不插用户气泡，
+     * 只续接一条助手轮把同一张执行卡往下推。后端同样不落 USER 事件，回放也不会多出气泡。
+     */
+    if (!continuingWaiting) {
+      turns.value = [
+        ...turns.value,
+        {
+          key: `wb-u-${Date.now()}`,
+          role: 'user',
+          text: content,
+          images: images?.length ? [...images] : undefined,
+          attachments: pendingAttachments(images, files, order),
+          blocks: [],
+          phase: 'done',
+          status: 'done',
+          startTime: 0
+        }
+      ]
+    }
+    /*
+     * 方案停等的回复不再新起助手轮：问句、已答正文与后续增量必须落在同一张子专家卡上，
+     * 另起一轮会变成「旧的还在问 + 下面又长出一张同专家的卡」。
+     * 工作流 / 普通轮仍按现网新起一轮（工作流的续跑卡自带完整节点表）。
+     */
+    let live: ChatTurn
+    if (maContinuing && waitingTurn) {
+      live = waitingTurn
+      live.status = 'streaming'
+      live.phase = 'planning'
+      // 计时从这次回复重新起算：等待时长不该计入「本轮用时」
+      live.startTime = Date.now()
+      live.revision = (live.revision ?? 0) + 1
+    } else {
+      const nextAssistant = assistantTurn(`wb-a-${Date.now()}`, 'streaming')
+      if (continuingWaiting) {
+        // 续作轮没有入口判定：投影层据此不再等入口身份，也不会造出网关卡
+        nextAssistant.continuation = true
       }
-    ]
-    turns.value = [...turns.value, assistantTurn(`wb-a-${Date.now()}`, 'streaming')]
-    const live = turns.value[turns.value.length - 1]
+      turns.value = [...turns.value, nextAssistant]
+      live = turns.value[turns.value.length - 1]
+    }
     const controller = new AbortController()
     streamAbort = controller
     /** 失活 abort 不当失败；finally 里据此跳过 finishLive，保留气泡。 */
@@ -1068,7 +1265,7 @@ export function useWorkbenchChat(pageActive: Ref<boolean>) {
       pendingForceRoute.value = null
       // 登记到模块级：切走再回来能接上同一份时间线
       beginLive(sessionId, turns.value)
-      const stream = createRunHandlers(live, touchSnapshot)
+      const stream = createRunHandlers(live, touchSnapshot, sessionId)
       await streamWorkbenchMessage(
         sessionId,
         content,
@@ -1152,13 +1349,15 @@ export function useWorkbenchChat(pageActive: Ref<boolean>) {
    * 点选项 → 断点续作：同一个 Agent 接着干，**不重走入口判词**。
    *
    * <p>为什么不能当普通消息再发一遍：那样会重新过一遍入口分流，选项可能被分给别的专家，
-   * 这一轮就断了。续作端点在后端直接派回会话沿用的那位 Agent，前端只把 optionId 带上；
-   * 用户气泡里写选项文案，让记录看起来就是「我说了这句话」。
+   * 这一轮就断了。续作端点在后端直接派回会话沿用的那位 Agent，前端只把 optionId 带上。
+   *
+   * <p>工作流停等时的点选是「对询问的回复」：不再插一条用户气泡，选择结果由执行卡的询问节点展示。
+   * 单专家选项续作保持原有气泡（那条续作仍是一次可见的用户输入），避免把既有行为改坏。
    *
    * <p>前置条件与发送一致（就绪、会话未取消、不在发送中）；草稿没有可续作的上下文，直接忽略。
    *
    * @param optionId 被点选项的短标识（后端对照最后一条助手消息上的选项块校验）
-   * @param label    选项展示文案，用作本轮用户气泡的文字
+   * @param label    选项展示文案（单专家续作用作本轮用户气泡；工作流续跑由后端投影写进节点）
    */
   async function chooseOption(optionId: string, label: string) {
     const current = session.value
@@ -1174,6 +1373,19 @@ export function useWorkbenchChat(pageActive: Ref<boolean>) {
       return
     }
     const sessionId = current.id
+    // 方案 / 工作流停等：点选是回复询问，不是新一轮提问，消息流里不插用户气泡
+    const replyToWaiting = waitingReply.value
+    const waitingTurn = waitingChoiceTurn(turns.value)
+    /*
+     * 点下选项就先把旧选项摘掉，续跑帧到达后再把旧卡收走。
+     * 方案停等更进一步：直接把这次选择写回同一张子专家卡（选项清空、留「您的选择」），
+     * 并让后续增量接在这一轮，不另起一张卡。
+     */
+    if (waitingTurn) {
+      markWaitingChoiceReplied(waitingTurn, text)
+    } else if (replyToWaiting) {
+      clearWaitingChoice()
+    }
     const runId = ++runSeq
     sending.value = true
     halted.value = false
@@ -1181,22 +1393,35 @@ export function useWorkbenchChat(pageActive: Ref<boolean>) {
     childPending.value = null
     // 手动续作接管展示：停轮询，这一轮改由 SSE 驱动
     stopPolling()
-    turns.value = [
-      ...turns.value,
-      { key: `wb-u-${Date.now()}`, role: 'user', text, blocks: [], phase: 'done', status: 'done', startTime: 0 }
-    ]
+    // 单专家选项续作仍保留用户气泡；等待中（方案 / 工作流）的回复只体现在对应卡片上
+    if (!replyToWaiting) {
+      turns.value = [
+        ...turns.value,
+        { key: `wb-u-${Date.now()}`, role: 'user', text, blocks: [], phase: 'done', status: 'done', startTime: 0 }
+      ]
+    }
     /*
      * 续作轮打标记：投影层据此**不去等入口报身份**（这一轮本来就没有入口判定），
      * 专家的思考直接出在自己块上，既不会被抢到入口，也不会因为等身份而晚出块。
+     * 方案停等复用等待那一轮：不再新起助手轮，增量继续长在同一张子专家卡上。
      */
-    turns.value = [...turns.value, { ...assistantTurn(`wb-a-${Date.now()}`, 'streaming'), continuation: true }]
-    const live = turns.value[turns.value.length - 1]
+    let live: ChatTurn
+    if (waitingTurn) {
+      live = waitingTurn
+      live.status = 'streaming'
+      live.phase = 'planning'
+      live.startTime = Date.now()
+      live.revision = (live.revision ?? 0) + 1
+    } else {
+      turns.value = [...turns.value, { ...assistantTurn(`wb-a-${Date.now()}`, 'streaming'), continuation: true }]
+      live = turns.value[turns.value.length - 1]
+    }
     const controller = new AbortController()
     streamAbort = controller
     let pausedByLeave = false
     const touchSnapshot = () => saveSnapshot(sessionId)
     beginLive(sessionId, turns.value)
-    const stream = createRunHandlers(live, touchSnapshot)
+    const stream = createRunHandlers(live, touchSnapshot, sessionId)
     try {
       await streamWorkbenchChoice(sessionId, optionId.trim(), stream.handlers, controller.signal)
       // 与发送同口径：收尾已被新一轮接管就不再回写（避免冲掉新气泡）
@@ -1257,7 +1482,7 @@ export function useWorkbenchChat(pageActive: Ref<boolean>) {
    * @param touchSnapshot 一拍落一次快照，刷新后可恢复
    * @return handlers 与可读的运行态 `state`（是否已收到落库终帧）
    */
-  function createRunHandlers(live: ChatTurn, touchSnapshot: () => void) {
+  function createRunHandlers(live: ChatTurn, touchSnapshot: () => void, sessionId?: number) {
     const state = {
       activeParticipantId: '',
       activeParticipantName: '',
@@ -1401,7 +1626,12 @@ export function useWorkbenchChat(pageActive: Ref<boolean>) {
          */
         appendChoice(
           live,
-          { question: choice.question || '', options: choice.options || [] },
+          {
+            question: choice.question || '',
+            options: choice.options || [],
+            reply: choice.reply || undefined,
+            waiting: choice.waiting === true
+          },
           state.activeParticipantId,
           state.activeParticipantName
         )
@@ -1413,7 +1643,17 @@ export function useWorkbenchChat(pageActive: Ref<boolean>) {
          * 工作流没有 token 输出，这张卡片就是它在消息流里的唯一可见载体；
          * 漏掉这条会让整张卡片只在刷新后的落库回放里出现。
          */
-        appendWorkflow(live, view, state.activeParticipantId, state.activeParticipantName)
+        appendWorkflow(live, view, state.activeParticipantId, state.activeParticipantName, sessionId)
+        /*
+         * 续跑轮拿到第一帧工作流快照时，把上一轮那张「停在询问」的卡收掉：
+         * 同一条运行只能有一张执行卡，否则直播里会同时出现「还在问」和「又起一条」。
+         * 回放走 turnsFromEvents 里的同一函数，直播 / 收尾 / 回放共用一个口径。
+         *
+         * 这里不回写 turns.value 数组引用：beginLive 存的是这份数组，
+         * 换引用会让快照（刷新后恢复直播画面）读到旧内容；旧轮被就地改写，
+         * blocks / revision 的写入本身就会触发签名重算。
+         */
+        absorbWaitingWorkflowCards(turns.value)
         touchSnapshot()
       },
       onAssistant: (text) => {
@@ -2484,6 +2724,7 @@ export function useWorkbenchChat(pageActive: Ref<boolean>) {
     showRouteChip,
     canSwitchRoute,
     canStopRun,
+    waitingReply,
     draftToken,
     init,
     newSession,

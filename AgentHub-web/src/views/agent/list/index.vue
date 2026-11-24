@@ -1730,7 +1730,7 @@ function onTrial(payload: { agentId: number; name: string; runMode: string }) {
   flex: none;
   align-items: center;
   padding: 2px;
-  background: #f3f4f6;
+  background: var(--ah-neutral-tint);
   border: 1px solid var(--ah-border);
   border-radius: 8px;
 }
@@ -1751,13 +1751,13 @@ function onTrial(payload: { agentId: number; name: string; runMode: string }) {
 
 .view-btn:hover:not(:disabled) {
   color: var(--ah-text);
-  background: #fff;
+  background: var(--ah-surface);
 }
 
 .view-btn.is-active {
-  color: #3b82f6;
-  background: #fff;
-  box-shadow: 0 1px 2px rgba(15, 23, 42, 0.08);
+  color: var(--ah-primary);
+  background: var(--ah-surface);
+  box-shadow: var(--ah-shadow);
 }
 
 .view-btn:disabled {
@@ -1812,11 +1812,11 @@ function onTrial(payload: { agentId: number; name: string; runMode: string }) {
 }
 
 /*
- * 平台默认智能助手卡片：很淡的透明蓝底，与普通专家白卡区分。
- * 只叠背景色，不改高度 / 阴影 / hover；禁止做成实色块。
+ * 平台默认智能助手卡片：用静灰底与普通专家白卡区分。
+ * 只叠背景色，不改高度 / 阴影 / hover；禁止做成实色块，也不再借遗留蓝。
  */
 .card.is-platform-default {
-  background-color: rgba(59, 130, 246, 0.06);
+  background-color: var(--ah-surface-muted);
 }
 
 /* 外观由 ConfigCard 接管；此处仅保留飞卡选择器所需的 .card 与内部排版 */
@@ -1880,13 +1880,13 @@ function onTrial(payload: { agentId: number; name: string; runMode: string }) {
 }
 
 .card-more-btn:hover {
-  color: var(--ah-text, #303133);
+  color: var(--ah-text, #1f2937);
   background: rgba(15, 23, 42, 0.06);
 }
 
 /* 下拉里唯一危险项：删除文案标红。菜单 teleport 到 body，但类名带本组件作用域仍能命中 */
 .menu-danger {
-  color: #ef4444;
+  color: var(--ah-danger);
 }
 
 /* 底栏分割线：按设计稿用主题边框 token（#ebeef5），只在本页收紧，不动共用组件 */
@@ -1897,7 +1897,7 @@ function onTrial(payload: { agentId: number; name: string; runMode: string }) {
 /* 复制弹窗说明：灰字一行，写清继承与不继承的范围 */
 .copy-hint {
   margin: 0;
-  color: var(--ah-text-muted, #9ca3af);
+  color: var(--ah-text-secondary, #6b7280);
   font-size: 12px;
   line-height: 1.6;
 }
@@ -1905,8 +1905,8 @@ function onTrial(payload: { agentId: number; name: string; runMode: string }) {
 .card-name {
   margin: 0;
   overflow: hidden;
-  font-size: 15px;
-  font-weight: 650;
+  font-size: 14px;
+  font-weight: 600;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
@@ -2034,8 +2034,8 @@ function onTrial(payload: { agentId: number; name: string; runMode: string }) {
   width: 100%;
   padding: 12px;
   border: 1px solid var(--ah-border);
-  border-radius: 12px;
-  background: #fff;
+  border-radius: 8px;
+  background: var(--ah-surface);
   box-shadow: var(--ah-shadow);
   color: inherit;
   text-align: left;
@@ -2043,18 +2043,18 @@ function onTrial(payload: { agentId: number; name: string; runMode: string }) {
 }
 
 .rail-card:hover:not(:disabled) {
-  border-color: #93c5fd;
+  border-color: var(--el-color-primary-light-5);
 }
 
-/* 左栏同一身份：更淡的透明蓝底；写在 is-current 之前，选中态仍是实色高亮 */
+/* 左栏同一身份：静灰底；写在 is-current 之前，选中态仍是浅紫高亮 */
 .rail-card.is-platform-default {
-  background-color: rgba(59, 130, 246, 0.05);
+  background-color: var(--ah-surface-muted);
 }
 
 .rail-card.is-current {
-  background: #eff6ff;
-  border-color: #3b82f6;
-  box-shadow: 0 0 0 1px #3b82f6;
+  background: var(--ah-primary-tint);
+  border-color: var(--ah-primary);
+  box-shadow: 0 1px 3px rgba(99, 91, 255, 0.12);
 }
 
 .rail-card:disabled {
@@ -2066,7 +2066,7 @@ function onTrial(payload: { agentId: number; name: string; runMode: string }) {
   width: 100%;
   overflow: hidden;
   font-size: 14px;
-  font-weight: 650;
+  font-weight: 600;
   text-overflow: ellipsis;
   white-space: nowrap;
 }

@@ -255,15 +255,15 @@ function submit() {
   margin: 0;
   overflow: auto;
   padding: 10px 12px;
-  background: #fafbfd;
-  border: 1px solid var(--ah-border, #e6e8ef);
+  background: var(--ah-surface-muted);
+  border: 1px solid var(--ah-border, #ebeef5);
   border-radius: 6px;
   white-space: pre-wrap;
   word-break: break-word;
   font-family: ui-monospace, Consolas, monospace;
   font-size: 12px;
   line-height: 1.6;
-  color: #4b5563;
+  color: var(--ah-text-regular);
 }
 
 .block-hint {

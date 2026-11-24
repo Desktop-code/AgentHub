@@ -17,10 +17,17 @@ import java.util.Optional;
  * 历史会话里可能还有旧的 {@code agenthub-choice} 机器块，仍由
  * {@code WorkbenchChoiceJson.parse} 兼容读取，但新写入不再使用机器块。
  *
+ * <p>方案停等时同一条结构还承担「这次询问的回复」：
+ * {@code waiting=true} 表示运行正停在这位子专家处等用户；
+ * {@code reply} 非空表示用户已经答复、选项应从卡片上清掉，只留一行「您的选择」。
+ * 两个字段都为空时就是普通的一次性选项（单专家 / 无停等），与旧协议逐字兼容。
+ *
  * @param question 一句话问题（可空：模型只给选项时由前端省略问题行）
  * @param options  选项列表；顺序即展示顺序
+ * @param reply    用户已答复的展示文案；未答复为空串
+ * @param waiting  true 表示这条选项对应一条仍在等待的询问
  */
-public record AgentChoice(String question, List<Option> options) {
+public record AgentChoice(String question, List<Option> options, String reply, boolean waiting) {
 
     /** 选项数量下限：一个选项不成其为「拍板」 */
     public static final int MIN_OPTIONS = 2;
@@ -30,6 +37,47 @@ public record AgentChoice(String question, List<Option> options) {
     /** 防御性归一：null → 空表，避免调用方逐处判空。 */
     public AgentChoice {
         options = options == null ? List.of() : List.copyOf(options);
+        question = question == null ? "" : question.trim();
+        reply = reply == null ? "" : reply.trim();
+    }
+
+    /**
+     * 兼容构造：普通一次性选项（不停等、未答复）。
+     *
+     * @param question 一句话问题
+     * @param options  选项列表
+     */
+    public AgentChoice(String question, List<Option> options) {
+        this(question, options, "", false);
+    }
+
+    /**
+     * @return true 表示用户已答复过这条询问
+     */
+    public boolean hasReply() {
+        return !reply.isEmpty();
+    }
+
+    /**
+     * 同一条询问标成「正在等待用户」；选项与问题原样保留。
+     *
+     * <p>命名避开 record 组件访问器 {@code waiting()}（那是布尔值），
+     * 否则会与 record 的访问器同签名冲突。
+     *
+     * @return 等待态结构
+     */
+    public AgentChoice awaiting() {
+        return new AgentChoice(question, options, reply, true);
+    }
+
+    /**
+     * 同一条询问的回复态：选项清空，只留问题与选择文案。
+     *
+     * @param replyText 用户答复的展示文案（如「您的选择：…」），非空
+     * @return 回复态结构
+     */
+    public AgentChoice replied(String replyText) {
+        return new AgentChoice(question, List.of(), replyText, false);
     }
 
     /**

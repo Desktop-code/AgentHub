@@ -26,6 +26,8 @@ public class WorkflowNodeRunEntity {
     private String inputJson;
     private String outputJson;
     private String errorSummary;
+    /** 用户对该节点询问的回复（对话续跑）；无询问或未回复时为空 */
+    private String replyText;
     private String selectedEdges;
     private LocalDateTime startTime;
     private LocalDateTime endTime;

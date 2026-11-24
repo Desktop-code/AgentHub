@@ -173,7 +173,10 @@
       </div>
       <el-table v-loading="ledgerLoading" :data="ledgerRows" empty-text="没有流水">
         <el-table-column v-bind="ledgerIndexColumnProps" />
-        <el-table-column prop="createTime" label="时间" min-width="170" align="center" />
+        <!-- 时间统一到秒：带毫秒会撑开列宽并出现折行 -->
+        <el-table-column prop="createTime" label="时间" min-width="170" align="center">
+          <template #default="{ row }">{{ formatDateTime(row.createTime) }}</template>
+        </el-table-column>
         <el-table-column label="Agent 名称" min-width="180" align="center" show-overflow-tooltip>
           <template #default="{ row }">
             <span class="agent-cell">
@@ -316,6 +319,7 @@ import { useListIndexColumn } from '@/composables/listIndex'
 import PriceFormDialog from '@/components/billing/PriceFormDialog.vue'
 import TokenTrendChart from '@/components/billing/TokenTrendChart.vue'
 import { useUserStore } from '@/stores/user'
+import { formatDateTime } from '@/utils/datetime'
 import type { AgentCard } from '@/types/agent'
 import type { DailyRow, LedgerRow, PriceRow, PriceSave, TrendPoint } from '@/types/billing'
 import type { InstanceRow } from '@/types/model'
@@ -852,7 +856,7 @@ async function loadOptions<T>(load: () => Promise<{ data: { data: { records: T[]
 .panel-head h2 {
   margin: 0;
   font-size: 16px;
-  font-weight: 650;
+  font-weight: 600;
 }
 
 .panel-sub {
@@ -883,7 +887,7 @@ async function loadOptions<T>(load: () => Promise<{ data: { data: { records: T[]
 }
 
 .chip-clear:hover {
-  color: var(--el-color-danger);
+  color: var(--ah-danger);
 }
 
 /*
@@ -989,15 +993,15 @@ async function loadOptions<T>(load: () => Promise<{ data: { data: { records: T[]
 
 .tag-deleted {
   flex-shrink: 0;
-  --el-tag-text-color: #b91c1c;
-  --el-tag-border-color: #fecaca;
-  --el-tag-bg-color: #fef2f2;
+  --el-tag-text-color: var(--ah-danger);
+  --el-tag-border-color: var(--el-color-danger-light-5);
+  --el-tag-bg-color: var(--ah-danger-tint);
 }
 
 .tag-disabled {
   flex-shrink: 0;
-  --el-tag-text-color: #6b7280;
-  --el-tag-border-color: #e5e7eb;
-  --el-tag-bg-color: #f3f4f6;
+  --el-tag-text-color: var(--ah-neutral);
+  --el-tag-border-color: var(--ah-border);
+  --el-tag-bg-color: var(--ah-neutral-tint);
 }
 </style>

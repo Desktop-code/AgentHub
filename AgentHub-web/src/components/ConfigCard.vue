@@ -50,11 +50,11 @@ withDefaults(
   box-sizing: border-box;
   padding: 0;
   overflow: hidden;
-  background: #fff;
+  background: var(--ah-surface);
   /* 可点业务卡：无生硬描边，轻阴影分层；hover 才轻微上浮 */
   border: none;
   border-radius: 8px;
-  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.05);
+  box-shadow: var(--ah-shadow);
   cursor: pointer;
   /*
    * 只过渡合成/绘制成本低的属性；禁止 transition: all ——
@@ -88,7 +88,7 @@ withDefaults(
 
 /* 选中：极浅紫底 + 品牌色轻阴影 */
 .config-card.is-selected {
-  background-color: #f4f4ff;
+  background-color: var(--ah-primary-tint-soft);
   box-shadow: 0 1px 3px rgba(99, 91, 255, 0.12);
 }
 
@@ -106,7 +106,7 @@ withDefaults(
   padding: 12px 14px 0;
   min-width: 0;
   overflow: hidden;
-  color: #303133;
+  color: var(--ah-text);
 }
 
 /* 标题区：加深加粗；单行截断，避免标题换行抬高整卡 */
@@ -115,7 +115,7 @@ withDefaults(
 .config-card__header :deep(strong) {
   min-width: 0;
   overflow: hidden;
-  color: #303133;
+  color: var(--ah-text);
   font-weight: 600;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -136,7 +136,7 @@ withDefaults(
   min-height: calc(1.5em * 2);
   max-height: calc(1.5em * 2);
   overflow: hidden;
-  color: #606266;
+  color: var(--ah-text-regular);
   font-size: 14px;
   line-height: 1.5;
   text-overflow: ellipsis;
@@ -163,7 +163,7 @@ withDefaults(
   margin-top: auto;
   padding: 0 10px;
   overflow: hidden;
-  background: #fafafa;
+  background: var(--ah-surface-muted);
   border-top: 1px solid var(--ah-border-soft, #f2f6fc);
   /* 底栏承载工具数 / 版本等元信息，用小一号的可读灰，不用 #9ca3af 一类的装饰灰 */
   color: var(--ah-text-muted);

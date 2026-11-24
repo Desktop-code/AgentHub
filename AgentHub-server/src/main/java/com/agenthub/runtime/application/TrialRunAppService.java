@@ -23,6 +23,7 @@ import com.agenthub.runtime.domain.model.ChoiceCapture;
 import com.agenthub.runtime.domain.model.EntryChannel;
 import com.agenthub.runtime.domain.model.EventType;
 import com.agenthub.runtime.domain.model.MaRunSpec;
+import com.agenthub.runtime.domain.model.MaPauseSnapshot;
 import com.agenthub.runtime.domain.model.MeterScope;
 import com.agenthub.runtime.domain.model.PendingPlan;
 import com.agenthub.runtime.domain.model.PreprocessView;
@@ -61,8 +62,10 @@ import com.agenthub.runtime.domain.service.TrialTexts;
 import com.agenthub.runtime.domain.service.VisionOcrTexts;
 import com.agenthub.runtime.domain.service.WorkbenchChoiceJson;
 import com.agenthub.runtime.domain.service.WorkflowRunJson;
+import com.agenthub.runtime.application.router.MaPauseSignal;
 import com.agenthub.runtime.infra.agentscope.ReActTrialExecutor;
 import com.agenthub.runtime.infra.agentscope.VisionOcrExecutor;
+import com.agenthub.workflow.domain.model.WorkflowRun;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.stereotype.Service;
@@ -75,7 +78,6 @@ import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 import java.util.Set;
-
 /**
  * 发送一轮试跑。所属域：runtime。模型调用在事务外，成功或失败后再落事件。
  * 会话在多轮期间保持 RUNNING，不写结束时间。业务失败写 error 事件后仍保持 RUNNING，方便续聊。
@@ -116,6 +118,18 @@ public class TrialRunAppService {
     private final ReceptionSchemeResolver reception;
     /** 工作台手动换线的一次性强制标记；调试路径从不读取 */
     private final WorkbenchRouteForceRegistry routeForce;
+
+    /**
+     * 工作流「对话停等」的续跑接线：本会话有等待回复的运行时，把用户下一句送回同一条 run，
+     * 不新建运行、也不经入口判路由。只在工作台会话生效。
+     */
+    private final WorkflowReplyResumer workflowReplies;
+    /**
+     * 方案「子专家询问」停等的续跑接线：本会话有等待回复的方案运行时，把用户下一句
+     * （点选项或输入框原文）送回同一条运行、同一位成员后续跑，不新开运行、不再经入口判路由。
+     * 只在工作台会话生效；与 {@link #workflowReplies} 互斥（同一会话同时只会有一条等待）。
+     */
+    private final MaReplyResumer maReplies;
     /** 一轮没能正常收尾时，把仍是 RUNNING 且没被占用的会话收成取消 */
     private final StaleRunCloser staleRuns;
     /** 用户附图落盘。无图时不参与。 */
@@ -150,6 +164,8 @@ public class TrialRunAppService {
      * @param maSpecs         方案读源；虚拟根没有 Agent 时由它提供模板、候选与判路由模型
      * @param idempotency     发消息幂等闸门；无键请求不改变原行为
      * @param routeForce      工作台手动换线的一次性强制标记（进程内，只作用一轮）
+     * @param workflowReplies 工作流对话停等的续跑接线；等待中的运行优先吃掉下一句
+     * @param maReplies       方案子专家询问停等的续跑接线；与工作流等待互斥
      * @param staleRuns      异常逃出时收口遗留 RUNNING；正常成功 / 业务失败不走这里
      * @param userImages     用户附图落盘；无图时不调用
      * @param userFiles         用户非图片附件落盘；无文件时不调用
@@ -167,7 +183,8 @@ public class TrialRunAppService {
                               TrialMessageIdempotency idempotency, ReceptionSchemeResolver reception,
                               WorkbenchRouteForceRegistry routeForce, StaleRunCloser staleRuns,
                               TrialUserImageStorage userImages, TrialUserFileStorage userFiles,
-                              TrialAttachmentReader attachmentReader, EntryPreprocess entryPreprocess) {
+                              TrialAttachmentReader attachmentReader, EntryPreprocess entryPreprocess,
+                              WorkflowReplyResumer workflowReplies, MaReplyResumer maReplies) {
         this.sessions = sessions;
         this.events = events;
         this.agents = agents;
@@ -197,6 +214,8 @@ public class TrialRunAppService {
         this.userFiles = userFiles;
         this.attachmentReader = attachmentReader;
         this.entryPreprocess = entryPreprocess;
+        this.workflowReplies = workflowReplies;
+        this.maReplies = maReplies;
     }
 
     /**
@@ -423,6 +442,45 @@ public class TrialRunAppService {
         RunSession session = access.require(sessionId);
         // 先做只读校验再占单飞：选项不合法时不该在会话上留下任何痕迹
         assertSendable(session);
+        /*
+         * 方案停等询问的选项：与输入框提交共用同一条续跑（同一成员、同一条运行），
+         * 不落 USER 事件，选择写进该子专家卡。与工作流等待互斥。
+         */
+        Optional<MaPauseSnapshot> waitingMa = maReplies.waitingRun(sessionId);
+        if (waitingMa.isPresent()) {
+            MaPauseSnapshot state = waitingMa.get();
+            Optional<AgentChoice.Option> option = state.getChoice() == null
+                    ? Optional.empty() : state.getChoice().find(optionId);
+            if (option.isEmpty()) {
+                throw new BizException(ErrorCode.BAD_REQUEST, "该选项不属于当前等待的询问，请重新选择或直接输入");
+            }
+            MessageResp resp = chooseMaReply(session, state, option.get().label(), progress);
+            if (resp != null) {
+                return resp;
+            }
+            // 并发已收口：落到下面工作流 / 单专家路径（通常会明确提示没有可续选项）
+        }
+        /*
+         * 工作流停等询问的选项：与输入框提交走同一条续跑写入（input.reply）。
+         * 必须排在「单专家续作」之前——工作流目标没有 sticky 专家，
+         * 落到下面那条分支只会被拒成「当前线路不是单个专家」。
+         * 命中即返回；没有等待中的运行 / 选项不属于这一步时继续走原单专家路径。
+         */
+        Optional<WorkflowRun> waitingWorkflow = workflowReplies.waitingRun(sessionId);
+        if (waitingWorkflow.isPresent()) {
+            WorkflowRun waiting = waitingWorkflow.get();
+            Optional<String> label = workflowReplies.waitingOptionLabel(waiting, optionId);
+            if (label.isEmpty()) {
+                // 已经停在等待却点了不属于这一步的选项：明确拒绝，不静默吞掉
+                throw new BizException(ErrorCode.BAD_REQUEST, "该选项不属于当前等待的询问，请重新选择或直接输入");
+            }
+            String userText = label.get();
+            MessageResp resp = chooseWorkflowReply(session, waiting, userText, progress);
+            if (resp != null) {
+                return resp;
+            }
+            // 并发已收口：落到下面按单专家路径处理（通常会明确提示没有可续选项）
+        }
         ChoiceAnchor anchor = requireChoice(sessionId, optionId);
         Long stickyAgentId = session.getStickyAgentId();
         if (stickyAgentId == null) {
@@ -487,6 +545,88 @@ public class TrialRunAppService {
             if (!settled) {
                 staleRuns.abandonIfIdle(sessionId);
             }
+        }
+    }
+
+    /**
+     * 点等待中工作流的选项：续跑同一条 run → 收尾。
+     *
+     * <p>为什么不落 USER 事件：这是对询问节点的回复，不是新的一轮提问。
+     * 时间线里只保留最初那句提问；选项文案由投影写进询问节点（{@code reply}），
+     * 用户气泡不再为它多出一条。
+     *
+     * <p>不占单飞、不建 trace：等待期间没有请求线程在跑，这里只做一次同步续跑；
+     * 引擎自身的条件迁移已经能挡住并发重复投递。
+     *
+     * @param session 当前会话
+     * @param run     等待中的 run
+     * @param userText 选项的服务端权威文案
+     * @param progress 增量出口；可空
+     * @return 本轮响应；运行已被并发收口时返回 null
+     */
+    private MessageResp chooseWorkflowReply(RunSession session, WorkflowRun run, String userText,
+                                            TrialProgress progress) {
+        Long sessionId = session.getId();
+        List<RunEvent> written = new ArrayList<>();
+        Optional<WorkflowReplyResumer.Resumed> resumed =
+                workflowReplies.resumeWithLabel(sessionId, run, userText, session.getUserId(), progress);
+        if (resumed.isEmpty()) {
+            // 并发已收口：没有可续运行，也没有用户消息可留；按失败说明收口
+            MessageResp failed = fail(session, written, "这条运行刚刚被取消或被别人继续，请重新提问", userText);
+            return failed;
+        }
+        written.addAll(resumed.get().events());
+        MessageResp resp = succeed(session, resumed.get().turn(), written, userText);
+        return resp;
+    }
+
+    /**
+     * 点等待中方案询问的选项：续跑同一条运行 → 收尾。
+     *
+     * <p>不落 USER 事件：对询问的回复由投影写进发问子专家的卡（CHOICE.reply），
+     * 右侧时间线仍只有最初那句提问。
+     *
+     * <p>与输入框提交一样占本会话单飞：两条路径都会跑模型，不能让它们并发续跑同一条运行；
+     * 等待行的条件收口（markDone）仍负责「重复投递只有第一次生效」，二者职责不重叠。
+     *
+     * @param session  当前会话
+     * @param state    等待中的方案快照
+     * @param userText 选项的服务端权威文案
+     * @param progress 增量出口；可空
+     * @return 本轮响应；运行已被并发收口时返回 null
+     */
+    private MessageResp chooseMaReply(RunSession session, MaPauseSnapshot state, String userText,
+                                      TrialProgress progress) {
+        Long sessionId = session.getId();
+        // 续作同样要单飞：与输入框提交 / 其它点选互斥，避免同一会话并发起两条续跑
+        if (!flight.tryStart(sessionId)) {
+            throw new BizException(ErrorCode.BAD_REQUEST, "该会话正在执行");
+        }
+        boolean liveStarted = false;
+        try {
+            List<RunEvent> written = new ArrayList<>();
+            TrialProgress sink = progress;
+            if (progress != null) {
+                /*
+                 * 点选续跑同样镜像内存快照：刷新 / 离开再进时能边跑边看，不必等整轮落库。
+                 * 第一条落库事件是「已答复」CHOICE，增量从它的下一条起，避免同序号合并时覆盖回复行。
+                 */
+                live.beginAt(sessionId, events.nextSeq(sessionId) + 1);
+                sink = TrialLiveBuffer.tee(progress, live.recorder(sessionId));
+                liveStarted = true;
+            }
+            Optional<MaReplyResumer.Resumed> resumed = maReplies.resumeWaiting(session, state, userText, sink);
+            if (resumed.isEmpty()) {
+                return null;
+            }
+            written.addAll(resumed.get().events());
+            return succeed(session, resumed.get().turn(), written, userText);
+        } finally {
+            // 续跑同步结束：快照使命完成，权威数据是刚落库的事件
+            if (liveStarted) {
+                live.clear(sessionId);
+            }
+            flight.finish(sessionId);
         }
     }
 
@@ -1044,6 +1184,70 @@ public class TrialRunAppService {
                         ? UserMessageFiles.FILE_ONLY_LABEL
                         : UserMessageImages.IMAGE_ONLY_LABEL;
             }
+            /*
+             * 工作流在对话里停等：这一句是对询问节点的回复，不是新的用户消息。
+             * 先定位等待中的运行；续跑成功就不落 USER 事件，时间线里仍只有最初那句提问，
+             * 选择结果由投影写进询问节点。没有等待中的运行 / 续跑未命中时，仍按普通新问题落用户消息。
+             * 只在工作台会话尝试；调试会话没有这条续跑语义。
+             */
+            Optional<WorkflowRun> waitingRun = EntryChannel.isWorkbench(session.getEntryChannel())
+                    && !spoken.isBlank()
+                    ? workflowReplies.waitingRun(sessionId)
+                    : Optional.empty();
+            /*
+             * 方案在对话里停等（子专家询问）：同样把这一句当回复而不是新问题。
+             * 与工作流等待互斥；带附件时按普通新问题处理，不把附件静默丢掉。
+             * 续跑成功后不落 USER 事件，选项清掉、选择写进该子专家卡。
+             */
+            Optional<MaPauseSnapshot> waitingMa = EntryChannel.isWorkbench(session.getEntryChannel())
+                    && !spoken.isBlank() && accepted.isEmpty() && acceptedFiles.isEmpty()
+                    ? maReplies.waitingRun(sessionId)
+                    : Optional.empty();
+            // 同一批增量同时镜像到内存快照：刷新页面后前端靠它继续看「边跑边写」，不必等整轮落库。
+            // 只在有真实出站时镜像：progress 为 null 是同步 send 路径，collector 会走「结束时一次性补发」
+            // 的分支，塞一个非空 progress 进去会改变那条路径的行为，属于不必要的副作用。
+            TrialProgress mirrored = progress;
+            if ((waitingRun.isPresent() || waitingMa.isPresent()) && progress != null) {
+                /*
+                 * 续跑轮没有新的用户事件：beginAt 只对齐序号，避免内存快照多出一个用户气泡。
+                 * 方案续跑会先把「已答复」的 CHOICE 写在 userSeq 上，再开始跑模型；
+                 * 内存增量必须从 userSeq+1 起，否则刷新合并时同序号会覆盖掉这条回复。
+                 */
+                live.beginAt(sessionId, waitingMa.isPresent() ? userSeq + 1 : userSeq);
+                mirrored = TrialLiveBuffer.tee(progress, live.recorder(sessionId));
+            }
+            if (waitingMa.isPresent()) {
+                Optional<MaReplyResumer.Resumed> resumed = maReplies.resumeWaiting(
+                        session, waitingMa.get(), spoken, mirrored);
+                if (resumed.isPresent()) {
+                    written.addAll(resumed.get().events());
+                    obs.finishOk(trace);
+                    MessageResp done = succeed(session, resumed.get().turn(), written, titleSeed);
+                    settled = true;
+                    return done;
+                }
+                // 并发收口：这条等待已不可续，退回普通新问题路径，用户这句话不丢
+                live.clear(sessionId);
+                mirrored = progress;
+            }
+            if (waitingRun.isPresent()) {
+                Optional<WorkflowReplyResumer.Resumed> resumed = workflowReplies.resumeWaiting(
+                        sessionId, waitingRun.get(), spoken, session.getUserId(), mirrored);
+                if (resumed.isPresent()) {
+                    WorkflowReplyResumer.Resumed result = resumed.get();
+                    written.addAll(result.events());
+                    obs.finishOk(trace);
+                    MessageResp done = succeed(session, result.turn(), written, titleSeed);
+                    settled = true;
+                    return done;
+                }
+                /*
+                 * 并发收口（刚被取消 / 别人已回复）：不能把用户这句话丢掉。
+                 * 退回普通新问题路径补落 USER 事件，并把快照重置成带用户事件的这一轮。
+                 */
+                live.clear(sessionId);
+                mirrored = progress;
+            }
             // 无附件仍走「摘要=正文」的原入口，避免把纯文本提问改成另一条重载。
             if (imageManifest == null) {
                 written.add(writer.append(sessionId, seq++, EventType.USER, spoken, null, null));
@@ -1055,10 +1259,6 @@ public class TrialRunAppService {
             if (visionNote != null && !visionNote.isBlank()) {
                 written.add(writer.append(sessionId, seq++, EventType.VISION, visionNote, null, null));
             }
-            // 同一批增量同时镜像到内存快照：刷新页面后前端靠它继续看「边跑边写」，不必等整轮落库。
-            // 只在有真实出站时镜像：progress 为 null 是同步 send 路径，collector 会走「结束时一次性补发」
-            // 的分支，塞一个非空 progress 进去会改变那条路径的行为，属于不必要的副作用。
-            TrialProgress mirrored = progress;
             if (progress != null) {
                 // 快照从用户事件那一序号起，附图清单与识别结果都带上：
                 // 刷新后 SSE 已断，快照会按序号盖住已落库的用户事件，清单必须在快照里。
@@ -1111,8 +1311,7 @@ public class TrialRunAppService {
             obs.finishOk(trace);
             MessageResp done = succeed(session, turn, written, titleSeed);
             settled = true;
-            return done;
-        } catch (TrialFailure ex) {
+            return done;        } catch (TrialFailure ex) {
             // 用户点停止：终态是「已中断」，不按失败刷一条试跑失败
             if ("cancelled".equals(ex.getFinishReason())) {
                 log.info("运行已中断 sessionId={}", sessionId);
@@ -1227,6 +1426,12 @@ public class TrialRunAppService {
             try {
                 routed = router.execute(root, spec, query, modelUser, userId,
                         session.getId(), progress, workbenchHint(session, modelUser));
+            } catch (MaPauseSignal pause) {
+                /*
+                 * 方案停在某位子专家询问处：落等待态并把已跑成员补写成标准事件。
+                 * 这不是失败——本轮以等待说明收尾，下一句回复由 maReplies 直接续跑。
+                 */
+                return maReplies.pauseRun(session.getId(), pause.state(), seq, written);
             } finally {
                 LeafChoiceHolder.clear();
             }

@@ -8,6 +8,7 @@ import com.baomidou.mybatisplus.core.conditions.query.LambdaQueryWrapper;
 import com.baomidou.mybatisplus.core.conditions.update.LambdaUpdateWrapper;
 import org.springframework.stereotype.Repository;
 
+import java.util.Collection;
 import java.util.List;
 import java.util.Optional;
 
@@ -59,6 +60,21 @@ public class WorkflowNodeRunRepositoryImpl implements WorkflowNodeRunRepository 
 
     /** {@inheritDoc} */
     @Override
+    public List<WorkflowNodeRun> listByRunIds(Collection<Long> runIds) {
+        if (runIds == null || runIds.isEmpty()) {
+            return List.of();
+        }
+        // 一次 IN 查询取回多张卡的节点行：回放补全不做逐卡往返
+        return mapper.selectList(new LambdaQueryWrapper<WorkflowNodeRunEntity>()
+                        .in(WorkflowNodeRunEntity::getRunId, runIds)
+                        .orderByAsc(WorkflowNodeRunEntity::getId))
+                .stream()
+                .map(this::toDomain)
+                .toList();
+    }
+
+    /** {@inheritDoc} */
+    @Override
     public Optional<WorkflowNodeRun> findById(Long id) {
         WorkflowNodeRunEntity entity = mapper.selectById(id);
         return entity == null ? Optional.empty() : Optional.of(toDomain(entity));
@@ -83,7 +99,7 @@ public class WorkflowNodeRunRepositoryImpl implements WorkflowNodeRunRepository 
     public int cancelOpen(Long runId) {
         int touched = mapper.update(null, new LambdaUpdateWrapper<WorkflowNodeRunEntity>()
                 .eq(WorkflowNodeRunEntity::getRunId, runId)
-                .in(WorkflowNodeRunEntity::getStatus, "RUNNING", "WAITING_HUMAN")
+                .in(WorkflowNodeRunEntity::getStatus, "RUNNING", "WAITING_HUMAN", "WAITING_REPLY")
                 .set(WorkflowNodeRunEntity::getStatus, "CANCELLED")
                 .set(WorkflowNodeRunEntity::getEndTime, java.time.LocalDateTime.now()));
         touched += mapper.update(null, new LambdaUpdateWrapper<WorkflowNodeRunEntity>()
@@ -91,6 +107,23 @@ public class WorkflowNodeRunRepositoryImpl implements WorkflowNodeRunRepository 
                 .eq(WorkflowNodeRunEntity::getStatus, "PENDING")
                 .set(WorkflowNodeRunEntity::getStatus, "SKIPPED"));
         return touched;
+    }
+
+    /**
+     * {@inheritDoc}
+     *
+     * <p>条件更新而不是先读后写：同一 run 只有一个等待节点（入口已校验唯一），
+     * 直接按 runId + nodeCode 覆盖，避免与引擎收口形成读改写竞争。
+     */
+    @Override
+    public int markReply(Long runId, String nodeCode, String replyText) {
+        if (runId == null || nodeCode == null || nodeCode.isBlank()) {
+            return 0;
+        }
+        return mapper.update(null, new LambdaUpdateWrapper<WorkflowNodeRunEntity>()
+                .eq(WorkflowNodeRunEntity::getRunId, runId)
+                .eq(WorkflowNodeRunEntity::getNodeCode, nodeCode)
+                .set(WorkflowNodeRunEntity::getReplyText, replyText));
     }
 
     private WorkflowNodeRun toDomain(WorkflowNodeRunEntity entity) {
@@ -105,6 +138,8 @@ public class WorkflowNodeRunRepositoryImpl implements WorkflowNodeRunRepository 
         nodeRun.setInputJson(entity.getInputJson());
         nodeRun.setOutputJson(entity.getOutputJson());
         nodeRun.setErrorSummary(entity.getErrorSummary());
+        // 回复是回放「我答了什么」的唯一来源：随行一起读出，读侧不必再查卡片快照
+        nodeRun.setReplyText(entity.getReplyText());
         nodeRun.setSelectedEdges(entity.getSelectedEdges());
         nodeRun.setStartTime(entity.getStartTime());
         nodeRun.setEndTime(entity.getEndTime());

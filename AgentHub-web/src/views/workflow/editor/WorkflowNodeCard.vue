@@ -125,6 +125,7 @@ const RUN_LABEL: Record<string, string> = {
   FAILED: '失败',
   SKIPPED: '已跳过',
   WAITING_HUMAN: '等待人工',
+  WAITING_REPLY: '等待回复',
   CANCELLED: '已取消'
 }
 
@@ -136,6 +137,7 @@ const RUN_TONE: Record<string, string> = {
   FAILED: 'failed',
   SKIPPED: 'skipped',
   WAITING_HUMAN: 'waiting',
+  WAITING_REPLY: 'waiting',
   CANCELLED: 'cancelled'
 }
 
@@ -152,17 +154,17 @@ const runClass = computed(() => {
   min-width: 148px;
   max-width: 220px;
   padding: 8px 10px;
-  border: 1px solid var(--ah-border, #e5e7eb);
-  border-left: 4px solid #94a3b8;
+  border: 1px solid var(--ah-border, #ebeef5);
+  border-left: 4px solid var(--ah-text-faint);
   border-radius: 8px;
-  background: #fff;
-  box-shadow: 0 2px 6px rgb(15 23 42 / 8%);
+  background: var(--ah-surface);
+  box-shadow: var(--ah-shadow);
   font-size: 12px;
   transition: box-shadow 0.15s ease, border-color 0.15s ease;
 }
 
 .wf-node.is-selected {
-  border-color: #635bff;
+  border-color: var(--ah-primary);
   box-shadow: 0 0 0 2px rgb(99 91 255 / 22%);
 }
 
@@ -174,17 +176,17 @@ const runClass = computed(() => {
 }
 
 .wf-node__type {
-  font-size: 11px;
+  font-size: 12px;
   font-weight: 600;
-  color: #635bff;
+  color: var(--ah-primary);
 }
 
 .wf-node__code {
   overflow: hidden;
   max-width: 96px;
-  color: #9ca3af;
+  color: var(--ah-text-faint);
   font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
-  font-size: 10px;
+  font-size: 12px;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
@@ -192,7 +194,7 @@ const runClass = computed(() => {
 .wf-node__name {
   margin-top: 2px;
   overflow: hidden;
-  color: #111827;
+  color: var(--ah-text);
   font-size: 13px;
   font-weight: 600;
   text-overflow: ellipsis;
@@ -202,8 +204,8 @@ const runClass = computed(() => {
 .wf-node__summary {
   margin-top: 2px;
   overflow: hidden;
-  color: #6b7280;
-  font-size: 11px;
+  color: var(--ah-text-secondary);
+  font-size: 12px;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
@@ -226,7 +228,7 @@ const runClass = computed(() => {
 }
 
 .wf-node.is-agent {
-  border-left-color: #635bff;
+  border-left-color: var(--ah-primary);
 }
 
 .wf-node.is-tool {
@@ -234,7 +236,7 @@ const runClass = computed(() => {
 }
 
 .wf-node.is-tool .wf-node__type {
-  color: #b45309;
+  color: var(--ah-warning);
 }
 
 .wf-node.is-cond {
@@ -265,23 +267,23 @@ const runClass = computed(() => {
 
 /* ===== 试跑高亮：只加描边 / 徽标，不改变节点既有类型配色 ===== */
 .wf-node.run-running {
-  border-color: #635bff;
+  border-color: var(--ah-primary);
   box-shadow: 0 0 0 3px rgb(99 91 255 / 18%);
   animation: wf-node-pulse 1.2s ease-in-out infinite;
 }
 
 .wf-node.run-success {
-  border-color: #10b981;
+  border-color: var(--ah-success);
   box-shadow: 0 0 0 3px rgb(16 185 129 / 16%);
 }
 
 .wf-node.run-failed {
-  border-color: #ef4444;
+  border-color: var(--ah-danger);
   box-shadow: 0 0 0 3px rgb(239 68 68 / 18%);
 }
 
 .wf-node.run-waiting {
-  border-color: #f59e0b;
+  border-color: var(--ah-warning);
   box-shadow: 0 0 0 3px rgb(245 158 11 / 18%);
   animation: wf-node-pulse 1.4s ease-in-out infinite;
 }
@@ -300,32 +302,32 @@ const runClass = computed(() => {
   margin-top: 4px;
   padding: 1px 6px;
   border-radius: 999px;
-  background: #eef2ff;
-  color: #4338ca;
-  font-size: 10px;
+  background: var(--ah-primary-tint);
+  color: var(--ah-primary);
+  font-size: 12px;
   font-weight: 600;
   text-align: center;
 }
 
 .wf-node.run-success .wf-node__run {
-  background: #ecfdf5;
+  background: var(--ah-success-tint);
   color: #047857;
 }
 
 .wf-node.run-failed .wf-node__run {
-  background: #fef2f2;
-  color: #b91c1c;
+  background: var(--ah-danger-tint);
+  color: var(--ah-danger);
 }
 
 .wf-node.run-waiting .wf-node__run {
-  background: #fffbeb;
-  color: #b45309;
+  background: var(--ah-warning-tint);
+  color: var(--ah-warning);
 }
 
 .wf-node.run-skipped .wf-node__run,
 .wf-node.run-cancelled .wf-node__run {
-  background: #f3f4f6;
-  color: #6b7280;
+  background: var(--ah-neutral-tint);
+  color: var(--ah-text-secondary);
 }
 
 /* 运行中 / 等待人工：呼吸提示，让用户一眼看出卡在哪 */

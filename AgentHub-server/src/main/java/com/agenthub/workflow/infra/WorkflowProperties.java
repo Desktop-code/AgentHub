@@ -8,8 +8,8 @@ import org.springframework.boot.context.properties.ConfigurationProperties;
  * 不标 {@code @Component}，避免同一配置出现两个 bean。
  * <p>硬顶口径（WF-P0 刀3）：
  * <ul>
- *   <li>{@code agenthub.workflow.wall-ms}：单次调度的墙钟上限；HUMAN 等待不计入，
- *       因为人工卡点由节点的 timeoutPolicy 单独兜底；</li>
+ *   <li>{@code agenthub.workflow.wall-ms}：单次调度的墙钟上限（平台硬顶）；HUMAN 与「等待用户回复」
+ *       都不计入，工作流自身的「整段上限 / 单节点上限」不得大于它；</li>
  *   <li>{@code agenthub.workflow.max-parallel-branches}：单个 FORK 允许的分支数，
  *       超出按「该 FORK 失败」处理（错误边可接管，否则整 run FAILED）；</li>
  *   <li>{@code agenthub.workflow.max-nodes-per-graph}：校验 / 发布时的节点硬顶；</li>
@@ -20,8 +20,14 @@ import org.springframework.boot.context.properties.ConfigurationProperties;
 @ConfigurationProperties(prefix = "agenthub.workflow")
 public class WorkflowProperties {
 
-    /** 单次调度墙钟的绝对硬顶：再大的配置也不能突破（毫秒） */
-    public static final long WALL_CAP_MS = 300_000L;
+    /**
+     * 单次调度墙钟的绝对硬顶（毫秒）：只作「写错不会变成无上限」的兜底，
+     * 业务上的平台硬顶是 {@code agenthub.workflow.wall-ms} 的实际生效值。
+     *
+     * <p>为什么不设成 5 分钟：代码生成类工作流一次跑十几分钟是常态，
+     * 旧值 300000 会把 YAML 里写的 600000 静默夹回 5 分钟，用户看到的与配置的对不上。
+     */
+    public static final long WALL_CAP_MS = 6 * 60 * 60 * 1_000L;
 
     /** 旧名兼容：刀2 的 {@code trial-wall-ms} 与墙钟同义 */
     public static final long TRIAL_WALL_CAP_MS = WALL_CAP_MS;
@@ -35,8 +41,8 @@ public class WorkflowProperties {
     /** 单 run 的 node_run 绝对硬顶（含 YAML 覆盖） */
     public static final int MAX_NODE_RUNS_CAP = 5_000;
 
-    /** 默认墙钟：60 秒（与刀2 一致） */
-    public static final long DEFAULT_WALL_MS = 60_000L;
+    /** 默认墙钟：10 分钟，足以跑完代码生成类工作流；HUMAN / 等待回复不计入 */
+    public static final long DEFAULT_WALL_MS = 600_000L;
 
     /** 默认单 FORK 分支上限 */
     public static final int DEFAULT_MAX_PARALLEL_BRANCHES = 3;
@@ -53,7 +59,7 @@ public class WorkflowProperties {
     /** 单次调度的墙钟上限（新键）；<=0 时回落到旧键 trialWallMs */
     private long wallMs = 0L;
 
-    /** 旧键：刀2 的单次调度墙钟，保留兼容 */
+    /** 旧键：刀2 的单次调度墙钟，保留兼容（wall-ms<=0 时才回落到这里） */
     private long trialWallMs = DEFAULT_WALL_MS;
 
     /** HUMAN 节点未配 timeoutMs 时的兜底等待时长（毫秒），默认 24 小时 */
@@ -102,6 +108,17 @@ public class WorkflowProperties {
      */
     public long effectiveTrialWallMs() {
         return effectiveWallMs();
+    }
+
+    /**
+     * 平台硬顶折算成整分钟，供配置页提示与「不得大于硬顶」的校验使用。
+     *
+     * <p>向下取整：硬顶 600000ms 时给出 10 分钟，界面写 10 分钟不会被自己拦住。
+     *
+     * @return 不小于 1 的分钟数
+     */
+    public int effectiveWallMinutes() {
+        return (int) Math.max(1L, effectiveWallMs() / 60_000L);
     }
 
     /**

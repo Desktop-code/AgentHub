@@ -164,7 +164,7 @@ function submit() {
 
 /* 固定用途：下拉退化为只读文案，与其它只读字段风格一致 */
 .fixed-purpose {
-  color: var(--ah-text-primary, #1f2430);
+  color: var(--ah-text-primary, #1f2937);
   font-size: 13px;
 }
 </style>

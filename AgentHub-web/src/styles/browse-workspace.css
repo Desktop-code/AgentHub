@@ -119,7 +119,7 @@
   flex: none;
   align-items: center;
   padding: 2px;
-  background: #f3f4f6;
+  background: var(--ah-neutral-tint);
   border: 1px solid var(--ah-border);
   border-radius: 8px;
 }
@@ -140,13 +140,14 @@
 
 .view-btn:hover:not(:disabled) {
   color: var(--ah-text);
-  background: #fff;
+  background: var(--ah-surface);
 }
 
+/* 当前视图 = 当前态，走信号紫；不引入遗留蓝 */
 .view-btn.is-active {
-  color: #3b82f6;
-  background: #fff;
-  box-shadow: 0 1px 2px rgba(15, 23, 42, 0.08);
+  color: var(--ah-primary);
+  background: var(--ah-surface);
+  box-shadow: var(--ah-shadow);
 }
 
 .view-btn:disabled {
@@ -233,7 +234,7 @@
   padding: 12px;
   border: none;
   border-radius: 8px;
-  background: #fff;
+  background: var(--ah-surface);
   box-shadow: var(--ah-shadow);
   color: inherit;
   text-align: left;
@@ -246,9 +247,10 @@
   box-shadow: 0 4px 12px rgba(0, 0, 0, 0.08);
 }
 
+/* 左栏当前卡：浅紫底 + 选中阴影（DESIGN 的 Selected 层），替掉遗留蓝描边 */
 .browse-workspace .rail-card.is-current {
-  background: #eff6ff;
-  box-shadow: 0 0 0 1px #3b82f6, var(--ah-shadow);
+  background: var(--el-color-primary-light-9, #f4f3ff);
+  box-shadow: 0 1px 3px rgba(99, 91, 255, 0.12);
 }
 
 .browse-workspace .rail-card:disabled {
@@ -260,7 +262,7 @@
   width: 100%;
   overflow: hidden;
   font-size: 14px;
-  font-weight: 650;
+  font-weight: 600;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
@@ -334,20 +336,21 @@
   backface-visibility: hidden;
 }
 
+/* 飞卡幽灵层：选中态与左栏当前卡同色；普通业务卡圆角回到 8px */
 .flip-ghost.is-rail-selected {
   gap: 4px;
   padding: 12px;
-  background: #eff6ff;
-  border: 1px solid #3b82f6;
-  border-radius: 12px;
-  box-shadow: 0 0 0 1px #3b82f6;
+  background: var(--el-color-primary-light-9, #f4f3ff);
+  border: 1px solid var(--ah-primary);
+  border-radius: 8px;
+  box-shadow: 0 1px 3px rgba(99, 91, 255, 0.12);
 }
 
 .flip-ghost.is-rail-selected h3 {
   margin: 0;
   overflow: hidden;
   font-size: 14px;
-  font-weight: 650;
+  font-weight: 600;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
@@ -356,17 +359,17 @@
   gap: 8px;
   padding: 16px;
   padding-right: 56px;
-  background: #fff;
-  border: 1px solid var(--ah-border, #e5e7eb);
-  border-radius: 12px;
-  box-shadow: var(--ah-shadow, 0 1px 2px rgba(15, 23, 42, 0.06));
+  background: var(--ah-surface);
+  border: 1px solid var(--ah-border, #ebeef5);
+  border-radius: 8px;
+  box-shadow: var(--ah-shadow, 0 1px 3px rgba(0, 0, 0, 0.05));
 }
 
 .flip-ghost.is-grid-card h3 {
   margin: 0;
   overflow: hidden;
   font-size: 16px;
-  font-weight: 650;
+  font-weight: 600;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
@@ -391,7 +394,7 @@
   display: inline-flex;
   align-items: center;
   padding: 0 6px;
-  border: 1px solid #e5e7eb;
+  border: 1px solid var(--ah-border);
   border-radius: 4px;
   font-size: 12px;
   line-height: 20px;
@@ -399,39 +402,39 @@
 }
 
 .flip-ghost .ghost-tag.is-react {
-  color: #635bff;
-  border-color: #c4c1ff;
-  background: #f4f3ff;
+  color: var(--ah-primary);
+  border-color: var(--el-color-primary-light-6);
+  background: var(--el-color-primary-light-9, #f4f3ff);
 }
 
 .flip-ghost .ghost-tag.is-router {
-  color: #b45309;
-  border-color: #fcd34d;
-  background: #fffbeb;
+  color: var(--ah-warning);
+  border-color: var(--el-color-warning-light-5);
+  background: var(--ah-warning-tint);
 }
 
 .flip-ghost .ghost-tag.is-on {
-  color: #047857;
-  border-color: #a7f3d0;
-  background: #ecfdf5;
+  color: var(--ah-success);
+  border-color: var(--el-color-success-light-5);
+  background: var(--ah-success-tint);
 }
 
 .flip-ghost .ghost-tag.is-off {
-  color: #6b7280;
-  border-color: #e5e7eb;
-  background: #f3f4f6;
+  color: var(--ah-neutral);
+  border-color: var(--ah-border);
+  background: var(--ah-neutral-tint);
 }
 
 .flip-ghost .ghost-tag.is-warn {
-  color: #b45309;
-  border-color: #fcd34d;
-  background: #fffbeb;
+  color: var(--ah-warning);
+  border-color: var(--el-color-warning-light-5);
+  background: var(--ah-warning-tint);
 }
 
 .flip-ghost .ghost-tag.is-plain {
-  color: #4b5563;
-  border-color: #e5e7eb;
-  background: #f9fafb;
+  color: var(--ah-text-regular);
+  border-color: var(--ah-border);
+  background: var(--ah-surface-muted);
 }
 
 /**
@@ -458,9 +461,9 @@
   border-radius: 4px !important;
   /* 这里**不能**再给 border 加 !important：选中态的描边色由 Element Plus 自己的
      checked-border-color 变量下发（见下方三块），加了 !important 会把彩色描边钉死成灰色 */
-  border: 1px solid #e5e7eb;
-  color: #6b7280;
-  background: #f3f4f6;
+  border: 1px solid var(--ah-border);
+  color: var(--ah-text-secondary);
+  background: var(--ah-neutral-tint);
   box-shadow: none !important;
 }
 
@@ -491,7 +494,7 @@
 .run-mode-group .el-radio-button.is-disabled .el-radio-button__inner {
   color: var(--el-text-color-placeholder);
   background: var(--el-fill-color-light);
-  border-color: #e5e7eb !important;
+  border-color: var(--ah-border) !important;
   cursor: not-allowed;
 }
 

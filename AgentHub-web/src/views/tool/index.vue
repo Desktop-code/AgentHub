@@ -1202,8 +1202,8 @@ onMounted(async () => {
 }
 
 .card-del:hover:not(:disabled) {
-  color: #ef4444;
-  background: #fef2f2;
+  color: var(--ah-danger);
+  background: var(--ah-danger-tint);
 }
 
 .card-del:disabled {
@@ -1214,8 +1214,8 @@ onMounted(async () => {
 .card-name {
   margin: 0;
   overflow: hidden;
-  font-size: 15px;
-  font-weight: 650;
+  font-size: 14px;
+  font-weight: 600;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
@@ -1239,9 +1239,9 @@ onMounted(async () => {
 }
 
 .badge-plain {
-  --el-tag-text-color: #4b5563;
-  --el-tag-border-color: #e5e7eb;
-  --el-tag-bg-color: #f9fafb;
+  --el-tag-text-color: var(--ah-text-regular);
+  --el-tag-border-color: var(--ah-border);
+  --el-tag-bg-color: var(--ah-surface-muted);
 }
 
 .sync-status {
@@ -1249,36 +1249,47 @@ onMounted(async () => {
   align-items: center;
   gap: 6px;
   max-width: 100%;
-  vertical-align: top;
+  /* 与文字光学居中；点带内光环后比纯点高 4px，top 对齐会显得偏高 */
+  vertical-align: middle;
 }
 
+/*
+ * 同步状态点只走语义色：停用灰 / 通过绿 / 故障红。
+ * 光环画在 12px 盒内（3px 内描边 + content-box 底色），不用外投影：
+ * 卡片正文是 line-clamp 裁切盒（overflow: hidden），外投影会越过左边界被裁掉半个圆，
+ * 静态截图里就表现为「提示灯被卡了一半」。
+ */
 .sync-dot {
   flex: none;
-  width: 8px;
-  height: 8px;
+  box-sizing: border-box;
+  width: 12px;
+  height: 12px;
+  border: 3px solid var(--ah-neutral-tint);
   border-radius: 50%;
-  background: #c0c4cc;
+  background-color: var(--ah-neutral);
+  background-clip: content-box;
 }
 
 .sync-dot.is-ok {
-  background: #67c23a;
-  box-shadow: 0 0 0 3px rgba(103, 194, 58, 0.18);
+  border-color: var(--ah-success-tint);
+  background-color: var(--ah-success);
 }
 
 .sync-dot.is-fail {
-  background: #f56c6c;
-  box-shadow: 0 0 0 3px rgba(245, 108, 108, 0.18);
+  border-color: var(--ah-danger-tint);
+  background-color: var(--ah-danger);
 }
 
 .sync-dot.is-idle {
-  background: #c0c4cc;
+  border-color: var(--ah-neutral-tint);
+  background-color: var(--ah-neutral);
 }
 
 .detail-body {
   padding: 16px;
   background: var(--ah-surface);
   border: 1px solid var(--ah-border);
-  border-radius: var(--ah-radius-lg, 12px);
+  border-radius: var(--ah-radius-lg, 8px);
   box-shadow: var(--ah-shadow);
 }
 
@@ -1300,7 +1311,7 @@ onMounted(async () => {
 .panel-head h2 {
   margin: 0;
   font-size: 16px;
-  font-weight: 650;
+  font-weight: 600;
   line-height: 1.4;
 }
 

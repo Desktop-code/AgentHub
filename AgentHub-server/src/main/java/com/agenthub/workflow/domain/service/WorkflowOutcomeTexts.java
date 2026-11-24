@@ -26,6 +26,43 @@ public final class WorkflowOutcomeTexts {
     /** 助手正文硬顶：工作流输出可能很长，超长按段落截断，避免一次灌满对话框 */
     private static final int ANSWER_MAX = 6000;
 
+    /**
+     * 整段运行超时的用户文案。
+     *
+     * <p>对最终用户只说「发生了什么、已停下」，<b>不</b>出现配置项名、毫秒或「撞限」。
+     * 内部细节（生效上限、跑到哪一步）只进日志。
+     */
+    public static final String RUN_TIMEOUT_TEXT = "工作流运行超时，已停止";
+
+    /** 单节点运行超时的用户文案；同样不带内部参数名与毫秒 */
+    public static final String NODE_TIMEOUT_TEXT = "这一步运行超时，已停止";
+
+    /** 调度异常（无进展等）的用户文案；内部原因写日志，不进对话 */
+    public static final String RUN_ABORTED_TEXT = "工作流运行异常，已停止";
+
+    /** 单节点触及执行预算（轮次 / 调用次数）的用户文案；同样不带内部键名 */
+    public static final String NODE_LIMIT_TEXT = "这一步运行超过上限，已停止";
+
+    /**
+     * 把内部失败文案收成对话可见的一句话。
+     *
+     * <p>子 Agent 的预算 / 超时异常原文形如「撞限：timeout（试跑超时）」「撞限：max_llm_calls（超过 30 次）」，
+     * 这些既含内部说法也含「撞限」，不能出现在工作流卡片与对话正文里。
+     * 其它普通失败（绑定缺失、无返回文本等）原样返回——它们已经是给人看的说明。
+     *
+     * @param raw 节点失败原文；可空
+     * @return 用户可见文案；空入参返回空串
+     */
+    public static String userText(String raw) {
+        String text = raw == null ? "" : raw.trim();
+        if (!text.contains("撞限")) {
+            return text;
+        }
+        String lower = text.toLowerCase(Locale.ROOT);
+        // 超时与「达到轮次 / 调用上限」对用户是两件事，分别落到两句固定话术
+        return lower.contains("timeout") ? NODE_TIMEOUT_TEXT : NODE_LIMIT_TEXT;
+    }
+
     /** END 节点映射里常见的「人类可读答案」键，按优先级匹配（大小写不敏感） */
     private static final List<String> ANSWER_KEYS =
             List.of("answer", "result", "output", "text", "content", "message", "summary", "reply");
@@ -61,6 +98,13 @@ public final class WorkflowOutcomeTexts {
         if (status == WorkflowRunStatus.FAILED) {
             String reason = run.getErrorSummary() == null || run.getErrorSummary().isBlank()
                     ? "节点执行失败，未产出结果" : run.getErrorSummary().trim();
+            /*
+             * 超时 / 异常停止已经是完整的一句话，再加「工作流「X」运行失败：」变成两层前缀。
+             * 对用户只保留那一句（不含内部键名与毫秒）。
+             */
+            if (isStopNotice(reason)) {
+                return clip(reason, 800);
+            }
             return "工作流" + label + "运行失败：" + clip(reason, 800);
         }
         if (status == WorkflowRunStatus.CANCELLED) {
@@ -71,7 +115,30 @@ public final class WorkflowOutcomeTexts {
         if (status == WorkflowRunStatus.PAUSED_HUMAN) {
             return waitingText(label);
         }
+        if (status == WorkflowRunStatus.WAITING_REPLY) {
+            return replyWaitingText(label);
+        }
         return "工作流" + label + "仍在运行中，完成后结果会继续追加到本会话。";
+    }
+
+    /**
+     * 是否是「已停止」类的收口文案（超时 / 调度异常）。
+     *
+     * <p>这类文案本身就写清了状态，调用方不要再套「运行失败：」前缀，
+     * 也确保最终用户看到的正文里没有内部参数名。
+     *
+     * @param text 失败摘要；可空
+     * @return true 表示可直接作为正文展示
+     */
+    public static boolean isStopNotice(String text) {
+        if (text == null) {
+            return false;
+        }
+        String trimmed = text.trim();
+        return RUN_TIMEOUT_TEXT.equals(trimmed)
+                || NODE_TIMEOUT_TEXT.equals(trimmed)
+                || NODE_LIMIT_TEXT.equals(trimmed)
+                || RUN_ABORTED_TEXT.equals(trimmed);
     }
 
     /**
@@ -86,6 +153,17 @@ public final class WorkflowOutcomeTexts {
     }
 
     /**
+     * 「等待用户回复」提示：直接在本会话输入框接着说，不需要去待办页点通过。
+     *
+     * @param label 工作流称呼（带「」）
+     * @return 中文提示
+     */
+    public static String replyWaitingText(String label) {
+        return "工作流" + label + "正在等待你的回复；请直接在本会话下方输入框接着说，"
+                + "这句话会送回同一条运行继续往下走。";
+    }
+
+    /**
      * 未结束 run 的防重提示：上一轮仍在跑 / 等人工时不允许再开第二 run。
      *
      * @param label 工作流称呼（带「」）
@@ -96,6 +174,10 @@ public final class WorkflowOutcomeTexts {
         if (WorkflowRunStatus.parse(run.getStatus()) == WorkflowRunStatus.PAUSED_HUMAN) {
             return "工作流" + label + "上一轮仍在等待人工处理（「编排 → 人工待办」），本次没有重复发起；"
                     + "处理完成后结果会继续追加到本会话。";
+        }
+        if (WorkflowRunStatus.parse(run.getStatus()) == WorkflowRunStatus.WAITING_REPLY) {
+            return "工作流" + label + "仍在等待你的回复，本次没有重复发起；"
+                    + "请直接在本会话下方输入框接着说。";
         }
         return "工作流" + label + "上一轮仍在运行中，本次没有重复发起；"
                 + "请等待完成后再追问，或换到其它线路。";

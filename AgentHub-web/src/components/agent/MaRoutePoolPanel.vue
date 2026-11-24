@@ -216,7 +216,7 @@ function intentMissingHint(row: MaCandidateRow): string {
 .form-block {
   margin-top: 18px;
   padding-top: 18px;
-  border-top: 1px solid var(--ah-border, #e8eaf0);
+  border-top: 1px solid var(--ah-border, #ebeef5);
 }
 
 .form-block--first {
@@ -229,9 +229,9 @@ function intentMissingHint(row: MaCandidateRow): string {
   display: flex;
   align-items: center;
   margin: 0 0 16px;
-  color: var(--ah-text-primary, #1f2430);
+  color: var(--ah-text-primary, #1f2937);
   font-size: 14px;
-  font-weight: 700;
+  font-weight: 600;
   letter-spacing: 0.02em;
 }
 
@@ -258,7 +258,7 @@ function intentMissingHint(row: MaCandidateRow): string {
 
 .candidate-head__info {
   flex: none;
-  color: var(--ah-text-muted, #9ca3af);
+  color: var(--ah-text-secondary, #6b7280);
   font-size: 14px;
   cursor: help;
 }
@@ -277,7 +277,7 @@ function intentMissingHint(row: MaCandidateRow): string {
 .candidate-intent {
   display: -webkit-box;
   overflow: hidden;
-  color: var(--ah-text-secondary, #4b5563);
+  color: var(--ah-text-secondary, #6b7280);
   font-size: 12px;
   line-height: 1.6;
   -webkit-box-orient: vertical;

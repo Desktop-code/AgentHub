@@ -7,8 +7,11 @@ import com.agenthub.common.web.OperatorContext;
 import com.agenthub.common.text.UserFacingText;
 import com.agenthub.workflow.api.dto.WorkflowRunDetailResp;
 import com.agenthub.workflow.api.dto.WorkflowRunTrialReq;
+import com.agenthub.workflow.domain.enums.WorkflowEdgeType;
+import com.agenthub.workflow.domain.enums.WorkflowNodeRunStatus;
 import com.agenthub.workflow.domain.enums.WorkflowRunStatus;
 import com.agenthub.workflow.domain.enums.WorkflowTriggerType;
+import com.agenthub.workflow.domain.model.WorkflowEdge;
 import com.agenthub.workflow.domain.model.WorkflowDef;
 import com.agenthub.workflow.domain.model.WorkflowGraph;
 import com.agenthub.workflow.domain.model.WorkflowHumanTask;
@@ -24,6 +27,7 @@ import com.agenthub.workflow.domain.repository.WorkflowNodeRunRepository;
 import com.agenthub.workflow.domain.repository.WorkflowReleaseRepository;
 import com.agenthub.workflow.domain.repository.WorkflowRunRepository;
 import com.agenthub.workflow.domain.service.WorkflowRunListener;
+import com.agenthub.workflow.domain.service.WorkflowStateMachine;
 import com.agenthub.workflow.domain.service.WorkflowTenantProvider;
 import com.agenthub.workflow.domain.service.WorkflowTraceWriter;
 import com.agenthub.workflow.infra.WorkflowProperties;
@@ -38,7 +42,10 @@ import org.springframework.transaction.annotation.Transactional;
 
 import java.time.LocalDateTime;
 import java.util.ArrayList;
+import java.util.Collection;
+import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Map;
 import java.util.Optional;
 
 /**
@@ -54,6 +61,9 @@ import java.util.Optional;
 public class WorkflowRunAppService {
 
     private static final Logger log = LoggerFactory.getLogger(WorkflowRunAppService.class);
+
+    /** 用户回复列宽：与 workflow_node_run.reply_text 的 varchar(2000) 对齐，写入前截断 */
+    private static final int REPLY_MAX = 2000;
 
     private final WorkflowRunRepository runs;
     private final WorkflowNodeRunRepository nodeRuns;
@@ -237,8 +247,7 @@ public class WorkflowRunAppService {
                 // 顺带做一次懒超时结算：到期策略可能已经把它推到终态，用户这轮就能看到结果
                 humanTaskService.resolveExpired(existing);
                 existing = runs.findById(existing.getId()).orElse(existing);
-            }
-            // 复用没有经过引擎：把库里已有的节点状态先报一次，卡片才不会是一张没有步骤的空壳
+            }            // 复用没有经过引擎：把库里已有的节点状态先报一次，卡片才不会是一张没有步骤的空壳
             publishExisting(existing, listener);
             return new WorkflowWorkbenchOutcome(existing, true);
         }
@@ -367,8 +376,7 @@ public class WorkflowRunAppService {
             // 懒检查：把到期待办按 AUTO_REJECT / AUTO_APPROVE 收口，可能顺带续跑
             humanTaskService.resolveExpired(run);
         }
-        return detail(id, tenantId);
-    }
+        return detail(id, tenantId);    }
 
     /**
      * 取消运行。终态幂等返回；允许 CREATED / RUNNING / PAUSED_HUMAN 取消。
@@ -387,7 +395,8 @@ public class WorkflowRunAppService {
         // 引擎侧用条件更新 CREATED→RUNNING，取消抢先落 CANCELLED 后不会再被启动覆盖。
         if (status != WorkflowRunStatus.CREATED
                 && status != WorkflowRunStatus.RUNNING
-                && status != WorkflowRunStatus.PAUSED_HUMAN) {
+                && status != WorkflowRunStatus.PAUSED_HUMAN
+                && status != WorkflowRunStatus.WAITING_REPLY) {
             throw new BizException(ErrorCode.BAD_REQUEST,
                     "当前运行状态为 " + status + "，不可取消");
         }
@@ -405,7 +414,8 @@ public class WorkflowRunAppService {
             WorkflowRunStatus freshStatus = fresh == null ? null
                     : WorkflowRunStatus.parse(fresh.getStatus());
             if (freshStatus == WorkflowRunStatus.RUNNING
-                    || freshStatus == WorkflowRunStatus.PAUSED_HUMAN) {
+                    || freshStatus == WorkflowRunStatus.PAUSED_HUMAN
+                    || freshStatus == WorkflowRunStatus.WAITING_REPLY) {
                 changed = runs.updateStatusIfMatches(id, freshStatus.name(),
                         WorkflowRunStatus.CANCELLED.name(), error, null, LocalDateTime.now(), operatorId);
             }
@@ -484,6 +494,328 @@ public class WorkflowRunAppService {
         long tenantId = tenantProvider.currentTenantId();
         requireDef(workflowId, tenantId);
         return runs.listByWorkflowId(workflowId, 10);
+    }
+
+    /**
+     * 等待回复节点上登记的可点选项：校验前端回传的 optionId 确实在这一步给出的选项里。
+     *
+     * <p>为什么必须在后端校验：点选与输入框提交共用同一条续跑写入，
+     * 展示文案不能采信前端；认不出结构就明确拒绝，让用户直接输入。
+     *
+     * @param runId    run 主键
+     * @param optionId 前端回传的选项标识
+     * @return 该选项的服务端权威文案；run 不在等待 / 没有这个选项时为空
+     */
+    public Optional<String> waitingOptionLabel(Long runId, String optionId) {
+        if (runId == null || optionId == null || optionId.isBlank()) {
+            return Optional.empty();
+        }
+        String wanted = optionId.trim();
+        for (WorkflowNodeRun row : nodeRuns.listByRunId(runId)) {
+            if (row == null || WorkflowNodeRunStatus.parse(row.getStatus()) != WorkflowNodeRunStatus.WAITING_REPLY) {
+                continue;
+            }
+            // 节点产出是自由形状 JSON：解析失败按「这一步没有选项」处理，不抛到点选链路
+            JsonNode choice = readNodeChoice(row.getOutputJson());
+            if (choice == null || !choice.isObject()) {
+                continue;
+            }
+            for (JsonNode option : choice.path("options")) {
+                String id = option.path("id").asText("").trim();
+                String label = option.path("label").asText("").trim();
+                if (!id.isEmpty() && id.equalsIgnoreCase(wanted) && !label.isEmpty()) {
+                    return Optional.of(label);
+                }
+            }
+        }
+        return Optional.empty();
+    }
+
+    /**
+     * 读节点产出里的 {@code choice} 节点；解析失败返回 null。
+     *
+     * @param outputJson 节点产出 JSON
+     * @return choice 节点；没有或不可解析为 null
+     */
+    private JsonNode readNodeChoice(String outputJson) {
+        if (outputJson == null || outputJson.isBlank()) {
+            return null;
+        }
+        try {
+            JsonNode root = json.readTree(outputJson);
+            return root instanceof ObjectNode body ? body.get("choice") : null;
+        } catch (Exception ex) {
+            return null;
+        }
+    }
+
+    /**
+     * 同一工作台会话里停在「等待用户回复」的 run。
+     *
+     * <p>续跑入口（用户下一句）靠它定位同一条运行；没有时调用方按正常对话处理。
+     *
+     * @param workbenchSessionId 工作台会话 id
+     * @return 等待回复的 run；没有为空
+     */
+    public Optional<WorkflowRun> findWaitingReplyRun(long workbenchSessionId) {
+        long tenantId = tenantProvider.currentTenantId();
+        Optional<WorkflowRun> found = runs.findWaitingReplyByWorkbenchSession(workbenchSessionId);
+        if (found.isEmpty()) {
+            return Optional.empty();
+        }
+        WorkflowRun run = found.get();
+        // 跨租户的脏数据不参与续跑：按「没有等待中的运行」处理，不泄露别人的 run
+        if (run.getTenantId() == null || run.getTenantId() != tenantId) {
+            return Optional.empty();
+        }
+        return found;
+    }
+
+    /**
+     * 工作流定义（卡片展示名 / 编码用）。定义被删时为空，调用方回落到编码兜底。
+     *
+     * @param run 运行实例
+     * @return 定义；不存在为空
+     */
+    public Optional<WorkflowDef> definitionOf(WorkflowRun run) {
+        if (run == null || run.getWorkflowId() == null) {
+            return Optional.empty();
+        }
+        return defs.findById(run.getWorkflowId());
+    }
+
+    /**
+     * 只读节点运行态，供对话回放按 runId 现算卡片节点产出。
+     *
+     * <p>为什么单独开一个入口：{@link #get(Long)} 会为人工卡点做超时懒结算（有副作用），
+     * 也会组装待办；刷新时间线只需要节点行本身。这里不加权限注解、不写库、不触发调度，
+     * 调用方已经通过会话归属校验，不会越权读到别人的 run。
+     *
+     * @param runId run 主键；可空
+     * @return 按图顺序的节点行；runId 为空时为空表
+     */
+    public List<WorkflowNodeRun> cardNodes(Long runId) {
+        if (runId == null) {
+            return List.of();
+        }
+        return nodeRuns.listByRunId(runId);
+    }
+
+    /**
+     * 批量取多张卡片对应的节点行，按 runId 分组。
+     *
+     * <p>一次刷新可能带同一条会话里的多张工作流卡；用一次 IN 查询代替逐卡查询。
+     * 没有节点行的 run 也会出现在结果里（值为空表），调用方据此保留骨架。
+     *
+     * @param runIds run 主键集合；可空
+     * @return runId → 节点行（按图顺序）；入参为空时为空表
+     */
+    public Map<Long, List<WorkflowNodeRun>> cardNodesOf(Collection<Long> runIds) {
+        if (runIds == null || runIds.isEmpty()) {
+            return Map.of();
+        }
+        Map<Long, List<WorkflowNodeRun>> grouped = new LinkedHashMap<>();
+        for (Long id : runIds) {
+            if (id != null) {
+                grouped.putIfAbsent(id, new ArrayList<>());
+            }
+        }
+        if (grouped.isEmpty()) {
+            return Map.of();
+        }
+        for (WorkflowNodeRun row : nodeRuns.listByRunIds(grouped.keySet())) {
+            if (row == null || row.getRunId() == null) {
+                continue;
+            }
+            List<WorkflowNodeRun> bucket = grouped.get(row.getRunId());
+            if (bucket != null) {
+                bucket.add(row);
+            }
+        }
+        return grouped;
+    }
+
+    /**
+     * 把用户在对话里的下一句送回同一条等待中的运行，并从挂起处继续调度。
+     *
+     * <p>与 {@link #runFromWorkbench} 的区别：这里<b>不新建 run</b>，也不经过入口判路由。
+     * 流程：
+     * <ol>
+     *   <li>校验 run 仍停在 WAITING_REPLY，且确实有节点在等待回复；</li>
+     *   <li>把回复写进 run 的 {@code input.reply}（条件边与后续节点的入参映射都读它）；</li>
+     *   <li>等待中的节点迁 SUCCESS 并选中常规出边，run 回到 RUNNING；</li>
+     *   <li>调用同一套引擎继续调度，结果由调用方投影回会话。</li>
+     * </ol>
+     *
+     * @param runId      等待中的 run 主键
+     * @param reply      用户在输入框发出的下一句（已去空白，非空）
+     * @param userId     平台用户（会话归属人）
+     * @param listener   节点状态观察者；可空
+     * @return 续跑后的 run 详情
+     * @throws BizException run 不在等待回复 / 没有等待节点 / 状态已被并发改写
+     */
+    public WorkflowRunDetail resumeWithReply(Long runId, String reply, long userId, WorkflowRunListener listener) {
+        if (reply == null || reply.isBlank()) {
+            throw new BizException(ErrorCode.BAD_REQUEST, "回复内容不能为空");
+        }
+        long tenantId = tenantProvider.currentTenantId();
+        WorkflowRun run = requireRun(runId, tenantId);
+        if (WorkflowRunStatus.parse(run.getStatus()) != WorkflowRunStatus.WAITING_REPLY) {
+            throw new BizException(ErrorCode.BAD_REQUEST, "这条运行已不在等待回复状态，请重新提问");
+        }
+        // 等待中的节点必须唯一：多节点同时等待会让「这一句回复给谁」变得不确定
+        List<WorkflowNodeRun> waiting = nodeRuns.listByRunId(runId).stream()
+                .filter(row -> WorkflowNodeRunStatus.parse(row.getStatus()) == WorkflowNodeRunStatus.WAITING_REPLY)
+                .toList();
+        if (waiting.isEmpty()) {
+            throw new BizException(ErrorCode.BAD_REQUEST, "这条运行没有等待回复的节点，请重新提问");
+        }
+        if (waiting.size() > 1) {
+            throw new BizException(ErrorCode.BAD_REQUEST,
+                    "这条运行同时有 " + waiting.size() + " 个节点在等待回复，无法确定回复给哪一步");
+        }
+        WorkflowNodeRun waitingRow = waiting.get(0);
+
+        // 1) 回复落库：覆盖同一个 input 对象，保留原始 query
+        ObjectNode input = readInput(run.getInputJson());
+        input.put("reply", reply.trim());
+        String inputJson = input.toString();
+        runs.updateInput(runId, inputJson, userId);
+        run.setInputJson(inputJson);
+
+        // 2) 等待节点收成 SUCCESS：保留已产出的问句，按常规出边继续
+        List<WorkflowEdge> selected = normalEdges(run, waitingRow);
+        waitingRow.setStatus(WorkflowStateMachine.requireNode(
+                WorkflowNodeRunStatus.WAITING_REPLY, WorkflowNodeRunStatus.SUCCESS).name());
+        waitingRow.setEndTime(LocalDateTime.now());
+        waitingRow.setSelectedEdges(joinIds(selected));
+        nodeRuns.update(waitingRow);
+        /*
+         * 回复落库到等待节点：落库卡片只存骨架，刷新回放靠这一列把「我答了什么」补回节点。
+         * 先截到列宽再写，避免长文本（「其它，我自己说」）撑破 varchar(2000)。
+         */
+        nodeRuns.markReply(runId, waitingRow.getNodeCode(), clipReply(reply.trim()));
+        /*
+         * 不在这里单独回报这一步：紧接着的 engine.execute 会先推一份「全图节点状态」的快照
+         * （含本节点 SUCCESS）。提前只报一个节点会让卡片先闪成一张只有一个步骤的空壳。
+         */
+
+        // 3) run 回 RUNNING（条件迁移：与取消并发时以库为准）
+        boolean changed = runs.updateStatusIfMatches(runId, WorkflowRunStatus.WAITING_REPLY.name(),
+                WorkflowRunStatus.RUNNING.name(), null, null, null, userId);
+        if (!changed) {
+            throw new BizException(ErrorCode.BAD_REQUEST, "这条运行刚刚被取消或改写，已无法继续，请重新提问");
+        }
+        run.setStatus(WorkflowRunStatus.RUNNING.name());
+        run.setErrorSummary(null);
+        operLogWriter.write("workflow", "run_reply", "workflow_run", String.valueOf(runId),
+                "对话回复续跑 run=" + runId);
+
+        // 4) 同一套引擎继续调度；终态 / 再次等待都由引擎自己落库
+        executeSafely(run, userId, listener);
+        WorkflowRun fresh = runs.findById(runId).orElse(run);
+        return assembler.detail(fresh);
+    }
+
+    /**
+     * 把等待节点的状态报给观察者（复用入口：续跑时先让卡片知道这一步已过）。
+     *
+     * <p>当前续跑流程不再调用它：引擎开跑时会统一推一次全图快照，单独先报一个节点
+     * 会让卡片先闪成单步空壳。保留给将来需要「只报一格」的路径，且始终是旁路。
+     *
+     * @param listener 观察者；可空
+     * @param run      运行实例（取图用）
+     * @param row      已更新的运行态行
+     */
+    private void publishNode(WorkflowRunListener listener, WorkflowRun run, WorkflowNodeRun row) {
+        if (listener == null || run == null || row == null) {
+            return;
+        }
+        try {
+            WorkflowGraph graph = codec.parse(run.getGraphJson());
+            WorkflowRuntimeGraph runtime = WorkflowRuntimeGraph.of(graph);
+            WorkflowNode node = runtime.node(row.getNodeId());
+            if (node != null) {
+                listener.nodeChanged(node, row);
+            }
+        } catch (RuntimeException ex) {
+            // 观察是旁路：画不出这一步不能影响续跑
+            log.warn("续跑后回报节点状态失败 runId={} nodeId={} type={}",
+                    run.getId(), row.getNodeId(), ex.getClass().getSimpleName());
+        }
+    }
+
+    /**
+     * 读 run 的输入快照成对象（脏数据按空对象处理，不抛到续跑链路）。
+     *
+     * @param raw input_json
+     * @return 可变对象
+     */
+    private ObjectNode readInput(String raw) {
+        if (raw == null || raw.isBlank()) {
+            return json.createObjectNode();
+        }
+        try {
+            JsonNode node = json.readTree(raw);
+            return node instanceof ObjectNode object ? object : json.createObjectNode();
+        } catch (Exception ex) {
+            return json.createObjectNode();
+        }
+    }
+
+    /**
+     * 取节点常规出边（NORMAL / COND / DEFAULT）；图损坏时按「无出边」处理。
+     *
+     * @param run 运行实例
+     * @param row 等待中的节点行
+     * @return 出边；没有时为空表
+     */
+    private List<WorkflowEdge> normalEdges(WorkflowRun run, WorkflowNodeRun row) {
+        List<WorkflowEdge> edges = new ArrayList<>();
+        try {
+            WorkflowGraph graph = codec.parse(run.getGraphJson());
+            WorkflowRuntimeGraph runtime = WorkflowRuntimeGraph.of(graph);
+            for (WorkflowEdge edge : runtime.outgoing(row.getNodeId())) {
+                if (WorkflowEdgeType.parseOrDefault(edge.getType()) != WorkflowEdgeType.ERROR) {
+                    edges.add(edge);
+                }
+            }
+        } catch (RuntimeException ex) {
+            log.warn("读取等待节点出边失败 runId={} nodeId={} type={}",
+                    run.getId(), row.getNodeId(), ex.getClass().getSimpleName());
+        }
+        return edges;
+    }
+
+    private String joinIds(List<WorkflowEdge> edges) {
+        StringBuilder builder = new StringBuilder();
+        for (WorkflowEdge edge : edges) {
+            if (edge.getId() == null || edge.getId().isBlank()) {
+                continue;
+            }
+            if (builder.length() > 0) {
+                builder.append(',');
+            }
+            builder.append(edge.getId());
+        }
+        return builder.toString();
+    }
+
+    /**
+     * 用户回复落库前的截断。
+     *
+     * <p>列宽 {@code varchar(2000)}：这里按字符截断并追省略号，避免「其它，我自己说」
+     * 这类长回复在严格模式下抛错、把整次续跑打成失败。
+     *
+     * @param reply 用户回复（已去空白、非空）
+     * @return 不超过列宽的文本
+     */
+    private static String clipReply(String reply) {
+        String text = reply == null ? "" : reply;
+        if (text.length() <= REPLY_MAX) {
+            return text;
+        }
+        return text.substring(0, REPLY_MAX - 1) + "…";
     }
 
     private WorkflowRunDetail detail(Long runId, long tenantId) {

@@ -37,6 +37,14 @@ public class WorkflowRunEntity {
     private String outputJson;
     private String errorSummary;
     private String graphJson;
+    /** 本次运行整段上限（毫秒）；建 run 时按工作流配置与平台硬顶取小 */
+    private Long runLimitMs;
+    /** 本次运行单节点上限（毫秒）；空=未配置 */
+    private Long nodeLimitMs;
+    /** 整段截止（等待不计入，恢复调度时顺延） */
+    private LocalDateTime runDeadline;
+    /** 进入等待的时刻；非空表示当前挂起不计时 */
+    private LocalDateTime waitingSince;
     private LocalDateTime startTime;
     private LocalDateTime endTime;
     private Long createdBy;

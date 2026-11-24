@@ -11,7 +11,9 @@ import type {
   TrialPlanView,
   TrialPreprocessView,
   TrialStepView,
+  TrialWorkflowLimitsView,
   TrialWorkflowNodeView,
+  TrialWorkflowStepView,
   TrialWorkflowView
 } from '@/types/runtime'
 import { readUserMessage } from './userMessageImages.ts'
@@ -33,12 +35,15 @@ export function turnsFromEvents(events: TrialEvent[]): ChatTurn[] {
   let assistant: ChatTurn | undefined
   // 上一条 begin 身份：其后的思考 / 工具 / 正文归它，直到下一条身份行。没有身份行就不认人。
   let active: ReplaySpeaker | undefined
+  // 本轮是否已经出现过入口身份：没出现过却先来一位专家 / 工作流，说明这是断点续作，不是又判了一次入口
+  let turnHasEntry = false
   for (const item of ordered) {
     if (item.eventType === 'user') {
       // 附图在摘要清单里，正文仍是原话。只发图时正文为空，气泡仍要留下。
       const message = readUserMessage(item.contentText, item.summary)
       assistant = undefined
       active = undefined
+      turnHasEntry = false
       if (message.text || message.images.length || message.attachments.length) {
         turns.push(userTurn(item.id, message.text, message.images, message.attachments))
       }
@@ -50,8 +55,27 @@ export function turnsFromEvents(events: TrialEvent[]): ChatTurn[] {
       if (who?.begin) {
         active = who
         if (who.kind === 'gateway') {
+          turnHasEntry = true
           assistant = ensureReplayTurn(turns, assistant, item.id)
           assistant.entryParticipantId = who.id
+        } else if (who.kind === 'workflow' && replayHasWaitingCard(assistant, who)) {
+          /*
+           * 等待回复的续跑（库里没有新的用户消息可作分隔）：这条身份紧跟上一轮的等待卡。
+           * 必须另起一张续作轮，不能并回等待那一轮：并回去旧卡就无法被
+           * {@link absorbWaitingWorkflowCards} 收走，等待正文也会留在同一条消息里。
+           */
+          assistant = ensureReplayTurn(turns, undefined, item.id)
+          assistant.continuation = true
+        } else if (who.kind !== 'conclusion' && !assistant) {
+          /*
+           * 本轮第一条身份就是专家 / 工作流：这是「等待回复续跑」或「点选项续作」。
+           * 后端不会为这种轮次推入口身份，也没有入口判定；回放同样不能凭一条 begin 占位
+           * 反推出「智能网关 → X」。标记续作轮，投影层据此不合成入口块。
+           */
+          assistant = ensureReplayTurn(turns, assistant, item.id)
+          if (!turnHasEntry) {
+            assistant.continuation = true
+          }
         }
       }
       const block = participantBeginBlock(item)
@@ -59,7 +83,7 @@ export function turnsFromEvents(events: TrialEvent[]): ChatTurn[] {
         continue
       }
       assistant = ensureReplayTurn(turns, assistant, item.id)
-      pushBlock(assistant, block)
+      pushBlock(assistant, block, item.sessionId)
       continue
     }
     const block = blockFromEvent(item)
@@ -69,13 +93,250 @@ export function turnsFromEvents(events: TrialEvent[]): ChatTurn[] {
     // 落库的思考 / 正文不带身份列：跟着上一条 participant 行走，不从路由文案猜作者
     carryReplayIdentity(block, active)
     assistant = ensureReplayTurn(turns, assistant, item.id)
-    pushBlock(assistant, block)
+    pushBlock(assistant, block, item.sessionId)
     if (block.kind === 'error') {
       assistant.status = 'error'
       assistant.phase = 'error'
     }
   }
+  // 等待回复续跑：把上一轮那张「停在询问」的卡收到续跑轮这一张上，避免同一条运行出现两张卡
+  absorbWaitingWorkflowCards(turns)
   return turns
+}
+
+/**
+ * 续跑轮接管上一轮的等待卡：同一条工作流只保留续跑轮这一张执行卡。所属域：runtime（前端）。
+ *
+ * <p>为什么必须跨轮收口：用户回答后时间线多了一轮（先是用户气泡，再是助手轮），
+ * 助手轮里的工作流快照是**同一条运行**的完整节点表（含已经结束的询问节点）。
+ * 若两轮各画一张卡，页面上就是「旧的还在问、下面又起一条从第一个条件节点开始的执行流」，
+ * 看起来像入口新分发了一条运行——实际并没有。
+ *
+ * <p>接管条件（缺一不可）：
+ * <ul>
+ *   <li>本轮是续作轮（{@code continuation=true}）；</li>
+ *   <li>本轮确有工作流卡；</li>
+ *   <li>更早的某轮有一张**同编码且仍在等待回复**的卡（卡片头或任一节点 WAITING_REPLY）。</li>
+ * </ul>
+ * 已完成 / 失败 / 取消的旧卡不动；单专家的选项续作没有工作流卡，也不会被接管。
+ *
+ * <p>接管的动作只是「把旧卡拿掉」，不搬动新卡：新卡本来就带着完整节点表与续跑种子正文
+ * （问句在种子里），因此执行卡仍在续跑轮上继续往下长，旧选项随旧卡一起消失。
+ * 旧轮里那段等待正文一同去掉，避免问句在两处重复；旧轮其余内容（入口卡、身份行）原样保留。
+ *
+ * @param turns 时间线（原地修改）
+ * @return true 表示确实接管过，调用方需要刷新这一轮之外的投影
+ */
+export function absorbWaitingWorkflowCards(turns: ChatTurn[]): boolean {
+  let changed = false
+  for (let i = 0; i < turns.length; i += 1) {
+    const turn = turns[i]
+    if (!turn || turn.role !== 'assistant' || turn.continuation !== true) {
+      continue
+    }
+    const fresh = (Array.isArray(turn.blocks) ? turn.blocks : [])
+      .filter((block) => block?.kind === 'workflow' && !!block.workflow)
+    for (const card of fresh) {
+      const target = card.workflow as TrialWorkflowView
+      const hostIndex = findWaitingCardHost(turns, i, target)
+      if (hostIndex < 0) {
+        continue
+      }
+      const host = turns[hostIndex]
+      const waiting = waitingCardOf(host, target)
+      /*
+       * 只有「等待的那个节点在新卡里已经结束 / 正在跑」才算同一条运行续上了。
+       * 若它变成 SKIPPED / PENDING，说明这句回复被当成新问题、新开了一条运行并跳过了询问；
+       * 这时绝不能收旧卡，否则会把「真的又开了一条运行」藏起来。
+       */
+      if (!waiting || !continuedSameRun(waiting, target)) {
+        continue
+      }
+      const takenAnswer = (target.answer || '').trim()
+      const blocks = Array.isArray(host.blocks) ? host.blocks : []
+      // 先定位旧卡：只有它之后的等待正文才跟着卡走，卡之前的入口 / 推理块一字不动
+      const cardIndex = blocks.findIndex(
+        (block) => block?.kind === 'workflow' && block.workflow && sameWorkflow(block.workflow, target)
+      )
+      if (cardIndex < 0) {
+        continue
+      }
+      host.blocks = blocks.filter((block, index) => {
+        if (index === cardIndex) {
+          // 只拿掉这一张卡：同轮别的卡（例如入口卡）与后续轮次都不受影响
+          return false
+        }
+        if (index <= cardIndex || block?.kind !== 'assistant') {
+          return true
+        }
+        /*
+         * 旧轮的等待正文与旧卡是同一份内容：卡片带正文时投影本来就把这段藏起来，
+         * 卡被拿走后它会变成一段孤立正文（问句在续跑种子里已有一份）。
+         * 只清卡片之后、且是纯正文的那几块；更早的文本属于入口 / 前序说明，保留。
+         */
+        if (takenAnswer) {
+          return false
+        }
+        /*
+         * 残缺卡没有正文可接：只把「等待你的回复」那句平台提示带走，
+         * 否则它会以一条孤立说明的形式留在旧轮里，看起来像还在等。
+         */
+        return !(target.degraded && (block.text || '').includes('等待你的回复'))
+      })
+      // 已结算轮次的投影签名被缓存过：改块后必须让投影重算，否则旧卡还会留在页面上
+      host.revision = (host.revision ?? 0) + 1
+      changed = true
+    }
+  }
+  return changed
+}
+
+/**
+ * 找本轮之前最近一张「同一工作流、仍在等待回复」的卡所在轮。
+ *
+ * @param turns  时间线
+ * @param before 续跑轮下标（只往前找）
+ * @param target 续跑轮上的新卡（按编码 / 名字认同一张）
+ * @return 旧卡的轮下标；没有为 -1
+ */
+function findWaitingCardHost(turns: ChatTurn[], before: number, target: TrialWorkflowView): number {
+  for (let i = before - 1; i >= 0; i -= 1) {
+    const turn = turns[i]
+    if (!turn || turn.role !== 'assistant') {
+      continue
+    }
+    for (const block of Array.isArray(turn.blocks) ? turn.blocks : []) {
+      if (block?.kind === 'workflow' && block.workflow
+        && sameWorkflow(block.workflow, target) && workflowWaitsReply(block.workflow)) {
+        return i
+      }
+    }
+  }
+  return -1
+}
+
+/**
+ * 取某一轮里「同一工作流、仍在等待回复」的那张卡。
+ *
+ * @param turn   候选轮（只认助手轮）
+ * @param target 续跑轮上的新卡（按编码 / 名字认同一张）
+ * @return 旧卡视图；没有为 undefined
+ */
+function waitingCardOf(turn: ChatTurn, target: TrialWorkflowView): TrialWorkflowView | undefined {
+  if (!turn || turn.role !== 'assistant') {
+    return undefined
+  }
+  for (const block of Array.isArray(turn.blocks) ? turn.blocks : []) {
+    if (block?.kind === 'workflow' && block.workflow
+      && sameWorkflow(block.workflow, target) && workflowWaitsReply(block.workflow)) {
+      return block.workflow
+    }
+  }
+  return undefined
+}
+
+/**
+ * 续跑卡是否确实接着那张等待卡往下走（判定「同一条运行」的可证据化口径）。
+ *
+ * <p>等待中的节点在续跑后必然被回复收口：状态只会是 SUCCESS（已结束）或 RUNNING（正在跑）。
+ * 若在新卡里找不到同编码节点，或它变成 SKIPPED / PENDING，就不是同一条运行的续跑——
+ * 多半是这句回复被当成新问题、新运行直接跳过了询问。此时收掉旧卡会把问题藏起来。
+ *
+ * @param waiting 旧卡（仍在等待回复）
+ * @param fresh   续跑轮上的新卡
+ * @return true 表示同一个等待节点已被答复并继续
+ */
+function continuedSameRun(waiting: TrialWorkflowView, fresh: TrialWorkflowView): boolean {
+  /*
+   * 残缺卡（历史事件被截断）没有节点表可用：摘要反推出的终态就是证据——
+   * 这一条运行确实已经结束在后续状态，同一条运行就被这句话续上了。
+   * 不放行的话，上一轮的等待卡会留在页面上，看起来像又问了一遍。
+   */
+  if (fresh.degraded) {
+    const status = (fresh.status || '').toUpperCase()
+    return status === 'SUCCESS' || status === 'FAILED' || status === 'CANCELLED'
+  }
+  const waitingCodes = (Array.isArray(waiting.nodes) ? waiting.nodes : [])
+    .filter((node) => (node?.status || '').toUpperCase() === 'WAITING_REPLY')
+    .map((node) => (node?.code || '').trim())
+    .filter(Boolean)
+  if (!waitingCodes.length) {
+    return false
+  }
+  const freshNodes = Array.isArray(fresh.nodes) ? fresh.nodes : []
+  return waitingCodes.every((code) => {
+    const node = freshNodes.find((item) => (item?.code || '').trim() === code)
+    const status = (node?.status || '').toUpperCase()
+    return status === 'SUCCESS' || status === 'RUNNING'
+  })
+}
+
+/**
+ * 卡片是否仍停在「等待用户回复」：卡片头 WAITING_REPLY，或任一节点 WAITING_REPLY。
+ *
+ * <p>直播里节点先落等待、卡片头稍后才收口，只看卡片头会漏掉那一拍。
+ *
+ * @param view 工作流卡片视图
+ * @return true 表示这张卡还在等人回复
+ */
+function workflowWaitsReply(view: TrialWorkflowView | undefined): boolean {
+  if (!view) {
+    return false
+  }
+  if ((view.status || '').toUpperCase() === 'WAITING_REPLY') {
+    return true
+  }
+  return (Array.isArray(view.nodes) ? view.nodes : [])
+    .some((node) => (node?.status || '').toUpperCase() === 'WAITING_REPLY')
+}
+
+/**
+ * 本轮是否已有一张「同一工作流、仍停在等待回复」的卡。所属域：runtime（前端回放）。
+ *
+ * <p>工作流停等的回复不再落成用户消息，回放时续跑身份会紧跟在旧等待卡之后。
+ * 用它识别这个轮边界：另起一张续作轮，旧卡才能被 {@link absorbWaitingWorkflowCards} 收走，
+ * 等待正文也不会和续跑结果挤在同一条消息里。
+ *
+ * @param turn 当前助手轮；可空
+ * @param who  刚读到的 participant begin 身份
+ * @return true 表示这条身份是同一工作流的续跑，应当另起一轮
+ */
+function replayHasWaitingCard(turn: ChatTurn | undefined, who: ReplaySpeaker & { routeKey?: string }): boolean {
+  if (!turn) {
+    return false
+  }
+  const code = (who.routeKey || '').trim()
+  const name = (who.name || '').trim()
+  return (Array.isArray(turn.blocks) ? turn.blocks : []).some((block) => {
+    if (block?.kind !== 'workflow' || !block.workflow || !workflowWaitsReply(block.workflow)) {
+      return false
+    }
+    return code
+      ? (block.workflow.code || '').trim() === code
+      : (block.workflow.name || '').trim() === name
+  })
+}
+
+/**
+ * 本轮真正代表「入口判了一次路由」的文案。所属域：runtime（前端）。
+ *
+ * <p>为什么不能把所有 `route` 块都算进来：participant begin 帧也会被投影成一条
+ * 「路由到 X」占位块（见 {@link participantBeginBlock}），它只负责把卡片挂到参与者，
+ * 不是入口判定。等待回复续跑 / 点选项续作时，后端只推这条身份 begin，
+ * 若把它当成入口路线，投影层就会凭空合成「智能网关 → X」「已分发给 X」——
+ * 页面上看起来像是入口又新开了一条运行，实际仍是同一条。
+ *
+ * <p>新问题轮保留 begin 占位：那一轮本来就有入口身份帧，占位只是把目标名提前带出来，
+ * 不会多造一次入口判定；续作轮才必须排除，因为整轮根本没有入口。
+ *
+ * @param blocks       本轮聊天块；可空
+ * @param continuation 是否断点续作轮（等待回复续跑 / 点选项续作）
+ * @return 入口投影可用的路由文案；续作轮排除 begin 占位
+ */
+export function entryRouteTextsOf(blocks: AssistantBlock[] | undefined, continuation = true): string[] {
+  return (Array.isArray(blocks) ? blocks : [])
+    .filter((block) => block && block.kind === 'route' && (!continuation || block.begin !== true))
+    .map((block) => block.text)
 }
 
 /** 回放里当前说话人：来自 event_type=participant 的 begin 帧。depth 随帧保留，缺了不补。 */
@@ -1024,22 +1285,49 @@ export function appendChoice(
   participantName?: string
 ) {
   const options = Array.isArray(choice?.options) ? choice.options.filter((one) => !!one?.id && !!one?.label) : []
-  // 少于两项不成选项：宁可不出 chips，也不给一组看不懂的按钮
-  if (options.length < 2) {
+  const reply = (choice?.reply || '').trim()
+  const waiting = choice?.waiting === true
+  // 普通选项少于两项不出 chips；回复态没有选项但有「已答复」文案，必须留下这条记录
+  if (options.length < 2 && !reply) {
     return
   }
   const text = (choice.question || '').trim()
-  const existing = turn.blocks.find((block) => block.kind === 'choice')
+  const view: TrialChoiceView = reply
+    ? { question: text, options: [], reply }
+    : { question: text, options, waiting }
+  /*
+   * 同一轮里可能有多位专家先后询问（方案续跑复用等待那一轮）：
+   * 有身份时只覆盖**同一位**的旧选项块，不能把上一位已答复的「您的选择」抹掉。
+   * 没有身份时沿用旧口径（只认第一块），单专家 / 工作流行为不变。
+   */
+  const ownerName = (participantName || '').trim()
+  const ownerId = (participantId || '').trim()
+  const existing = turn.blocks.find((block) => {
+    if (block.kind !== 'choice') {
+      return false
+    }
+    if (!ownerName && !ownerId) {
+      return true
+    }
+    return (!!ownerName && (block.participantName || '').trim() === ownerName)
+      || (!!ownerId && (block.participantId || '').trim() === ownerId)
+  })
   if (existing) {
     existing.text = text
-    existing.choice = { question: text, options }
+    existing.choice = view
+    if (ownerId) {
+      existing.participantId = ownerId
+    }
+    if (ownerName) {
+      existing.participantName = ownerName
+    }
     return
   }
   turn.blocks.push({
     id: nextBlockId(turn),
     kind: 'choice',
     text,
-    choice: { question: text, options },
+    choice: view,
     participantId,
     participantName
   })
@@ -1060,9 +1348,10 @@ export function appendWorkflow(
   turn: ChatTurn,
   raw: WorkflowSnapshotInput | undefined,
   participantId?: string,
-  participantName?: string
+  participantName?: string,
+  sessionId?: number
 ) {
-  const workflow = normalizeWorkflow(raw)
+  const workflow = normalizeWorkflow(raw, sessionId)
   if (!workflow) {
     return
   }
@@ -1078,7 +1367,59 @@ export function appendWorkflow(
     if (!nextAnswer && previousAnswer) {
       workflow.answer = existing.workflow?.answer || ''
     }
+    /*
+     * 可点选项与正文同一纪律：只在「这一拍确实带了选项」时替换。
+     * 停等之后的节点状态拍（引擎每迁一次节点就推一份快照）不会重复带 choice，
+     * 若按整份覆盖，chips 会在问句下面闪一下就消失——用户只看到问句、点不到选项。
+     * 反过来，续跑后卡片转 SUCCESS / RUNNING 时必须能清掉：那两态由后端显式不带 choice，
+     * 且没有任何节点还在 WAITING_REPLY，再保留就是一组点不动的旧按钮。
+     */
+    const keepChoice = !workflow.choice && existing.workflow?.choice
+    if (keepChoice) {
+      const status = (workflow.status || '').toUpperCase()
+      const waitingNode = (Array.isArray(workflow.nodes) ? workflow.nodes : []).some(
+        (node) => (node?.status || '').toUpperCase() === 'WAITING_REPLY'
+      )
+      // 只认「仍在等待回复」：卡片头或任一节点处于 WAITING_REPLY 才留 chips
+      if (status === 'WAITING_REPLY' || waitingNode) {
+        workflow.choice = existing.workflow?.choice
+      }
+    }
+    /*
+     * 节点内过程同样只增不减：收尾期的旧快照 / 重连重放可能不带 steps/output/files，
+     * 若整份覆盖，用户正在看的思考会闪空。只在旧节点确实有该字段时补齐。
+     */
+    const previousNodes = new Map(
+      (existing.workflow?.nodes || []).map((node) => [(node.code || node.name || '').trim(), node])
+    )
+    for (const node of workflow.nodes) {
+      const previous = previousNodes.get((node.code || node.name || '').trim())
+      if (!previous) {
+        continue
+      }
+      if (!(node.output || '').trim() && (previous.output || '').trim()) {
+        node.output = previous.output
+      }
+      if (!node.steps?.length && previous.steps?.length) {
+        node.steps = previous.steps
+      }
+      if (!node.files?.length && previous.files?.length) {
+        node.files = previous.files
+      }
+      // 用户回复同理：不带 reply 的后续快照不得把询问节点里已经记下的选择冲掉
+      if (!(node.reply || '').trim() && (previous.reply || '').trim()) {
+        node.reply = previous.reply
+      }
+    }
+    /*
+     * 时限同理：某些补帧（取消补状态 / 反向合并）不带 limits，
+     * 直接整份覆盖会把卡片上的「上限 / 剩余」抹掉。只有新帧没带时限时才沿用上一份。
+     */
+    const previousLimits = existing.workflow?.limits
     existing.workflow = workflow
+    if (!workflow.limits && previousLimits) {
+      workflow.limits = previousLimits
+    }
     if (!existing.participantId && participantId) {
       existing.participantId = participantId
     }
@@ -1124,9 +1465,18 @@ export interface WorkflowSnapshotInput {
   status?: unknown
   answer?: unknown
   nodes?: unknown
+  /** 停等询问的可点选项（与 CHOICE 事件同形：question + options[{id,label}]） */
+  choice?: unknown
   /** 节点上的可选字段（归一化时逐个校验） */
   type?: unknown
   note?: unknown
+  output?: unknown
+  steps?: unknown
+  files?: unknown
+  /** 用户对询问节点的回复（续跑后才有） */
+  reply?: unknown
+  /** 运行时限（整段 / 当前节点上限与各自截止，绝对时刻） */
+  limits?: unknown
 }
 
 /**
@@ -1137,7 +1487,10 @@ export interface WorkflowSnapshotInput {
  * @param raw 原始快照（SSE 帧 / 落库 JSON / 快照回放）
  * @return 归一化视图；不可用时为 undefined
  */
-export function normalizeWorkflow(raw: WorkflowSnapshotInput | undefined): TrialWorkflowView | undefined {
+export function normalizeWorkflow(
+  raw: WorkflowSnapshotInput | undefined,
+  sessionId?: number
+): TrialWorkflowView | undefined {
   if (!raw || typeof raw !== 'object') {
     return undefined
   }
@@ -1156,7 +1509,12 @@ export function normalizeWorkflow(raw: WorkflowSnapshotInput | undefined): Trial
         name: typeof one.name === 'string' ? one.name.trim() : '',
         type: typeof one.type === 'string' ? one.type.trim().toUpperCase() : '',
         status: typeof one.status === 'string' && one.status.trim() ? one.status.trim().toUpperCase() : 'PENDING',
-        note: typeof one.note === 'string' ? one.note.trim() : ''
+        note: typeof one.note === 'string' ? one.note.trim() : '',
+        output: typeof one.output === 'string' ? one.output : '',
+        steps: normalizeWorkflowSteps(one.steps),
+        files: normalizeWorkflowNodeFiles(one.files, sessionId),
+        // 续跑后询问节点上的用户回复；首次发起 / 非询问节点没有该字段
+        reply: typeof one.reply === 'string' ? one.reply.trim() : ''
       }
     })
   return {
@@ -1164,8 +1522,154 @@ export function normalizeWorkflow(raw: WorkflowSnapshotInput | undefined): Trial
     code,
     status: typeof raw.status === 'string' && raw.status.trim() ? raw.status.trim().toUpperCase() : 'RUNNING',
     answer: typeof raw.answer === 'string' ? raw.answer : '',
-    nodes
+    nodes,
+    choice: normalizeWorkflowChoice(raw.choice),
+    limits: normalizeWorkflowLimits(raw.limits)
   }
+}
+
+/**
+ * 归一化卡片上的运行时限。
+ *
+ * <p>只要「整段截止」这一个硬条件：没有它就无法算剩余，整块丢弃（卡片退回不展示时限）。
+ * 其余字段逐个校验类型，避免前端拿字符串做减法得出 NaN 分钟。
+ *
+ * @param raw limits 原始字段（SSE 帧 / 落库 JSON）
+ * @return 时限视图；没有或不合格时为 undefined
+ */
+function normalizeWorkflowLimits(raw: unknown): TrialWorkflowLimitsView | undefined {
+  if (!raw || typeof raw !== 'object') {
+    return undefined
+  }
+  const one = raw as Record<string, unknown>
+  const num = (value: unknown): number | undefined =>
+    typeof value === 'number' && Number.isFinite(value) ? value : undefined
+  const runDeadlineAt = num(one.runDeadlineAt)
+  if (!runDeadlineAt || runDeadlineAt <= 0) {
+    return undefined
+  }
+  const text = (value: unknown): string | undefined => {
+    const str = typeof value === 'string' ? value.trim() : ''
+    return str || undefined
+  }
+  return {
+    runLimitMs: num(one.runLimitMs),
+    runDeadlineAt,
+    waitingAt: num(one.waitingAt),
+    nodeCode: text(one.nodeCode) ?? null,
+    nodeName: text(one.nodeName) ?? null,
+    nodeLimitMs: num(one.nodeLimitMs) ?? null,
+    nodeDeadlineAt: num(one.nodeDeadlineAt) ?? null
+  }
+}
+
+/**
+ * 归一化节点过程步：只认 REASONING / TOOL，空内容丢弃，顺序保持后端给的先后。
+ *
+ * @param raw 节点 steps 字段
+ * @return 过程步；没有或结构不合格时为空表
+ */
+function normalizeWorkflowSteps(raw: unknown): TrialWorkflowStepView[] {
+  if (!Array.isArray(raw)) {
+    return []
+  }
+  const steps: TrialWorkflowStepView[] = []
+  for (const item of raw) {
+    if (!item || typeof item !== 'object') {
+      continue
+    }
+    const one = item as { type?: unknown; name?: unknown; content?: unknown; state?: unknown }
+    const type = typeof one.type === 'string' ? one.type.trim().toUpperCase() : ''
+    if (type !== 'REASONING' && type !== 'TOOL') {
+      continue
+    }
+    const content = typeof one.content === 'string' ? one.content : ''
+    if (type === 'REASONING' && !content.trim()) {
+      continue
+    }
+    const state = typeof one.state === 'string' ? one.state.trim().toLowerCase() : ''
+    steps.push({
+      type,
+      name: typeof one.name === 'string' ? one.name.trim() : '',
+      content,
+      state: state === 'running' || state === 'error' || state === 'done' ? state : type === 'TOOL' ? 'done' : undefined
+    })
+  }
+  return steps
+}
+
+/**
+ * 归一化节点文件行：只存文件名 / 体积，下载地址按当前会话现拼。
+ *
+ * <p>不把 downloadUrl 写进快照：会话复制或迁移后旧地址会失效，回放应读当前会话。
+ *
+ * @param raw       节点 files 字段
+ * @param sessionId 会话主键；缺失时地址为空串，FileCard 会置灰
+ * @return 文件视图；没有或结构不合格时为空表
+ */
+function normalizeWorkflowNodeFiles(raw: unknown, sessionId?: number): TrialFileView[] {
+  if (!Array.isArray(raw)) {
+    return []
+  }
+  const files: TrialFileView[] = []
+  const seen = new Set<string>()
+  for (const item of raw) {
+    if (!item || typeof item !== 'object') {
+      continue
+    }
+    const one = item as { fileName?: unknown; size?: unknown }
+    const fileName = typeof one.fileName === 'string' ? one.fileName.trim() : ''
+    if (!fileName || seen.has(fileName)) {
+      continue
+    }
+    seen.add(fileName)
+    const size = typeof one.size === 'number' && Number.isFinite(one.size) ? one.size : -1
+    files.push({
+      fileName,
+      size,
+      downloadUrl: sessionId ? buildDownloadUrl(sessionId, fileName) : ''
+    })
+  }
+  return files
+}
+
+/**
+ * 归一化卡片上的可点选项。
+ *
+ * <p>与 CHOICE 事件同一套边界（2~6 项、id / label 非空、id 不重复），不合格整份丢弃：
+ * 宁可这一张卡没有芯片，也不渲染一组点了会对错人的按钮。
+ *
+ * @param raw 原始选项字段（SSE 帧 / 落库 JSON）
+ * @return 选项视图；没有或不合格时为 undefined
+ */
+function normalizeWorkflowChoice(raw: unknown): TrialChoiceView | undefined {
+  if (!raw || typeof raw !== 'object') {
+    return undefined
+  }
+  const data = raw as { question?: unknown; options?: unknown }
+  if (!Array.isArray(data.options)) {
+    return undefined
+  }
+  const options: { id: string; label: string }[] = []
+  for (const item of data.options) {
+    if (!item || typeof item !== 'object') {
+      return undefined
+    }
+    const one = item as { id?: unknown; label?: unknown }
+    const id = typeof one.id === 'string' ? one.id.trim() : ''
+    const label = typeof one.label === 'string' ? one.label.trim() : ''
+    if (!id || !label) {
+      return undefined
+    }
+    if (options.some((row) => row.id.toLowerCase() === id.toLowerCase())) {
+      return undefined
+    }
+    options.push({ id, label })
+  }
+  if (options.length < 2 || options.length > 6) {
+    return undefined
+  }
+  return { question: typeof data.question === 'string' ? data.question.trim() : '', options }
 }
 
 /**
@@ -2220,7 +2724,7 @@ function userTurn(
   }
 }
 
-function pushBlock(turn: ChatTurn, block: AssistantBlock) {
+function pushBlock(turn: ChatTurn, block: AssistantBlock, sessionId?: number) {
   // 回放与直播共用 appendText / appendRoute：块上已经贴好的身份必须跟着走，不能在这里丢掉
   if (block.kind === 'reasoning' || block.kind === 'assistant') {
     appendText(turn, block.kind, block.text, block.participantId, block.participantName)
@@ -2255,7 +2759,7 @@ function pushBlock(turn: ChatTurn, block: AssistantBlock) {
   }
   // 工作流卡片同理：同一轮同一工作流只保留最新一份快照
   if (block.kind === 'workflow' && block.workflow) {
-    appendWorkflow(turn, block.workflow, block.participantId, block.participantName)
+    appendWorkflow(turn, block.workflow, block.participantId, block.participantName, sessionId)
     return
   }
   // 其余块（vision / system / error / ROUTER_TRACE）直接入列：补齐稳定 id 再 push，
@@ -2354,9 +2858,11 @@ function blockFromEvent(item: TrialEvent): AssistantBlock | undefined {
   if (item.eventType === 'workflow') {
     /*
      * 工作流执行卡片：正文是 {name,code,status,answer,nodes} 的 JSON（与 SSE 帧同形）。
-     * 解析失败时整块丢弃：宁可刷新后只剩正文，也不能画一张字段错位的假卡片。
+     * 正文残缺（历史截断）时不再整块丢弃：用事件摘要合成一张「已结束」占位卡，
+     * 让这一轮仍有收口标记，旧的等待卡也能被接管。
      */
-    const workflow = parseWorkflowEvent(item.contentText)
+    const workflow = parseWorkflowEvent(item.contentText, item.sessionId)
+      || placeholderWorkflow(item.summary)
     return workflow ? { kind: 'workflow', text: workflow.name || workflow.code, workflow } : undefined
   }
   if (item.eventType === 'error') {
@@ -2484,16 +2990,66 @@ export function parsePreprocessEvent(raw: string | undefined): TrialPreprocessVi
   }
 }
 
-export function parseWorkflowEvent(raw: string | undefined): TrialWorkflowView | undefined {
+export function parseWorkflowEvent(
+  raw: string | undefined,
+  sessionId?: number
+): TrialWorkflowView | undefined {
   const text = (raw || '').trim()
   if (!text) {
     return undefined
   }
   try {
-    return normalizeWorkflow(JSON.parse(text) as WorkflowSnapshotInput)
+    return normalizeWorkflow(JSON.parse(text) as WorkflowSnapshotInput, sessionId)
   } catch {
-    // 半截 JSON（列宽截断）：不出卡片，本轮仍能看正文
+    // 半截 JSON（列宽截断 / 历史脏数据）：交给 placeholderWorkflow 出占位卡
     return undefined
+  }
+}
+
+/** 事件摘要里的工作流名：后端摘要固定是「工作流「名字」状态」 */
+const WORKFLOW_SUMMARY_NAME = /「([^」]+)」/
+
+/**
+ * 由事件摘要合成一张占位卡（回放兜底）。所属域：runtime（前端）。
+ *
+ * <p>为什么不能继续「解析失败就整块丢弃」：执行卡片是这一轮唯一的收口标记。
+ * 丢掉它之后，上一轮停在「等待你的回复」的旧卡就没有新卡来接管，
+ * 页面看起来像又退回去问了一遍——这正是历史截断事故的可见症状。
+ *
+ * <p>只从摘要里取「名字 + 状态」，不猜节点：没有名字时宁可不画卡，
+ * 也不画一张无法归属到任何工作流的空卡。
+ *
+ * @param summary 事件摘要（形如「工作流「X」已完成」）；可空
+ * @returns 占位卡；摘要里没有可用名字时为 undefined
+ */
+export function placeholderWorkflow(summary: string | undefined): TrialWorkflowView | undefined {
+  const text = (summary || '').trim()
+  if (!text) {
+    return undefined
+  }
+  const matched = WORKFLOW_SUMMARY_NAME.exec(text)
+  const name = (matched?.[1] || '').trim()
+  if (!name) {
+    return undefined
+  }
+  // 状态只按摘要里的固定短语反推；认不出时给 UNKNOWN（前端按「详情不可用」展示，不转圈）
+  let status = 'UNKNOWN'
+  if (text.includes('已完成')) {
+    status = 'SUCCESS'
+  } else if (text.includes('运行失败')) {
+    status = 'FAILED'
+  } else if (text.includes('已取消') || text.includes('已中断')) {
+    status = 'CANCELLED'
+  } else if (text.includes('等待你的回复')) {
+    status = 'WAITING_REPLY'
+  }
+  return {
+    name,
+    code: '',
+    status,
+    answer: '',
+    nodes: [],
+    degraded: true
   }
 }
 
@@ -2511,36 +3067,46 @@ export function parseChoiceEvent(raw: string | undefined): TrialChoiceView | und
   if (!text) {
     return undefined
   }
-  let data: { question?: unknown; options?: unknown }
+  let data: { question?: unknown; options?: unknown; reply?: unknown; waiting?: unknown }
   try {
-    data = JSON.parse(text) as { question?: unknown; options?: unknown }
+    data = JSON.parse(text) as { question?: unknown; options?: unknown; reply?: unknown; waiting?: unknown }
   } catch {
     // 半截 JSON（快照写入时被截断）：不出块，正文照常展示
     return undefined
   }
-  if (!data || !Array.isArray(data.options)) {
+  if (!data) {
     return undefined
+  }
+  const question = typeof data.question === 'string' ? data.question.trim() : ''
+  const reply = typeof data.reply === 'string' ? data.reply.trim() : ''
+  const waiting = data.waiting === true
+  // 回复态允许 options 缺省 / 为空（选项已清掉），但必须有回复文案；普通选项没有 reply
+  if (!Array.isArray(data.options)) {
+    return reply ? { question, options: [], reply, waiting: false } : undefined
   }
   const options: { id: string; label: string }[] = []
   for (const item of data.options) {
     if (!item || typeof item !== 'object') {
-      return undefined
+      return reply ? { question, options: [], reply, waiting: false } : undefined
     }
     const one = item as { id?: unknown; label?: unknown }
     const id = typeof one.id === 'string' ? one.id.trim() : ''
     const label = typeof one.label === 'string' ? one.label.trim() : ''
     if (!id || !label) {
-      return undefined
+      return reply ? { question, options: [], reply, waiting: false } : undefined
     }
     if (options.some((row) => row.id.toLowerCase() === id.toLowerCase())) {
-      return undefined
+      return reply ? { question, options: [], reply, waiting: false } : undefined
     }
     options.push({ id, label })
   }
-  if (options.length < 2 || options.length > 6) {
-    return undefined
+  if (options.length === 0) {
+    return reply ? { question, options: [], reply, waiting: false } : undefined
   }
-  return { question: typeof data.question === 'string' ? data.question.trim() : '', options }
+  if (options.length < 2 || options.length > 6) {
+    return reply ? { question, options: [], reply, waiting: false } : undefined
+  }
+  return { question, options, reply: reply || undefined, waiting }
 }
 
 /**

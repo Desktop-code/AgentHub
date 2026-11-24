@@ -530,9 +530,17 @@ export function buildThinkTimeline(input: ThinkTimelineInput): ThinkTimelineStep
    * 也不写 ROUTE 事件——这里再补一块「已接收问题，交由「X」处理」就是凭空造了一次入口判定，
    * 页面上看起来像重新分流了一遍。
    */
-  // 入口块：判定进行中、已有入口身份，或已经有路由文案。没有泳道时不再按路由名另造专家卡。
-  const entryRouted =
-    input.entryJudging === true || input.routeTexts.length > 0 || !!input.entryParticipantId
+  /*
+   * 入口块出现的三种依据：判定进行中、已有入口身份、或已经有真实路由文案。
+   *
+   * <p>`expectEntry === false` 是断点续作 / 等待回复续跑：这一轮由原专家或原工作流接着跑，
+   * 后端不判路由、不推入口身份。此时即使消息流里混进了 `route` 块（例如参与者 begin 的
+   * 占位行，或并行分支自己的路由行），也不能合成「智能网关 → X」——那会让用户以为入口
+   * 又分发了一次、新开了一条运行。
+   */
+  const entryRouted = input.expectEntry === false
+    ? false
+    : input.entryJudging === true || input.routeTexts.length > 0 || !!input.entryParticipantId
   const split = entryRouted
     ? splitEntrySteps(input.lanes, input.entryParticipantId)
     : { entrySteps: [] as ProcessStep[], lanes: agentLanes }

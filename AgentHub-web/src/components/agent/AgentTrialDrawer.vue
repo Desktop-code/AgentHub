@@ -101,7 +101,7 @@ watch(
   align-items: center;
   margin-bottom: 0;
   padding-bottom: 14px;
-  border-bottom: 1px solid var(--ah-border, #e5e7eb);
+  border-bottom: 1px solid var(--ah-border, #ebeef5);
 }
 
 /* 窄屏别把左轨挤没；至少留侧栏宽度 */
@@ -126,7 +126,7 @@ watch(
   overflow: hidden;
   color: var(--el-text-color-primary);
   font-size: 16px;
-  font-weight: 650;
+  font-weight: 600;
   text-overflow: ellipsis;
   white-space: nowrap;
 }

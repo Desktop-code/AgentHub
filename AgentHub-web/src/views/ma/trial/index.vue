@@ -324,8 +324,8 @@ watch(
   min-width: 0;
   /* 运行页统一白底：三栏与页头共用一块白色工作区，不再让灰底从栏间漏出 */
   padding: 16px 18px 18px;
-  background: #fff;
-  border-radius: 12px;
+  background: var(--ah-surface);
+  border-radius: 8px;
 }
 
 .ma-trial__body {

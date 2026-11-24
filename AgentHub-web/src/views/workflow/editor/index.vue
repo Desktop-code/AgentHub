@@ -156,7 +156,7 @@
           @nodes-initialized="onNodesInitialized"
           @error="onVueFlowError"
         >
-          <Background :gap="16" color="#e5e7eb" />
+          <Background :gap="16" color="#ebeef5" />
         </VueFlow>
 
         <!-- 底部悬浮胶囊：缩放 / 自适应 / 试跑；空白处穿透，不挡画布拖拽 -->
@@ -227,6 +227,41 @@
               </button>
             </el-tooltip>
           </div>
+        <!-- 工作流级运行时限：不随选中态隐藏，不选中任何元素也能改；单位分钟，不露内部键名 -->
+        <el-form label-position="top" class="wf-form wf-limits" @submit.prevent>
+          <div class="wf-limits__head">
+            <span class="wf-limits__title">运行时限</span>
+            <span class="wf-limits__hint">留空按平台上限 {{ platformMaxMinutes }} 分钟</span>
+          </div>
+          <el-form-item label="整段运行上限">
+            <el-input
+              v-model="runMinutesText"
+              class="wf-field"
+              placeholder="留空 = 平台上限"
+              inputmode="numeric"
+              maxlength="5"
+              clearable
+              :disabled="!canEdit"
+            >
+              <template #append>分钟</template>
+            </el-input>
+          </el-form-item>
+          <el-form-item label="单节点上限">
+            <el-input
+              v-model="nodeMinutesText"
+              class="wf-field"
+              placeholder="留空 = 不限制单节点"
+              inputmode="numeric"
+              maxlength="5"
+              clearable
+              :disabled="!canEdit"
+            >
+              <template #append>分钟</template>
+            </el-input>
+          </el-form-item>
+          <div v-if="limitsError" class="wf-tip wf-tip--error">{{ limitsError }}</div>
+          <div v-else class="wf-tip">等待用户回复或人工处理的时间不计入这两项。</div>
+        </el-form>
         <template v-if="selectedNode">
           <el-form label-position="top" class="wf-form">
             <el-form-item label="编码 code" required>
@@ -277,6 +312,22 @@
                 :closable="false"
                 class="block-alert"
               />
+              <!--
+                对话停等：勾上后该 Agent 节点产出的问句会进对话正文，运行挂起等同一会话的下一句。
+                不勾＝原行为（节点一次跑完继续往下），因此存量图不用改。
+              -->
+              <el-form-item label="等用户回复">
+                <el-switch
+                  :model-value="selectedNode.data.config.awaitReply === true"
+                  :disabled="!canEdit"
+                  @update:model-value="setAwaitReply"
+                />
+              </el-form-item>
+              <div class="wf-tip">
+                勾上后：本节点产出的问句直接写进工作台对话，运行停在「等待你的回复」；
+                用户在本会话输入框发下一句，会送回同一条运行继续，后续条件边可读
+                <code>$.input.reply</code>。不勾＝节点跑完直接继续，行为与原来一致。
+              </div>
             </template>
 
             <!-- TOOL：直接绑定工具项 -->
@@ -568,6 +619,7 @@ import type {
   WorkflowFlowNodeData,
   WorkflowGraph,
   WorkflowGraphEdge,
+  WorkflowGraphLimits,
   WorkflowGraphNode,
   WorkflowIssue,
   WorkflowMappingSource,
@@ -730,6 +782,55 @@ const publishing = ref(false)
 
 const issues = ref<IssueItem[]>([])
 const lastResult = ref<{ errors: number; warns: number } | null>(null)
+
+/*
+ * 工作流级运行时限（单位分钟）。用文本 ref 而非数字：用户需要能「清空」表示跟随平台，
+ * 数字输入框清空时会变成 0 / NaN，反而更难表达「未配置」。提交前统一解析成整数。
+ */
+const runMinutesText = ref('')
+const nodeMinutesText = ref('')
+/** 平台硬顶（分钟）：由草稿接口下发，页面只显示分钟，不显示 yml 键名与毫秒 */
+const platformMaxMinutes = ref(60)
+
+/** 解析一个「分钟」文本框：空 → null；非正整数 → NaN */
+function parseMinutesText(raw: string): number | null {
+  const text = String(raw ?? '').trim()
+  if (!text) {
+    return null
+  }
+  if (!/^\d+$/.test(text)) {
+    return Number.NaN
+  }
+  const value = Number(text)
+  return value > 0 ? value : Number.NaN
+}
+
+const runMinutesValue = computed(() => parseMinutesText(runMinutesText.value))
+const nodeMinutesValue = computed(() => parseMinutesText(nodeMinutesText.value))
+
+/**
+ * 时限输入的本地校验：只出中文（分钟 + 平台上限），不出现毫秒或配置键。
+ * 后端还会再校验一次，这里只负责让用户保存前就看到问题。
+ */
+const limitsError = computed(() => {
+  const run = runMinutesValue.value
+  const node = nodeMinutesValue.value
+  if (Number.isNaN(run)) {
+    return '整段运行上限请填大于 0 的整数分钟（留空表示跟随平台上限）'
+  }
+  if (run !== null && run > platformMaxMinutes.value) {
+    return `整段运行上限不能超过平台上限 ${platformMaxMinutes.value} 分钟`
+  }
+  if (Number.isNaN(node)) {
+    return '单节点上限请填大于 0 的整数分钟（留空表示不限制单节点）'
+  }
+  // 单节点不得超过整段：整段留空时，整段实际上就是平台上限
+  const effectiveRun = run ?? platformMaxMinutes.value
+  if (node !== null && node > effectiveRun) {
+    return `单节点上限不能超过整段运行上限 ${effectiveRun} 分钟`
+  }
+  return ''
+})
 
 const selected = ref<SelectedElement | null>(null)
 
@@ -1140,6 +1241,16 @@ function buildGraph(): WorkflowGraph {
       config: (data.config ?? {}) as Record<string, unknown>
     }
   })
+  const limits: WorkflowGraphLimits = {}
+  // 只有真的填了才写：空值不落 limits 键，后端按「跟平台硬顶走」处理
+  const runMinutes = runMinutesValue.value
+  const nodeMinutes = nodeMinutesValue.value
+  if (runMinutes !== null && Number.isFinite(runMinutes)) {
+    limits.runMinutes = runMinutes
+  }
+  if (nodeMinutes !== null && Number.isFinite(nodeMinutes)) {
+    limits.nodeMinutes = nodeMinutes
+  }
   return {
     nodes,
     edges,
@@ -1147,17 +1258,25 @@ function buildGraph(): WorkflowGraph {
       x: Math.round(view.x),
       y: Math.round(view.y),
       zoom: Number(view.zoom.toFixed(3))
-    }
+    },
+    ...(Object.keys(limits).length ? { limits } : {})
   }
 }
 
 /**
- * 图签名：只比 nodes / edges，忽略 viewport 与展示字段。
+ * 图签名：比 nodes / edges / 运行时限，忽略 viewport 与展示字段。
+ *
+ * <p>时限必须进签名：只改两个上限不动画布也算「有未保存修改」，
+ * 否则用户改完时限直接点发布，会被「不脏就不存草稿」的路径静默丢掉。
  *
  * @param graph 图
  */
 function graphSignature(graph: WorkflowGraph): string {
-  return JSON.stringify({ nodes: graph.nodes, edges: graph.edges })
+  return JSON.stringify({
+    nodes: graph.nodes,
+    edges: graph.edges,
+    limits: graph.limits ?? null
+  })
 }
 
 /** 落库结构 → 画布节点 */
@@ -1388,6 +1507,10 @@ async function loadAll() {
     const graph = draftResp.data.data.graph || { nodes: [], edges: [] }
     vf.setNodes((graph.nodes || []).map(toFlowNode))
     vf.setEdges((graph.edges || []).map(toFlowEdge))
+    // 运行时限：空表示跟平台走；平台上限由后端折算成分钟下发，页面不出现毫秒与键名
+    runMinutesText.value = graph.limits?.runMinutes ? String(graph.limits.runMinutes) : ''
+    nodeMinutesText.value = graph.limits?.nodeMinutes ? String(graph.limits.nodeMinutes) : ''
+    platformMaxMinutes.value = draftResp.data.data.platformMaxMinutes || 60
     // Agent / 工具选项可能已先加载完成：铺完节点立刻补一次名称，避免首屏闪「Agent #30」
     syncAgentLabels()
     syncToolLabels()
@@ -1475,6 +1598,11 @@ async function onSaveDraft(silent = false): Promise<boolean> {
   }
   if (!canEdit.value) {
     ElMessage.warning('没有编辑权限，无法保存草稿')
+    return false
+  }
+  // 时限本地先拦：后端也会拦，但先给用户一句直接的中文，省一次往返
+  if (limitsError.value) {
+    ElMessage.error(limitsError.value)
     return false
   }
   saving.value = true
@@ -1799,6 +1927,24 @@ function setNodeTool(value: number | string | undefined) {
 }
 
 /**
+ * 切换 Agent 节点的「等用户回复」。
+ *
+ * <p>关掉时显式写 false 而不是删键：草稿里留一个明确的 false，发布快照与后端读取口径一致。
+ *
+ * @param value 开关值
+ */
+function setAwaitReply(value: boolean | string | number) {
+  const node = selectedNode.value
+  if (!node) {
+    return
+  }
+  node.data = {
+    ...node.data,
+    config: { ...node.data.config, awaitReply: value === true }
+  }
+}
+
+/**
  * 把 toolId 对应的工具名称回填到所有 TOOL 节点。
  * <p>工具下拉与草稿并行加载，草稿先到时名称还解析不出来；
  * 这里在两边任一就绪后统一补齐，同值短路避免无意义重渲染。
@@ -2115,9 +2261,9 @@ onActivated(() => {
   flex: none;
   margin-bottom: 10px;
   padding: 8px 10px;
-  border: 1px solid var(--ah-border, #e5e7eb);
-  border-radius: 10px;
-  background: #fff;
+  border: 1px solid var(--ah-border, #ebeef5);
+  border-radius: 8px;
+  background: var(--ah-surface);
 }
 
 .wf-issues__title {
@@ -2128,7 +2274,7 @@ onActivated(() => {
 }
 
 .wf-issues__stale {
-  color: #b45309;
+  color: var(--ah-warning);
 }
 
 .wf-issues__list {
@@ -2146,29 +2292,29 @@ onActivated(() => {
   gap: 6px;
   max-width: 420px;
   padding: 4px 8px;
-  border: 1px solid #e5e7eb;
+  border: 1px solid var(--ah-border);
   border-radius: 8px;
-  background: #fff;
+  background: var(--ah-surface);
   font-size: 12px;
   cursor: pointer;
 }
 
 .wf-issue.is-error {
-  border-color: #fecaca;
-  background: #fef2f2;
-  color: #b91c1c;
+  border-color: var(--el-color-danger-light-5);
+  background: var(--ah-danger-tint);
+  color: var(--ah-danger);
 }
 
 .wf-issue.is-warn {
-  border-color: #fde68a;
-  background: #fffbeb;
-  color: #b45309;
+  border-color: var(--el-color-warning-light-5);
+  background: var(--ah-warning-tint);
+  color: var(--ah-warning);
 }
 
 .wf-issue__code {
   color: inherit;
   font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
-  font-size: 11px;
+  font-size: 12px;
   opacity: 0.75;
 }
 
@@ -2191,9 +2337,9 @@ onActivated(() => {
   position: relative;
   min-width: 0;
   overflow: hidden;
-  border: 1px solid var(--ah-border, #e5e7eb);
-  border-radius: 12px;
-  background: #fff;
+  border: 1px solid var(--ah-border, #ebeef5);
+  border-radius: 8px;
+  background: var(--ah-surface);
   transition: flex-basis 0.22s ease, width 0.22s ease, margin 0.22s ease, border-color 0.22s ease;
 }
 
@@ -2241,7 +2387,7 @@ onActivated(() => {
   gap: 8px;
   margin: 0;
   min-width: 0;
-  color: var(--ah-text-primary, #111827);
+  color: var(--ah-text-primary, #1f2937);
   font-size: 13px;
   font-weight: 600;
 }
@@ -2258,14 +2404,14 @@ onActivated(() => {
   border: 0;
   border-radius: 6px;
   background: transparent;
-  color: #9ca3af;
+  color: var(--ah-text-faint);
   cursor: pointer;
   transition: background 0.15s ease, color 0.15s ease;
 }
 
 .wf-panel__fold:hover {
-  background: #f3f4f6;
-  color: #4b5563;
+  background: var(--ah-neutral-tint);
+  color: var(--ah-text-regular);
 }
 
 /*
@@ -2288,8 +2434,8 @@ onActivated(() => {
   border: 1px solid rgb(15 23 42 / 8%);
   /* 半透明浅灰底 + 轻阴影：比纯白描边更显眼，又不喧宾夺主 */
   background: rgb(243 244 246 / 92%);
-  color: #4b5563;
-  box-shadow: 0 2px 10px rgb(15 23 42 / 12%);
+  color: var(--ah-text-regular);
+  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.08);
   cursor: pointer;
   white-space: nowrap;
   transform: translateY(-50%);
@@ -2299,8 +2445,8 @@ onActivated(() => {
 .wf-edge-wake:hover,
 .wf-edge-wake:focus-visible {
   width: 104px;
-  background: #fff;
-  color: #635bff;
+  background: var(--ah-surface);
+  color: var(--ah-primary);
   box-shadow: 0 6px 18px rgb(99 91 255 / 22%);
 }
 
@@ -2317,7 +2463,7 @@ onActivated(() => {
 /* 文字默认收起，hover 时随宽度一起浮现 */
 .wf-edge-wake__label {
   flex: none;
-  font-size: 11px;
+  font-size: 12px;
   font-weight: 600;
   opacity: 0;
   transition: opacity 0.16s ease;
@@ -2388,46 +2534,46 @@ onActivated(() => {
   align-items: center;
   gap: 6px;
   padding: 7px 9px;
-  border: 1px solid #e5e7eb;
+  border: 1px solid var(--ah-border);
   border-radius: 8px;
-  background: #fafafa;
+  background: var(--ah-surface-muted);
   font-size: 12px;
   cursor: grab;
   user-select: none;
 }
 
 .wf-palette__item:hover {
-  border-color: #c7c3ff;
-  background: #f5f4ff;
+  border-color: var(--el-color-primary-light-6);
+  background: var(--ah-primary-tint);
 }
 
 .wf-palette__item.is-p1 {
   border-style: dashed;
-  color: #9ca3af;
+  color: var(--ah-text-faint);
   cursor: not-allowed;
 }
 
 .wf-palette__label {
-  color: var(--ah-text-primary, #111827);
+  color: var(--ah-text-primary, #1f2937);
   font-weight: 600;
 }
 
 .wf-palette__item.is-p1 .wf-palette__label {
-  color: #9ca3af;
+  color: var(--ah-text-faint);
 }
 
 .wf-palette__p1 {
   padding: 0 4px;
-  border: 1px solid #e5e7eb;
+  border: 1px solid var(--ah-border);
   border-radius: 4px;
-  font-size: 10px;
+  font-size: 12px;
   line-height: 14px;
 }
 
 .wf-palette__hint {
   flex: 1 0 100%;
-  color: #9ca3af;
-  font-size: 11px;
+  color: var(--ah-text-faint);
+  font-size: 12px;
   line-height: 1.4;
 }
 
@@ -2439,9 +2585,9 @@ onActivated(() => {
   min-height: 0;
   height: auto;
   overflow: hidden;
-  border: 1px solid var(--ah-border, #e5e7eb);
-  border-radius: 12px;
-  background: #fbfbfd;
+  border: 1px solid var(--ah-border, #ebeef5);
+  border-radius: 8px;
+  background: var(--ah-surface-muted);
 }
 
 .canvas-alert {
@@ -2464,8 +2610,8 @@ onActivated(() => {
   padding: 5px 8px;
   border: 1px solid rgb(15 23 42 / 8%);
   border-radius: 999px;
-  background: #fff;
-  box-shadow: 0 10px 26px rgb(15 23 42 / 14%);
+  background: var(--ah-surface);
+  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.08);
   transform: translateX(-50%);
   /* 胶囊留白处穿透：节点拖到工具栏下方时仍能被抓住 */
   pointer-events: none;
@@ -2486,21 +2632,21 @@ onActivated(() => {
   border: 0;
   border-radius: 50%;
   background: transparent;
-  color: #4b5563;
+  color: var(--ah-text-regular);
   font-size: 14px;
   cursor: pointer;
   transition: background 0.15s ease, color 0.15s ease;
 }
 
 .wf-dock__btn:hover {
-  background: #f3f4f6;
-  color: #635bff;
+  background: var(--ah-neutral-tint);
+  color: var(--ah-primary);
 }
 
 .wf-dock__zoom {
   min-width: 42px;
-  color: #6b7280;
-  font-size: 11px;
+  color: var(--ah-text-secondary);
+  font-size: 12px;
   font-variant-numeric: tabular-nums;
   text-align: center;
 }
@@ -2509,7 +2655,7 @@ onActivated(() => {
   width: 1px;
   height: 16px;
   margin: 0 4px;
-  background: #e5e7eb;
+  background: var(--ah-border);
 }
 
 /* 试跑是工具栏唯一主色按钮，视觉权重高于缩放 */
@@ -2519,7 +2665,7 @@ onActivated(() => {
   padding: 0 14px;
   border: 0;
   border-radius: 999px;
-  background: #635bff;
+  background: var(--ah-primary);
   color: #fff;
   font-size: 12px;
   font-weight: 600;
@@ -2528,11 +2674,11 @@ onActivated(() => {
 }
 
 .wf-dock__run:hover {
-  background: #5147e6;
+  background: var(--ah-primary-hover);
 }
 
 .wf-dock__run:disabled {
-  background: #c7c3ff;
+  background: var(--el-color-primary-light-5);
   cursor: not-allowed;
 }
 
@@ -2568,13 +2714,39 @@ onActivated(() => {
 
 .wf-tip {
   margin: -4px 0 10px;
-  color: #9ca3af;
-  font-size: 11px;
+  color: var(--ah-text-faint);
+  font-size: 12px;
   line-height: 1.5;
 }
 
 .wf-tip--error {
-  color: #dc2626;
+  color: var(--ah-danger);
+}
+
+/* 运行时限区块：与节点属性用同一条分隔线，避免两块表单挤在一起 */
+.wf-limits {
+  margin: 0 0 14px;
+  padding: 0 0 10px;
+  border-bottom: 1px solid var(--ah-border);
+}
+
+.wf-limits__head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 8px;
+  margin-bottom: 4px;
+}
+
+.wf-limits__title {
+  color: var(--ah-text);
+  font-size: 13px;
+  font-weight: 600;
+}
+
+.wf-limits__hint {
+  color: var(--ah-text-faint);
+  font-size: 12px;
 }
 
 .wf-delete {
@@ -2583,14 +2755,14 @@ onActivated(() => {
 
 .wf-props__empty {
   padding: 18px 6px;
-  color: #9ca3af;
+  color: var(--ah-text-faint);
   font-size: 12px;
   line-height: 1.7;
   text-align: center;
 }
 
 .wf-props__empty-hint {
-  font-size: 11px;
+  font-size: 12px;
 }
 
 .wf-footer {
@@ -2601,9 +2773,9 @@ onActivated(() => {
   gap: 12px;
   margin-top: 10px;
   padding: 8px 12px;
-  border: 1px solid var(--ah-border, #e5e7eb);
-  border-radius: 10px;
-  background: #fff;
+  border: 1px solid var(--ah-border, #ebeef5);
+  border-radius: 8px;
+  background: var(--ah-surface);
   color: var(--ah-text-secondary, #6b7280);
   font-size: 12px;
 }
@@ -2613,15 +2785,15 @@ onActivated(() => {
 }
 
 .wf-footer__dirty {
-  color: #b45309;
+  color: var(--ah-warning);
 }
 
 .wf-footer .is-error {
-  color: #dc2626;
+  color: var(--ah-danger);
 }
 
 .wf-footer .is-warn {
-  color: #b45309;
+  color: var(--ah-warning);
 }
 
 /* VueFlow 铺满容器 */

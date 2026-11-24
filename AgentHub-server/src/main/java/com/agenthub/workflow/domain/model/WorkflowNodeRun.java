@@ -29,6 +29,13 @@ public class WorkflowNodeRun {
     private String inputJson;
     private String outputJson;
     private String errorSummary;
+    /**
+     * 用户对该节点询问的回复（对话续跑）。
+     *
+     * <p>落库卡片只存骨架、刷新回放按 runId 现算，回复不能只活在卡片快照里；
+     * 这一列是「我答了什么」的持久真源，写入前截到 2000 字。
+     */
+    private String replyText;
     /** 选中的出边 id，逗号分隔 */
     private String selectedEdges;
     private LocalDateTime startTime;

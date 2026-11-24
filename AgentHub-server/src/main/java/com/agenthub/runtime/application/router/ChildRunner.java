@@ -16,6 +16,9 @@ import com.agenthub.runtime.application.TrialBindingLoader;
 import com.agenthub.runtime.application.TrialMemoryCoordinator;
 import com.agenthub.runtime.domain.model.AgentChoice;
 import com.agenthub.runtime.domain.model.ChildPlanPendingView;
+import com.agenthub.runtime.domain.model.ChoiceCapture;
+import com.agenthub.runtime.domain.model.MaPauseMember;
+import com.agenthub.runtime.domain.model.MaPauseSnapshot;
 import com.agenthub.runtime.domain.model.GeneratedFile;
 import com.agenthub.runtime.domain.model.ParticipantView;
 import com.agenthub.runtime.domain.model.PendingPlan;
@@ -27,11 +30,13 @@ import com.agenthub.runtime.domain.model.TrialTurn;
 import com.agenthub.runtime.domain.model.WorkflowRunView;
 import com.agenthub.runtime.domain.service.CauseDigest;
 import com.agenthub.runtime.domain.service.ChildSubQueryInput;
+import com.agenthub.runtime.domain.service.ChoiceCaptureHolder;
 import com.agenthub.runtime.domain.service.EntryMaterialHolder;
 import com.agenthub.runtime.domain.service.FixedSequenceContext;
 import com.agenthub.runtime.domain.service.LimitHitReasons;
 import com.agenthub.runtime.domain.service.PromptInjectionHolder;
 import com.agenthub.runtime.domain.service.ScratchContext;
+import com.agenthub.runtime.domain.service.SoleChainHolder;
 import com.agenthub.runtime.domain.service.TrialFailure;
 import com.agenthub.runtime.domain.service.TrialProgress;
 import com.agenthub.runtime.infra.agentscope.ReActTrialExecutor;
@@ -41,8 +46,10 @@ import org.springframework.scheduling.concurrent.ThreadPoolTaskExecutor;
 
 import java.time.LocalDateTime;
 import java.util.ArrayList;
+import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 import java.util.concurrent.CancellationException;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ExecutionException;
@@ -191,10 +198,20 @@ public class ChildRunner {
                                           TrialProgress progress, ObsTraceScope trace, Long childParent,
                                           boolean isolateChild, boolean leafChoice) {
         if (intents.size() == 1) {
-            // 单意图内联执行，不经过线程池；submitter 传当前线程即可（清理分支本就不会走到）
-            return List.of(runOneChild(parent, intents.get(0), modelUser, userText, userId, sessionId,
-                    deadlineNanos, progress, trace, childParent, false, isolateChild, Thread.currentThread(), null,
-                    null, leafChoice));
+            /*
+             * 单意图内联执行，不经过线程池；submitter 传当前线程即可（清理分支本就不会走到）。
+             * 同时标记「本层只派了一位」：嵌套方案要在这条链上建停等边界，多子链一旦停住，
+             * 快照里没有其它成员的坐标，续跑会把它们整段丢掉。
+             */
+            boolean previousSole = SoleChainHolder.allows();
+            SoleChainHolder.set(true);
+            try {
+                return List.of(runOneChild(parent, intents.get(0), modelUser, userText, userId, sessionId,
+                        deadlineNanos, progress, trace, childParent, false, isolateChild, Thread.currentThread(),
+                        null, null, leafChoice));
+            } finally {
+                SoleChainHolder.restore(previousSole);
+            }
         }
         // 嵌套编排（命中 MA 候选后的那一层）不抢同一个池：按序内联推进，
         // 避免「池线程等子任务、子任务排队等线程」的自等待；结果与顺序与并行一致
@@ -240,6 +257,14 @@ public class ChildRunner {
                      */
                     // ExecutionException 需剥掉包装层才能拿到业务异常；中断/超时按原样处理
                     Throwable cause = ex instanceof ExecutionException && ex.getCause() != null ? ex.getCause() : ex;
+                    /*
+                     * 停等不是失败：并行链理论上不会建边界（SoleChainHolder 为 false），
+                     * 但更深一层若真的抛出来，必须原样交给入口，绝不能被压成「子 Agent 执行失败」。
+                     */
+                    if (cause instanceof MaPauseSignal pause) {
+                        cancelPending(futures);
+                        throw pause;
+                    }
                     // 包装层会吞掉原始栈，这里带 Throwable 打一次，保证并行子失败也有全栈
                     log.warn("并行子 Agent 执行失败 sessionId={} index={} type={} cause={}",
                             sessionId, i, cause.getClass().getSimpleName(), CauseDigest.of(cause), cause);
@@ -293,6 +318,9 @@ public class ChildRunner {
         }
         ExecutorService lane = Executors.newFixedThreadPool(
                 Math.min(intents.size(), INLINE_PARALLELISM), inlineWorkerFactory());
+        // 多子并行不是单链：本层显式标 false，避免外层单链的标记被内部成员误读成「可以停等」
+        boolean previousSole = SoleChainHolder.allows();
+        SoleChainHolder.set(false);
         try {
             List<Future<ChildOutcome>> futures = new ArrayList<>(intents.size());
             ScratchBoard scratch = ScratchContext.board();
@@ -335,6 +363,7 @@ public class ChildRunner {
         } finally {
             // 本层专属池：用完即关，不残留线程；已在跑的任务允许跑完（不打断正常收尾）
             lane.shutdown();
+            SoleChainHolder.restore(previousSole);
         }
     }
 
@@ -362,6 +391,9 @@ public class ChildRunner {
             try {
                 outcomes.add(runOneChild(parent, intent, modelUser, userText, userId, sessionId, deadlineNanos,
                         progress, trace, childParent, false, isolateChild, Thread.currentThread(), null));
+            } catch (MaPauseSignal pause) {
+                // 停等不是失败：单链停止由入口落等待态，这里不能压成「子 Agent 执行失败」
+                throw pause;
             } catch (RuntimeException ex) {
                 // 与并行链同口径：单子失败不打断其它子，正文走边界清洗
                 log.warn("嵌套编排子执行失败 agentId={} type={} cause={}",
@@ -385,52 +417,253 @@ public class ChildRunner {
                                                long sessionId, long deadlineNanos, TrialProgress progress,
                                                ObsTraceScope trace, Long childParent, List<RoutedIntent> intents,
                                                AgentRuntimeConfig runtime) {
+        return runFixedSequence(parent, modelUser, userText, userId, sessionId, deadlineNanos, progress, trace,
+                childParent, intents, runtime, null, List.of(), null, false);
+    }
+
+    /**
+     * 串行执行（可停等）：固定串行与路由后串行共用。
+     *
+     * <p>停等只在 {@code pauseScope != null && leafChoice} 时发生：某一步的模型产出了
+     * 可点询问（{@code agenthub_choice} / 后端整理），循环立刻抛出 {@link MaPauseSignal}，
+     * 把「已完成成员、当前成员、剩余成员、问句选项、已写键」打包成可恢复状态交给入口落库。
+     * 不在这里写库、也不在这里收口参与者：那位专家的卡片要保持在「等待」态，
+     * 等用户回复后由续跑继续把它收成完成态。
+     *
+     * @param seedPrior             续跑时已完成成员的结论（拼进下一步输入）；首次为空
+     * @param firstModelTextOverride 续跑第一位（刚被询问的那位）的模型输入；非空时不再按前置摘要重拼
+     * @param leafChoice             本串行链是否允许成员输出可点询问
+     * @return 每位成员的结果，顺序与 intents 一致
+     */
+    public List<ChildOutcome> runFixedSequence(AgentDef parent, String modelUser, String userText, long userId,
+                                               long sessionId, long deadlineNanos, TrialProgress progress,
+                                               ObsTraceScope trace, Long childParent, List<RoutedIntent> intents,
+                                               AgentRuntimeConfig runtime, MaPauseScope pauseScope,
+                                               List<FixedSequenceContext.PriorStep> seedPrior,
+                                               String firstModelTextOverride, boolean leafChoice) {
         List<ChildOutcome> outcomes = new ArrayList<>(intents.size());
-        List<FixedSequenceContext.PriorStep> prior = new ArrayList<>();
+        List<FixedSequenceContext.PriorStep> prior = new ArrayList<>(
+                seedPrior == null ? List.of() : seedPrior);
         // 单子串行没有「前置」，与现网单意图对齐：允许继承父历史，否则硬隔离
         boolean single = intents.size() == 1;
-        for (RoutedIntent intent : intents) {
-            RouterClock.assertBefore(deadlineNanos);
-            // 每步先推本步分块标题；串行下后续 reasoning/tool 自然落进该块，不需要 lane 重推
-            if (progress != null && intent.routeLine() != null) {
-                progress.route(intent.routeLine());
-            }
-            // 多步串行的输入固定为「本步子问 + 前面专家的成文结论」，不看上下文策略开关，
-            // 也不把工具 JSON / 父历史灌进去；并行不走本方法。单步交回既有解析。
-            String stepModelText = null;
-            boolean isolate;
-            if (!single) {
+        /*
+         * 本层是不是单链：只有单链才允许下一层（目标方案）建停等边界。
+         * 多子串行一旦停在某一位，快照里没有兄弟步的坐标，续跑只会把被停住的那条链跑完，
+         * 其余成员整段丢失——所以这里按本层成员数显式标一次。
+         */
+        boolean previousSole = SoleChainHolder.allows();
+        SoleChainHolder.set(single);
+        try {
+            for (int index = 0; index < intents.size(); index++) {
+                RoutedIntent intent = intents.get(index);
+                RouterClock.assertBefore(deadlineNanos);
+                // 每步先推本步分块标题；串行下后续 reasoning/tool 自然落进该块，不需要 lane 重推
+                if (progress != null && intent.routeLine() != null) {
+                    progress.route(intent.routeLine());
+                }
+                // 多步串行的输入固定为「本步子问 + 前面专家的成文结论」，不看上下文策略开关，
+                // 也不把工具 JSON / 父历史灌进去；并行不走本方法。单步交回既有解析。
+                String stepModelText = null;
+                boolean isolate;
+                if (index == 0 && firstModelTextOverride != null && !firstModelTextOverride.isBlank()) {
+                    // 续跑第一位：把「子问 + 询问前终答 + 用户回复」一次交给同一位专家，不再重拼前置摘要
+                    stepModelText = firstModelTextOverride;
+                    isolate = true;
+                } else if (!single) {
+                    /*
+                     * 本步的问题基座取 intent.subQuery()：
+                     * - 固定串行里 sub_query 恒等于用户原问（不做切分）；
+                     * - 路由后串行里它是判路由切给该子的子问题，不能再拿整段合问。
+                     */
+                    String stepQuestion = intent.subQuery() == null || intent.subQuery().isBlank()
+                            ? userText
+                            : intent.subQuery();
+                    stepModelText = FixedSequenceContext.render(stepQuestion, prior);
+                    isolate = true;
+                } else {
+                    isolate = !runtime.allowParentHistoryWhenSingleOn();
+                }
+                ChildOutcome outcome;
+                try {
+                    outcome = runOneChild(parent, intent, modelUser, userText, userId, sessionId, deadlineNanos,
+                            progress, trace, childParent, false, isolate, Thread.currentThread(), stepModelText,
+                            null, leafChoice, pauseScope != null);
+                } catch (MaPauseSignal pause) {
+                    /*
+                     * 停等不是失败：这条串行链下面的目标方案停住了，信号必须原样穿出去。
+                     * 压成占位段会让外层以为「该成员失败」，用户看到一处假错误、且永远等不到续跑。
+                     */
+                    throw pause;
+                } catch (RuntimeException ex) {
+                    // 默认「失败继续」：压成占位段，后续步仍能看到「该步未完成」而不是整条序列中断
+                    log.warn("固定串行第 {} 步失败 agentId={} type={} cause={}", outcomes.size() + 1,
+                            rootId(parent), ex.getClass().getSimpleName(), CauseDigest.of(ex), ex);
+                    outcome = ChildOutcome.failed(intent, UserFacingText.safeMessage(ex, "子 Agent 执行失败"));
+                }
+                outcomes.add(outcome);
                 /*
-                 * 本步的问题基座取 intent.subQuery()：
-                 * - 固定串行里 sub_query 恒等于用户原问（不做切分）；
-                 * - 路由后串行里它是判路由切给该子的子问题，不能再拿整段合问。
+                 * 成员刚问完：整条串行立即挂起。检测放在 outcome 收集之后、下一步之前，
+                 * 保证停等快照里能看到这位成员的完整终稿与身份；并行 / 未开放停等的链传的 scope 为 null，
+                 * 不会走到这里，行为与现网一致。
                  */
-                String stepQuestion = intent.subQuery() == null || intent.subQuery().isBlank()
-                        ? userText
-                        : intent.subQuery();
-                stepModelText = FixedSequenceContext.render(stepQuestion, prior);
-                isolate = true;
-            } else {
-                isolate = !runtime.allowParentHistoryWhenSingleOn();
+                if (pauseScope != null && leafChoice) {
+                    AgentChoice captured = capturedChoice();
+                    if (captured != null) {
+                        throw buildPauseSnapshot(pauseScope, intents, index, outcomes, captured, sessionId);
+                    }
+                }
+                // 只交接成文结论：展示名不含 route_key；失败步只有一句短说明，不带异常原文和工具 JSON
+                prior.add(new FixedSequenceContext.PriorStep(
+                        RouterTexts.childLabel(intent.candidate().agent()),
+                        outcome.turn() == null ? null : outcome.turn().getAssistantText(),
+                        outcome.turn() == null));
             }
-            ChildOutcome outcome;
-            try {
-                outcome = runOneChild(parent, intent, modelUser, userText, userId, sessionId, deadlineNanos,
-                        progress, trace, childParent, false, isolate, Thread.currentThread(), stepModelText);
-            } catch (RuntimeException ex) {
-                // 默认「失败继续」：压成占位段，后续步仍能看到「该步未完成」而不是整条序列中断
-                log.warn("固定串行第 {} 步失败 agentId={} type={} cause={}", outcomes.size() + 1,
-                        rootId(parent), ex.getClass().getSimpleName(), CauseDigest.of(ex), ex);
-                outcome = ChildOutcome.failed(intent, UserFacingText.safeMessage(ex, "子 Agent 执行失败"));
-            }
-            outcomes.add(outcome);
-            // 只交接成文结论：展示名不含 route_key；失败步只有一句短说明，不带异常原文和工具 JSON
-            prior.add(new FixedSequenceContext.PriorStep(
-                    RouterTexts.childLabel(intent.candidate().agent()),
-                    outcome.turn() == null ? null : outcome.turn().getAssistantText(),
-                    outcome.turn() == null));
+            return outcomes;
+        } finally {
+            SoleChainHolder.restore(previousSole);
         }
-        return outcomes;
+    }
+
+    /**
+     * 当前请求里模型产出的可点询问。没有开启捕获（调试 / 并行 / 嵌套）时为空。
+     *
+     * @return 捕获到的选项；没有时为空
+     */
+    private static AgentChoice capturedChoice() {
+        ChoiceCapture capture = ChoiceCaptureHolder.current();
+        return capture == null ? null : capture.choice();
+    }
+
+    /**
+     * 把「停在第 index 位」打包成可恢复快照。
+     *
+     * <p>done 只放**已经跑完**的成员（含 seedDone），paused 单独放当前询问者；
+     * writtenKeys 记录本次停等之后视为已写身份 / 路由的键，续跑时据此避免重复 begin。
+     *
+     * @param scope     停等边界
+     * @param intents   本轮串行意图（含续跑时已跑完的前缀）
+     * @param index     停在 intents 的哪一位
+     * @param outcomes  与 intents 同序的已执行结果（至少到 index）
+     * @param choice    模型给出的问句与选项
+     * @param sessionId 会话
+     * @return 控制流信号
+     */
+    private static MaPauseSignal buildPauseSnapshot(MaPauseScope scope, List<RoutedIntent> intents, int index,
+                                                    List<ChildOutcome> outcomes, AgentChoice choice,
+                                                    long sessionId) {
+        MaPauseSnapshot state = new MaPauseSnapshot();
+        state.setSessionId(sessionId);
+        state.setMaDefId(scope.maDefId());
+        state.setSchemeName(scope.schemeName());
+        state.setTemplate(scope.template());
+        state.setDepth(scope.depth());
+        state.setParentKey(scope.parentKey());
+        state.setUserText(scope.userText());
+        state.setModelUser(scope.modelUser());
+        state.setGateway(scope.gateway());
+        state.setJudgeReasoning(scope.judgeReasoning());
+        state.setDecisionBlock(scope.decisionBlock());
+        state.setSkipped(scope.skipped());
+        state.setPreWrittenKeys(scope.writtenKeys());
+        List<MaPauseMember> done = new ArrayList<>(scope.seedDone());
+        // 前缀这一段在上一轮停等时已经写过，再次停等只作续跑摘要，不重复补事件
+        state.setSeedDoneSize(done.size());
+        // 本次续跑里已经完成的成员（paused 之前）也要进 done，续跑时作为前置摘要与本轮拼接稿
+        for (int i = 0; i < index && i < outcomes.size(); i++) {
+            done.add(pauseMemberOf(outcomes.get(i), intents.get(i)));
+        }
+        state.setDone(done);
+        MaPauseMember paused = pauseMemberOf(outcomes.get(index), intents.get(index));
+        state.setPausedMember(paused);
+        state.setPausedAnswer(outcomes.get(index).turn() == null
+                ? "" : outcomes.get(index).turn().getAssistantText());
+        state.setChoice(choice.awaiting());
+        List<MaPauseMember> remaining = new ArrayList<>();
+        for (int i = index + 1; i < intents.size(); i++) {
+            remaining.add(pauseMemberOf(intents.get(i)));
+        }
+        state.setRemaining(remaining);
+        // 本次停等之后：已完成 + 当前询问者 + 已跳过 + 本次之前已写，都视为已写身份 / 路由
+        Set<String> written = new LinkedHashSet<>(scope.writtenKeys());
+        for (MaPauseMember member : done) {
+            addKey(written, member.getRouteKey());
+        }
+        addKey(written, paused.getRouteKey());
+        for (MaPauseMember skip : scope.skipped()) {
+            addKey(written, skip.getRouteKey());
+        }
+        state.setWrittenKeys(written);
+        return new MaPauseSignal(state);
+    }
+
+    /**
+     * 已执行成员 → 停等快照成员。
+     *
+     * @param outcome 成员结果
+     * @param intent  成员意图
+     * @return 快照成员
+     */
+    private static MaPauseMember pauseMemberOf(ChildOutcome outcome, RoutedIntent intent) {
+        MaPauseMember member = pauseMemberOf(intent);
+        if (outcome == null) {
+            return member;
+        }
+        member.setAnswer(outcome.turn() == null ? null : outcome.turn().getAssistantText());
+        member.setError(outcome.error());
+        member.setFailed(!outcome.skipped() && outcome.turn() == null);
+        member.setSkipped(outcome.skipped());
+        member.setTurn(outcome.turn());
+        member.setReasoning(outcome.reasoning());
+        member.setWorkflow(outcome.workflow());
+        member.setChildren(outcome.children());
+        member.setConclusionName(outcome.conclusionName());
+        member.setConclusionReasoning(outcome.conclusionReasoning());
+        return member;
+    }
+
+    /**
+     * 只有路由信息的成员（未执行 / 已跳过）。
+     *
+     * @param intent 成员意图
+     * @return 快照成员
+     */
+    private static MaPauseMember pauseMemberOf(RoutedIntent intent) {
+        MaPauseMember member = new MaPauseMember();
+        ParticipantView participant = participantOf(intent, intent.candidate());
+        member.setRouteKey(intent.candidate().route().getRouteKey());
+        member.setParticipantId(participant.id());
+        member.setParticipantName(participant.name());
+        member.setParticipantKind(participant.kind());
+        member.setParticipantDepth(participant.depth());
+        member.setSubQuery(intent.subQuery());
+        member.setReason(intent.reason());
+        member.setRouteLine(intent.routeLine());
+        return member;
+    }
+
+    /**
+     * 供编排层为「超限已跳过」成员构造同一个快照结构。
+     *
+     * @param intent 已跳过成员意图
+     * @return 快照成员（skipped=true，无 turn）
+     */
+    public static MaPauseMember pauseMemberOfSkipped(RoutedIntent intent) {
+        MaPauseMember member = pauseMemberOf(intent);
+        member.setSkipped(true);
+        member.setError(intent.routeLine());
+        return member;
+    }
+
+    /**
+     * 只收非空路由键；空键不参与去重（否则所有无名成员会被当成同一位）。
+     *
+     * @param keys 集合
+     * @param key  路由键
+     */
+    private static void addKey(Set<String> keys, String key) {
+        if (key != null && !key.isBlank()) {
+            keys.add(key.trim());
+        }
     }
 
     /**
@@ -483,6 +716,26 @@ public class ChildRunner {
                                     ObsTraceScope trace, Long childParent, boolean parallelWorker,
                                     boolean isolateChild, Thread submitter, String modelTextOverride,
                                     Map<String, Object> extraSpanAttrs, boolean leafChoice) {
+        return runOneChild(parent, intent, modelUser, userText, userId, sessionId, deadlineNanos, progress,
+                trace, childParent, parallelWorker, isolateChild, submitter, modelTextOverride, extraSpanAttrs,
+                leafChoice, false);
+    }
+
+    /**
+     * 同 {@link #runOneChild(AgentDef, RoutedIntent, String, String, long, long, long, TrialProgress,
+     * ObsTraceScope, Long, boolean, boolean, Thread, String, Map, boolean)}；
+     * 额外决定本子产出的选项是否标成「运行正停在这里等用户」。
+     *
+     * <p>只有可停等串行链传 true；其它入口仍按普通一次性选项落库 / 出帧，行为与现网一致。
+     *
+     * @param waitingChoice true 表示本子的选项属于一条会挂起的运行
+     */
+    public ChildOutcome runOneChild(AgentDef parent, RoutedIntent intent, String modelUser, String userText,
+                                    long userId, long sessionId, long deadlineNanos, TrialProgress progress,
+                                    ObsTraceScope trace, Long childParent, boolean parallelWorker,
+                                    boolean isolateChild, Thread submitter, String modelTextOverride,
+                                    Map<String, Object> extraSpanAttrs, boolean leafChoice,
+                                    boolean waitingChoice) {
         if (trace != null && parallelWorker) {
             // 并行子线程各自 bind trace，并拿到独立 stack（ThreadLocal.withInitial）
             ObsTraceHolder.bind(trace);
@@ -534,13 +787,13 @@ public class ChildRunner {
                      */
                     TrialProgress schemeBase = progress.conclusionChannel();
                     childProgressView = schemeBase == null ? null
-                            : participantBound(schemeBase, selfView, childRouteLine);
+                            : participantBound(schemeBase, selfView, childRouteLine, waitingChoice);
                     // 路由行只推一次，并且从本方案自己的包装器出去：
                     // 外层若再包着别的方案，不会把这条改挂回去。
                     TrialProgress routeOutlet = childProgressView != null ? childProgressView : progress;
                     routeOutlet.route(childRouteLine);
                 } else {
-                    childProgressView = participantBound(progress, selfView, childRouteLine);
+                    childProgressView = participantBound(progress, selfView, childRouteLine, waitingChoice);
                     if ((parallelWorker || MaNestedContext.inside()) && childProgressView != null) {
                         // 并行 / 嵌套：路由从子包装器出去，归属就是这位子专家
                         childProgressView.route(childRouteLine);
@@ -657,9 +910,14 @@ public class ChildRunner {
             /*
              * 开过 begin 的参与者必须自己收口：成功路径统一推一条终态。
              * 工作流卡 / 方案外壳（子专家已各自收口）也在这里结束自己的块，页面不再等整轮收尾才停转。
+             * 但串行方案里这位刚产出「可点询问」时不能收口：卡片要留在等待态，
+             * 问句与选项嵌在同一张卡里；用户回复后续跑的那一次再统一收成完成态。
              */
-            closeParticipant(childProgress != null ? childProgress : progress, self,
-                    TrialProgress.PARTICIPANT_DONE, "");
+            boolean awaitingUser = leafChoice && capturedChoice() != null;
+            if (!awaitingUser) {
+                closeParticipant(childProgress != null ? childProgress : progress, self,
+                        TrialProgress.PARTICIPANT_DONE, "");
+            }
             // 工作流目标：卡片终态随结果交给上层落库；其它分支 workflowView 保持 null
             if (workflowView != null) {
                 return ChildOutcome.okWorkflow(intent, notices, turn, workflowView);
@@ -670,6 +928,19 @@ public class ChildRunner {
                         schemeConclusion, schemeConclusionReasoning);
             }
             return ChildOutcome.ok(intent, notices, turn, nested, schemeReasoning);
+        } catch (MaPauseSignal pause) {
+            /*
+             * 停等不是失败：目标方案在自己的串行链里停住了。
+             * 这里既不写失败帧、也不把卡片收成 FAILED——那张卡要停在「正在等用户回复」，
+             * 由入口落等待态、用户回复后从同一位继续。span 按正常暂停收尾，追踪页不出现假错误。
+             */
+            if (trace != null && agentSpan != null) {
+                SpanClose paused = new SpanClose();
+                paused.setStatus(ObsStatus.OK);
+                paused.setOutputText("等待用户回复");
+                trace.close(agentSpan, paused);
+            }
+            throw pause;
         } catch (RuntimeException ex) {
             // 子 Agent 失败：并行时被压成失败段（用户可见文案走清洗），但栈必须留在日志里
             log.warn("子 Agent 执行失败 agentId={} parallel={} type={} cause={}",
@@ -984,12 +1255,15 @@ public class ChildRunner {
      * 每帧重推会让方案自己的思考与子专家的事件互相打断（页面表现为串块）。
      * 现在身份走独立的 participant 帧（不产生可见文字），文案只推一次。
      *
-     * @param progress    下游推送
-     * @param participant 本参与者身份
-     * @param routeLine   本子路由行；仅用于归属前的可见依据（由调用方单独推一次）
+     * @param progress      下游推送
+     * @param participant   本参与者身份
+     * @param routeLine     本子路由行；仅用于归属前的可见依据（由调用方单独推一次）
+     * @param waitingChoice true 表示本子属于可停等串行链：它产出的选项要标成「等待用户」，
+     *                      前端据此把下一句当作回复而不是新一轮提问
      * @return 包装后的推送；progress 为空时返回 null
      */
-    private TrialProgress participantBound(TrialProgress progress, ParticipantView participant, String routeLine) {
+    private TrialProgress participantBound(TrialProgress progress, ParticipantView participant, String routeLine,
+                                           boolean waitingChoice) {
         if (progress == null) {
             return null;
         }
@@ -1099,7 +1373,9 @@ public class ChildRunner {
              */
             @Override
             public void choice(AgentChoice choice) {
-                emit(() -> progress.choice(choice));
+                // 可停等串行链：直播帧也标 waiting，前端才能把下一句识别成对这位专家的回复
+                AgentChoice payload = waitingChoice && choice != null ? choice.awaiting() : choice;
+                emit(() -> progress.choice(payload));
             }
 
             /**
@@ -1173,12 +1449,15 @@ public class ChildRunner {
      * <p>父方案键来自 {@link MaNestedContext} 的栈顶；根层没有父方案时固定写 root，
      * 保证格式统一、可复现，也避免出现 {@code p-0--policy} 这种双横线。
      *
+     * <p>公开给停等补写复用：续跑 / 停等时要用<b>同一个</b>函数算出方案卡 id，
+     * 否则回放里会多出一张挂不上父的方案卡。
+     *
      * @param depth     嵌套层数
      * @param parentKey 当前层方案路由键；根层为空
      * @param leafKey   本子路由键（没有 route_key 时用 Agent 主键）
      * @return 同一轮内唯一的参与者 id
      */
-    static String participantIdOf(int depth, String parentKey, String leafKey) {
+    public static String participantIdOf(int depth, String parentKey, String leafKey) {
         int safeDepth = Math.max(0, depth);
         String parent = parentKey == null || parentKey.isBlank() ? "root" : parentKey.trim();
         String leaf = leafKey == null || leafKey.isBlank() ? "unknown" : leafKey.trim();

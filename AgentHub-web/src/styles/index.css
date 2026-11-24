@@ -8,9 +8,16 @@
   --ah-primary: #635bff;
   --ah-primary-hover: #5146f5;
   --ah-primary-active: #4338ca;
+  /* 紫雾底两级：页签用 tint，选中卡片用 tint-soft，按 DESIGN 保留两个值 */
+  --ah-primary-tint: #f4f3ff;
+  --ah-primary-tint-soft: #f4f4ff;
   --ah-bg: #f5f7fa;
   --ah-surface: #ffffff;
+  --ah-surface-muted: #fafafa;
   --ah-text: #1f2937;
+  /* 兼容既有引用：部分页仍写 var(--ah-text-primary)，语义等同 Ink 墨色 */
+  --ah-text-primary: #1f2937;
+  --ah-text-regular: #374151;
   --ah-text-secondary: #6b7280;
   /* 承载信息的辅助字（说明 / 副标题 / 时间 / 编号）：与 secondary 同级，保证可读；
      纯装饰（分隔线、占位图标、禁用态）请用下面的 faint，不要再用 muted 承载正文 */
@@ -20,8 +27,18 @@
   --ah-border-soft: #f2f6fc;
   --ah-divider: #e4e7ed;
   --ah-input-fill: #f5f7fa;
+  /* 语义色与浅底：状态只走这四组，不再另写 Tailwind / Element 默认色 */
+  --ah-success: #047857;
+  --ah-warning: #b45309;
+  --ah-danger: #b91c1c;
+  --ah-neutral: #6b7280;
+  --ah-success-tint: #ecfdf5;
+  --ah-warning-tint: #fffbeb;
+  --ah-danger-tint: #fef2f2;
+  --ah-neutral-tint: #f3f4f6;
   --ah-radius-lg: 8px;
   --ah-radius-md: 6px;
+  --ah-radius-xs: 4px;
   /* 全局卡片轻阴影：去生硬描边后的分层感 */
   --ah-shadow: 0 1px 3px rgba(0, 0, 0, 0.05);
   --ah-sidebar: 240px;
@@ -252,18 +269,19 @@ body.el-popup-parent--hidden .main {
   margin-right: 4px;
 }
 
-/* 筛选操作按钮：查询淡蓝 / 重置白底描边 / 新建 primary，三者同尺寸。
+/* 筛选操作按钮：查询 / 重置 / 新建三者同尺寸。
+   查询是筛选条里的主操作，按令牌收成 primary（信号紫）；不再保留遗留淡蓝 #409EFF。
    带 .el-button 前缀压过 Element Plus 的 .el-button 基础变量（按需引入后组件 CSS 晚到） */
 .el-button.btn-query {
-  --el-button-bg-color: #ecf5ff;
-  --el-button-text-color: #409eff;
-  --el-button-border-color: #b3d8ff;
-  --el-button-hover-bg-color: #d9ecff;
-  --el-button-hover-text-color: #337ecc;
-  --el-button-hover-border-color: #8cc5ff;
-  --el-button-active-bg-color: #c6e2ff;
-  --el-button-active-text-color: #337ecc;
-  --el-button-active-border-color: #8cc5ff;
+  --el-button-bg-color: var(--ah-primary);
+  --el-button-text-color: #ffffff;
+  --el-button-border-color: var(--ah-primary);
+  --el-button-hover-bg-color: var(--ah-primary-hover);
+  --el-button-hover-text-color: #ffffff;
+  --el-button-hover-border-color: var(--ah-primary-hover);
+  --el-button-active-bg-color: var(--ah-primary-active);
+  --el-button-active-text-color: #ffffff;
+  --el-button-active-border-color: var(--ah-primary-active);
 }
 
 .el-button.btn-reset {
@@ -317,10 +335,10 @@ body.el-popup-parent--hidden .main {
    同样加 :root 前缀，压过 Element Plus 的 .el-table 默认变量（表头 / 悬浮底色） */
 :root .el-table {
   --el-table-border-color: var(--ah-border-soft);
-  --el-table-header-bg-color: #fafafa;
+  --el-table-header-bg-color: var(--ah-surface-muted);
   /* 表头文字加深到可读灰（原 #909399 在浅底上偏淡），字号仍由组件保持紧凑 */
-  --el-table-header-text-color: #5f6673;
-  --el-table-row-hover-bg-color: #fafafa;
+  --el-table-header-text-color: var(--ah-text-secondary);
+  --el-table-row-hover-bg-color: var(--ah-surface-muted);
   background: transparent;
 }
 
@@ -335,8 +353,8 @@ body.el-popup-parent--hidden .main {
 }
 
 .el-table th.el-table__cell {
-  background: #fafafa;
-  color: #5f6673;
+  background: var(--ah-surface-muted);
+  color: var(--ah-text-secondary);
   font-weight: 600;
   border-bottom: 1px solid var(--ah-border) !important;
 }
@@ -370,28 +388,28 @@ body.el-popup-parent--hidden .main {
    组件 CSS 晚于本文件加载，故用 :root 前缀提一层权重，避免被 .el-tag--success 等反压；
    排除 effect="dark"：深底标签必须保留白字，不能把文字压成深绿 / 深红 */
 :root .el-tag.el-tag--success:not(.el-tag--dark) {
-  --el-tag-text-color: #047857;
+  --el-tag-text-color: var(--ah-success);
 }
 
 :root .el-tag.el-tag--danger:not(.el-tag--dark) {
-  --el-tag-text-color: #b91c1c;
+  --el-tag-text-color: var(--ah-danger);
 }
 
 :root .el-tag.el-tag--warning:not(.el-tag--dark) {
-  --el-tag-text-color: #b45309;
+  --el-tag-text-color: var(--ah-warning);
 }
 
 /* 卡片启停小标签（网格卡 / 左栏共用）。原先四页各拷一份，收口到这里统一跟色 */
 :root .badge-on {
-  --el-tag-text-color: #047857;
-  --el-tag-border-color: #a7f3d0;
-  --el-tag-bg-color: #ecfdf5;
+  --el-tag-text-color: var(--ah-success);
+  --el-tag-border-color: var(--el-color-success-light-5);
+  --el-tag-bg-color: var(--ah-success-tint);
 }
 
 :root .badge-off {
-  --el-tag-text-color: #6b7280;
-  --el-tag-border-color: #e5e7eb;
-  --el-tag-bg-color: #f3f4f6;
+  --el-tag-text-color: var(--ah-neutral);
+  --el-tag-border-color: var(--ah-border);
+  --el-tag-bg-color: var(--ah-neutral-tint);
 }
 
 /* 表格内置空态（el-table #empty）里的「文案 + 清除筛选」横排 */
@@ -469,7 +487,7 @@ body.el-popup-parent--hidden .main {
 }
 
 .page .grid > .card.is-selected {
-  background: #f4f3ff;
+  background: var(--ah-primary-tint);
   box-shadow: 0 1px 3px rgba(99, 91, 255, 0.12);
 }
 

@@ -54,6 +54,24 @@ public interface WorkflowRunRepository {
                       LocalDateTime endTime, Long operatorId);
 
     /**
+     * 写入本次运行的时限快照与计时状态。
+     *
+     * <p>只写四列（run_limit_ms / node_limit_ms / run_deadline / waiting_since），
+     * 不碰 status / graph_json，避免与调度线程的状态迁移互相覆盖。
+     *
+     * <p>传 null 的列会写成 NULL（用于「恢复调度时清空等待时刻」）。
+     *
+     * @param id            主键
+     * @param runLimitMs    整段上限毫秒
+     * @param nodeLimitMs   单节点上限毫秒；null 表示未配置
+     * @param runDeadline   整段截止
+     * @param waitingSince  进入等待的时刻；null 表示不在等待
+     * @param operatorId    操作人
+     */
+    void updateRunLimits(Long id, Long runLimitMs, Long nodeLimitMs, LocalDateTime runDeadline,
+                         LocalDateTime waitingSince, Long operatorId);
+
+    /**
      * 某个工作流最近的 run，按 id 倒序。
      *
      * @param workflowId 定义 id
@@ -99,6 +117,29 @@ public interface WorkflowRunRepository {
      * @return 最近一条未结束 run；没有为空
      */
     Optional<WorkflowRun> findActiveByWorkbenchSession(Long workflowId, Long workbenchSessionId);
+
+    /**
+     * 工作台续跑查询：同一会话里是否有停在「等待用户回复」的 run。
+     *
+     * <p>用户下一句送回本 run 时按它定位；一个会话同时只会有一条等待中的运行
+     * （同一会话一轮只派发一份工作流），因此取 id 最大的一条即可。
+     *
+     * @param workbenchSessionId 工作台会话 id
+     * @return 等待回复的 run；没有为空
+     */
+    Optional<WorkflowRun> findWaitingReplyByWorkbenchSession(Long workbenchSessionId);
+
+    /**
+     * 把用户回复写进 run 的输入快照。
+     *
+     * <p>只写 input_json 一列：条件边与后续节点的入参映射都读 {@code $.input.reply}，
+     * 因此回复必须落库，不能只留在内存里。状态迁移仍走 {@link #updateStatusIfMatches}。
+     *
+     * @param id        主键
+     * @param inputJson 新的输入 JSON
+     * @param operatorId 操作人
+     */
+    void updateInput(Long id, String inputJson, Long operatorId);
 
     /**
      * 工作台停止一轮时，找出该会话下全部未结束的 run（CREATED / RUNNING / PAUSED_HUMAN）。

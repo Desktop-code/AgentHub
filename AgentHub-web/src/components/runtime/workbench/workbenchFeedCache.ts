@@ -36,6 +36,11 @@ export function turnFeedSignature(turn: ChatTurn, entry: string, candidates: str
   const blocks: AssistantBlock[] = Array.isArray(turn.blocks) ? turn.blocks : []
   let signature = `${turn.status}|${entry}|${candidates}|${turn.entryParticipantId || ''}`
     + `|${turn.continuation === true ? 'cont' : ''}`
+    /*
+     * 跨轮接管（续跑轮收走上一轮的等待卡）会改写已结算轮的块：块本身可能一条不少
+     * （拿掉工作流卡又补上别的内容时长度恰好相同），只有这个计数能保证签名必变。
+     */
+    + `|r${turn.revision ?? 0}`
   for (const block of blocks) {
     /*
      * 身份（participantId）与「这一步刚开始」（begin）必须进签名：
@@ -64,6 +69,11 @@ export function turnFeedSignature(turn: ChatTurn, entry: string, candidates: str
     if (block.workflow) {
       signature += `|wf:${block.workflow.name}:${block.workflow.status}:`
         + `${block.workflow.nodes.map((node) => node.status).join(',')}:${(block.workflow.answer || '').length}`
+      /*
+       * 可点选项必须进签名：它在卡片状态**仍是 RUNNING / WAITING_REPLY** 时才出现，
+       * 节点状态与正文长度可能都不变，漏掉它直播这一拍会命中缓存、chips 要等收尾才出来。
+       */
+      signature += `:${block.workflow.choice?.options.map((option) => option.id).join(',') || ''}`
     }
   }
   return signature
@@ -103,11 +113,16 @@ export class ParticipantFeedCache {
       this.settled.clear()
     }
     for (const turn of turns) {
+      /*
+       * 结算缓存键带上接管代次：同一轮被续跑轮改写后，旧签名不再命中，
+       * 必须重扫块才能把拿掉的等待卡反映到页面上。
+       */
+      const settledKey = `${turn.key}#${turn.revision ?? 0}`
       if (turn.status === 'streaming') {
         // 仍在流式：内容每帧都在长，签名必须现算，同时作废它可能残留的旧缓存
-        this.settled.delete(turn.key)
+        this.settled.delete(settledKey)
       } else {
-        const cached = this.settled.get(turn.key)
+        const cached = this.settled.get(settledKey)
         if (cached !== undefined) {
           signatures.set(turn.key, cached)
           continue
@@ -116,7 +131,7 @@ export class ParticipantFeedCache {
       const signature = turnFeedSignature(turn, entry, candidates)
       signatures.set(turn.key, signature)
       if (turn.status !== 'streaming') {
-        this.settled.set(turn.key, signature)
+        this.settled.set(settledKey, signature)
       }
     }
     return signatures

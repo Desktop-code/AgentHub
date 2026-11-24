@@ -59,7 +59,9 @@
                 </el-tooltip>
               </template>
             </el-table-column>
-            <el-table-column prop="updateTime" label="更新时间" min-width="170" align="center" />
+            <el-table-column prop="updateTime" label="更新时间" min-width="170" align="center">
+              <template #default="{ row }">{{ formatDateTime(row.updateTime) }}</template>
+            </el-table-column>
             <el-table-column label="操作" min-width="160" align="center" fixed="right">
               <template #default="{ row }">
                 <el-button link type="primary" @click="openSuiteDetail(row)">用例</el-button>
@@ -170,7 +172,9 @@
             <el-table-column label="通过率" min-width="120" align="center">
               <template #default="{ row }">{{ passRate(row) }}</template>
             </el-table-column>
-            <el-table-column prop="createTime" label="创建时间" min-width="180" align="center" />
+            <el-table-column prop="createTime" label="创建时间" min-width="180" align="center">
+              <template #default="{ row }">{{ formatDateTime(row.createTime) }}</template>
+            </el-table-column>
             <el-table-column label="操作" width="140" align="center" fixed="right">
               <template #default="{ row }">
                 <el-button
@@ -249,7 +253,9 @@
             <el-table-column label="Judge" min-width="100" align="center">
               <template #default="{ row }">{{ ojLabel(row) }}</template>
             </el-table-column>
-            <el-table-column prop="finishedTime" label="时间" min-width="170" align="center" />
+            <el-table-column prop="finishedTime" label="时间" min-width="170" align="center">
+              <template #default="{ row }">{{ formatDateTime(row.finishedTime) }}</template>
+            </el-table-column>
             <el-table-column label="操作" min-width="180" align="center" fixed="right">
               <template #default="{ row }">
                 <el-button
@@ -313,7 +319,7 @@
         <span>门禁 {{ gateText(runDetail.gatePassed) }}</span>
         <span>打分模型 {{ judgeModelLabel(runDetail) }}</span>
         <span>{{ passRate(runDetail) }}</span>
-        <span v-if="runDetail.createTime" class="meta-muted">{{ runDetail.createTime }}</span>
+        <span v-if="runDetail.createTime" class="meta-muted">{{ formatDateTime(runDetail.createTime) }}</span>
         <el-button v-if="user.hasPerm('eval:run:view')" size="small" @click="loadReport">刷新报告</el-button>
       </div>
       <el-table
@@ -545,6 +551,7 @@ import {
 import { pageAgents } from '@/api/agent'
 import { pageInstances } from '@/api/model'
 import { useUserStore } from '@/stores/user'
+import { formatDateTime } from '@/utils/datetime'
 import type { AgentCard } from '@/types/agent'
 import type { InstanceRow } from '@/types/model'
 import { normalizeCapability } from '@/types/model'
@@ -1424,11 +1431,11 @@ void loadSuiteOptions()
   margin-bottom: 12px;
 }
 .filter-bar {
-  background: #fff;
-  border-radius: 12px;
+  background: var(--ah-surface);
+  border-radius: 8px;
   padding: 12px 16px;
   margin-bottom: 12px;
-  box-shadow: 0 1px 2px rgba(15, 23, 42, 0.04);
+  box-shadow: var(--ah-shadow);
 }
 .filter-form :deep(.el-form-item) {
   margin-bottom: 0;
@@ -1442,10 +1449,10 @@ void loadSuiteOptions()
   margin-right: 4px;
 }
 .panel {
-  background: #fff;
-  border-radius: 12px;
+  background: var(--ah-surface);
+  border-radius: 8px;
   padding: 12px 16px 8px;
-  box-shadow: 0 1px 2px rgba(15, 23, 42, 0.04);
+  box-shadow: var(--ah-shadow);
 }
 .eval-table :deep(.el-table__header th) {
   text-align: center;
@@ -1482,31 +1489,31 @@ void loadSuiteOptions()
 }
 .switch-text {
   font-size: 12px;
-  color: #64748b;
+  color: var(--ah-text-secondary);
 }
 .judge-off {
-  color: #94a3b8;
+  color: var(--ah-text-faint);
 }
 .gate-ok {
-  color: #16a34a;
+  color: var(--ah-success);
 }
 .gate-fail {
-  color: #dc2626;
+  color: var(--ah-danger);
 }
 .hint {
   margin-top: 12px;
-  color: #64748b;
+  color: var(--ah-text-secondary);
   font-size: 12px;
 }
 .field-tip {
   margin: 6px 0 0;
-  color: #64748b;
+  color: var(--ah-text-secondary);
   font-size: 12px;
   line-height: 1.45;
 }
 .field-tip code {
   padding: 0 4px;
-  background: #f1f5f9;
+  background: var(--ah-neutral-tint);
   border-radius: 4px;
   font-size: 12px;
 }
@@ -1520,10 +1527,10 @@ void loadSuiteOptions()
   align-items: center;
   margin-bottom: 12px;
   font-size: 13px;
-  color: #475569;
+  color: var(--ah-text-secondary);
 }
 .meta-muted {
-  color: #94a3b8;
+  color: var(--ah-text-faint);
 }
 .report-box {
   margin-top: 16px;
@@ -1538,11 +1545,12 @@ void loadSuiteOptions()
 .report-box h3 {
   margin: 0;
   font-size: 14px;
+  font-weight: 600;
 }
 .report-pre {
   max-height: 320px;
   overflow: auto;
-  background: #f8fafc;
+  background: var(--ah-surface-muted);
   border-radius: 8px;
   padding: 12px;
   font-size: 12px;

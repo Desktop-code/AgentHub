@@ -94,7 +94,51 @@ public class WorkflowGraphCodec {
                 index++;
             }
         }
+        // 运行时限（工作流自身配置）：单位分钟，没配 = 跟平台硬顶走
+        JsonNode limits = root.get("limits");
+        if (limits != null && !limits.isNull()) {
+            if (!limits.isObject()) {
+                throw new BizException(ErrorCode.BAD_REQUEST, "图 JSON 的 limits 必须是对象");
+            }
+            graph.setRunMinutes(readMinutes(limits, "runMinutes", "整段运行上限"));
+            graph.setNodeMinutes(readMinutes(limits, "nodeMinutes", "单节点上限"));
+        }
         return graph;
+    }
+
+    /**
+     * 读取 limits 里的分钟数（只允许正整数；允许纯数字文本，兼容早期手写 JSON）。
+     *
+     * <p>这里只做「是不是一个合法的分钟数」的结构校验；
+     * 是否超过平台上限交给 {@code WorkflowRunLimits.issues}，避免本类依赖配置。
+     *
+     * @param limits 根上的 limits 对象
+     * @param field  字段名 runMinutes / nodeMinutes
+     * @param label  中文名，用于错误提示
+     * @return 分钟数；缺失或 null 返回 null
+     * @throws BizException 不是正整数（BAD_REQUEST，文案只用分钟，不暴露毫秒）
+     */
+    private Integer readMinutes(JsonNode limits, String field, String label) {
+        JsonNode value = limits.get(field);
+        if (value == null || value.isNull()) {
+            return null;
+        }
+        long minutes;
+        if (value.isIntegralNumber()) {
+            minutes = value.asLong();
+        } else if (value.isTextual() && !value.asText().isBlank()) {
+            try {
+                minutes = Long.parseLong(value.asText().trim());
+            } catch (NumberFormatException ex) {
+                throw new BizException(ErrorCode.BAD_REQUEST, label + "必须是大于 0 的整数分钟");
+            }
+        } else {
+            throw new BizException(ErrorCode.BAD_REQUEST, label + "必须是大于 0 的整数分钟");
+        }
+        if (minutes <= 0 || minutes > Integer.MAX_VALUE) {
+            throw new BizException(ErrorCode.BAD_REQUEST, label + "必须是大于 0 的整数分钟");
+        }
+        return (int) minutes;
     }
 
     /**

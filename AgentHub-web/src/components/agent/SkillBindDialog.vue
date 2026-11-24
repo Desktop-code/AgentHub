@@ -149,19 +149,19 @@ function submit(ids: (number | string)[]): void {
   top: 0;
   right: 0;
   padding: 0 6px;
-  border: 1px solid #d1fae5;
+  border: 1px solid var(--el-color-success-light-5);
   border-radius: 999px;
-  background: #ecfdf5;
-  color: #047857;
-  font-size: 11px;
+  background: var(--ah-success-tint);
+  color: var(--ah-success);
+  font-size: 12px;
   font-weight: 600;
   line-height: 16px;
 }
 
 .skill-version.is-unpublished {
-  border-color: #e5e7eb;
-  background: #f9fafb;
-  color: #9ca3af;
+  border-color: var(--ah-border);
+  background: var(--ah-surface-muted);
+  color: var(--ah-text-faint);
 }
 
 /* 左栏选项：标题 / 编码 / 简介 / 关键词，信息比工具多一行 */
@@ -169,7 +169,7 @@ function submit(ids: (number | string)[]): void {
   overflow: hidden;
   color: var(--ah-text);
   font-size: 13px;
-  font-weight: 650;
+  font-weight: 600;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
@@ -178,7 +178,7 @@ function submit(ids: (number | string)[]): void {
   overflow: hidden;
   color: var(--ah-text-muted);
   font-family: ui-monospace, Consolas, monospace;
-  font-size: 11px;
+  font-size: 12px;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
@@ -205,17 +205,17 @@ function submit(ids: (number | string)[]): void {
 
 /* 关键词 Tag：浅灰底，信息层级低于标题与简介 */
 .skill-tag {
-  --el-tag-font-size: 11px;
+  --el-tag-font-size: 12px;
   --el-tag-padding: 0 5px;
   --el-tag-height: 18px;
-  --el-tag-border-color: #e5e7eb;
-  --el-tag-bg-color: #f9fafb;
-  --el-tag-text-color: #6b7280;
+  --el-tag-border-color: var(--ah-border);
+  --el-tag-bg-color: var(--ah-surface-muted);
+  --el-tag-text-color: var(--ah-text-secondary);
 }
 
 .skill-tag-more {
   color: var(--ah-text-muted);
-  font-size: 11px;
+  font-size: 12px;
 }
 
 /* 右侧已选：标题与编码同列排布 */
@@ -232,7 +232,7 @@ function submit(ids: (number | string)[]): void {
   overflow: hidden;
   color: var(--ah-text-muted);
   font-family: ui-monospace, Consolas, monospace;
-  font-size: 11px;
+  font-size: 12px;
   text-overflow: ellipsis;
   white-space: nowrap;
 }

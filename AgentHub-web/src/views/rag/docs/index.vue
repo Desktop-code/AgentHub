@@ -1709,7 +1709,7 @@ onBeforeUnmount(stopPoll)
 }
 
 .kb-name {
-  font-weight: 700;
+  font-weight: 600;
   color: var(--ah-text);
 }
 
@@ -1741,7 +1741,7 @@ onBeforeUnmount(stopPoll)
 .meta-dim {
   padding: 2px 8px;
   border-radius: 6px;
-  background: #f3f4f6;
+  background: var(--ah-neutral-tint);
   color: var(--ah-text-secondary);
 }
 
@@ -1902,7 +1902,7 @@ onBeforeUnmount(stopPoll)
 }
 
 :deep(.is-current-doc) {
-  --el-table-tr-bg-color: #f3f4f6;
+  --el-table-tr-bg-color: var(--ah-neutral-tint);
   cursor: pointer;
 }
 
@@ -1927,15 +1927,15 @@ onBeforeUnmount(stopPoll)
   gap: 8px;
   min-width: 120px;
   padding: 8px 10px;
-  border: 1px solid #e8eaed;
+  border: 1px solid var(--ah-border);
   border-radius: 8px;
-  background: #f8f9fa;
+  background: var(--ah-surface-muted);
   cursor: pointer;
   transition: border-color 0.15s ease, background 0.15s ease;
 }
 
 .stage-step:hover {
-  border-color: #c9c5ff;
+  border-color: var(--el-color-primary-light-5);
 }
 
 .stage-dot {
@@ -1946,8 +1946,8 @@ onBeforeUnmount(stopPoll)
   width: 20px;
   height: 20px;
   border-radius: 50%;
-  background: #e5e7eb;
-  color: #6b7280;
+  background: var(--ah-neutral-tint);
+  color: var(--ah-text-secondary);
   font-size: 12px;
   font-weight: 600;
 }
@@ -1970,43 +1970,44 @@ onBeforeUnmount(stopPoll)
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
-  font-size: 11px;
+  font-size: 12px;
   color: var(--ah-text-muted);
 }
 
+/* 五步阶段条只走语义色令牌：通过绿 / 待办琥珀 / 故障红 / 停用灰 */
 .stage-success {
-  border-color: #a7f3d0;
-  background: #ecfdf5;
+  border-color: var(--el-color-success-light-5);
+  background: var(--ah-success-tint);
 }
 
 .stage-success .stage-dot {
-  background: #10b981;
+  background: var(--ah-success);
   color: #fff;
 }
 
 .stage-running {
-  border-color: #fde68a;
-  background: #fffbeb;
+  border-color: var(--el-color-warning-light-5);
+  background: var(--ah-warning-tint);
 }
 
 .stage-running .stage-dot {
-  background: #d97706;
+  background: var(--ah-warning);
   color: #fff;
 }
 
 .stage-failed {
-  border-color: #fecaca;
-  background: #fef2f2;
+  border-color: var(--el-color-danger-light-5);
+  background: var(--ah-danger-tint);
 }
 
 .stage-failed .stage-dot {
-  background: #ef4444;
+  background: var(--ah-danger);
   color: #fff;
 }
 
 .stage-unknown .stage-dot {
-  background: #e5e7eb;
-  color: #9ca3af;
+  background: var(--ah-neutral-tint);
+  color: var(--ah-text-faint);
 }
 
 .stage-pop {
@@ -2042,10 +2043,10 @@ onBeforeUnmount(stopPoll)
   flex-direction: column;
   min-width: 0;
   min-height: 0;
-  border: 1px solid #e8eaed;
+  border: 1px solid var(--ah-border);
   border-radius: 8px;
   overflow: hidden;
-  background: #fff;
+  background: var(--ah-surface);
 }
 
 .compare-parse {
@@ -2063,8 +2064,8 @@ onBeforeUnmount(stopPoll)
   justify-content: space-between;
   gap: 10px;
   padding: 8px 12px;
-  border-bottom: 1px solid #eef0f3;
-  background: #fafbfc;
+  border-bottom: 1px solid var(--ah-border-soft);
+  background: var(--ah-surface-muted);
 }
 
 .compare-title {
@@ -2077,7 +2078,7 @@ onBeforeUnmount(stopPoll)
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
-  font-size: 11px;
+  font-size: 12px;
   color: var(--ah-text-muted);
 }
 
@@ -2097,7 +2098,7 @@ onBeforeUnmount(stopPoll)
 .parse-block {
   margin: 0 0 4px;
   padding: 3px 6px;
-  border-radius: 5px;
+  border-radius: 6px;
   white-space: pre-wrap;
   word-break: break-word;
   cursor: pointer;
@@ -2105,22 +2106,23 @@ onBeforeUnmount(stopPoll)
 }
 
 .parse-block:hover {
-  background: #f7f6ff;
+  background: var(--ah-primary-tint);
 }
 
 .parse-block.is-active {
-  background: #efeaff;
-  box-shadow: inset 2px 0 0 #635bff;
+  background: var(--ah-primary-tint);
+  box-shadow: inset 2px 0 0 var(--ah-primary);
 }
 
+/* 对照区标题层级只取 16 / 14 / 13 / 12 四级，字重负责继续分层 */
 .parse-h1 {
   font-size: 16px;
-  font-weight: 700;
+  font-weight: 600;
   margin-top: 8px;
 }
 
 .parse-h2 {
-  font-size: 15px;
+  font-size: 16px;
   font-weight: 600;
   margin-top: 7px;
 }
@@ -2139,7 +2141,7 @@ onBeforeUnmount(stopPoll)
 
 .parse-h5,
 .parse-h6 {
-  font-size: 13px;
+  font-size: 12px;
   font-weight: 600;
 }
 
@@ -2148,10 +2150,10 @@ onBeforeUnmount(stopPoll)
   margin-right: 6px;
   padding: 0 5px;
   border-radius: 4px;
-  background: #f3f4f6;
+  background: var(--ah-neutral-tint);
   color: var(--ah-text-muted);
-  font-size: 10px;
-  line-height: 16px;
+  font-size: 12px;
+  line-height: 18px;
   vertical-align: 1px;
 }
 
@@ -2185,21 +2187,21 @@ onBeforeUnmount(stopPoll)
 }
 
 .chunk-card {
-  border: 1px solid #e8eaed;
+  border: 1px solid var(--ah-border);
   border-radius: 8px;
   padding: 10px 12px;
-  background: #f8f9fa;
+  background: var(--ah-surface-muted);
   cursor: pointer;
   transition: border-color 0.15s ease, background 0.15s ease;
 }
 
 .chunk-card:hover {
-  border-color: #c9c5ff;
+  border-color: var(--el-color-primary-light-5);
 }
 
 .chunk-card.is-active {
-  border-color: #635bff;
-  background: #f7f5ff;
+  border-color: var(--ah-primary);
+  background: var(--ah-primary-tint);
   box-shadow: 0 0 0 1px rgba(99, 91, 255, 0.18);
 }
 
@@ -2271,41 +2273,42 @@ onBeforeUnmount(stopPoll)
 }
 
 .preview-card {
-  border: 1px solid #e8eaed;
+  border: 1px solid var(--ah-border);
   border-radius: 8px;
   padding: 8px 10px;
-  background: #f8f9fa;
+  background: var(--ah-surface-muted);
 }
 
 /* ---------------- 状态色 ---------------- */
+/* 切片策略标签只取令牌色：主色 / 通过绿 / 待办琥珀 / 停用灰，不再用靛蓝与天蓝 */
 .strategy-tag {
-  --el-tag-bg-color: #f3f4f6;
-  --el-tag-border-color: #e5e7eb;
-  --el-tag-text-color: #6b7280;
+  --el-tag-bg-color: var(--ah-neutral-tint);
+  --el-tag-border-color: var(--ah-border);
+  --el-tag-text-color: var(--ah-neutral);
 }
 
 .strategy-hierarchical {
-  --el-tag-bg-color: #eef2ff;
-  --el-tag-border-color: #c7d2fe;
-  --el-tag-text-color: #4f46e5;
+  --el-tag-bg-color: var(--ah-primary-tint);
+  --el-tag-border-color: var(--el-color-primary-light-5);
+  --el-tag-text-color: var(--ah-primary);
 }
 
 .strategy-entry {
-  --el-tag-bg-color: #ecfdf5;
-  --el-tag-border-color: #a7f3d0;
-  --el-tag-text-color: #059669;
+  --el-tag-bg-color: var(--ah-success-tint);
+  --el-tag-border-color: var(--el-color-success-light-5);
+  --el-tag-text-color: var(--ah-success);
 }
 
 .strategy-tabular {
-  --el-tag-bg-color: #fffbeb;
-  --el-tag-border-color: #fde68a;
-  --el-tag-text-color: #b45309;
+  --el-tag-bg-color: var(--ah-warning-tint);
+  --el-tag-border-color: var(--el-color-warning-light-5);
+  --el-tag-text-color: var(--ah-warning);
 }
 
 .strategy-narrative {
-  --el-tag-bg-color: #eff6ff;
-  --el-tag-border-color: #bfdbfe;
-  --el-tag-text-color: #2563eb;
+  --el-tag-bg-color: var(--ah-neutral-tint);
+  --el-tag-border-color: var(--ah-border);
+  --el-tag-text-color: var(--ah-text-regular);
 }
 
 .chunk-empty {
@@ -2322,7 +2325,7 @@ onBeforeUnmount(stopPoll)
 
 .chunk-empty-icon {
   font-size: 48px;
-  color: #c4c9d2;
+  color: var(--ah-text-faint);
 }
 
 .chunk-empty-text {
@@ -2349,27 +2352,27 @@ onBeforeUnmount(stopPoll)
 }
 
 .tag-on {
-  --el-tag-text-color: #10b981;
-  --el-tag-border-color: #a7f3d0;
-  --el-tag-bg-color: #ecfdf5;
+  --el-tag-text-color: var(--ah-success);
+  --el-tag-border-color: var(--el-color-success-light-5);
+  --el-tag-bg-color: var(--ah-success-tint);
 }
 
 .tag-error {
-  --el-tag-text-color: #ef4444;
-  --el-tag-border-color: #fecaca;
-  --el-tag-bg-color: #fef2f2;
+  --el-tag-text-color: var(--ah-danger);
+  --el-tag-border-color: var(--el-color-danger-light-5);
+  --el-tag-bg-color: var(--ah-danger-tint);
 }
 
 .tag-running {
-  --el-tag-text-color: #d97706;
-  --el-tag-border-color: #fde68a;
-  --el-tag-bg-color: #fffbeb;
+  --el-tag-text-color: var(--ah-warning);
+  --el-tag-border-color: var(--el-color-warning-light-5);
+  --el-tag-bg-color: var(--ah-warning-tint);
 }
 
 .tag-off {
-  --el-tag-text-color: #6b7280;
-  --el-tag-border-color: #e5e7eb;
-  --el-tag-bg-color: #f3f4f6;
+  --el-tag-text-color: var(--ah-neutral);
+  --el-tag-border-color: var(--ah-border);
+  --el-tag-bg-color: var(--ah-neutral-tint);
 }
 
 @media (max-width: 1440px) {

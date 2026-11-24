@@ -153,6 +153,6 @@ function submit() {
   margin: 6px 0 0;
   font-size: 12px;
   line-height: 1.5;
-  color: #d97706;
+  color: var(--ah-warning);
 }
 </style>

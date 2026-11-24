@@ -114,14 +114,14 @@ function sameValue(left: unknown, right: unknown): boolean {
 
 .jsonlogic__error {
   margin-top: 4px;
-  color: #dc2626;
+  color: var(--ah-danger);
   font-size: 12px;
 }
 
 .jsonlogic__hint {
   margin-top: 4px;
-  color: #9ca3af;
-  font-size: 11px;
+  color: var(--ah-text-faint);
+  font-size: 12px;
   line-height: 1.5;
 }
 </style>

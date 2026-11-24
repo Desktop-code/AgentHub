@@ -374,8 +374,8 @@ watch(structureKey, () => {
 <style scoped>
 .ime__empty {
   margin-bottom: 6px;
-  color: #9ca3af;
-  font-size: 11px;
+  color: var(--ah-text-faint);
+  font-size: 12px;
   line-height: 1.6;
 }
 
@@ -383,9 +383,9 @@ watch(structureKey, () => {
 .ime__row {
   margin-bottom: 8px;
   padding: 8px;
-  border: 1px solid #e5e7eb;
+  border: 1px solid var(--ah-border);
   border-radius: 8px;
-  background: #fafbfc;
+  background: var(--ah-surface-muted);
 }
 
 .ime__head {
@@ -400,10 +400,10 @@ watch(structureKey, () => {
   width: 16px;
   height: 16px;
   border-radius: 4px;
-  background: #eef2ff;
-  color: #635bff;
-  font-size: 10px;
-  font-weight: 700;
+  background: var(--ah-primary-tint);
+  color: var(--ah-primary);
+  font-size: 12px;
+  font-weight: 600;
   line-height: 16px;
   text-align: center;
 }
@@ -419,14 +419,14 @@ watch(structureKey, () => {
   border: 0;
   border-radius: 4px;
   background: transparent;
-  color: #9ca3af;
+  color: var(--ah-text-faint);
   cursor: pointer;
   transition: background 0.15s ease, color 0.15s ease;
 }
 
 .ime__del:hover:not(:disabled) {
-  background: #fef2f2;
-  color: #dc2626;
+  background: var(--ah-danger-tint);
+  color: var(--ah-danger);
 }
 
 .ime__del:disabled {
@@ -445,8 +445,8 @@ watch(structureKey, () => {
 .ime__label {
   flex: none;
   width: 28px;
-  color: #9ca3af;
-  font-size: 11px;
+  color: var(--ah-text-faint);
+  font-size: 12px;
   line-height: 1.4;
 }
 
@@ -460,10 +460,10 @@ watch(structureKey, () => {
   padding: 2px 6px;
   overflow: hidden;
   border-radius: 4px;
-  background: #f3f4f6;
-  color: #6b7280;
+  background: var(--ah-neutral-tint);
+  color: var(--ah-text-secondary);
   font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
-  font-size: 10px;
+  font-size: 12px;
   line-height: 1.6;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -476,15 +476,15 @@ watch(structureKey, () => {
 
 .ime__warn {
   margin-top: 4px;
-  color: #dc2626;
-  font-size: 11px;
+  color: var(--ah-danger);
+  font-size: 12px;
   line-height: 1.5;
 }
 
 .ime__hint {
   margin-top: 4px;
-  color: #9ca3af;
-  font-size: 11px;
+  color: var(--ah-text-faint);
+  font-size: 12px;
   line-height: 1.5;
 }
 </style>

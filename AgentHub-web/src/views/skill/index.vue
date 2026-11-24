@@ -1,5 +1,5 @@
 <template>
-  <div class="browse-page" :class="{ 'is-flip-busy': flipBusy }">
+  <div class="browse-page skill-page" :class="{ 'is-flip-busy': flipBusy }">
     <!-- 页头只承载标题/说明 + 全局「新建 Skill」；筛选条内不再重复放新建 -->
     <PageHeader title="Skill 管理" description="维护可复用的 Skill 正文（Markdown）；供后续 Agent 绑定使用。">
       <template #extra>
@@ -414,7 +414,7 @@
                             <el-tag v-if="row.isActive === 1" size="small" effect="dark" type="success">
                               生效
                             </el-tag>
-                            <span class="version-item__time">{{ row.updateTime || row.createTime || '' }}</span>
+                            <span class="version-item__time">{{ formatDateTime(row.updateTime || row.createTime) }}</span>
                             <!--
                               版本操作收进「⋯」下拉：复制为草稿 / 设置为生效 / 删除。
                               复制为草稿：同 Skill 已有草稿时不可用；设置为生效：仅已发布且未生效；删除：仅草稿。
@@ -588,6 +588,7 @@ import type { FlipCardSnap } from '@/composables/viewFlip'
 import { CARD_HEIGHT_NORMAL, lastPage, useGridPageSize } from '@/composables/gridPageSize'
 import { confirmDiscardUnsaved } from '@/utils/unsavedConfirm'
 import { requestErrorText } from '@/utils/requestError'
+import { formatDateTime } from '@/utils/datetime'
 import { useUserStore } from '@/stores/user'
 import type { SkillCard, SkillDetail, SkillVersionDetail, SkillVersionRow } from '@/types/skill'
 
@@ -1565,8 +1566,8 @@ onMounted(loadRows)
 }
 
 .card-del:hover:not(:disabled) {
-  color: #ef4444;
-  background: #fef2f2;
+  color: var(--ah-danger);
+  background: var(--ah-danger-tint);
 }
 
 .card-del:disabled {
@@ -1578,8 +1579,8 @@ onMounted(loadRows)
   margin: 0;
   padding-right: 32px;
   overflow: hidden;
-  font-size: 15px;
-  font-weight: 650;
+  font-size: 14px;
+  font-weight: 600;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
@@ -1627,10 +1628,44 @@ onMounted(loadRows)
   font-size: 12px;
 }
 
-/* 主从区拉满到视口底部，详情卡下边框贴底（与左栏 max-height 口径一致） */
-.master {
+/*
+ * 主从区精确吃满「页头以下」的可视高度。
+ * 之前用 100vh 减固定像素：扣多了详情卡底部留一大块空白，扣少了主区立刻冒出几像素滚动条
+ * （页签条、主区留白、页头高度任一变化都会重新对不上）。改为把页面根节点拉满 .main 的内容盒，
+ * 再用 flex 把高度一列传下来，高度只由实际占位决定，不再猜像素。
+ */
+.skill-page {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  min-height: 0;
+}
+
+/* 网格层在前、主从层在后；两层的容器都要能吃到宿主剩余高度 */
+.skill-page > .browse-workspace {
+  flex: 1;
+  min-height: 0;
+}
+
+/* 主从层铺满工作区：绝对定位的非当前层不参与（见 browse-workspace 的 .layer 规则） */
+.skill-page .layer-master.is-active {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  min-height: 0;
+}
+
+.skill-page .master {
+  flex: 1;
   align-items: stretch;
-  height: calc(100vh - 220px);
+  height: auto;
+  min-height: 0;
+}
+
+/* 左栏跟随主从区同高：旧 max-height 会提前截断，底部留白不对称 */
+.skill-page .master .rail {
+  max-height: none;
+  height: 100%;
 }
 
 .detail-pane {
@@ -1649,7 +1684,7 @@ onMounted(loadRows)
   overflow: hidden;
   background: var(--ah-surface);
   border: 1px solid var(--ah-border);
-  border-radius: var(--ah-radius-lg, 12px);
+  border-radius: var(--ah-radius-lg, 8px);
   box-shadow: var(--ah-shadow);
 }
 
@@ -1707,11 +1742,11 @@ onMounted(loadRows)
 .remark-input :deep(textarea) {
   color: var(--ah-text-secondary, #6b7280);
   font-size: 12px;
-  background-color: #f5f7fa;
+  background-color: var(--ah-input-fill);
 }
 
 .remark-input :deep(.el-textarea__inner) {
-  background-color: #f5f7fa;
+  background-color: var(--ah-input-fill);
 }
 
 /*
@@ -1726,9 +1761,13 @@ onMounted(loadRows)
 }
 
 .form-block--version {
-  flex: 1;
-  /* 两块同屏时版本编辑器至少保留一屏可用高度；不足部分由外层滚动消化 */
-  min-height: 360px;
+  flex: 1 1 auto;
+  /*
+   * 下限只保证「简介 + 正文」还看得见（块头 + 两行简介 + 正文 96 + 动作行 ≈ 256），
+   * 不再按整屏高度写死 360 —— 窗口矮一档时就会把详情体顶出滚动条。
+   * 有余量时由 flex 吃掉，正文框同步变高。
+   */
+  min-height: 320px;
   margin-top: 4px;
   padding-top: 10px;
   border-top: 1px solid var(--ah-border);
@@ -1797,7 +1836,8 @@ onMounted(loadRows)
 .markdown :deep(.el-textarea__inner) {
   flex: 1;
   height: 100% !important;
-  min-height: 0;
+  /* 与版本块 320 的下限配套：正文再挤也留 96px 可读高度，其余由 flex 分配 */
+  min-height: 96px;
   resize: none;
   font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
 }
@@ -1909,7 +1949,7 @@ onMounted(loadRows)
 
 .version-item__more-btn:hover {
   color: var(--ah-primary, #635bff);
-  background: #f1f0ff;
+  background: var(--ah-primary-tint);
 }
 
 .version-item:hover {
@@ -1918,12 +1958,12 @@ onMounted(loadRows)
 
 .version-item.is-current {
   border-color: var(--ah-primary, #635bff);
-  background: #f5f3ff;
+  background: var(--ah-primary-tint);
 }
 
 .version-item__no {
   font-size: 13px;
-  font-weight: 650;
+  font-weight: 600;
 }
 
 .version-item__time {
@@ -1966,7 +2006,7 @@ onMounted(loadRows)
   padding: 0 7px;
   border: 1px solid var(--ah-border);
   border-radius: 4px;
-  background: #f3f4f6;
+  background: var(--ah-neutral-tint);
   color: var(--ah-text-secondary);
   font-size: 12px;
   font-weight: 600;

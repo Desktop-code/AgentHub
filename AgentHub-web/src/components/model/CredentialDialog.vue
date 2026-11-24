@@ -423,7 +423,7 @@ async function remove(row: CredentialRow) {
 
 /* 有引用：用待办琥珀点明「需要处理」，不用故障红（不是错误） */
 .cred-ref.is-locked {
-  color: #b45309;
+  color: var(--ah-warning);
 }
 
 .cred-ref.muted {
@@ -456,9 +456,9 @@ async function remove(row: CredentialRow) {
   justify-content: center;
   width: 100%;
   height: 36px;
-  border: 1px dashed var(--ah-border, #dcdfe6);
+  border: 1px dashed var(--ah-border, #ebeef5);
   border-radius: 8px;
-  background: #fafafa;
+  background: var(--ah-surface-muted);
   color: var(--ah-text-secondary, #6b7280);
   font-size: 20px;
   line-height: 1;
@@ -467,8 +467,8 @@ async function remove(row: CredentialRow) {
 
 .cred-add-row:hover:not(:disabled) {
   color: var(--ah-primary, #635bff);
-  border-color: #c5c2ff;
-  background: #f4f3ff;
+  border-color: var(--el-color-primary-light-5);
+  background: var(--ah-primary-tint);
 }
 
 .cred-add-row:disabled {
