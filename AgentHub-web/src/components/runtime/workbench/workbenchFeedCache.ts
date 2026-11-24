@@ -9,11 +9,12 @@
  * 文件名都不变，变的只有身份（{@code participantId}）、占位标记（{@code begin}）
  * 或这位参与者的终态（{@code closed}）。
  * 签名漏掉这类字段时，缓存命中会继续返回旧卡片，「有身份就保留 pending 壳」的判定永远等不到执行。
- * 因此签名必须覆盖：参与者身份、begin 占位标记、参与者终态、工作流状态与正文长度。
+ * 因此签名必须覆盖：参与者身份、begin 占位标记、参与者终态、工作流状态与正文长度，
+ * 以及工作流**节点过程**（节点正文 / 文件 / 思考与工具步）——它们同样是原位增长。
  *
  * <p>线程 / 生命周期：只在单线程（浏览器主线程）用；切会话时由调用方 {@link #clear()}。
  */
-import type { AssistantBlock, ChatTurn } from '@/types/runtime'
+import type { AssistantBlock, ChatTurn, TrialWorkflowNodeView } from '@/types/runtime'
 import type { ParticipantCard } from './workbenchParticipantFeed'
 
 /** 一轮的投影缓存条目：签名一致就直接复用卡片 */
@@ -74,9 +75,45 @@ export function turnFeedSignature(turn: ChatTurn, entry: string, candidates: str
        * 节点状态与正文长度可能都不变，漏掉它直播这一拍会命中缓存、chips 要等收尾才出来。
        */
       signature += `:${block.workflow.choice?.options.map((option) => option.id).join(',') || ''}`
+      /*
+       * 节点过程同样必须进签名：思考 / 工具步与节点正文都是**原位增长**——
+       * 节点状态一直是 RUNNING、卡级 answer 一个字没变，只有最后一段思考或节点正文在变长。
+       * 漏掉这一段，签名不变 → 命中缓存 → 卡片仍握着投影那一刻的旧快照，
+       * 页面上就是「节点思考和正文要等节点结束才一次性出现」。
+       */
+      signature += `|wfn:${workflowNodeProcessSignature(block.workflow.nodes)}`
     }
   }
   return signature
+}
+
+/**
+ * 工作流节点过程的浅签名：逐节点的正文长度、文件条数，以及每一步的类型 / 状态 / 正文长度。
+ *
+ * <p>为什么单独抽出来：签名每帧都要算，必须保持「只拼长度与状态、不序列化全文」的便宜口径；
+ * 单独成函数也让「节点过程要不要作废缓存」这一条判定只有一处实现。
+ *
+ * <p>只拼 {@code content.length} 而不拼内容：正文内容变了长度必然变，
+ * 长度没变时展示也没有可更新的差异，没必要为它把整段思考搬进签名。
+ *
+ * @param nodes 工作流卡片上的节点快照
+ * @return 形如「节点码:步数:步签名:正文长度:文件数|…」的浅签名
+ */
+function workflowNodeProcessSignature(nodes: TrialWorkflowNodeView[]): string {
+  const parts: string[] = []
+  for (const node of nodes) {
+    const steps = Array.isArray(node.steps) ? node.steps : []
+    // 步签名只留类型 / 状态 / 正文长度：工具步靠 state 变化推进，思考靠 length 增长
+    let stepSignature = ''
+    for (const step of steps) {
+      stepSignature += `${step.type}:${(step.content || '').length}:${step.state || ''},`
+    }
+    const files = Array.isArray(node.files) ? node.files.length : 0
+    parts.push(
+      `${node.code || node.name}:${steps.length}:${stepSignature}:${(node.output || '').length}:${files}`
+    )
+  }
+  return parts.join('|')
 }
 
 /**
