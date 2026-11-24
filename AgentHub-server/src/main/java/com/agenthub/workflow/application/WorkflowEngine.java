@@ -21,8 +21,11 @@ import com.agenthub.workflow.domain.repository.WorkflowRunRepository;
 import com.agenthub.workflow.domain.service.JsonLogicEvaluator;
 import com.agenthub.workflow.domain.service.WorkflowAgentInvoker;
 import com.agenthub.workflow.domain.service.WorkflowAssigneeRule;
+import com.agenthub.workflow.domain.service.WorkflowCardLimits;
 import com.agenthub.workflow.domain.service.WorkflowNodeConfig;
 import com.agenthub.workflow.domain.service.WorkflowNodeInputs;
+import com.agenthub.workflow.domain.service.WorkflowOutcomeTexts;
+import com.agenthub.workflow.domain.service.WorkflowRunLimits;
 import com.agenthub.workflow.domain.service.WorkflowRunListener;
 import com.agenthub.workflow.domain.service.WorkflowStateMachine;
 import com.agenthub.workflow.domain.service.WorkflowToolInvoker;
@@ -35,7 +38,9 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.stereotype.Component;
 
+import java.time.Instant;
 import java.time.LocalDateTime;
+import java.time.ZoneId;
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
@@ -83,6 +88,15 @@ public class WorkflowEngine {
      * <p>清理放在 {@code execute} 的 finally：池线程复用不会把上一位的观察者带给下一位。
      */
     private final ThreadLocal<WorkflowRunListener> listenerHolder = new ThreadLocal<>();
+
+    /**
+     * 当前执行线程上的时限账本（整段上限 / 截止 / 单节点上限 / 是否在等待）。
+     *
+     * <p>与 {@link #listenerHolder} 同生命周期：一次 {@code execute} 一份，finally 清理。
+     * 截止时刻在首次调度时**落库**，之后每次调度只读库里的那一份——
+     * 这样刷新页面、离开再进、回放看到的都是同一个截止，不会重新从头上计时。
+     */
+    private final ThreadLocal<RunClock> clockHolder = new ThreadLocal<>();
 
     /**
      * @param runs         run 仓储
@@ -148,6 +162,8 @@ public class WorkflowEngine {
             executeInternal(run, operatorId);
         } finally {
             listenerHolder.remove();
+            // 时限账本同样按调用清理：池线程不携带上一轮的上限与截止
+            clockHolder.remove();
         }
     }
 
@@ -196,13 +212,19 @@ public class WorkflowEngine {
         for (WorkflowNodeRun row : rows) {
             rowByNode.put(row.getNodeId(), row);
         }
+        /*
+         * 时限账本：上限取「工作流自身配置 ∩ 平台硬顶」，截止时刻首次调度时落库。
+         * 放在 publishStarted 之前：卡片第一帧就要看到整段上限，不能等第一次节点变更才补。
+         */
+        long platformMs = properties.effectiveWallMs();
+        RunClock clock = openClock(run, graph, platformMs, operatorId);
+        clockHolder.set(clock);
+        publishLimits(null, null);
         // 卡片先按图顺序铺出完整时间轴（全部未开始），后续节点状态再逐个点亮
         publishStarted(runtime, rows);
         ObjectNode outputs = collectOutputs(runtime, rows);
         ObjectNode ctx = JsonLogicEvaluator.context(input, outputs, json.createObjectNode());
 
-        long wallMs = properties.effectiveWallMs();
-        long deadline = System.currentTimeMillis() + wallMs;
         // 无进展守卫：正常 DAG 每节点最多推进 2 拍（执行 + 跳过判定），这里留足冗余
         int maxSteps = Math.max(runtime.nodes().size() * 2 + 8, 16);
         int steps = 0;
@@ -223,13 +245,20 @@ public class WorkflowEngine {
                     return;
                 }
                 if (++steps > maxSteps) {
-                    failRun(run, "撞限：单次调度无进展（节点步数超过 " + maxSteps + "）；"
-                            + progressBrief(rowByNode), operatorId);
+                    // 内部细节（步数 / 进度）只进日志，对话里只给「异常已停止」
+                    log.warn("工作流调度无进展，主动收口 runId={} maxSteps={} progress={}",
+                            run.getId(), maxSteps, progressBrief(rowByNode));
+                    failRun(run, WorkflowOutcomeTexts.RUN_ABORTED_TEXT, operatorId);
                     return;
                 }
-                if (System.currentTimeMillis() > deadline) {
-                    failRun(run, "撞限：工作流运行超出墙钟上限 " + wallMs
-                            + "ms（agenthub.workflow.wall-ms）；" + progressBrief(rowByNode), operatorId);
+                if (System.currentTimeMillis() > clock.deadlineMs) {
+                    /*
+                     * 整段超时：等待用户回复 / 人工卡点的时长已在 openClock 里补回截止，
+                     * 这里扣到的都是真正在跑的时长。日志留内部细节，对话只给一句话术。
+                     */
+                    log.warn("工作流整段运行超时 runId={} runLimitMs={} deadlineMs={} progress={}",
+                            run.getId(), clock.runLimitMs, clock.deadlineMs, progressBrief(rowByNode));
+                    failRun(run, WorkflowOutcomeTexts.RUN_TIMEOUT_TEXT, operatorId);
                     return;
                 }
                 WorkflowNode next = pickNext(runtime, rowByNode);
@@ -257,7 +286,7 @@ public class WorkflowEngine {
                             run.getId(), ex.getClass().getSimpleName());
                 }
             }
-            // 只有终态才收口；PAUSED_HUMAN 保持 RUNNING，等人工通过后续写
+            // 只有终态才收口；PAUSED_HUMAN / WAITING_REPLY 保持未结束，等人工通过 / 用户回复后续写
             traceSafely("finishRun", run.getId(), () -> traces.finishRun(run));
         }
     }
@@ -307,11 +336,213 @@ public class WorkflowEngine {
         if (listener == null || node == null || row == null) {
             return;
         }
+        /*
+         * 顺序有意为之：先把时限（含当前节点截止）交给观察者，再报节点状态。
+         * 观察者的 nodeChanged 会立刻推一帧快照，此时账本已是新的，
+         * 卡片就能一次画全「节点 + 该节点上限 + 剩余」，不会出现落后一帧的剩余时间。
+         */
+        publishLimits(node, row);
         try {
             listener.nodeChanged(node, row);
         } catch (RuntimeException ex) {
             log.warn("工作流节点观察失败 action=nodeChanged nodeCode={} type={}",
                     node.getCode(), ex.getClass().getSimpleName(), ex);
+        }
+    }
+
+    /**
+     * 建本轮时限账本：上限 = min(工作流配置, 平台硬顶)，截止时刻首次调度时落库。
+     *
+     * <p>为什么截止要落库而不是每次调度现算：卡片要能刷新、离开再进、回放。
+     * 只有「同一个截止」才能让这些场景看到的剩余时间一致，而不是每帧重头计时。
+     *
+     * <p>等待不计入：从 WAITING_REPLY / PAUSED_HUMAN 恢复时，把 {@code waiting_since}
+     * 到现在的时长补回截止，并清空 {@code waiting_since}——
+     * 这样同一段等待只补一次，等待期间也不消耗整段上限与平台硬顶。
+     *
+     * @param run        已落库的 run（状态已是 RUNNING）
+     * @param graph      本轮图快照（取工作流自身配置的两项上限）
+     * @param platformMs 平台硬顶（毫秒），来自 {@code agenthub.workflow.wall-ms}
+     * @param operatorId 操作人
+     * @return 本轮账本
+     */
+    private RunClock openClock(WorkflowRun run, WorkflowGraph graph, long platformMs, long operatorId) {
+        WorkflowRunLimits resolved = resolveRunLimits(run, graph, platformMs);
+        long runLimitMs = resolved.runLimitMs();
+        long nodeLimitMs = resolved.nodeLimitMs();
+        long nowMs = System.currentTimeMillis();
+        Long waitingSinceMs = run.getWaitingSince() == null ? null : toEpochMs(run.getWaitingSince());
+        // 恢复调度：先把等待时长补回截止，再决定落库值
+        long deadlineMs;
+        if (run.getRunDeadline() == null) {
+            // 首次调度：从现在起算整段上限
+            deadlineMs = nowMs + runLimitMs;
+        } else {
+            deadlineMs = toEpochMs(run.getRunDeadline());
+        }
+        if (waitingSinceMs != null) {
+            long pausedMs = Math.max(0L, nowMs - waitingSinceMs);
+            deadlineMs += pausedMs;
+            log.info("工作流恢复调度，等待时长不计入运行时限 runId={} pausedMs={} runLimitMs={}",
+                    run.getId(), pausedMs, runLimitMs);
+        }
+        boolean needsPersist = run.getRunDeadline() == null
+                || waitingSinceMs != null
+                || run.getRunLimitMs() == null
+                || run.getNodeLimitMs() == null;
+        if (needsPersist) {
+            LocalDateTime deadlineAt = toLocalDateTime(deadlineMs);
+            /*
+             * 落库失败不阻断调度：本次仍按内存账本执行（最坏是重启后按图重新解析一次上限）。
+             * 但 waiting_since 必须一并清空，否则同一段等待会在下一次恢复时被重复补回。
+             */
+            runs.updateRunLimits(run.getId(), runLimitMs, nodeLimitMs, deadlineAt, null, operatorId);
+            run.setRunLimitMs(runLimitMs);
+            run.setNodeLimitMs(nodeLimitMs);
+            run.setRunDeadline(deadlineAt);
+            run.setWaitingSince(null);
+        }
+        return new RunClock(runLimitMs, deadlineMs, nodeLimitMs, null);
+    }
+
+    /**
+     * 解析本轮两项上限。
+     *
+     * <p>run 上已落过的值优先（重启后仍按最初那一刻的上限执行），再与当前平台硬顶取小：
+     * 运维把 yml 调小后，在途 run 也必须立刻服从新的硬顶。
+     *
+     * @param run        已落库的 run
+     * @param graph      本轮图快照
+     * @param platformMs 平台硬顶（毫秒）
+     * @return 生效的整段 / 单节点上限
+     */
+    private WorkflowRunLimits resolveRunLimits(WorkflowRun run, WorkflowGraph graph, long platformMs) {
+        WorkflowRunLimits fromGraph;
+        try {
+            fromGraph = WorkflowRunLimits.resolve(graph, platformMs);
+        } catch (RuntimeException ex) {
+            // 图 JSON 坏掉不能把 run 直接打死：按平台硬顶跑，问题留给校验器
+            log.warn("解析工作流时限失败，按平台硬顶执行 runId={} type={}",
+                    run.getId(), ex.getClass().getSimpleName());
+            fromGraph = WorkflowRunLimits.resolve(null, platformMs);
+        }
+        long runLimitMs = run.getRunLimitMs() != null && run.getRunLimitMs() > 0
+                ? Math.min(run.getRunLimitMs(), platformMs)
+                : fromGraph.runLimitMs();
+        long nodeLimitMs = run.getNodeLimitMs() != null && run.getNodeLimitMs() > 0
+                ? Math.min(run.getNodeLimitMs(), runLimitMs)
+                : fromGraph.nodeLimitMs();
+        return WorkflowRunLimits.of(runLimitMs, nodeLimitMs);
+    }
+
+    /**
+     * 把时限快照交给观察者（只更新账本，不单独推帧）。
+     *
+     * <p>观察者是旁路：这里抛异常只记日志，不能影响调度结论。
+     *
+     * @param node 当前要展示的节点；null 表示不展示节点级时限
+     * @param row  该节点的运行态；为空或非 RUNNING 时不展示节点级时限
+     */
+    private void publishLimits(WorkflowNode node, WorkflowNodeRun row) {
+        WorkflowRunListener listener = listenerHolder.get();
+        RunClock clock = clockHolder.get();
+        if (listener == null || clock == null) {
+            return;
+        }
+        Long nodeLimitMs = null;
+        Long nodeDeadlineMs = null;
+        String nodeCode = null;
+        String nodeName = null;
+        // 只有「该节点正在跑 + 配了单节点上限」才给节点行：其余状态画上限没有意义
+        if (node != null && row != null && clock.nodeLimitMs > 0
+                && WorkflowNodeRunStatus.parse(row.getStatus()) == WorkflowNodeRunStatus.RUNNING
+                && row.getStartTime() != null) {
+            nodeLimitMs = clock.nodeLimitMs;
+            nodeDeadlineMs = toEpochMs(row.getStartTime()) + clock.nodeLimitMs;
+            nodeCode = node.getCode();
+            nodeName = node.getName();
+        }
+        try {
+            listener.limits(new WorkflowCardLimits(clock.runLimitMs, clock.deadlineMs, clock.waitingAtMs,
+                    nodeCode, nodeName, nodeLimitMs, nodeDeadlineMs));
+        } catch (RuntimeException ex) {
+            log.warn("工作流时限观察失败 nodeCode={} type={}",
+                    nodeCode, ex.getClass().getSimpleName(), ex);
+        }
+    }
+
+    /**
+     * 该节点是否已超过单节点上限。未配置上限 / 节点没有开始时间时恒 false。
+     *
+     * @param row 运行态行
+     * @return true 表示这一步已超时
+     */
+    private boolean nodeTimedOut(WorkflowNodeRun row) {
+        RunClock clock = clockHolder.get();
+        if (clock == null || clock.nodeLimitMs <= 0 || row == null || row.getStartTime() == null) {
+            return false;
+        }
+        return System.currentTimeMillis() > toEpochMs(row.getStartTime()) + clock.nodeLimitMs;
+    }
+
+    /**
+     * 单节点超时收口：节点 FAILED、run FAILED，对话只给「这一步运行超时，已停止」。
+     *
+     * <p>不走 ERROR 边：超时是「这一步没做完」，继续走错误分支容易把半成品当正常产出。
+     *
+     * @param run        已落库的 run
+     * @param node       当前节点
+     * @param row        运行态行
+     * @param operatorId 操作人
+     * @return 恒 false，表示本次调度到此停止
+     */
+    private boolean failNodeTimeout(WorkflowRun run, WorkflowNode node, WorkflowNodeRun row, long operatorId) {
+        RunClock clock = clockHolder.get();
+        long limitMs = clock == null ? 0L : clock.nodeLimitMs;
+        long costMs = row.getStartTime() == null ? 0L
+                : Math.max(0L, System.currentTimeMillis() - toEpochMs(row.getStartTime()));
+        // 内部细节只进日志：节点、生效上限、实际耗时
+        log.warn("工作流单节点运行超时 runId={} nodeCode={} nodeLimitMs={} costMs={}",
+                run.getId(), node.getCode(), limitMs, costMs);
+        row.setStatus(WorkflowNodeRunStatus.FAILED.name());
+        row.setErrorSummary(WorkflowOutcomeTexts.NODE_TIMEOUT_TEXT);
+        row.setEndTime(LocalDateTime.now());
+        row.setSelectedEdges("");
+        nodeRuns.update(row);
+        publishNode(node, row);
+        failRun(run, WorkflowOutcomeTexts.NODE_TIMEOUT_TEXT, operatorId);
+        return false;
+    }
+
+    /** epoch 毫秒 → 服务器时区 LocalDateTime（落库列类型是 DATETIME） */
+    private static LocalDateTime toLocalDateTime(long epochMs) {
+        return LocalDateTime.ofInstant(Instant.ofEpochMilli(epochMs), ZoneId.systemDefault());
+    }
+
+    /** LocalDateTime（服务器时区）→ epoch 毫秒 */
+    private static long toEpochMs(LocalDateTime time) {
+        return time.atZone(ZoneId.systemDefault()).toInstant().toEpochMilli();
+    }
+
+    /**
+     * 单次调度的时限账本（线程内）。
+     *
+     * @param runLimitMs  整段上限（毫秒）
+     * @param deadlineMs  整段截止（epoch 毫秒）
+     * @param nodeLimitMs 单节点上限（毫秒）；<=0 表示未配置
+     * @param waitingAtMs 进入等待的时刻（epoch 毫秒）；null 表示正在跑
+     */
+    private static final class RunClock {
+        private final long runLimitMs;
+        private final long deadlineMs;
+        private final long nodeLimitMs;
+        private Long waitingAtMs;
+
+        private RunClock(long runLimitMs, long deadlineMs, long nodeLimitMs, Long waitingAtMs) {
+            this.runLimitMs = runLimitMs;
+            this.deadlineMs = deadlineMs;
+            this.nodeLimitMs = nodeLimitMs;
+            this.waitingAtMs = waitingAtMs;
         }
     }
 
@@ -507,18 +738,118 @@ public class WorkflowEngine {
                 ? json.createObjectNode().put("text", message).toString()
                 : mapped.toString());
         long userId = run.getTriggeredBy() == null ? operatorId : run.getTriggeredBy();
-        String text = agentInvoker.invoke(agentId, message, userId, run.getId());
+        /*
+         * 询问节点（awaitReply）要能带可点选项，因此走带选项的执行口；其它节点保持原调用，
+         * 既不装选项工具，也不多一次出站。
+         */
+        boolean awaitReply = WorkflowNodeConfig.trueValue(node.getConfig(), "awaitReply");
+        /*
+         * 带上节点编码：执行器把子 Agent 的思考 / 工具 / 运行中正文按节点交回卡片投影，
+         * 卡片才能把它们挂到这条时间轴的对应节点里，而不是堆在整张卡下面。
+         */
+        WorkflowAgentInvoker.Reply reply = awaitReply
+                ? agentInvoker.invokeForReply(agentId, message, userId, run.getId(), node.getCode())
+                : new WorkflowAgentInvoker.Reply(
+                        agentInvoker.invoke(agentId, message, userId, run.getId(), node.getCode()), "");
+        String text = reply == null ? null : reply.text();
         if (text == null || text.isBlank()) {
             return handleFailure(run, runtime, node, row,
                     "Agent「" + node.getCode() + "」没有返回文本", null, operatorId);
+        }
+        /*
+         * 单节点上限：出站回来后立刻核对这一步耗时。放在产出落库前，
+         * 超时就不再进 succeed / 等待回复，避免「已经超时的节点还挂在等待里」。
+         */
+        if (nodeTimedOut(row)) {
+            return failNodeTimeout(run, node, row, operatorId);
         }
         ObjectNode raw = json.createObjectNode();
         raw.put("text", text);
         ObjectNode shaped = WorkflowNodeInputs.shapeOutput(raw,
                 WorkflowNodeConfig.objectValue(node.getConfig(), "outputMapping"));
         row.setOutputJson(shaped.toString());
+        /*
+         * 对话停等：节点配了 awaitReply 且本 run 还没有用户回复时，把这一节点刚产出的问句
+         * 作为「已经流出的正文」落进 output，随后把 run 挂到 WAITING_REPLY 并停止调度。
+         * 不把 run 标成成功来假装本轮结束——用户下一句回来要从这里接着往下走。
+         */
+        if (awaitReply && !replyProvided(ctx)) {
+            return enterReplyWait(run, node, row, shaped, reply.choiceJson(), operatorId);
+        }
         succeed(row, node, outputs, defaultEdges(runtime, node), ctx);
         return true;
+    }
+
+    /**
+     * 是否已经从输入里拿到用户回复。
+     *
+     * <p>只认 {@code input.reply}：回复由续跑入口写进 run 的输入快照（同一会话的下一句）。
+     * 历史 run 没有这个键，因此老图重跑时行为与原来一致。
+     *
+     * @param ctx 本轮求值上下文
+     * @return true 表示本次调度是在用户回复之后继续
+     */
+    private static boolean replyProvided(ObjectNode ctx) {
+        JsonNode input = ctx == null ? null : ctx.get("input");
+        JsonNode reply = input == null ? null : input.get("reply");
+        return reply != null && reply.isTextual() && !reply.asText().isBlank();
+    }
+
+    /**
+     * 进入「等待用户回复」：节点 WAITING_REPLY、run WAITING_REPLY，然后停止调度。
+     *
+     * <p>问句必须留在节点产出里（{@code text} / {@code question}）：工作流卡的正文按
+     * 节点产出增量拼接，卡片与回放都读这一份；只在内存里留一句会刷新即丢。
+     *
+     * <p>可点选项同理落在 {@code choice}：形状与 CHOICE 事件正文完全一致
+     * （{@code {"question","options":[{"id","label"}]}}），前端一套渲染即可，
+     * 不需要为工作流另做一套芯片。
+     *
+     * @param run        已落库的 run
+     * @param node       当前 AGENT 节点
+     * @param row        运行态行（已是 RUNNING）
+     * @param produced   节点产出（至少含 text）
+     * @param choiceJson 结构化选项 JSON；没有选项时为空
+     * @param operatorId 操作人
+     * @return 恒 false，表示本次调度到此停止
+     */
+    private boolean enterReplyWait(WorkflowRun run, WorkflowNode node, WorkflowNodeRun row,
+                                   ObjectNode produced, String choiceJson, long operatorId) {
+        WorkflowNodeRunStatus from = WorkflowNodeRunStatus.parse(row.getStatus());
+        row.setStatus(WorkflowStateMachine.requireNode(from, WorkflowNodeRunStatus.WAITING_REPLY).name());
+        String question = WorkflowNodeInputs.text(produced == null ? null : produced.get("text"));
+        ObjectNode kept = produced == null ? json.createObjectNode() : produced.deepCopy();
+        if (!question.isBlank()) {
+            // 单独留一份 question：后续节点 / 卡片想只取问句时不必再拆正文
+            kept.put("question", question.trim());
+        }
+        JsonNode choice = parse(choiceJson);
+        if (choice != null && choice.isObject()) {
+            /*
+             * 存成对象而不是字符串：卡片投影与回放都按同一份结构读取，
+             * 前端只需一次 JSON.parse 就能拿到 {question, options}。
+             */
+            kept.set("choice", choice);
+        }
+        row.setOutputJson(kept.toString());
+        // 节点还没结束：结束时间留空，等用户回复后由续跑入口补
+        row.setEndTime(null);
+        nodeRuns.update(row);
+        /*
+         * 先把 run 迁到 WAITING_REPLY，再把带选项的等待卡推给前端。
+         *
+         * <p>顺序不能反：等待卡一出现，用户就可能立刻点选项；若此时库里 run 还是 RUNNING，
+         * 会话入口按「等待中的运行」查不到它，这句回复会被当成新问题重新过一遍入口。
+         * 只有 run 真正挂起后才发布卡片，才能保证「看到选项时一定拦得住下一句」。
+         */
+        transitionRun(run, WorkflowRunStatus.RUNNING, WorkflowRunStatus.WAITING_REPLY,
+                "等待用户回复", null, operatorId);
+        // 并发取消优先：run 已被停止时不再发布一张还在等待的卡片
+        if (!WorkflowRunStatus.WAITING_REPLY.name().equals(run.getStatus())) {
+            return false;
+        }
+        publishNode(node, row);
+        return false;
     }
 
     private boolean invokeTool(WorkflowRun run, WorkflowRuntimeGraph runtime, WorkflowNode node,
@@ -534,6 +865,10 @@ public class WorkflowEngine {
         if (text == null || text.isBlank()) {
             return handleFailure(run, runtime, node, row,
                     "工具「" + node.getCode() + "」没有返回内容", null, operatorId);
+        }
+        // 工具调用同样受单节点上限约束（MCP 可能长时间不回）
+        if (nodeTimedOut(row)) {
+            return failNodeTimeout(run, node, row, operatorId);
         }
         ObjectNode raw = json.createObjectNode();
         raw.put("text", text);
@@ -695,6 +1030,7 @@ public class WorkflowEngine {
     private void settle(WorkflowRun run, WorkflowRuntimeGraph runtime,
                         Map<String, WorkflowNodeRun> rowByNode, long operatorId) {
         boolean waitingHuman = false;
+        boolean waitingReply = false;
         boolean failed = false;
         boolean endSuccess = false;
         String firstError = null;
@@ -707,6 +1043,9 @@ public class WorkflowEngine {
             WorkflowNodeRunStatus status = WorkflowNodeRunStatus.parse(row.getStatus());
             if (status == WorkflowNodeRunStatus.WAITING_HUMAN) {
                 waitingHuman = true;
+            }
+            if (status == WorkflowNodeRunStatus.WAITING_REPLY) {
+                waitingReply = true;
             }
             if (status == WorkflowNodeRunStatus.FAILED) {
                 failed = true;
@@ -725,6 +1064,16 @@ public class WorkflowEngine {
         if (waitingHuman) {
             transitionRun(run, WorkflowRunStatus.RUNNING, WorkflowRunStatus.PAUSED_HUMAN,
                     null, null, operatorId);
+            return;
+        }
+        /*
+         * 等待回复优先于「未到达结束节点」：图里若「问完就结束本轮」用 END 收尾，
+         * 只要还有一个节点停在等待回复，这条 run 就是挂起而不是成功 / 失败。
+         * 挂起态必须由用户下一句送回后才继续，不能在这里收口。
+         */
+        if (waitingReply) {
+            transitionRun(run, WorkflowRunStatus.RUNNING, WorkflowRunStatus.WAITING_REPLY,
+                    "等待用户回复", null, operatorId);
             return;
         }
         if (endSuccess) {
@@ -789,6 +1138,27 @@ public class WorkflowEngine {
         }
         if (end != null) {
             run.setEndTime(end);
+        }
+        /*
+         * 进入等待态：记下「等待开始时刻」并落库。
+         *
+         * <p>恢复调度时按这个时刻把等待时长补回截止；补完即清空，所以同一段等待只补一次。
+         * 同时把冻结后的剩余交给观察者——等待态卡片不应继续往下扣时间。
+         */
+        if (to == WorkflowRunStatus.PAUSED_HUMAN || to == WorkflowRunStatus.WAITING_REPLY) {
+            RunClock clock = clockHolder.get();
+            LocalDateTime waitingAt = LocalDateTime.now();
+            if (clock != null) {
+                LocalDateTime deadlineAt = toLocalDateTime(clock.deadlineMs);
+                clock.waitingAtMs = toEpochMs(waitingAt);
+                runs.updateRunLimits(run.getId(), clock.runLimitMs, clock.nodeLimitMs,
+                        deadlineAt, waitingAt, operatorId);
+                run.setRunLimitMs(clock.runLimitMs);
+                run.setNodeLimitMs(clock.nodeLimitMs);
+                run.setRunDeadline(deadlineAt);
+                run.setWaitingSince(waitingAt);
+                publishLimits(null, null);
+            }
         }
     }
 
@@ -937,7 +1307,8 @@ public class WorkflowEngine {
                 }
             } else if (status == WorkflowNodeRunStatus.FAILED) {
                 failed++;
-            } else if (status == WorkflowNodeRunStatus.WAITING_HUMAN) {
+            } else if (status == WorkflowNodeRunStatus.WAITING_HUMAN
+                    || status == WorkflowNodeRunStatus.WAITING_REPLY) {
                 waiting++;
             }
         }

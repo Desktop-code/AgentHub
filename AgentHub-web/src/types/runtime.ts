@@ -217,6 +217,10 @@ export interface TrialChoiceView {
   /** 一句话问题；模型没给时为空串（只出 chips，不硬凑问句） */
   question: string
   options: TrialChoiceOption[]
+  /** 用户已答复的展示文案；未答复为空。方案停等续跑后只留它，选项清空 */
+  reply?: string
+  /** true 表示这条询问对应的方案运行正停在这位子专家处等用户 */
+  waiting?: boolean
 }
 
 /**
@@ -244,10 +248,45 @@ export interface TrialWorkflowNodeView {
   name: string
   /** AGENT / TOOL / CONDITION / HUMAN / PARALLEL_FORK / PARALLEL_JOIN */
   type: string
-  /** PENDING / RUNNING / SUCCESS / FAILED / SKIPPED / WAITING_HUMAN / CANCELLED */
+  /** PENDING / RUNNING / SUCCESS / FAILED / SKIPPED / WAITING_HUMAN / WAITING_REPLY / CANCELLED */
   status: string
   /** 一句状态说明（执行中 / 已完成 / 失败原因 / 等待前置节点）；后端已脱敏 */
   note?: string
+  /**
+   * 该节点自己的正文（AGENT 节点；等待回复时是问句）。
+   *
+   * <p>本刀起节点输出挂在节点内部，不再整段堆在卡片下面。旧数据没有该字段，
+   * 前端回落卡级 answer，回放不丢正文。
+   */
+  output?: string
+  /** 该节点自己的思考与工具，按发生顺序；与 output 一起进四行窗口 */
+  steps?: TrialWorkflowStepView[]
+  /** 该节点写出的真实文件（一行一个，不计入四行窗口） */
+  files?: TrialFileView[]
+  /**
+   * 用户对这一节点询问的回复。
+   *
+   * <p>只挂在被答复的询问节点上：等待回复时不出现；续跑后选项清掉、节点收成完成态，
+   * 这里记下这次选择（如「HTML/CSS/JavaScript 单页」）。它不落成新的用户消息。
+   */
+  reply?: string
+}
+
+/**
+ * 工作流节点自己的过程步。
+ *
+ * <p>只保留展示需要的字段：思考正文与工具结果都已在后端脱敏 / 截断，
+ * 前端不再解析原始事件，也不把工具入参拼回正文。
+ */
+export interface TrialWorkflowStepView {
+  /** REASONING（思考） / TOOL（工具调用） */
+  type: 'REASONING' | 'TOOL'
+  /** 工具名；思考为空 */
+  name?: string
+  /** 思考正文，或工具结果摘录 */
+  content?: string
+  /** 工具状态：running / done / error；思考为空 */
+  state?: 'running' | 'done' | 'error'
 }
 
 /**
@@ -261,12 +300,57 @@ export interface TrialWorkflowView {
   name: string
   /** 工作流编码 */
   code: string
-  /** CREATED / RUNNING / PAUSED_HUMAN / SUCCESS / FAILED / CANCELLED */
+  /** CREATED / RUNNING / PAUSED_HUMAN / WAITING_REPLY / SUCCESS / FAILED / CANCELLED */
   status: string
   /** 终答正文；运行中按「节点完成」增量追加，不再是运行期恒空 */
   answer?: string
   /** 按图顺序的真实节点；可能为空表（事件还没到） */
   nodes: TrialWorkflowNodeView[]
+  /**
+   * 停等询问的可点选项（与 CHOICE 事件同形）。
+   *
+   * <p>只在工作流停在「等待你的回复」时出现；点选与输入框提交走同一条续跑写入。
+   * 已结束 / 已中断的卡片不带宽选项字段。
+   */
+  choice?: TrialChoiceView
+  /**
+   * 运行时限（整段上限 / 当前节点上限与各自截止）。
+   *
+   * <p>后端只给「绝对截止时刻」：前端按同一个截止现场算剩余，
+   * 刷新、离开再进、回放才不会各自从头计时。
+   * 等待态（`waitingAt` 非空）以那一刻代替「现在」算，等待时长不扣剩余。
+   */
+  limits?: TrialWorkflowLimitsView
+  /**
+   * 仅回放兜底：事件正文残缺、无法解析时由前端合成的占位卡。
+   *
+   * <p>标记出来后只用于「画一张不误导的已结束卡片」，并允许它接管上一轮的等待卡；
+   * 不参与实时帧，也不代表后端真实状态。
+   */
+  degraded?: boolean
+}
+
+/**
+ * 工作流卡片上的时限视图。字段与后端 WorkflowRunView.Limits 一致。
+ *
+ * <p>单位统一是毫秒 + epoch 毫秒，展示时由前端格式化成「8 分钟」「1 分 20 秒」，
+ * 不在界面上出现毫秒数或内部配置键。
+ */
+export interface TrialWorkflowLimitsView {
+  /** 整段上限（毫秒）；<=0 表示未知 */
+  runLimitMs?: number
+  /** 整段截止（epoch 毫秒） */
+  runDeadlineAt?: number
+  /** 进入等待的时刻（epoch 毫秒）；为空表示正在跑 */
+  waitingAt?: number
+  /** 当前运行中节点编码；为空表示不展示节点行 */
+  nodeCode?: string | null
+  /** 当前运行中节点展示名 */
+  nodeName?: string | null
+  /** 当前节点上限（毫秒）；为空表示该节点未配置 */
+  nodeLimitMs?: number | null
+  /** 当前节点截止（epoch 毫秒） */
+  nodeDeadlineAt?: number | null
 }
 
 /** 计划中的一步。seq 即执行顺序。 */
@@ -341,6 +425,14 @@ export interface ChatTurn {
    * 或者在等不到身份时整块不画。历史回放没有该字段，按新问题（期待入口）处理。
    */
   continuation?: boolean
+  /**
+   * 本轮的块被「跨轮接管」改写过的次数（前端态）。
+   *
+   * <p>为什么需要它：续跑轮会把上一轮那张等待卡收走（见 {@code absorbWaitingWorkflowCards}），
+   * 被改写的旧轮通常已经结算，投影缓存按「轮 key」记着旧的签名，改块后不会再重算。
+   * 这个计数进入签名与缓存键，改一次就作废一次缓存，旧卡才会真的从页面上消失。
+   */
+  revision?: number
   /**
    * 块 id 的自增序号（前端态）。每分配一块 +1，随快照持久化。
    *

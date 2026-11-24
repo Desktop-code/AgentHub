@@ -128,10 +128,14 @@ agenthub:
       read-timeout-ms: 15000
   workflow:
     # WF-P0 刀3 硬顶（生效值都会夹紧，写错不会变成无上限）：
-    # 单次调度的墙钟上限（毫秒）。HUMAN 等待不计入，人工卡点由节点 timeoutPolicy 兜底。
-    wall-ms: ${AGENTHUB_WORKFLOW_WALL_MS:60000}
+    # 单次调度的墙钟上限（毫秒）= 平台硬顶。工作流自身配置的「整段 / 单节点上限」都不得大于它。
+    # 默认 10 分钟：代码生成类工作流一次跑十几分钟是常态；等待用户回复 / 人工处理不计入。
+    # 注意：打包启动（bin/AgentHub-start.bat → java -jar）读的就是这份 application.yml，
+    # 这里改值即生效；旧版代码里还有 5 分钟硬夹（300000ms）会把 600000 静默夹回去，已移除。
+    wall-ms: ${AGENTHUB_WORKFLOW_WALL_MS:600000}
     # 旧键兼容（刀2）：wall-ms<=0 时回落到这里；新部署只配 wall-ms 即可。
-    trial-wall-ms: 60000
+    # 与 wall-ms 保持同一默认值，避免只把 wall-ms 置 0 时又退回 60 秒那种一到就断的口径。
+    trial-wall-ms: ${AGENTHUB_WORKFLOW_TRIAL_WALL_MS:600000}
     # HUMAN 节点未配 timeoutMs 时的兜底等待时长（毫秒），默认 24 小时。
     human-default-timeout-ms: 86400000
     # 单个 PARALLEL_FORK 允许的分支数（不含 ERROR 边）；超出即失败该 FORK。

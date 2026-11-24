@@ -106,6 +106,7 @@ public final class WorkflowStateMachine {
             case CREATED -> "已创建";
             case RUNNING -> "运行中";
             case PAUSED_HUMAN -> "等待人工";
+            case WAITING_REPLY -> "等待回复";
             case SUCCESS -> "成功";
             case FAILED -> "失败";
             case CANCELLED -> "已取消";
@@ -129,6 +130,7 @@ public final class WorkflowStateMachine {
             case FAILED -> "失败";
             case SKIPPED -> "已跳过";
             case WAITING_HUMAN -> "等待人工";
+            case WAITING_REPLY -> "等待回复";
             case CANCELLED -> "已取消";
         };
     }
@@ -140,6 +142,7 @@ public final class WorkflowStateMachine {
                 WorkflowRunStatus.CANCELLED));
         map.put(WorkflowRunStatus.RUNNING, EnumSet.of(
                 WorkflowRunStatus.PAUSED_HUMAN,
+                WorkflowRunStatus.WAITING_REPLY,
                 WorkflowRunStatus.SUCCESS,
                 WorkflowRunStatus.FAILED,
                 WorkflowRunStatus.CANCELLED));
@@ -147,6 +150,13 @@ public final class WorkflowStateMachine {
         map.put(WorkflowRunStatus.PAUSED_HUMAN, EnumSet.of(
                 WorkflowRunStatus.RUNNING,
                 WorkflowRunStatus.FAILED,
+                WorkflowRunStatus.CANCELLED));
+        /*
+         * 等待回复：用户下一句送回本 run 时回到 RUNNING 续跑；用户点停止则直接 CANCELLED。
+         * 不允许从 WAITING_REPLY 直接成功 / 失败——挂起态必须先把这一步走完再收口。
+         */
+        map.put(WorkflowRunStatus.WAITING_REPLY, EnumSet.of(
+                WorkflowRunStatus.RUNNING,
                 WorkflowRunStatus.CANCELLED));
         return Collections.unmodifiableMap(map);
     }
@@ -162,8 +172,14 @@ public final class WorkflowStateMachine {
                 WorkflowNodeRunStatus.SUCCESS,
                 WorkflowNodeRunStatus.FAILED,
                 WorkflowNodeRunStatus.WAITING_HUMAN,
+                WorkflowNodeRunStatus.WAITING_REPLY,
                 WorkflowNodeRunStatus.CANCELLED));
         map.put(WorkflowNodeRunStatus.WAITING_HUMAN, EnumSet.of(
+                WorkflowNodeRunStatus.SUCCESS,
+                WorkflowNodeRunStatus.FAILED,
+                WorkflowNodeRunStatus.CANCELLED));
+        // 等待回复：用户下一句送回后节点 SUCCESS 并继续；停止时由 cancelOpen 收成 CANCELLED
+        map.put(WorkflowNodeRunStatus.WAITING_REPLY, EnumSet.of(
                 WorkflowNodeRunStatus.SUCCESS,
                 WorkflowNodeRunStatus.FAILED,
                 WorkflowNodeRunStatus.CANCELLED));

@@ -42,4 +42,16 @@ public interface WorkflowRunListener {
      * @param row  更新后的运行态（取状态 / 错误摘要）
      */
     void nodeChanged(WorkflowNode node, WorkflowNodeRun row);
+
+    /**
+     * 运行时限快照（整段上限 / 当前节点上限 / 各自的截止时刻）。
+     *
+     * <p>与节点状态分开上报：时限不是节点事实，但卡片要把它和节点一起画。
+     * 默认空实现，避免旧实现（测试替身等）被迫改代码。
+     *
+     * @param limits 时限快照；可空（调用方仅在算得出时上报）
+     */
+    default void limits(WorkflowCardLimits limits) {
+        // 缺省什么也不做：卡片可以不展示时限
+    }
 }

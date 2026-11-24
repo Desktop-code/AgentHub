@@ -74,11 +74,26 @@ export interface WorkflowGraphEdge {
   config?: Record<string, unknown>
 }
 
+/**
+ * 工作流自身的运行时限。单位：分钟；不配 = 跟平台硬顶走。
+ *
+ * <p>随 graph_json 一起落库，不进 settings 表：它属于这份图的运行口径，
+ * 换引擎 / 换部署都必须和工作流定义一起走。
+ */
+export interface WorkflowGraphLimits {
+  /** 整段运行上限（分钟）；不得大于平台上限，也不得小于单节点上限 */
+  runMinutes?: number | null
+  /** 单节点上限（分钟）；不得大于整段上限 */
+  nodeMinutes?: number | null
+}
+
 /** graph_json 整体结构 */
 export interface WorkflowGraph {
   nodes: WorkflowGraphNode[]
   edges: WorkflowGraphEdge[]
   viewport?: { x: number; y: number; zoom: number }
+  /** 运行时限（分钟）；缺省表示未配置，运行时按平台硬顶 */
+  limits?: WorkflowGraphLimits
 }
 
 /** 画布节点 data（VueFlow 节点上的业务载荷） */
@@ -144,6 +159,11 @@ export interface WorkflowDraftResp {
   workflowId: number
   graph: WorkflowGraph
   updateTime?: string
+  /**
+   * 平台硬顶（整分钟）：来自后端 yml 的 agenthub.workflow.wall-ms。
+   * 页面只用它做「不得大于平台上限」的校验与说明，不显示键名或毫秒。
+   */
+  platformMaxMinutes?: number
 }
 
 /** 单条校验问题 */

@@ -125,6 +125,7 @@ const RUN_LABEL: Record<string, string> = {
   FAILED: '失败',
   SKIPPED: '已跳过',
   WAITING_HUMAN: '等待人工',
+  WAITING_REPLY: '等待回复',
   CANCELLED: '已取消'
 }
 
@@ -136,6 +137,7 @@ const RUN_TONE: Record<string, string> = {
   FAILED: 'failed',
   SKIPPED: 'skipped',
   WAITING_HUMAN: 'waiting',
+  WAITING_REPLY: 'waiting',
   CANCELLED: 'cancelled'
 }
 

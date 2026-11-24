@@ -17,4 +17,10 @@ public class WorkflowDraftResp {
     private JsonNode graph;
     /** 更新时间（yyyy-MM-dd HH:mm:ss.SSS），PUT 时作为 expectedUpdateTime */
     private LocalDateTime updateTime;
+    /**
+     * 平台运行硬顶折算成的分钟数（配置页提示 + 前端拦截用）。
+     *
+     * <p>只给分钟：页面上不暴露 yml 键名与毫秒。
+     */
+    private Integer platformMaxMinutes;
 }

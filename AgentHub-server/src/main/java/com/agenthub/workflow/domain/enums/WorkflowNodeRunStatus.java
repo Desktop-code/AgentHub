@@ -19,6 +19,13 @@ public enum WorkflowNodeRunStatus {
     SKIPPED,
     /** 人工节点等待处理 */
     WAITING_HUMAN,
+    /**
+     * 对话回复节点等待当前会话的用户下一句。
+     *
+     * <p>问句已写进本节点产出并投影进工作流卡正文；用户下一句送回同一条 run 后，
+     * 本节点迁 SUCCESS 并按出边继续。与 {@link #WAITING_HUMAN} 分开，避免与人工待办混淆。
+     */
+    WAITING_REPLY,
     /** 被取消 */
     CANCELLED;
 
@@ -27,6 +34,15 @@ public enum WorkflowNodeRunStatus {
      */
     public boolean terminal() {
         return this == SUCCESS || this == FAILED || this == SKIPPED || this == CANCELLED;
+    }
+
+    /**
+     * 是否在等外部输入（人工处理 / 对话回复）之后才能继续。
+     *
+     * @return true 表示 WAITING_HUMAN / WAITING_REPLY
+     */
+    public boolean waiting() {
+        return this == WAITING_HUMAN || this == WAITING_REPLY;
     }
 
     /**

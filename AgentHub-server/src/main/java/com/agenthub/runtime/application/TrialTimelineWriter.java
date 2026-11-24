@@ -117,7 +117,8 @@ final class TrialTimelineWriter {
              * 卡片是状态快照不是增量，正文用 JSON，与 SSE 帧同形（前端一套解析）。
              */
             if (segment.workflow() != null) {
-                String payload = WorkflowRunJson.write(segment.workflow());
+                // 落库只存骨架：节点产出在 workflow_node_run，刷新回放按 runId 现算
+                String payload = WorkflowRunJson.compact(segment.workflow());
                 if (!payload.isEmpty()) {
                     written.add(writer.append(sessionId, seq++, EventType.WORKFLOW,
                             WorkflowRunJson.summary(segment.workflow()), payload, null, null));
@@ -276,6 +277,23 @@ final class TrialTimelineWriter {
         }
         written.add(writer.append(sessionId, seq++, EventType.PARTICIPANT, who.name(), payload, null, null));
         return seq;
+    }
+
+    /**
+     * 单独补写一行 begin（入口卡 / 方案卡）。
+     *
+     * <p>只为停等补写开放：嵌套方案的入口与方案卡在对外的正常路径里由各自的包装器推，
+     * 停等时整轮还没落库，只能在落等待态前手动补齐，否则刷新后成员卡没有父。
+     * 与 {@link #appendParticipant} 同一份 payload 口径，不新增事件类型。
+     *
+     * @param sessionId 会话主键
+     * @param seq       当前序号
+     * @param who       身份；空则原样返回 seq
+     * @param written   已写事件
+     * @return 推进后的序号
+     */
+    int appendParticipantRow(Long sessionId, int seq, ParticipantView who, List<RunEvent> written) {
+        return appendParticipant(sessionId, seq, who, written);
     }
 
     /**

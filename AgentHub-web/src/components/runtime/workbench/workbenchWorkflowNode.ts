@@ -112,7 +112,7 @@ export function workflowNodeToolLabel(
   if (pill.state === 'error' || code === 'FAILED') {
     return `${shown}：调用失败`
   }
-  if (code === 'PENDING' || code === 'WAITING_HUMAN') {
+  if (code === 'PENDING' || code === 'WAITING_HUMAN' || code === 'WAITING_REPLY') {
     return `将调用${shown}`
   }
   if (code === 'SKIPPED' || code === 'CANCELLED') {

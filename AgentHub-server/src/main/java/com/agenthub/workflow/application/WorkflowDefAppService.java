@@ -21,6 +21,7 @@ import com.agenthub.workflow.domain.model.WorkflowDef;
 import com.agenthub.workflow.domain.model.WorkflowDefQuery;
 import com.agenthub.workflow.domain.model.WorkflowDraft;
 import com.agenthub.workflow.domain.model.WorkflowGraph;
+import com.agenthub.workflow.domain.model.WorkflowIssue;
 import com.agenthub.workflow.domain.model.WorkflowRelease;
 import com.agenthub.workflow.domain.model.WorkflowValidationResult;
 import com.agenthub.workflow.domain.repository.WorkflowDefRepository;
@@ -28,6 +29,7 @@ import com.agenthub.workflow.domain.repository.WorkflowDraftRepository;
 import com.agenthub.workflow.domain.repository.WorkflowReleaseRepository;
 import com.agenthub.workflow.domain.service.WorkflowFingerprint;
 import com.agenthub.workflow.domain.service.WorkflowGraphValidator;
+import com.agenthub.workflow.domain.service.WorkflowRunLimits;
 import com.agenthub.workflow.domain.service.WorkflowTenantProvider;
 import com.agenthub.workflow.infra.WorkflowProperties;
 import com.fasterxml.jackson.databind.JsonNode;
@@ -228,7 +230,13 @@ public class WorkflowDefAppService {
         WorkflowDef def = requireDef(id);
         String graphJson = codec.write(graph);
         // 结构校验在写库前做：nodes/edges 不是数组这类坏包不应落库
-        codec.parse(graphJson);
+        WorkflowGraph parsed = codec.parse(graphJson);
+        /*
+         * 运行时限超过平台硬顶时直接拒绝保存：
+         * 这类值发布后也跑不起来，先存下来只会让配置者和运行者对不上；
+         * 文案只用分钟，不把 yml 键名 / 毫秒抛给页面。
+         */
+        rejectInvalidLimits(parsed);
 
         LocalDateTime expected = parseExpected(expectedUpdateTime);
         WorkflowDraft current = requireDraft(id);
@@ -259,6 +267,7 @@ public class WorkflowDefAppService {
         WorkflowBindingSnapshot bindings = bindingResolver.resolve(graph);
         WorkflowValidationResult result = WorkflowGraphValidator.validate(graph, bindings, true,
                 properties.effectiveMaxNodesPerGraph());
+        appendLimitIssues(graph, result);
         return toValidateResp(result);
     }
 
@@ -278,6 +287,7 @@ public class WorkflowDefAppService {
         WorkflowBindingSnapshot bindings = bindingResolver.resolve(graph);
         WorkflowValidationResult result = WorkflowGraphValidator.validate(graph, bindings, true,
                 properties.effectiveMaxNodesPerGraph());
+        appendLimitIssues(graph, result);
         if (!result.passed()) {
             throw new BizException(ErrorCode.BAD_REQUEST, publishFailureMessage(result));
         }
@@ -356,7 +366,34 @@ public class WorkflowDefAppService {
         resp.setWorkflowId(draft.getWorkflowId());
         resp.setGraph(codec.read(draft.getGraphJson()));
         resp.setUpdateTime(draft.getUpdateTime());
+        // 平台硬顶折算成分钟给配置页：页面上只出现分钟，不出现 yml 键名或毫秒
+        resp.setPlatformMaxMinutes(properties.effectiveWallMinutes());
         return resp;
+    }
+
+    /**
+     * 保存草稿前的运行时限校验：任一问题即拒绝保存。
+     *
+     * @param graph 已结构校验的图
+     * @throws BizException 整段 / 单节点上限超过平台硬顶或彼此倒挂
+     */
+    private void rejectInvalidLimits(WorkflowGraph graph) {
+        List<String> issues = WorkflowRunLimits.issues(graph, properties.effectiveWallMs());
+        if (!issues.isEmpty()) {
+            throw new BizException(ErrorCode.BAD_REQUEST, String.join("；", issues));
+        }
+    }
+
+    /**
+     * 把运行时限问题并入校验 / 发布的 errors（走同一份校验结果，页面能看到条目而不是只有一句 toast）。
+     *
+     * @param graph  草稿图
+     * @param result 图校验结果（原地追加）
+     */
+    private void appendLimitIssues(WorkflowGraph graph, WorkflowValidationResult result) {
+        for (String message : WorkflowRunLimits.issues(graph, properties.effectiveWallMs())) {
+            result.getErrors().add(new WorkflowIssue("RUN_LIMITS_INVALID", message, null, null));
+        }
     }
 
     private WorkflowValidateResp toValidateResp(WorkflowValidationResult result) {

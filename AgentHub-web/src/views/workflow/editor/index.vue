@@ -227,6 +227,41 @@
               </button>
             </el-tooltip>
           </div>
+        <!-- 工作流级运行时限：不随选中态隐藏，不选中任何元素也能改；单位分钟，不露内部键名 -->
+        <el-form label-position="top" class="wf-form wf-limits" @submit.prevent>
+          <div class="wf-limits__head">
+            <span class="wf-limits__title">运行时限</span>
+            <span class="wf-limits__hint">留空按平台上限 {{ platformMaxMinutes }} 分钟</span>
+          </div>
+          <el-form-item label="整段运行上限">
+            <el-input
+              v-model="runMinutesText"
+              class="wf-field"
+              placeholder="留空 = 平台上限"
+              inputmode="numeric"
+              maxlength="5"
+              clearable
+              :disabled="!canEdit"
+            >
+              <template #append>分钟</template>
+            </el-input>
+          </el-form-item>
+          <el-form-item label="单节点上限">
+            <el-input
+              v-model="nodeMinutesText"
+              class="wf-field"
+              placeholder="留空 = 不限制单节点"
+              inputmode="numeric"
+              maxlength="5"
+              clearable
+              :disabled="!canEdit"
+            >
+              <template #append>分钟</template>
+            </el-input>
+          </el-form-item>
+          <div v-if="limitsError" class="wf-tip wf-tip--error">{{ limitsError }}</div>
+          <div v-else class="wf-tip">等待用户回复或人工处理的时间不计入这两项。</div>
+        </el-form>
         <template v-if="selectedNode">
           <el-form label-position="top" class="wf-form">
             <el-form-item label="编码 code" required>
@@ -277,6 +312,22 @@
                 :closable="false"
                 class="block-alert"
               />
+              <!--
+                对话停等：勾上后该 Agent 节点产出的问句会进对话正文，运行挂起等同一会话的下一句。
+                不勾＝原行为（节点一次跑完继续往下），因此存量图不用改。
+              -->
+              <el-form-item label="等用户回复">
+                <el-switch
+                  :model-value="selectedNode.data.config.awaitReply === true"
+                  :disabled="!canEdit"
+                  @update:model-value="setAwaitReply"
+                />
+              </el-form-item>
+              <div class="wf-tip">
+                勾上后：本节点产出的问句直接写进工作台对话，运行停在「等待你的回复」；
+                用户在本会话输入框发下一句，会送回同一条运行继续，后续条件边可读
+                <code>$.input.reply</code>。不勾＝节点跑完直接继续，行为与原来一致。
+              </div>
             </template>
 
             <!-- TOOL：直接绑定工具项 -->
@@ -568,6 +619,7 @@ import type {
   WorkflowFlowNodeData,
   WorkflowGraph,
   WorkflowGraphEdge,
+  WorkflowGraphLimits,
   WorkflowGraphNode,
   WorkflowIssue,
   WorkflowMappingSource,
@@ -730,6 +782,55 @@ const publishing = ref(false)
 
 const issues = ref<IssueItem[]>([])
 const lastResult = ref<{ errors: number; warns: number } | null>(null)
+
+/*
+ * 工作流级运行时限（单位分钟）。用文本 ref 而非数字：用户需要能「清空」表示跟随平台，
+ * 数字输入框清空时会变成 0 / NaN，反而更难表达「未配置」。提交前统一解析成整数。
+ */
+const runMinutesText = ref('')
+const nodeMinutesText = ref('')
+/** 平台硬顶（分钟）：由草稿接口下发，页面只显示分钟，不显示 yml 键名与毫秒 */
+const platformMaxMinutes = ref(60)
+
+/** 解析一个「分钟」文本框：空 → null；非正整数 → NaN */
+function parseMinutesText(raw: string): number | null {
+  const text = String(raw ?? '').trim()
+  if (!text) {
+    return null
+  }
+  if (!/^\d+$/.test(text)) {
+    return Number.NaN
+  }
+  const value = Number(text)
+  return value > 0 ? value : Number.NaN
+}
+
+const runMinutesValue = computed(() => parseMinutesText(runMinutesText.value))
+const nodeMinutesValue = computed(() => parseMinutesText(nodeMinutesText.value))
+
+/**
+ * 时限输入的本地校验：只出中文（分钟 + 平台上限），不出现毫秒或配置键。
+ * 后端还会再校验一次，这里只负责让用户保存前就看到问题。
+ */
+const limitsError = computed(() => {
+  const run = runMinutesValue.value
+  const node = nodeMinutesValue.value
+  if (Number.isNaN(run)) {
+    return '整段运行上限请填大于 0 的整数分钟（留空表示跟随平台上限）'
+  }
+  if (run !== null && run > platformMaxMinutes.value) {
+    return `整段运行上限不能超过平台上限 ${platformMaxMinutes.value} 分钟`
+  }
+  if (Number.isNaN(node)) {
+    return '单节点上限请填大于 0 的整数分钟（留空表示不限制单节点）'
+  }
+  // 单节点不得超过整段：整段留空时，整段实际上就是平台上限
+  const effectiveRun = run ?? platformMaxMinutes.value
+  if (node !== null && node > effectiveRun) {
+    return `单节点上限不能超过整段运行上限 ${effectiveRun} 分钟`
+  }
+  return ''
+})
 
 const selected = ref<SelectedElement | null>(null)
 
@@ -1140,6 +1241,16 @@ function buildGraph(): WorkflowGraph {
       config: (data.config ?? {}) as Record<string, unknown>
     }
   })
+  const limits: WorkflowGraphLimits = {}
+  // 只有真的填了才写：空值不落 limits 键，后端按「跟平台硬顶走」处理
+  const runMinutes = runMinutesValue.value
+  const nodeMinutes = nodeMinutesValue.value
+  if (runMinutes !== null && Number.isFinite(runMinutes)) {
+    limits.runMinutes = runMinutes
+  }
+  if (nodeMinutes !== null && Number.isFinite(nodeMinutes)) {
+    limits.nodeMinutes = nodeMinutes
+  }
   return {
     nodes,
     edges,
@@ -1147,17 +1258,25 @@ function buildGraph(): WorkflowGraph {
       x: Math.round(view.x),
       y: Math.round(view.y),
       zoom: Number(view.zoom.toFixed(3))
-    }
+    },
+    ...(Object.keys(limits).length ? { limits } : {})
   }
 }
 
 /**
- * 图签名：只比 nodes / edges，忽略 viewport 与展示字段。
+ * 图签名：比 nodes / edges / 运行时限，忽略 viewport 与展示字段。
+ *
+ * <p>时限必须进签名：只改两个上限不动画布也算「有未保存修改」，
+ * 否则用户改完时限直接点发布，会被「不脏就不存草稿」的路径静默丢掉。
  *
  * @param graph 图
  */
 function graphSignature(graph: WorkflowGraph): string {
-  return JSON.stringify({ nodes: graph.nodes, edges: graph.edges })
+  return JSON.stringify({
+    nodes: graph.nodes,
+    edges: graph.edges,
+    limits: graph.limits ?? null
+  })
 }
 
 /** 落库结构 → 画布节点 */
@@ -1388,6 +1507,10 @@ async function loadAll() {
     const graph = draftResp.data.data.graph || { nodes: [], edges: [] }
     vf.setNodes((graph.nodes || []).map(toFlowNode))
     vf.setEdges((graph.edges || []).map(toFlowEdge))
+    // 运行时限：空表示跟平台走；平台上限由后端折算成分钟下发，页面不出现毫秒与键名
+    runMinutesText.value = graph.limits?.runMinutes ? String(graph.limits.runMinutes) : ''
+    nodeMinutesText.value = graph.limits?.nodeMinutes ? String(graph.limits.nodeMinutes) : ''
+    platformMaxMinutes.value = draftResp.data.data.platformMaxMinutes || 60
     // Agent / 工具选项可能已先加载完成：铺完节点立刻补一次名称，避免首屏闪「Agent #30」
     syncAgentLabels()
     syncToolLabels()
@@ -1475,6 +1598,11 @@ async function onSaveDraft(silent = false): Promise<boolean> {
   }
   if (!canEdit.value) {
     ElMessage.warning('没有编辑权限，无法保存草稿')
+    return false
+  }
+  // 时限本地先拦：后端也会拦，但先给用户一句直接的中文，省一次往返
+  if (limitsError.value) {
+    ElMessage.error(limitsError.value)
     return false
   }
   saving.value = true
@@ -1795,6 +1923,24 @@ function setNodeTool(value: number | string | undefined) {
     config: { ...node.data.config, toolId },
     toolTitle: tool?.title ?? '',
     toolName: tool?.name ?? ''
+  }
+}
+
+/**
+ * 切换 Agent 节点的「等用户回复」。
+ *
+ * <p>关掉时显式写 false 而不是删键：草稿里留一个明确的 false，发布快照与后端读取口径一致。
+ *
+ * @param value 开关值
+ */
+function setAwaitReply(value: boolean | string | number) {
+  const node = selectedNode.value
+  if (!node) {
+    return
+  }
+  node.data = {
+    ...node.data,
+    config: { ...node.data.config, awaitReply: value === true }
   }
 }
 
@@ -2575,6 +2721,32 @@ onActivated(() => {
 
 .wf-tip--error {
   color: var(--ah-danger);
+}
+
+/* 运行时限区块：与节点属性用同一条分隔线，避免两块表单挤在一起 */
+.wf-limits {
+  margin: 0 0 14px;
+  padding: 0 0 10px;
+  border-bottom: 1px solid var(--ah-border);
+}
+
+.wf-limits__head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 8px;
+  margin-bottom: 4px;
+}
+
+.wf-limits__title {
+  color: var(--ah-text);
+  font-size: 13px;
+  font-weight: 600;
+}
+
+.wf-limits__hint {
+  color: var(--ah-text-faint);
+  font-size: 12px;
 }
 
 .wf-delete {

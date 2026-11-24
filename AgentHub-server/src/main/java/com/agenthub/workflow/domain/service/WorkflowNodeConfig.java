@@ -61,6 +61,34 @@ public final class WorkflowNodeConfig {
     }
 
     /**
+     * 读取布尔字段，容忍 true/false、1/0 与 "true"/"false" 文本。
+     *
+     * @param config config，可空
+     * @param field  字段名，如 awaitReply
+     * @return true 表示显式打开；缺失或非法一律按 false
+     */
+    public static boolean trueValue(JsonNode config, String field) {
+        if (config == null || !config.isObject()) {
+            return false;
+        }
+        JsonNode value = config.get(field);
+        if (value == null || value.isNull()) {
+            return false;
+        }
+        if (value.isBoolean()) {
+            return value.asBoolean();
+        }
+        if (value.isIntegralNumber()) {
+            return value.asInt() != 0;
+        }
+        if (value.isTextual()) {
+            String text = value.asText();
+            return text != null && "true".equalsIgnoreCase(text.trim());
+        }
+        return false;
+    }
+
+    /**
      * 读取对象字段（如 inputMapping / outputMapping）。
      *
      * @param config config，可空

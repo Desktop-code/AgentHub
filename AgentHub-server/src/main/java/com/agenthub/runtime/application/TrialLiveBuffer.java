@@ -669,6 +669,10 @@ public class TrialLiveBuffer {
          *
          * <p>为什么要覆盖而不是追加：这是同一张卡片的快照（运行中 → 已完成），
          * 追加会让刷新时看到一串互相矛盾的旧状态；覆盖后视觉与实时完全一致。
+         *
+         * <p>为什么不能再按字符截断：快照会被刷新页面直接读走并 JSON 解析，
+         * 半截字符串会让整张卡消失。装得下就存整份；装不下退成紧凑骨架（仍是合法 JSON），
+         * 读侧按 {@code runId} 从库里补回节点产出。
          */
         @Override
         public void workflow(WorkflowRunView view) {
@@ -676,9 +680,13 @@ public class TrialLiveBuffer {
             if (payload.isEmpty()) {
                 return;
             }
+            String stored = payload.length() <= LIVE_TEXT_LIMIT
+                    ? payload : WorkflowRunJson.compact(view);
+            if (stored.isEmpty()) {
+                return;
+            }
             // 同一张卡片只留最新快照：先摘掉上一份，再按当前顺序追加
-            turn.replaceWorkflow(TrialTexts.summary(WorkflowRunJson.summary(view)),
-                    TrialTexts.content(payload, LIVE_TEXT_LIMIT));
+            turn.replaceWorkflow(TrialTexts.summary(WorkflowRunJson.summary(view)), stored);
         }
     }
 }

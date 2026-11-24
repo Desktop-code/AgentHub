@@ -4,7 +4,10 @@ import com.agenthub.runtime.domain.model.EventType;
 import com.agenthub.runtime.domain.model.RunEvent;
 import com.agenthub.runtime.domain.repository.RunEventRepository;
 import com.agenthub.runtime.domain.service.TrialTexts;
+import com.agenthub.runtime.domain.service.WorkflowRunJson;
 import com.agenthub.runtime.infra.agentscope.TrialProperties;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import org.springframework.stereotype.Component;
 
 import java.time.LocalDateTime;
@@ -15,6 +18,8 @@ import java.time.LocalDateTime;
  */
 @Component
 public class TrialEventWriter {
+
+    private static final Logger log = LoggerFactory.getLogger(TrialEventWriter.class);
 
     private final RunEventRepository events;
     private final TrialProperties properties;
@@ -62,7 +67,22 @@ public class TrialEventWriter {
         event.setSeq(seq);
         event.setEventType(type.code());
         event.setSummary(TrialTexts.summary(summary));
-        String body = TrialTexts.content(content, contentLimit());
+        /*
+         * 工作流卡片走单独的落库口径：正文是 JSON，一旦按普通文本截断就会变成半截字符串，
+         * 刷新回放解析失败、整张卡消失（历史上正是「跑完刷新又变回询问」的根因）。
+         * 这里先收成骨架（剥掉节点产出、压到限内），再整份落库，永不返回半截 JSON。
+         */
+        String body;
+        if (type == EventType.WORKFLOW) {
+            body = WorkflowRunJson.forStorage(content, contentLimit());
+            if (body.isEmpty() && content != null && !content.isBlank()) {
+                // 只记长度与位置，不记正文：卡片正文可能含业务内容
+                log.warn("工作流卡片不可安全落库，已跳过 sessionId={} seq={} 原长度={}",
+                        sessionId, seq, content.length());
+            }
+        } else {
+            body = TrialTexts.content(content, contentLimit());
+        }
         // 空正文不落空串，旧数据和「没有结果」都表现为 null
         event.setContentText(body.isEmpty() ? null : body);
         event.setTokenPrompt(prompt);

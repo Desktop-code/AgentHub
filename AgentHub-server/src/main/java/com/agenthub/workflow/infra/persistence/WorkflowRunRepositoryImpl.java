@@ -50,6 +50,10 @@ public class WorkflowRunRepositoryImpl implements WorkflowRunRepository {
         entity.setOutputJson(run.getOutputJson());
         entity.setErrorSummary(run.getErrorSummary());
         entity.setGraphJson(run.getGraphJson());
+        entity.setRunLimitMs(run.getRunLimitMs());
+        entity.setNodeLimitMs(run.getNodeLimitMs());
+        entity.setRunDeadline(run.getRunDeadline());
+        entity.setWaitingSince(run.getWaitingSince());
         entity.setStartTime(run.getStartTime());
         entity.setEndTime(run.getEndTime());
         entity.setCreatedBy(run.getCreatedBy());
@@ -102,6 +106,24 @@ public class WorkflowRunRepositoryImpl implements WorkflowRunRepository {
             wrapper.set(WorkflowRunEntity::getEndTime, endTime);
         }
         mapper.update(null, wrapper);
+    }
+
+    /** {@inheritDoc} */
+    @Override
+    public void updateRunLimits(Long id, Long runLimitMs, Long nodeLimitMs, LocalDateTime runDeadline,
+                                LocalDateTime waitingSince, Long operatorId) {
+        if (id == null) {
+            return;
+        }
+        // 显式 set：null 也要落成 NULL（恢复调度时清空等待时刻），不能用「null 表示不改」的写法
+        mapper.update(null, new LambdaUpdateWrapper<WorkflowRunEntity>()
+                .eq(WorkflowRunEntity::getId, id)
+                .set(WorkflowRunEntity::getRunLimitMs, runLimitMs)
+                .set(WorkflowRunEntity::getNodeLimitMs, nodeLimitMs)
+                .set(WorkflowRunEntity::getRunDeadline, runDeadline)
+                .set(WorkflowRunEntity::getWaitingSince, waitingSince)
+                .set(WorkflowRunEntity::getUpdatedBy, operatorId)
+                .set(WorkflowRunEntity::getUpdateTime, LocalDateTime.now()));
     }
 
     /** {@inheritDoc} */
@@ -164,12 +186,13 @@ public class WorkflowRunRepositoryImpl implements WorkflowRunRepository {
         if (workflowId == null || workbenchSessionId == null) {
             return Optional.empty();
         }
-        // 只看未结束两态：终态 run 不阻止下一轮重新发起
+        // 只看未结束态：终态 run 不阻止下一轮重新发起；等待回复也属于「同一条运行还没走完」
         WorkflowRunEntity entity = mapper.selectOne(new LambdaQueryWrapper<WorkflowRunEntity>()
                 .eq(WorkflowRunEntity::getWorkflowId, workflowId)
                 .eq(WorkflowRunEntity::getWorkbenchSessionId, workbenchSessionId)
                 .in(WorkflowRunEntity::getStatus,
-                        WorkflowRunStatus.RUNNING.name(), WorkflowRunStatus.PAUSED_HUMAN.name())
+                        WorkflowRunStatus.RUNNING.name(), WorkflowRunStatus.PAUSED_HUMAN.name(),
+                        WorkflowRunStatus.WAITING_REPLY.name())
                 .orderByDesc(WorkflowRunEntity::getId)
                 .last("LIMIT 1"));
         return entity == null ? Optional.empty() : Optional.of(toDomain(entity));
@@ -181,17 +204,47 @@ public class WorkflowRunRepositoryImpl implements WorkflowRunRepository {
         if (workbenchSessionId == null) {
             return List.of();
         }
-        // 未结束三态：CREATED 也要算——run 已落库但调度线程还没起时，停止必须能覆盖到它；
+        // 未结束四态：CREATED 也要算——run 已落库但调度线程还没起时，停止必须能覆盖到它；
         // 终态 run 不需要取消，也不应让停止请求因它失败
         return mapper.selectList(new LambdaQueryWrapper<WorkflowRunEntity>()
                         .eq(WorkflowRunEntity::getWorkbenchSessionId, workbenchSessionId)
                         .in(WorkflowRunEntity::getStatus,
                                 WorkflowRunStatus.CREATED.name(),
-                                WorkflowRunStatus.RUNNING.name(), WorkflowRunStatus.PAUSED_HUMAN.name())
+                                WorkflowRunStatus.RUNNING.name(), WorkflowRunStatus.PAUSED_HUMAN.name(),
+                                WorkflowRunStatus.WAITING_REPLY.name())
                         .orderByDesc(WorkflowRunEntity::getId))
                 .stream()
                 .map(this::toDomain)
                 .toList();
+    }
+
+    /** {@inheritDoc} */
+    @Override
+    public Optional<WorkflowRun> findWaitingReplyByWorkbenchSession(Long workbenchSessionId) {
+        if (workbenchSessionId == null) {
+            return Optional.empty();
+        }
+        // 只认等待回复这一态：人工待办的等待不走对话续跑，不能被这里抢走
+        WorkflowRunEntity entity = mapper.selectOne(new LambdaQueryWrapper<WorkflowRunEntity>()
+                .eq(WorkflowRunEntity::getWorkbenchSessionId, workbenchSessionId)
+                .eq(WorkflowRunEntity::getStatus, WorkflowRunStatus.WAITING_REPLY.name())
+                .orderByDesc(WorkflowRunEntity::getId)
+                .last("LIMIT 1"));
+        return entity == null ? Optional.empty() : Optional.of(toDomain(entity));
+    }
+
+    /** {@inheritDoc} */
+    @Override
+    public void updateInput(Long id, String inputJson, Long operatorId) {
+        if (id == null || inputJson == null) {
+            return;
+        }
+        // 只写 input_json：状态仍由条件迁移改写，避免与调度线程互相覆盖
+        mapper.update(null, new LambdaUpdateWrapper<WorkflowRunEntity>()
+                .eq(WorkflowRunEntity::getId, id)
+                .set(WorkflowRunEntity::getInputJson, inputJson)
+                .set(WorkflowRunEntity::getUpdatedBy, operatorId)
+                .set(WorkflowRunEntity::getUpdateTime, LocalDateTime.now()));
     }
 
     private WorkflowRun toDomain(WorkflowRunEntity entity) {
@@ -213,6 +266,10 @@ public class WorkflowRunRepositoryImpl implements WorkflowRunRepository {
         run.setOutputJson(entity.getOutputJson());
         run.setErrorSummary(entity.getErrorSummary());
         run.setGraphJson(entity.getGraphJson());
+        run.setRunLimitMs(entity.getRunLimitMs());
+        run.setNodeLimitMs(entity.getNodeLimitMs());
+        run.setRunDeadline(entity.getRunDeadline());
+        run.setWaitingSince(entity.getWaitingSince());
         run.setStartTime(entity.getStartTime());
         run.setEndTime(entity.getEndTime());
         run.setCreatedBy(entity.getCreatedBy());

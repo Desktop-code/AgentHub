@@ -54,6 +54,28 @@ public class WorkflowRun {
     private String errorSummary;
     /** 建 run 时拷贝的不可变图 JSON */
     private String graphJson;
+    /**
+     * 本次运行生效的整段上限（毫秒）。
+     *
+     * <p>建 run 时按「工作流配置与平台硬顶取小」算一次并冻结，
+     * 之后改工作流配置 / 改 yml 都不影响已在跑的实例。
+     */
+    private Long runLimitMs;
+    /**
+     * 本次运行生效的单节点上限（毫秒）；null 或 0 表示未配置。
+     */
+    private Long nodeLimitMs;
+    /**
+     * 整段运行的绝对截止时间（活动时间口径）。
+     *
+     * <p>等待人工 / 等待用户回复期间不计时；恢复调度时把等待时长补回截止时间，
+     * 因此刷新、回放看到的是同一个截止，不会从头计时。
+     */
+    private LocalDateTime runDeadline;
+    /**
+     * 进入等待（人工 / 用户回复）的时刻；非空表示当前挂起、不计入任何时限。
+     */
+    private LocalDateTime waitingSince;
     /** 进入 RUNNING 的时间 */
     private LocalDateTime startTime;
     /** 终态时间 */

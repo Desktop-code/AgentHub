@@ -172,6 +172,7 @@
           :detached="detached"
           :can-send="canSend"
           :can-stop="canStopRun"
+          :waiting-reply="waitingReply"
           :session-ready="canSend"
           :blocked-hint="blockedHint"
           :can-approve="canSend"
@@ -347,6 +348,7 @@ const {
   pendingForceRoute,
   canPickRoute,
   canStopRun,
+  waitingReply,
   draftToken,
   init,
   newSession,

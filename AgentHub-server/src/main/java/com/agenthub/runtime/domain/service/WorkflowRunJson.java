@@ -19,8 +19,14 @@ import java.util.Map;
  * <pre>
  * {"name":"制度要点与报告","code":"policy_brief_report","status":"RUNNING","answer":"",
  *  "nodes":[{"code":"policy_points","name":"知识问答","type":"AGENT",
- *            "status":"RUNNING","note":"执行中"}]}
+ *            "status":"RUNNING","note":"执行中",
+ *            "output":"节点正文","steps":[{"type":"REASONING","name":"","content":"…","state":""}],
+ *            "files":[{"fileName":"game.html","size":1234}],
+ *            "reply":"HTML/CSS/JavaScript 单页"}]}
  * </pre>
+ *
+ * <p>节点内字段只在非空时写入：旧卡片没有它们时前端回落卡级 answer，
+ * 新卡片把过程 / 正文 / 文件 / 用户回复挂在对应节点里。
  *
  * <p>两条来源共用本类：实时 SSE {@code workflow} 帧与落库 {@code WORKFLOW} 事件正文。
  * 前端一套解析即可覆盖「实时推送 / 内存快照 / 刷新回放」。
@@ -30,6 +36,30 @@ import java.util.Map;
 public final class WorkflowRunJson {
 
     private static final ObjectMapper JSON = new ObjectMapper();
+
+    /**
+     * 落库骨架的版本号。读侧只补全「带这个版本号」的卡片；
+     * 旧卡片（没有该键）保持原样，避免把历史全量卡也当成骨架去重算。
+     */
+    public static final int STORAGE_VERSION = 2;
+
+    /**
+     * 落库骨架的字符硬顶。
+     *
+     * <p>为什么不等于 {@code content_text} 的 32K：那个上限来自「截断纯文本」的通道，
+     * 对 JSON 做字符截断必然产出半截字符串，前端只能整块丢弃。这里在写库前就把骨架压到
+     * 远低于 32K，保证<b>永不触发那一次截断</b>；节点产出等大字段本来就不进事件。
+     */
+    public static final int STORAGE_LIMIT = 16 * 1024;
+
+    /** 每个节点落库保留的过程步数：过程只是辅助信息，卡片默认也不全展开 */
+    private static final int STORAGE_STEPS_PER_NODE = 4;
+
+    /** 单条过程步落库的展示硬顶 */
+    private static final int STORAGE_STEP_MAX = 400;
+
+    /** 骨架仍超限时，正文逐档压缩；最后一档只留一句摘要 */
+    private static final int[] ANSWER_FALLBACKS = {4000, 2000, 800, 300};
 
     private WorkflowRunJson() {
     }
@@ -47,6 +77,10 @@ public final class WorkflowRunJson {
         }
         body.put("name", view.name());
         body.put("code", view.code());
+        // 运行主键：落库指针，读侧靠它按 run 现算节点产出；前端不消费，旧卡片没有这个键
+        if (view.runId() != null) {
+            body.put("runId", view.runId());
+        }
         body.put("status", view.status());
         body.put("answer", view.answer());
         List<Map<String, Object>> nodes = new ArrayList<>();
@@ -57,17 +91,90 @@ public final class WorkflowRunJson {
             one.put("type", node.type());
             one.put("status", node.status());
             one.put("note", node.note());
+            // 节点内过程 / 正文 / 文件：只在真的有内容时写，旧卡片回放不因多出空数组而变胖
+            if (!node.output().isBlank()) {
+                one.put("output", node.output());
+            }
+            if (!node.steps().isEmpty()) {
+                List<Map<String, Object>> steps = new ArrayList<>();
+                for (WorkflowRunView.Step step : node.steps()) {
+                    Map<String, Object> item = new LinkedHashMap<>();
+                    item.put("type", step.type());
+                    item.put("name", step.name());
+                    item.put("content", step.content());
+                    item.put("state", step.state());
+                    steps.add(item);
+                }
+                one.put("steps", steps);
+            }
+            if (!node.files().isEmpty()) {
+                List<Map<String, Object>> files = new ArrayList<>();
+                for (WorkflowRunView.NodeFile file : node.files()) {
+                    Map<String, Object> item = new LinkedHashMap<>();
+                    item.put("fileName", file.fileName());
+                    item.put("size", file.size());
+                    files.add(item);
+                }
+                one.put("files", files);
+            }
+            /*
+             * 用户对询问的回复：只挂在被答复的询问节点上，非空才写。
+             * 这条不落成新的用户消息，是「我答了什么」的唯一展示来源。
+             */
+            if (!node.reply().isBlank()) {
+                one.put("reply", node.reply());
+            }
             nodes.add(one);
         }
         body.put("nodes", nodes);
+        // 可点选项：只在停等询问时出现；没有就完全不写这个键，老前端无感
+        WorkflowRunView.Choice choice = view.choice();
+        if (choice != null && choice.usable()) {
+            Map<String, Object> pick = new LinkedHashMap<>();
+            pick.put("question", choice.question());
+            List<Map<String, Object>> options = new ArrayList<>();
+            for (WorkflowRunView.Choice.Option option : choice.options()) {
+                Map<String, Object> one = new LinkedHashMap<>();
+                one.put("id", option.id());
+                one.put("label", option.label());
+                options.add(one);
+            }
+            pick.put("options", options);
+            body.put("choice", pick);
+        }
+        /*
+         * 运行时限：只在算得出时写这个键，老卡片 / 老前端不受影响。
+         * 送绝对截止而不是剩余毫秒——前端每次按同一个截止现算，
+         * 刷新、离开再进、回放看到的剩余才不会各自从头计时。
+         */
+        WorkflowRunView.Limits limits = view.limits();
+        if (limits != null) {
+            Map<String, Object> one = new LinkedHashMap<>();
+            one.put("runLimitMs", limits.runLimitMs());
+            one.put("runDeadlineAt", limits.runDeadlineAt());
+            if (limits.waitingAt() != null) {
+                one.put("waitingAt", limits.waitingAt());
+            }
+            if (limits.nodeCode() != null) {
+                one.put("nodeCode", limits.nodeCode());
+                one.put("nodeName", limits.nodeName() == null ? "" : limits.nodeName());
+            }
+            if (limits.nodeLimitMs() != null) {
+                one.put("nodeLimitMs", limits.nodeLimitMs());
+                one.put("nodeDeadlineAt", limits.nodeDeadlineAt());
+            }
+            body.put("limits", one);
+        }
         return body;
     }
 
     /**
-     * 写成落库事件正文（紧凑 JSON）。
+     * 写成完整卡片 JSON（SSE 帧 / 内存快照用，含节点产出）。
+     *
+     * <p>落库不要用这个：{@link #compact(WorkflowRunView)} 才是不带节点产出的骨架形态。
      *
      * @param view 执行卡片视图；可空
-     * @return JSON 字符串；视图为空或序列化失败时返回空串（调用方据此跳过落库）
+     * @return JSON 字符串；视图为空或序列化失败时返回空串（调用方据此跳过出站）
      */
     public static String write(WorkflowRunView view) {
         if (view == null) {
@@ -77,6 +184,224 @@ public final class WorkflowRunJson {
             return JSON.writeValueAsString(payload(view));
         } catch (JsonProcessingException ex) {
             // 载荷只含字符串，正常不会失败；失败时宁可不落库，也不把异常抛进运行主链路
+            return "";
+        }
+    }
+
+    /**
+     * 写成落库骨架（{@code content_text} 用）。
+     *
+     * <p>与 {@link #write(WorkflowRunView)} 的区别只有一个：<b>不带节点产出</b>。
+     * 节点正文的真源是 {@code workflow_node_run.output_json}，事件里再抄一份既浪费列宽，
+     * 又会在多节点 / 长代码时把整份 JSON 顶过截断线。刷新回放由服务端按 {@code runId}
+     * 现算（同一套节点取文口径），因此这里只要留下卡片骨架与指针。
+     *
+     * <p>返回值保证是合法 JSON 且不超过 {@link #STORAGE_LIMIT}：超限时依次丢过程步、
+     * 压正文、最后只留卡头，绝不返回半截字符串。
+     *
+     * @param view 执行卡片视图；可空
+     * @return 紧凑 JSON；视图为空时为空串
+     */
+    public static String compact(WorkflowRunView view) {
+        if (view == null) {
+            return "";
+        }
+        ObjectNode body = JSON.valueToTree(payload(view));
+        body.put("v", STORAGE_VERSION);
+        slimNodes(body);
+        return fit(body, STORAGE_LIMIT);
+    }
+
+    /**
+     * 把任意来源的卡片 JSON 收成可安全落库的形态。
+     *
+     * <p>为什么要这一步：直播帧与内存快照仍走 {@link #write(WorkflowRunView)}（含节点产出），
+     * 停止补落库等路径会把它们直接写进事件。这里统一剥掉产出、压缩过程，再套用上限，
+     * 避免「实时能看、刷新丢卡」再次发生。
+     *
+     * <p>已经是骨架（{@code v >= STORAGE_VERSION}）且不超限的文本原样返回，不重新序列化，
+     * 避免字段顺序与数值精度被改写。
+     *
+     * @param raw 卡片 JSON 文本；可空
+     * @return 可落库的 JSON；非对象 / 解析失败时为空串（调用方跳过落库，不写半截）
+     */
+    public static String forStorage(String raw) {
+        return forStorage(raw, STORAGE_LIMIT);
+    }
+
+    /**
+     * 按调用方给定的上限收成可落库形态。
+     *
+     * <p>上限取 {@code min(configured, STORAGE_LIMIT)}：运维把 {@code content-limit-chars}
+     * 调小时，卡片也跟着收，不会出现「配置说 8K、卡片却写 16K」。
+     * 非正数按 {@link #STORAGE_LIMIT} 处理。
+     *
+     * @param raw   卡片 JSON 文本；可空
+     * @param limit 期望的字符上限
+     * @return 可落库的 JSON；非对象 / 解析失败时为空串
+     */
+    public static String forStorage(String raw, int limit) {
+        if (raw == null || raw.isBlank()) {
+            return "";
+        }
+        int max = limit <= 0 ? STORAGE_LIMIT : Math.min(limit, STORAGE_LIMIT);
+        String text = raw.trim();
+        try {
+            JsonNode root = JSON.readTree(text);
+            if (!(root instanceof ObjectNode body)) {
+                return "";
+            }
+            if (body.path("v").asInt(0) >= STORAGE_VERSION && text.length() <= max
+                    && !hasNodeOutput(body)) {
+                return text;
+            }
+            body.put("v", STORAGE_VERSION);
+            slimNodes(body);
+            return fit(body, max);
+        } catch (JsonProcessingException ex) {
+            // 半截 JSON（历史脏数据）：无法安全修好，宁可不写，交给前端出占位卡
+            return "";
+        }
+    }
+
+    /** 是否还有节点的 {@code output}：旧全量卡会带上，需要剥掉后重新压到限内。 */
+    private static boolean hasNodeOutput(ObjectNode body) {
+        JsonNode nodes = body.get("nodes");
+        if (!(nodes instanceof ArrayNode list)) {
+            return false;
+        }
+        for (JsonNode item : list) {
+            if (item instanceof ObjectNode node && node.has("output")) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    /**
+     * 剥掉节点产出、压缩过程步。
+     *
+     * <p>只动节点内部：卡片头、正文、选项、时限原样保留；用户回复保留（它很小，
+     * 且是「我答了什么」的唯一展示来源，库里另有 reply_text 作为持久真源）。
+     *
+     * @param body 卡片 JSON 对象（原地修改）
+     */
+    private static void slimNodes(ObjectNode body) {
+        JsonNode nodes = body.get("nodes");
+        if (!(nodes instanceof ArrayNode list)) {
+            return;
+        }
+        for (JsonNode item : list) {
+            if (!(item instanceof ObjectNode node)) {
+                continue;
+            }
+            // 节点产出是真源表里的字段，不进事件正文
+            node.remove("output");
+            trimSteps(node);
+        }
+    }
+
+    /** 过程步只留前 N 条、每条截到展示硬顶；超出的过程对回放没有信息增量。 */
+    private static void trimSteps(ObjectNode node) {
+        JsonNode steps = node.get("steps");
+        if (!(steps instanceof ArrayNode list) || list.isEmpty()) {
+            node.remove("steps");
+            return;
+        }
+        ArrayNode kept = JSON.createArrayNode();
+        for (JsonNode step : list) {
+            if (kept.size() >= STORAGE_STEPS_PER_NODE) {
+                break;
+            }
+            if (!(step instanceof ObjectNode one)) {
+                continue;
+            }
+            String content = one.path("content").asText("");
+            if (content.length() > STORAGE_STEP_MAX) {
+                one.put("content", clipRaw(content, STORAGE_STEP_MAX));
+            }
+            kept.add(one);
+        }
+        if (kept.isEmpty()) {
+            node.remove("steps");
+        } else {
+            node.set("steps", kept);
+        }
+    }
+
+    /**
+     * 逐档压缩到给定上限以内。
+     *
+     * <p>顺序是有意为之：<b>先丢过程、再压正文、最后丢节点表</b>。
+     * 过程是可选细节；正文是用户已经看过的字（尽量保留）；节点状态是卡片的结构，
+     * 只有在前两者都压到极限仍超限时才放弃（此时读侧仍能按 runId 补回节点）。
+     *
+     * @param body  卡片 JSON（原地修改）
+     * @param limit 字符上限
+     * @return 不超过上限的 JSON 文本；序列化失败时为空串
+     */
+    private static String fit(ObjectNode body, int limit) {
+        String text = write(body);
+        if (text.isEmpty() || text.length() <= limit) {
+            return text;
+        }
+        // 1) 过程整块丢掉：节点状态 / 正文 / 选项仍在
+        if (stripAllSteps(body)) {
+            text = write(body);
+            if (text.length() <= limit) {
+                return text;
+            }
+        }
+        // 2) 正文逐档压缩
+        String answer = body.path("answer").asText("");
+        for (int cap : ANSWER_FALLBACKS) {
+            body.put("answer", clipRaw(answer, cap));
+            text = write(body);
+            if (text.length() <= limit) {
+                return text;
+            }
+        }
+        // 3) 极端兜底：只留卡头，节点表整个不要（读侧仍按 runId 现算）
+        body.remove("nodes");
+        body.remove("choice");
+        body.remove("limits");
+        text = write(body);
+        if (text.length() <= limit) {
+            return text;
+        }
+        // 4) 理论不可达（卡头只有几个短字段）：留空表示不可安全落库
+        return "";
+    }
+
+    /** 一次清掉所有节点的过程步；返回是否真的删过。 */
+    private static boolean stripAllSteps(ObjectNode body) {
+        boolean removed = false;
+        JsonNode nodes = body.get("nodes");
+        if (nodes instanceof ArrayNode list) {
+            for (JsonNode item : list) {
+                if (item instanceof ObjectNode node && node.has("steps")) {
+                    node.remove("steps");
+                    removed = true;
+                }
+            }
+        }
+        return removed;
+    }
+
+    /** 简单字符硬截（不折叠换行）：用于落库骨架里的正文与过程，追一个省略号。 */
+    private static String clipRaw(String text, int max) {
+        String value = text == null ? "" : text;
+        if (value.length() <= max) {
+            return value;
+        }
+        return value.substring(0, Math.max(0, max - 1)) + "…";
+    }
+
+    /** 序列化骨架；失败返回空串（调用方据此跳过落库）。 */
+    private static String write(ObjectNode body) {
+        try {
+            return JSON.writeValueAsString(body);
+        } catch (JsonProcessingException ex) {
             return "";
         }
     }
@@ -109,6 +434,17 @@ public final class WorkflowRunJson {
                 return json;
             }
             body.put("status", "CANCELLED");
+            /*
+             * 已中断：不再有「当前节点」与「剩余」可言。
+             * 只清节点级字段与等待时刻，整段上限 / 截止留着，回放仍能解释这段跑了多久。
+             */
+            if (body.get("limits") instanceof ObjectNode limits) {
+                limits.remove("nodeCode");
+                limits.remove("nodeName");
+                limits.remove("nodeLimitMs");
+                limits.remove("nodeDeadlineAt");
+                limits.remove("waitingAt");
+            }
             JsonNode nodes = body.get("nodes");
             if (nodes instanceof ArrayNode list) {
                 for (JsonNode item : list) {
@@ -116,8 +452,9 @@ public final class WorkflowRunJson {
                         continue;
                     }
                     String nodeStatus = node.path("status").asText("").trim().toUpperCase();
-                    if ("RUNNING".equals(nodeStatus) || "WAITING_HUMAN".equals(nodeStatus)) {
-                        // 与 WorkflowNodeRunRepository.cancelOpen 同一口径：在途节点落成 CANCELLED
+                    if ("RUNNING".equals(nodeStatus) || "WAITING_HUMAN".equals(nodeStatus)
+                            || "WAITING_REPLY".equals(nodeStatus)) {
+                        // 与 WorkflowNodeRunRepository.cancelOpen 同一口径：在途 / 等待中的节点落成 CANCELLED
                         node.put("status", "CANCELLED");
                         node.put("note", "已中断");
                     } else if ("PENDING".equals(nodeStatus)) {
@@ -228,6 +565,7 @@ public final class WorkflowRunJson {
             case "FAILED" -> "运行失败";
             case "CANCELLED" -> "已取消";
             case "PAUSED_HUMAN" -> "等待人工处理";
+            case "WAITING_REPLY" -> "等待你的回复";
             case "CREATED" -> "准备运行";
             default -> "运行中";
         };

@@ -434,10 +434,10 @@ const myTasks = computed<WorkflowHumanTaskRow[]>(() =>
  */
 const isRunning = computed(() => starting.value || runDetail.value?.status === 'RUNNING')
 
-/** 取消只对 RUNNING / PAUSED_HUMAN 有意义 */
+/** 取消只对 RUNNING / PAUSED_HUMAN / WAITING_REPLY 有意义 */
 const canCancel = computed(() => {
   const status = runDetail.value?.status
-  return status === 'RUNNING' || status === 'PAUSED_HUMAN'
+  return status === 'RUNNING' || status === 'PAUSED_HUMAN' || status === 'WAITING_REPLY'
 })
 
 /** 摘要栏版本号：跟着当前选中的发布版本走 */
@@ -469,7 +469,7 @@ const statusTone = computed<'running' | 'success' | 'failed' | 'muted'>(() => {
   if (status === 'FAILED' || status === 'CANCELLED') {
     return 'failed'
   }
-  if (status === 'PAUSED_HUMAN') {
+  if (status === 'PAUSED_HUMAN' || status === 'WAITING_REPLY') {
     return 'running'
   }
   return 'muted'
@@ -836,6 +836,8 @@ async function onStart() {
       ElMessage.success('执行成功')
     } else if (data.data.status === 'PAUSED_HUMAN') {
       ElMessage.warning('已停在人工节点，请在下方处理待办')
+    } else if (data.data.status === 'WAITING_REPLY') {
+      ElMessage.warning('已停在等待回复节点；回到对话输入下一句即可继续这条运行')
     } else if (data.data.status === 'FAILED') {
       ElMessage.error(data.data.errorSummary || '执行失败')
     }
@@ -1205,6 +1207,7 @@ function runStatusLabel(status: string): string {
     CREATED: '已创建',
     RUNNING: '运行中',
     PAUSED_HUMAN: '等待人工',
+    WAITING_REPLY: '等待回复',
     SUCCESS: '成功',
     FAILED: '失败',
     CANCELLED: '已取消'
@@ -1221,6 +1224,7 @@ function nodeStatusLabel(status: string): string {
     FAILED: '失败',
     SKIPPED: '已跳过',
     WAITING_HUMAN: '等待人工',
+    WAITING_REPLY: '等待回复',
     CANCELLED: '已取消'
   }
   return map[status] || status
@@ -1229,7 +1233,7 @@ function nodeStatusLabel(status: string): string {
 /** run 状态 → Element Plus tag 类型 */
 function runTagType(status: string): 'success' | 'warning' | 'danger' | 'info' | 'primary' {
   if (status === 'SUCCESS') return 'success'
-  if (status === 'PAUSED_HUMAN') return 'warning'
+  if (status === 'PAUSED_HUMAN' || status === 'WAITING_REPLY') return 'warning'
   if (status === 'FAILED' || status === 'CANCELLED') return 'danger'
   if (status === 'RUNNING') return 'primary'
   return 'info'
@@ -1238,7 +1242,7 @@ function runTagType(status: string): 'success' | 'warning' | 'danger' | 'info' |
 /** 节点状态 → Element Plus tag 类型 */
 function nodeTagType(status: string): 'success' | 'warning' | 'danger' | 'info' | 'primary' {
   if (status === 'SUCCESS') return 'success'
-  if (status === 'WAITING_HUMAN' || status === 'RUNNING') return 'warning'
+  if (status === 'WAITING_HUMAN' || status === 'WAITING_REPLY' || status === 'RUNNING') return 'warning'
   if (status === 'FAILED') return 'danger'
   return 'info'
 }

@@ -195,8 +195,12 @@ export interface TrialFileChunk {
 export interface TrialChoiceChunk {
   /** 一句话问题；可能为空串 */
   question: string
-  /** 2~6 个选项，顺序即展示顺序 */
+  /** 2~6 个选项，顺序即展示顺序；回复态可为空（选项已清掉） */
   options: { id: string; label: string }[]
+  /** 用户已答复的展示文案；未答复为空 */
+  reply?: string
+  /** true 表示方案正停在这位子专家处等用户 */
+  waiting?: boolean
 }
 
 /**
@@ -239,7 +243,7 @@ export interface TrialWorkflowChunk {
   name?: string
   /** 工作流编码 */
   code?: string
-  /** CREATED / RUNNING / PAUSED_HUMAN / SUCCESS / FAILED / CANCELLED */
+  /** CREATED / RUNNING / PAUSED_HUMAN / WAITING_REPLY / SUCCESS / FAILED / CANCELLED */
   status?: string
   /** 终答文本；运行中为空 */
   answer?: string
