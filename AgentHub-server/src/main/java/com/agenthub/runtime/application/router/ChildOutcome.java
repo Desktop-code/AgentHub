@@ -1,6 +1,7 @@
 package com.agenthub.runtime.application.router;
 
 import com.agenthub.agent.domain.model.AgentDef;
+import com.agenthub.runtime.domain.model.ParticipantView;
 import com.agenthub.runtime.domain.model.TrialTurn;
 import com.agenthub.runtime.domain.model.WorkflowRunView;
 
@@ -23,10 +24,12 @@ import java.util.List;
  * @param workflow 工作流目标的执行卡片终态（只有 WORKFLOW 目标会非空）；落库后刷新仍能看卡片
  * @param conclusionName 目标方案自己的汇总结论名（只有 MA 目标、且真汇总开始过才非空）
  * @param conclusionReasoning 目标方案汇总模型的推理；随「方案结论：X」一起落库
+ * @param participant 该子开跑时算定的参与者身份（直播 begin 用的同一份）；跳过 / 未识别时为空
  */
 public record ChildOutcome(RoutedIntent intent, List<String> notices, TrialTurn turn, String error,
                            boolean skipped, List<NestedRoute> children, String reasoning,
-                           WorkflowRunView workflow, String conclusionName, String conclusionReasoning) {
+                           WorkflowRunView workflow, String conclusionName, String conclusionReasoning,
+                           ParticipantView participant) {
 
     /**
      * 兼容构造：普通子 Agent / 工作流目标没有下一层可展开。
@@ -39,7 +42,7 @@ public record ChildOutcome(RoutedIntent intent, List<String> notices, TrialTurn 
      */
     public ChildOutcome(RoutedIntent intent, List<String> notices, TrialTurn turn, String error,
                         boolean skipped) {
-        this(intent, notices, turn, error, skipped, List.of(), null, null, null, null);
+        this(intent, notices, turn, error, skipped, List.of(), null, null, null, null, null);
     }
 
     /**
@@ -54,7 +57,7 @@ public record ChildOutcome(RoutedIntent intent, List<String> notices, TrialTurn 
      */
     public ChildOutcome(RoutedIntent intent, List<String> notices, TrialTurn turn, String error,
                         boolean skipped, List<NestedRoute> children) {
-        this(intent, notices, turn, error, skipped, children, null, null, null, null);
+        this(intent, notices, turn, error, skipped, children, null, null, null, null, null);
     }
 
     /**
@@ -72,7 +75,7 @@ public record ChildOutcome(RoutedIntent intent, List<String> notices, TrialTurn 
     public ChildOutcome(RoutedIntent intent, List<String> notices, TrialTurn turn, String error,
                         boolean skipped, List<NestedRoute> children, String reasoning,
                         WorkflowRunView workflow) {
-        this(intent, notices, turn, error, skipped, children, reasoning, workflow, null, null);
+        this(intent, notices, turn, error, skipped, children, reasoning, workflow, null, null, null);
     }
 
     /** 下一层跳防御性归一：null → 空表，调用方不必逐处判空。 */
@@ -113,7 +116,7 @@ public record ChildOutcome(RoutedIntent intent, List<String> notices, TrialTurn 
                                         List<NestedRoute> children, String reasoning,
                                         String conclusionName, String conclusionReasoning) {
         return new ChildOutcome(intent, notices == null ? List.of() : new ArrayList<>(notices), turn, null,
-                false, children, reasoning, null, conclusionName, conclusionReasoning);
+                false, children, reasoning, null, conclusionName, conclusionReasoning, null);
     }
 
     /**
@@ -129,7 +132,7 @@ public record ChildOutcome(RoutedIntent intent, List<String> notices, TrialTurn 
     public static ChildOutcome ok(RoutedIntent intent, List<String> notices, TrialTurn turn,
                                   List<NestedRoute> children, String reasoning) {
         return new ChildOutcome(intent, notices == null ? List.of() : new ArrayList<>(notices), turn, null,
-                false, children, reasoning, null, null, null);
+                false, children, reasoning, null, null, null, null);
     }
 
     /**
@@ -182,6 +185,24 @@ public record ChildOutcome(RoutedIntent intent, List<String> notices, TrialTurn 
      */
     public static ChildOutcome skipped(RoutedIntent intent, String note) {
         return new ChildOutcome(intent, List.of(), null, note, true);
+    }
+
+    /**
+     * 补上执行时算定的参与者身份，返回一个新的不可变结果。
+     *
+     * <p>为什么由执行侧填、消费侧只读：嵌套方案的深度 / 父键来自 {@link MaNestedContext} 的
+     * 线程内栈，子执行结束、栈已弹出之后再算只会退化成根层（{@code p-0-root-*}）。
+     * 身份必须与直播 begin 同一时刻、同一份对象，落库与续跑都只认这一份。
+     *
+     * @param view 执行时算出的身份；可空（空则原样返回）
+     * @return 带身份的新结果
+     */
+    public ChildOutcome withParticipant(ParticipantView view) {
+        if (view == null) {
+            return this;
+        }
+        return new ChildOutcome(intent, notices, turn, error, skipped, children, reasoning, workflow,
+                conclusionName, conclusionReasoning, view);
     }
 
     /**

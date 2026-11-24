@@ -77,6 +77,16 @@ export function turnsFromEvents(events: TrialEvent[]): ChatTurn[] {
             assistant.continuation = true
           }
         }
+      } else {
+        /*
+         * 参与者终态（begin=false + state）：把「这一位已经结束」落到它自己的 route 块上。
+         * 进行中一轮的内存快照现在带这一帧；缺了它，刷新后所有成员只能等整轮收尾才停转。
+         * 只收口已经存在的助手轮，不凭一条终态凭空造轮。
+         */
+        const end = readParticipantEnd(item)
+        if (end && assistant) {
+          appendParticipantEnd(assistant, end)
+        }
       }
       const block = participantBeginBlock(item)
       if (!block) {
@@ -2936,6 +2946,41 @@ function readParticipantEvent(item: TrialEvent): (ReplaySpeaker & { begin: boole
     begin: true,
     depth: typeof chunk.depth === 'number' ? chunk.depth : undefined
   }
+}
+
+/**
+ * 读一条 participant 终态事件（{@code begin=false} + {@code state}）。
+ *
+ * <p>为什么要单独解析：{@link readParticipantEvent} 只认 begin 帧，终态帧不能用来换人，
+ * 但它必须能把「这一位已结束」落到已有的 route 块上，否则刷新回放（进行中一轮的内存快照）
+ * 里所有成员都只能等整轮结束才停转。
+ *
+ * <p>只认带 state 的帧：{@code begin=false} 但没有 state 的是纯归属切换，不是收口，
+ * 老数据 / 老前端都按忽略处理，行为不变。
+ *
+ * @param item 事件（内存快照 / 落库）
+ * @return 终态身份；不是终态帧或字段不全时为 undefined
+ */
+function readParticipantEnd(
+  item: TrialEvent
+): { id: string; name: string; state: string; note: string } | undefined {
+  const raw = (item.contentText || '').trim()
+  if (!raw || raw[0] !== '{') {
+    return undefined
+  }
+  let chunk: { id?: string; name?: string; state?: string; note?: string; begin?: boolean }
+  try {
+    chunk = JSON.parse(raw)
+  } catch {
+    return undefined
+  }
+  const id = (chunk?.id || '').trim()
+  const state = (chunk?.state || '').trim()
+  // begin=true 是开始帧；没有 state 的是纯归属帧。两者都不是「结束」
+  if (!chunk || chunk.begin === true || !id || !state) {
+    return undefined
+  }
+  return { id, name: (chunk.name || '').trim(), state, note: (chunk.note || '').trim() }
 }
 
 /** 展示优先用正文，旧数据没有 contentText 时退回短摘要。 */

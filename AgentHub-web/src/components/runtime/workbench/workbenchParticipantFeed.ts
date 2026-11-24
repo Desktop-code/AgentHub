@@ -529,7 +529,7 @@ export function buildParticipantFeed(input: ThinkTimelineInput & { blocks: Assis
     // 方案是否真分了子专家：只看已经出现的子专家泳道，不从拼接稿标题补人
     const dispatchSchemes = new Set(schemeWithChildren)
     // 分了子专家的方案：仍是自己的聊天块，只是内容框里的话从「正文」换成「分给了谁」
-    const withSchemes = schemeDispatchBlocks(withGateway, dispatchSchemes)
+    const withSchemes = schemeDispatchBlocks(withGateway, dispatchSchemes, input.streaming === true)
     /*
      * 汇总另起一条：排在所有子专家之后，不回填分流那条。
      * 分流块在分发完成时就已冻结，后面专家执行、方案汇总都不再改动它。
@@ -965,11 +965,13 @@ function hasDirectChild(steps: ThinkTimelineStep[], index: number, depth: number
  *
  * @param cards             按发生顺序排好的卡片
  * @param dispatchSchemes   真的分了子专家的方案名
+ * @param streaming         本轮是否仍在流式输出
  * @return 收成聊天块后的卡片
  */
 function schemeDispatchBlocks(
   cards: ParticipantCard[],
-  dispatchSchemes: Set<string>
+  dispatchSchemes: Set<string>,
+  streaming: boolean
 ): ParticipantCard[] {
   if (!dispatchSchemes.size) {
     return cards
@@ -1006,7 +1008,7 @@ function schemeDispatchBlocks(
     if (!lines.length && !(card.participantId || '').trim()) {
       continue
     }
-    const pendingLines = lines.length ? lines : ['正在分发…']
+    const pendingLines = lines.length ? lines : streaming ? ['正在分发…'] : []
     const block: ParticipantCard = {
       ...card,
       /*
@@ -1022,8 +1024,12 @@ function schemeDispatchBlocks(
       errors: [],
       files: [],
       look: card.look,
-      // 还没拿到子专家名的 pending 壳保持进行态；拿到分流句就按已发生的分流结果处理
-      pending: !lines.length
+      /*
+       * 还没拿到子专家名的 pending 壳保持进行态；拿到分流句就按已发生的分流结果处理。
+       * 整轮已结束（streaming=false）时不再兜底成进行态：子卡被摊平 / 空壳兜底都不能
+       * 让这一张方案卡在结束后永远转圈。
+       */
+      pending: streaming && !lines.length
     }
     blocks.set(card.title, block)
     out.push(block)

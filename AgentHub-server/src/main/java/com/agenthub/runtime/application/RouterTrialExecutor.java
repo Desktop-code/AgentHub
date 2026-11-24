@@ -1983,8 +1983,8 @@ public class RouterTrialExecutor {
      * @return 分段
      */
     private static RouteSegment ranSegment(ChildOutcome outcome, String line) {
-        ParticipantView who = outcome != null && !outcome.skipped()
-                ? ChildRunner.viewOf(outcome.intent()) : null;
+        // 身份只认执行时那一份：事后按 intent 重算在嵌套退出后会退化成 root
+        ParticipantView who = outcome != null && !outcome.skipped() ? outcome.participant() : null;
         return new RouteSegment(line, outcome.turn(),
                 outcome.skipped() ? null : outcome.error(), outcome.children(), outcome.reasoning(),
                 outcome.workflow(), outcome.conclusionName(), outcome.conclusionReasoning())

@@ -248,7 +248,8 @@ public class ChildRunner {
                     // 请求线程被中断：先恢复中断标记再按失败收束，避免吞掉停机/取消信号
                     Thread.currentThread().interrupt();
                     cancelPending(futures);
-                    outcomes.add(ChildOutcome.failed(intents.get(i), "子 Agent 执行被中断"));
+                    outcomes.add(ChildOutcome.failed(intents.get(i), "子 Agent 执行被中断")
+                            .withParticipant(viewOf(intents.get(i))));
                 } catch (Exception ex) {
                     /*
                      * 单个子失败（含它自己撞上 consecutive_fail_abort）只记这一路失败，
@@ -270,7 +271,8 @@ public class ChildRunner {
                             sessionId, i, cause.getClass().getSimpleName(), CauseDigest.of(cause), cause);
                     // 失败段正文会进终答拼接（用户可见）：统一走边界清洗，不给路径/端口/异常码
                     outcomes.add(ChildOutcome.failed(intents.get(i),
-                            UserFacingText.safeMessage(cause, "子 Agent 执行失败")));
+                            UserFacingText.safeMessage(cause, "子 Agent 执行失败"))
+                            .withParticipant(viewOf(intents.get(i))));
                 }
             }
             return outcomes;
@@ -350,13 +352,15 @@ public class ChildRunner {
                 } catch (InterruptedException ex) {
                     Thread.currentThread().interrupt();
                     cancelPending(futures);
-                    outcomes.add(ChildOutcome.failed(intents.get(i), "子 Agent 执行被中断"));
+                    outcomes.add(ChildOutcome.failed(intents.get(i), "子 Agent 执行被中断")
+                            .withParticipant(viewOf(intents.get(i))));
                 } catch (Exception ex) {
                     Throwable cause = ex instanceof ExecutionException && ex.getCause() != null ? ex.getCause() : ex;
                     log.warn("嵌套并行子执行失败 sessionId={} index={} type={} cause={}",
                             sessionId, i, cause.getClass().getSimpleName(), CauseDigest.of(cause), cause);
                     outcomes.add(ChildOutcome.failed(intents.get(i),
-                            UserFacingText.safeMessage(cause, "子 Agent 执行失败")));
+                            UserFacingText.safeMessage(cause, "子 Agent 执行失败"))
+                            .withParticipant(viewOf(intents.get(i))));
                 }
             }
             return outcomes;
@@ -398,7 +402,8 @@ public class ChildRunner {
                 // 与并行链同口径：单子失败不打断其它子，正文走边界清洗
                 log.warn("嵌套编排子执行失败 agentId={} type={} cause={}",
                         rootId(parent), ex.getClass().getSimpleName(), CauseDigest.of(ex), ex);
-                outcomes.add(ChildOutcome.failed(intent, UserFacingText.safeMessage(ex, "子 Agent 执行失败")));
+                outcomes.add(ChildOutcome.failed(intent, UserFacingText.safeMessage(ex, "子 Agent 执行失败"))
+                        .withParticipant(viewOf(intent)));
             }
         }
         return outcomes;
@@ -498,7 +503,8 @@ public class ChildRunner {
                     // 默认「失败继续」：压成占位段，后续步仍能看到「该步未完成」而不是整条序列中断
                     log.warn("固定串行第 {} 步失败 agentId={} type={} cause={}", outcomes.size() + 1,
                             rootId(parent), ex.getClass().getSimpleName(), CauseDigest.of(ex), ex);
-                    outcome = ChildOutcome.failed(intent, UserFacingText.safeMessage(ex, "子 Agent 执行失败"));
+                    outcome = ChildOutcome.failed(intent, UserFacingText.safeMessage(ex, "子 Agent 执行失败"))
+                            .withParticipant(viewOf(intent));
                 }
                 outcomes.add(outcome);
                 /*
@@ -920,14 +926,14 @@ public class ChildRunner {
             }
             // 工作流目标：卡片终态随结果交给上层落库；其它分支 workflowView 保持 null
             if (workflowView != null) {
-                return ChildOutcome.okWorkflow(intent, notices, turn, workflowView);
+                return ChildOutcome.okWorkflow(intent, notices, turn, workflowView).withParticipant(self);
             }
             // 目标方案真汇总过：结论名与汇总推理一起交出去，落库后回放才画得出汇总那条
             if (schemeConclusion != null) {
                 return ChildOutcome.okScheme(intent, notices, turn, nested, schemeReasoning,
-                        schemeConclusion, schemeConclusionReasoning);
+                        schemeConclusion, schemeConclusionReasoning).withParticipant(self);
             }
-            return ChildOutcome.ok(intent, notices, turn, nested, schemeReasoning);
+            return ChildOutcome.ok(intent, notices, turn, nested, schemeReasoning).withParticipant(self);
         } catch (MaPauseSignal pause) {
             /*
              * 停等不是失败：目标方案在自己的串行链里停住了。
@@ -976,7 +982,7 @@ public class ChildRunner {
             closeParticipant(childProgress != null ? childProgress : progress, self, failState, failText);
             if (parallelWorker) {
                 // 失败段正文会进终答拼接：边界处清洗，避免路径/端口/异常码被复述给用户
-                return ChildOutcome.failed(intent, failText);
+                return ChildOutcome.failed(intent, failText).withParticipant(self);
             }
             throw ex;
         } finally {
@@ -1398,10 +1404,13 @@ public class ChildRunner {
     }
 
     /**
-     * 落库用的身份：与开跑时 {@link #participantOf} 同一套 id / kind / routeKey。
+     * 取参与者身份：与开跑时 {@link #participantOf} 同一套 id / kind / routeKey。
      *
-     * <p>必须在组装时间线分段时调用（嵌套深度与 begin 当时一致）。
-     * 跳过、没有候选时返回 null，不给没开跑的人补一张卡。
+     * <p><b>只在执行现场调用</b>（嵌套深度与 begin 当时一致）。子执行结束、{@link MaNestedContext}
+     * 已弹出之后不要再调它——那时深度会退化成 0、父键丢成 root，落库就成了 {@code p-0-root-*}。
+     * 结果对象请用 {@link ChildOutcome#withParticipant(ParticipantView)} 带上开跑时算好的那一份。
+     *
+     * <p>跳过、没有候选时返回 null，不给没开跑的人补一张卡。
      *
      * @param intent 子意图；可空
      * @return 参与者身份；无法识别时 null
