@@ -1,6 +1,6 @@
 ﻿# AgentHub
 
-**可独立部署的企业 Agent 中台。** 用配置把模型、工具、知识库、提示词、记忆、技能装成可运行的 Agent，再用统一的「对话」入口和运行、观测把它们用起来。
+**可独立部署的企业 Agent 中台。** 用配置把模型、工具、知识库、提示词、记忆、技能装成可运行的 Agent，再用统一的「对话」入口和运行、观测把它们用起来。工作流与串行方案可以在对话里停等并继续，不必另起一轮。
 
 后端为单模块 Spring Boot，前端为 Vue 3 管理台；可以打成单个 jar 运行，也可以用 Docker Compose 拉起一套带依赖的环境。
 
@@ -23,14 +23,16 @@
 
 ## 界面
 
+> 截图为 2026-11-15 实拍；现网新增的对话内停等、运行时限与引用区未重拍，行为以文档正文为准。
+
 ![对话（单问题）](docs/architecture/images/01-对话-单问题.png)
-对话：一次提问只走一路。
+对话：入口判定后按参与者成块展示，检索出处贴结果旁。
 
 ![多智能体](docs/architecture/images/13-多智能体MA.png)
 多智能体：入口只做判定与分发，路由池可放单兵、方案与已发布工作流。
 
 ![工作流](docs/architecture/images/12-工作流-WF.png)
-工作流：可视化画布，草稿与不可变发布版本分开。
+工作流：可视化画布，草稿与不可变发布版本分开；运行有整段与单节点上限，执行卡可停等后继续。
 
 ![Agent 管理](docs/architecture/images/10-AGENT管理-网格窗.png)
 Agent 管理：只放单兵，ReAct 与 Plan-Execute 两种执行方式。
@@ -85,7 +87,7 @@ cd AgentHub-web && npm install && npm run dev
 
 ## 文档
 
-- [架构设计](docs/architecture/AgentHub-架构设计.md)：分层、信息架构、运行时主链路、各能力域边界、部署拓扑。
+- [架构设计](docs/architecture/AgentHub-架构设计.md)：分层、信息架构、运行时主链路、各能力域边界、部署拓扑、已落地对照与接下来预期。
 - [功能说明](docs/architecture/AgentHub-功能说明.md)：各模块行为说明、仓库结构、运行与配置细节。
 - [评测软评分服务](scripts/openjudge-sidecar/README.md)：契约、启动与排障。
 
