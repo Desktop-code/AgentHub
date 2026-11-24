@@ -1,4 +1,4 @@
-package com.agenthub.runtime.application;
+package com.agenthub.runtime.application.router;
 
 import com.agenthub.runtime.domain.model.AgentChoice;
 import com.agenthub.runtime.domain.model.ChildPlanPendingView;
@@ -9,7 +9,7 @@ import com.agenthub.runtime.domain.model.StepView;
 import com.agenthub.runtime.domain.service.TrialProgress;
 
 /**
- * 判定 / 汇总推理的旁路抄写器。所属域：runtime（应用层）。
+ * 判定 / 汇总推理的旁路抄写器。所属域：runtime（router 包）。
  *
  * <p>为什么需要它：判路由与汇总都是一次独立的模型调用，它们的推理只经
  * {@link TrialProgress#reasoning(String)} 流式下发，不进入子 Agent 的 traces。
