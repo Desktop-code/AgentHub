@@ -2109,10 +2109,52 @@ export function useWorkbenchChat(pageActive: Ref<boolean>) {
     const [persisted, liveResp] = await Promise.all([listWorkbenchEvents(id), fetchLiveSafe(id)])
     const stored = persisted.data.data || []
     const live = liveResp
-    if (live.length) {
+    /*
+     * 落库已经写出这一轮的终态（没有开口，且序号不落后于内存末条）：
+     * 权威数据已就绪，只是 finally 里的 live.clear 还有竞态窗口。
+     * 这时若仍按「内存有增量」进入续订，会把已经结束的一轮重新标成 streaming，
+     * 所有未收口参与者一起转圈——收尾回放和刷新都会撞上。
+     */
+    if (live.length && !coversLiveTail(stored, live)) {
       return { live: true, events: mergeBySeq(stored, live) }
     }
-    return { live: false, events: stored }
+    // 内存快照不覆盖落库末尾（或已清空）：只认落库事件，回放才是最终身份与终态
+    return { live: false, events: stored.length ? stored : mergeBySeq(stored, live) }
+  }
+
+  /**
+   * 落库事件是否已经覆盖内存快照的末尾。
+   *
+   * <p>判据：落库事件里这一轮已经没有开口（{@link hasOpenTurn} 为 false，末尾即使跟着
+   * 装配说明 / 子 Agent 失败等 system 事件也算收口），且末尾 seq 不小于内存末条。
+   * 续跑进行中时落库停在「已答复」CHOICE 或等待用的空 assistant，seq 明显落后于内存，
+   * 不会误判成已完成；整轮落库后两者 seq 对齐，才认定权威数据已接管。
+   *
+   * @param stored     已落库事件
+   * @param liveEvents 内存快照事件
+   * @return true 表示落库已经写出这一轮的终态
+   */
+  function coversLiveTail(stored: TrialEvent[], liveEvents: TrialEvent[]): boolean {
+    const storedTail = lastEventOf(stored)
+    const liveTail = lastEventOf(liveEvents)
+    if (!storedTail || !liveTail) {
+      return false
+    }
+    if (hasOpenTurn(stored)) {
+      return false
+    }
+    return (storedTail.seq ?? 0) >= (liveTail.seq ?? 0)
+  }
+
+  /** 序号最大的一条事件；空数组返回 undefined。 */
+  function lastEventOf(events: TrialEvent[]): TrialEvent | undefined {
+    let tail: TrialEvent | undefined
+    for (const item of events) {
+      if (!tail || (item.seq ?? 0) >= (tail.seq ?? 0)) {
+        tail = item
+      }
+    }
+    return tail
   }
 
   /** 读内存增量；失败按空处理（老后端 / 多实例读不到都算正常）。 */
@@ -2215,7 +2257,7 @@ export function useWorkbenchChat(pageActive: Ref<boolean>) {
     resumingId = id
     markTurnRunning(id, true)
     detached.value = !liveMode && !hasLiveStream(id)
-    resumeSignature = keepCurrent ? signOf(first) : ''
+    resumeSignature = keepCurrent ? resumeSignatureOf(first, liveMode) : ''
     if (!keepCurrent) {
       applyResumeEvents(id, first, liveMode)
     }
@@ -2232,7 +2274,8 @@ export function useWorkbenchChat(pageActive: Ref<boolean>) {
         return
       }
       if (Date.now() - startTime > RESUME_MAX_MS) {
-        finishResume()
+        // 等待超时：不知道后端真实终态，按 error 收口，避免整排头像无限转
+        finishResume('error')
         pageError.value = '本轮等待超时，请稍后重新打开会话查看结果'
         return
       }
@@ -2270,7 +2313,7 @@ export function useWorkbenchChat(pageActive: Ref<boolean>) {
 
   /** 把轮询到的全量事件重放成时间线。 */
   function applyResumeEvents(id: number, events: TrialEvent[], live = false) {
-    const signature = signOf(events)
+    const signature = resumeSignatureOf(events, live)
     if (signature === resumeSignature) {
       return
     }
@@ -2294,14 +2337,42 @@ export function useWorkbenchChat(pageActive: Ref<boolean>) {
     syncSessionFromEvents(events)
   }
 
-  /** 事件指纹：条数 + 末尾 seq + 末尾正文长度（同一条事件会续写）。 */
+  /**
+   * 续订签名：来源（内存快照 / 落库）+ 条数 + 末条 seq + 末条正文长度 + 参与者身份。
+   *
+   * <p>为什么把来源和身份也放进来：从「内存快照合并版」切到「纯落库版」时，
+   * 条数 / 末 seq / 末正文长度往往一模一样；身份（错身份的 begin 行被正确身份替换）
+   * 也可能在长度不变时变化。只比长度会让这两种变化被早退挡掉，
+   * 页面就留在旧的 streaming / 错身份投影上。
+   */
+  function resumeSignatureOf(events: TrialEvent[], live: boolean): string {
+    return `${live ? 'L' : 'P'}|${signOf(events)}`
+  }
+
+  /** 事件指纹：条数 + 末尾 seq + 末尾正文长度 + 参与者身份摘要（同一条事件会续写）。 */
   function signOf(events: TrialEvent[]) {
     if (!events.length) {
       return '0'
     }
+    const identities = events
+      .filter((item) => item.eventType === 'participant')
+      .map(participantSignature)
+      .join(',')
     const last = events[events.length - 1]
     const text = last.contentText || last.summary || ''
-    return `${events.length}:${last.seq ?? 0}:${text.length}`
+    return `${events.length}:${last.seq ?? 0}:${text.length}:${identities}`
+  }
+
+  /** 一条参与者事件的稳定摘要（id + depth + kind）：只能来自 begin 身份，不按名字猜。 */
+  function participantSignature(item: TrialEvent): string {
+    const raw = item.contentText || ''
+    try {
+      const payload = JSON.parse(raw) as { id?: string; depth?: number; kind?: string }
+      return `${payload.id || ''}@${payload.depth ?? ''}/${payload.kind || ''}`
+    } catch {
+      // 半截 / 旧数据：退回原文，宁可多算一次也不漏掉身份变化
+      return raw
+    }
   }
 
   /** 用本页时间线补当前会话的轮次与预览（服务端要整轮结束才回写）。 */
@@ -2440,14 +2511,39 @@ export function useWorkbenchChat(pageActive: Ref<boolean>) {
     knownSessions.value = nextKnown
   }
 
-  /** 结束续订：停轮询并摘转圈；内容保留。 */
-  function finishResume() {
+  /** 结束续订：停轮询、把仍挂在 streaming 的末尾轮落到终态并摘转圈；内容保留。 */
+  function finishResume(settleAs: 'done' | 'error' = 'done') {
     const id = resumingId
     stopPolling()
+    // 只停轮询不会改 turn.status；不在这里收口，投影会继续按整轮 streaming 给全员转圈
+    settleResumeTail(settleAs)
     if (id != null) {
       finishLive(id)
     }
     detached.value = false
+  }
+
+  /**
+   * 把末尾仍标着 streaming 的助手轮落到终态。
+   *
+   * <p>续订结束意味着这一轮不会再收到增量（已落库 / 已超时）。如果仍留着 streaming，
+   * 所有没有终态帧的参与者会一直转；这里只改状态与阶段，不动已流出文字、块序和折叠状态。
+   *
+   * @param status 收口状态：正常结束 done，等待超时 error
+   */
+  function settleResumeTail(status: 'done' | 'error') {
+    const list = [...turns.value]
+    for (let i = list.length - 1; i >= 0; i -= 1) {
+      const turn = list[i]
+      if (turn.role !== 'assistant') {
+        continue
+      }
+      if (turn.status === 'streaming') {
+        list[i] = { ...turn, status, phase: status }
+        turns.value = list
+      }
+      return
+    }
   }
 
   /** 只停轮询，不动左栏转圈（发送接管时用）。 */

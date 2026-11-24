@@ -249,11 +249,16 @@ public class TrialLiveBuffer {
             }
 
             /**
-             * 参与者终态只走出站：快照是「进行中一轮的内存镜像」，终态由下一轮落库事件接管；
-             * 但这里绝不能吞掉——吞掉前端就永远收不了口。
+             * 参与者终态：出站与内存快照两边都要。
+             *
+             * <p>为什么快照也必须记：刷新后页面读的是这份镜像。只有 begin 没有终态时，
+             * 投影只能拿「整轮是否还在流」当进行态——已经跑完的成员会和正在跑的那位一起转圈，
+             * 多成员方案里就是「方案内全员同时转」。整轮结束时落库事件才接管，刷新那一拍覆盖不了。
+             * 终态帧沿用出站同一形状（同 id、begin=false、state、note），前端一套解析即可。
              */
             @Override
             public void endParticipant(ParticipantView participant, String state, String note) {
+                recorder.endParticipant(participant, state, note);
                 delegate.endParticipant(participant, state, note);
             }
 
@@ -553,6 +558,25 @@ public class TrialLiveBuffer {
         @Override
         public void beginParticipant(ParticipantView participant) {
             String payload = ParticipantJson.payload(participant, true);
+            if (payload == null) {
+                return;
+            }
+            turn.append(EventType.PARTICIPANT, TrialTexts.summary(participant.name()), payload, null);
+        }
+
+        /**
+         * 参与者终态：快照记一条 begin=false + state 的身份事件。
+         *
+         * <p>为什么必须补：快照是刷新后唯一的「边跑边看」来源。缺这一帧时，回放出来的
+         * route 块没有 {@code closed}，整轮又仍被标成 streaming，于是所有成员一起转圈；
+         * 直播侧有 SSE 终态所以看起来正常，差别只在这一份镜像。
+         *
+         * <p>状态/说明与出站帧同源（{@link ParticipantJson#payload}），不另造字段；
+         * 老前端不认识 state 时按普通归属帧忽略，行为不变。
+         */
+        @Override
+        public void endParticipant(ParticipantView participant, String state, String note) {
+            String payload = ParticipantJson.payload(participant, state, note);
             if (payload == null) {
                 return;
             }

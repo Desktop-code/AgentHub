@@ -395,6 +395,10 @@ public class MaReplyResumer {
     /**
      * 成员结果 → 时间线分段。
      *
+     * <p>身份只取 {@link ChildOutcome#participant()}（子执行时在嵌套上下文内算好的那一份）。
+     * 不能在这里调 {@link ChildRunner#viewOf} 重算：续跑时 {@link MaNestedContext} 已退出，
+     * 深度 / 父键都丢了，剩余成员会被落成 {@code p-0-root-*}，回放时跑出方案内框。
+     *
      * @param outcome 子结果
      * @return 分段；身份不可识别时 null
      */
@@ -402,7 +406,7 @@ public class MaReplyResumer {
         if (outcome == null) {
             return null;
         }
-        ParticipantView participant = ChildRunner.viewOf(outcome.intent());
+        ParticipantView participant = outcome.participant();
         if (participant == null) {
             return null;
         }
