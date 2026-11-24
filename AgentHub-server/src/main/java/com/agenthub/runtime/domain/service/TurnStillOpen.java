@@ -1,5 +1,6 @@
 package com.agenthub.runtime.domain.service;
 
+import com.agenthub.runtime.domain.model.AgentChoice;
 import com.agenthub.runtime.domain.model.EventType;
 import com.agenthub.runtime.domain.model.PlanState;
 import com.agenthub.runtime.domain.model.PlanView;
@@ -45,6 +46,12 @@ public final class TurnStillOpen {
             } else if (EventType.PLAN.code().equalsIgnoreCase(type) && planClosed(item.getContentText())) {
                 // 待批准 / 用户取消计划 / 计划已完成：这一轮没有后续正文
                 open = false;
+            } else if (EventType.CHOICE.code().equalsIgnoreCase(type) && choiceWaiting(item.getContentText())) {
+                /*
+                 * 方案停等：子专家问完就整轮挂起，请求线程已经结束，后面不会有新的助手正文。
+                 * 不在这里收口的话，waiting 轮会被判成「还没写完」而拒绝下一句回复。
+                 */
+                open = false;
             }
         }
         return open;
@@ -59,6 +66,16 @@ public final class TurnStillOpen {
     private static boolean planClosed(String content) {
         PlanState state = PlanJson.parsePlan(content).map(PlanView::state).orElse(null);
         return state == PlanState.PENDING || state == PlanState.REJECTED || state == PlanState.DONE;
+    }
+
+    /**
+     * 这条 CHOICE 是否是「运行停在询问处等用户」。
+     *
+     * @param content CHOICE 事件正文 JSON
+     * @return true 表示选项已标记 waiting
+     */
+    private static boolean choiceWaiting(String content) {
+        return WorkbenchChoiceJson.parseJson(content).map(AgentChoice::waiting).orElse(false);
     }
 
     private static int seqOf(RunEvent event) {

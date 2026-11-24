@@ -1532,4 +1532,45 @@ CREATE TABLE `workflow_run`  (
   INDEX `idx_workflow_run_workbench_session`(`workbench_session_id`, `workflow_id`, `status`) USING BTREE
 ) ENGINE = InnoDB AUTO_INCREMENT = 1 CHARACTER SET = utf8mb4 COLLATE = utf8mb4_general_ci COMMENT = '工作流运行实例' ROW_FORMAT = Dynamic;
 
+-- ----------------------------------------------------------------------------
+-- 方案（MA）中途停等：子专家发出询问时，整条方案运行挂起并释放线程，
+-- 停在哪位成员、问句与选项、已完成成员快照都落在这一行；下一句回复按它续跑。
+-- 同一会话只需一条 state=WAITING 的行；历史行保留停等轨迹，不删除。
+-- ----------------------------------------------------------------------------
+CREATE TABLE `agent_run_ma_wait`  (
+  `id` bigint(20) NOT NULL AUTO_INCREMENT COMMENT '主键',
+  `session_id` bigint(20) NOT NULL COMMENT 'agent_run_session.id',
+  `ma_def_id` bigint(20) NULL DEFAULT NULL COMMENT 'ma_def.id；旧 Agent 固定串行为空',
+  `scheme_name` varchar(128) CHARACTER SET utf8mb4 COLLATE utf8mb4_general_ci NULL DEFAULT NULL COMMENT '方案展示名',
+  `template` varchar(32) CHARACTER SET utf8mb4 COLLATE utf8mb4_general_ci NULL DEFAULT NULL COMMENT 'FIXED_SEQUENCE / ROUTER_THEN_SEQUENCE',
+  `depth` int(11) NOT NULL DEFAULT 0 COMMENT '嵌套层级；本刀只落 0',
+  `parent_key` varchar(64) CHARACTER SET utf8mb4 COLLATE utf8mb4_general_ci NULL DEFAULT NULL COMMENT '当前层方案路由键；根层为空',
+  `paused_participant_id` varchar(128) CHARACTER SET utf8mb4 COLLATE utf8mb4_general_ci NULL DEFAULT NULL COMMENT '发出询问的参与者 id',
+  `paused_participant_name` varchar(128) CHARACTER SET utf8mb4 COLLATE utf8mb4_general_ci NULL DEFAULT NULL COMMENT '发出询问的成员展示名',
+  `paused_participant_kind` varchar(32) CHARACTER SET utf8mb4 COLLATE utf8mb4_general_ci NULL DEFAULT NULL COMMENT 'agent / workflow / scheme',
+  `paused_participant_depth` int(11) NOT NULL DEFAULT 0 COMMENT '参与者嵌套层级',
+  `paused_route_key` varchar(64) CHARACTER SET utf8mb4 COLLATE utf8mb4_general_ci NULL DEFAULT NULL COMMENT '发出询问成员的路由键',
+  `paused_member_json` longtext CHARACTER SET utf8mb4 COLLATE utf8mb4_general_ci NULL COMMENT '发出询问成员的完整快照（含 turn）',
+  `paused_answer` longtext CHARACTER SET utf8mb4 COLLATE utf8mb4_general_ci NULL COMMENT '该成员询问前答出的正文',
+  `question` text CHARACTER SET utf8mb4 COLLATE utf8mb4_general_ci NULL COMMENT '问句',
+  `options_json` text CHARACTER SET utf8mb4 COLLATE utf8mb4_general_ci NULL COMMENT '等待态选项 JSON（与 CHOICE 事件同形）',
+  `reply` text CHARACTER SET utf8mb4 COLLATE utf8mb4_general_ci NULL COMMENT '用户答复的展示文案（审计用）',
+  `done_json` longtext CHARACTER SET utf8mb4 COLLATE utf8mb4_general_ci NULL COMMENT '已完成成员列表 JSON',
+  `remaining_json` longtext CHARACTER SET utf8mb4 COLLATE utf8mb4_general_ci NULL COMMENT '待执行成员列表 JSON',
+  `skipped_json` longtext CHARACTER SET utf8mb4 COLLATE utf8mb4_general_ci NULL COMMENT '已跳过成员列表 JSON',
+  `pre_written_keys_json` text CHARACTER SET utf8mb4 COLLATE utf8mb4_general_ci NULL COMMENT '本次停等前已写身份 / 路由的键',
+  `seed_done_size` int(11) NOT NULL DEFAULT 0 COMMENT 'done_json 前缀中已完整写过的成员数（再次停等不补写）',
+  `written_keys_json` text CHARACTER SET utf8mb4 COLLATE utf8mb4_general_ci NULL COMMENT '本次停等后视为已写的键（续跑去重）',
+  `user_text` longtext CHARACTER SET utf8mb4 COLLATE utf8mb4_general_ci NULL COMMENT '本轮用户原文',
+  `model_user` longtext CHARACTER SET utf8mb4 COLLATE utf8mb4_general_ci NULL COMMENT '本轮送给模型的用户侧文本',
+  `gateway_json` varchar(512) CHARACTER SET utf8mb4 COLLATE utf8mb4_general_ci NULL COMMENT '入口参与者身份 JSON（停等补写入口块用）',
+  `judge_reasoning` longtext CHARACTER SET utf8mb4 COLLATE utf8mb4_general_ci NULL COMMENT '入口判定 / 方案分流推理',
+  `decision_block` longtext CHARACTER SET utf8mb4 COLLATE utf8mb4_general_ci NULL COMMENT '多意图决策块机器 JSON',
+  `state` varchar(16) CHARACTER SET utf8mb4 COLLATE utf8mb4_general_ci NOT NULL DEFAULT 'WAITING' COMMENT 'WAITING / DONE / CANCELLED',
+  `create_time` datetime NOT NULL DEFAULT CURRENT_TIMESTAMP COMMENT '创建时间',
+  `update_time` datetime NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP COMMENT '更新时间',
+  PRIMARY KEY (`id`) USING BTREE,
+  INDEX `idx_ma_wait_session_state`(`session_id`, `state`) USING BTREE
+) ENGINE = InnoDB AUTO_INCREMENT = 1 CHARACTER SET = utf8mb4 COLLATE = utf8mb4_general_ci COMMENT = '方案中途停等：子专家询问时的可恢复状态' ROW_FORMAT = Dynamic;
+
 SET FOREIGN_KEY_CHECKS = 1;

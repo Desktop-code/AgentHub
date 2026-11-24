@@ -110,7 +110,11 @@ public final class WorkbenchChoiceJson {
      * @return 紧凑 JSON；空结构返回空串（调用方据此跳过落库）
      */
     public static String write(AgentChoice choice) {
-        if (choice == null || !choice.usable()) {
+        if (choice == null) {
+            return "";
+        }
+        // 等待态必须有可点选项；回复态可以没有选项（选项已清掉），但必须有回复文案
+        if (!choice.usable() && !choice.hasReply()) {
             return "";
         }
         Map<String, Object> body = new LinkedHashMap<>();
@@ -123,6 +127,13 @@ public final class WorkbenchChoiceJson {
             options.add(one);
         }
         body.put("options", options);
+        // 只有停等 / 已答复时才多出这两个字段：普通选项的 JSON 与旧协议逐字一致
+        if (choice.hasReply()) {
+            body.put("reply", choice.reply());
+        }
+        if (choice.waiting()) {
+            body.put("waiting", true);
+        }
         try {
             return JSON.writeValueAsString(body);
         } catch (JsonProcessingException ex) {
@@ -155,19 +166,29 @@ public final class WorkbenchChoiceJson {
                 return null;
             }
             String question = root.path("question").asText("");
+            String reply = root.path("reply").asText("").trim();
+            boolean waiting = root.path("waiting").asBoolean(false);
             JsonNode array = root.path("options");
+            // 回复态允许没有 options（用户答复后选项已清掉）；没有 options 又没有 reply 才算非法
             if (!array.isArray()) {
-                return null;
+                return reply.isEmpty() ? null : new AgentChoice(question, List.of(), reply, false);
             }
             List<AgentChoice.Option> options = new ArrayList<>();
             for (JsonNode one : array) {
                 if (one == null || !one.isObject()) {
-                    return null;
+                    return reply.isEmpty() ? null : new AgentChoice(question, List.of(), reply, false);
                 }
                 options.add(new AgentChoice.Option(one.path("id").asText(""), one.path("label").asText("")));
             }
             // 统一走 AgentChoice.of：边界（非空 / id 唯一 / 2~6 项）与工具、整理结果同口径
-            return AgentChoice.of(question, options);
+            AgentChoice base = AgentChoice.of(question, options);
+            if (base == null) {
+                return reply.isEmpty() ? null : new AgentChoice(question, List.of(), reply, false);
+            }
+            if (waiting) {
+                return new AgentChoice(base.question(), base.options(), reply, true);
+            }
+            return reply.isEmpty() ? base : new AgentChoice(base.question(), base.options(), reply, false);
         } catch (Exception ex) {
             // 模型偶发输出非法 JSON：整块忽略，正文照常展示，不抛进运行主链路
             return null;

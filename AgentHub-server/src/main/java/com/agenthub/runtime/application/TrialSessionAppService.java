@@ -79,10 +79,25 @@ public class TrialSessionAppService {
      */
     private final WorkflowRunAppService workflowRuns;
     /**
+     * 工作流对话停等的停止端：等待期间请求线程已结束，
+     * 停止走这里取消 run 并补中断闭环，不把会话收成取消。
+     */
+    private final WorkflowReplyResumer workflowReplies;
+    /**
+     * 方案子专家询问停等的停止端：等待期间没有请求线程，
+     * 停止走这里取消等待行并补中断闭环（回复态选项 + 「已中断」），不把会话收成取消。
+     */
+    private final MaReplyResumer maReplies;
+    /**
      * 本轮 trace 收口：停止工作台一轮时把仍为 RUNNING 的 trace / 步骤收成 CANCELLED，
      * 避免右上角明细里残留「执行中」。只对工作台入口调用，不改管理端试跑 / 多智能体的口径。
      */
     private final TrialObsHooks obs;
+    /**
+     * 刷新回放补全：落库卡片只存骨架，读侧按 runId 从 workflow_node_run 现算节点产出。
+     * 与直播共用同一套取文口径，前端协议形状不变。
+     */
+    private final WorkflowCardRebuilder cardRebuilder;
 
     /**
      * @param sessions        会话
@@ -103,7 +118,10 @@ public class TrialSessionAppService {
      * @param maSpecs         方案读源：虚拟根建会话与执行共用同一套方案校验
      * @param mas             只读方案，列表回显 maCode / maName
      * @param workflowRuns    工作流取消端：停止一轮时连带取消同会话正在跑的 run
+     * @param workflowReplies 工作流对话停等的停止端：等待中的运行按现网中断收口，会话仍可用
+     * @param maReplies       方案子专家询问停等的停止端；与工作流等待互斥
      * @param obs             trace 收口：停止工作台一轮时把残留 RUNNING 的 trace / 步骤收成 CANCELLED
+     * @param cardRebuilder   回放补全：按 runId 从节点运行态现算工作流卡片的节点产出
      */
     public TrialSessionAppService(RunSessionRepository sessions, RunEventRepository events, AgentDefRepository agents,
                                   TrialAccess access, OperatorContext operatorContext, OperLogWriter operLogWriter,
@@ -111,7 +129,9 @@ public class TrialSessionAppService {
                                   TrialMemoryCoordinator memory, TrialSessionCloser closer, TrialLiveBuffer live,
                                   PlanPendingRegistry pendingPlans, ChildPlanApprovalRegistry childApprovals,
                                   TrialBindingLoader loader, MaTrialSpecLoader maSpecs, MaDefRepository mas,
-                                  WorkflowRunAppService workflowRuns, TrialObsHooks obs) {
+                                  WorkflowRunAppService workflowRuns, WorkflowReplyResumer workflowReplies,
+                                  MaReplyResumer maReplies, TrialObsHooks obs,
+                                  WorkflowCardRebuilder cardRebuilder) {
         this.sessions = sessions;
         this.events = events;
         this.agents = agents;
@@ -130,7 +150,10 @@ public class TrialSessionAppService {
         this.maSpecs = maSpecs;
         this.mas = mas;
         this.workflowRuns = workflowRuns;
+        this.workflowReplies = workflowReplies;
+        this.maReplies = maReplies;
         this.obs = obs;
+        this.cardRebuilder = cardRebuilder;
     }
 
     /**
@@ -234,12 +257,18 @@ public class TrialSessionAppService {
     }
 
     /**
+     * 刷新回放：已落库的权威事件，按 seq 升序。
+     *
+     * <p>工作流卡片在库里只存骨架（不含节点正文）：这里按卡片里的 {@code runId} 现算节点产出，
+     * 让刷新后看到的卡片与实时一致。补全失败时保留骨架，不会整块丢卡。
+     *
      * @param id 会话主键
      * @return 全部事件，seq 升序
      */
     public List<EventResp> events(Long id) {
         access.require(id);
-        return events.listBySessionId(id).stream().map(TrialSessionAppService::toEvent).toList();
+        return cardRebuilder.enrich(events.listBySessionId(id).stream()
+                .map(TrialSessionAppService::toEvent).toList());
     }
 
     /**
@@ -254,7 +283,8 @@ public class TrialSessionAppService {
      */
     public List<EventResp> liveEvents(Long id) {
         access.require(id);
-        return live.snapshot(id);
+        // 快照装不下整份卡片时会退成骨架：同一条补全口径，刷新「边跑边看」也拿得到节点正文
+        return cardRebuilder.enrich(live.snapshot(id));
     }
 
     /**
@@ -381,6 +411,17 @@ public class TrialSessionAppService {
     @Transactional
     public SessionResp cancel(Long id) {
         RunSession session = access.require(id);
+        /*
+         * 工作流在对话里停等：这一步请求线程早已结束（没有 ReAct 在跑），普通分支会拒绝或把整条
+         * 会话收成 CANCELLED，用户之后就无法接着聊了。等待中的运行按现网中断口径单独停掉，
+         * 会话本身保持可用——这正是「停在等待时点停止」的语义。
+         */
+        if (!flight.running(id)
+                && EntryChannel.WORKBENCH.name().equals(session.getEntryChannel())
+                && (workflowReplies.stopWaiting(id, session.getUserId())
+                || maReplies.stopWaiting(id, session.getUserId()))) {
+            return toResp(sessions.findById(id).orElseThrow());
+        }
         if (flight.running(id)) {
             /*
              * 先按会话取消工作流实例，再中断 ReAct：

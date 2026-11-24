@@ -434,7 +434,7 @@ export function isFinishedStatusShell(card: ParticipantCard): boolean {
   if (card.lines.length || card.steps.length || card.errors.length || card.files.length) {
     return false
   }
-  if (card.choice && card.choice.options.length) {
+  if (card.choice && (card.choice.options.length || (card.choice.reply || '').trim())) {
     return false
   }
   const answer = (card.answer || '').trim()
@@ -1595,7 +1595,8 @@ function collectAnswers(
      * 结构化选项：归属规则与文件 / 报错完全一致（身份帧优先，其次当前路由）。
      * 它不属于「正文」，因此不参与拼接稿分段的任何判断。
      */
-    if (block.kind === 'choice' && block.choice && block.choice.options.length) {
+    if (block.kind === 'choice' && block.choice
+      && (block.choice.options.length || (block.choice.reply || '').trim())) {
       const who = expertOwner(pinOf(block, kindOf) || owner, lastExpert, kindOf, answerableSchemes)
       if (who) {
         choiceByName.set(who, block.choice)
