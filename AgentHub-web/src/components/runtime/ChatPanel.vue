@@ -51,24 +51,7 @@
       <div v-for="row in rows" :key="row.turn.key" class="row" :class="row.turn.role">
         <!-- 用户气泡：登录用户头像（或首字兜底）；与 Agent 形象分开 -->
         <template v-if="row.turn.role === 'user'">
-          <div class="speak-row is-user">
-            <div class="user-stack">
-              <!-- 附件在文字气泡外面。没打字时不画气泡，避免空的紫色框。 -->
-              <UserAttachmentStrip v-if="attachmentItems(row.turn).length" :items="attachmentItems(row.turn)" />
-              <div v-if="row.turn.text" class="bubble">
-                <div class="bubble-text">{{ row.turn.text }}</div>
-              </div>
-            </div>
-            <div
-              class="msg-avatar is-user"
-              :class="{ 'has-photo': !!userAvatarSrc }"
-              :style="userAvatarStyle"
-              :title="userDisplayName"
-            >
-              <img v-if="userAvatarSrc" :src="userAvatarSrc" alt="" />
-              <span v-else>{{ userInitial }}</span>
-            </div>
-          </div>
+          <UserTurnRow :turn="row.turn" :attachments="attachmentsOfTurn(row.turn)" />
         </template>
 
         <!-- 计划执行模式：顺序钉死（计划思考 → 计划卡 → 按步执行 → 终答） -->
@@ -205,28 +188,15 @@
             <!-- 工作台：不展示「最终回答」标题与朗读调试图标，终端用户只看正文气泡 -->
             <div v-if="!isWorkbench && row.turn.status !== 'streaming'" class="answer-head">
               <div class="section-label answer-label">最终回答</div>
-              <div class="speak-actions">
-                <el-tooltip :content="speakHintOf(planAnswerKey(row.turn))" placement="top">
-                  <button
-                    type="button"
-                    class="speak-icon"
-                    :class="{ active: isSpeaking(planAnswerKey(row.turn)) }"
-                    :aria-label="speakHintOf(planAnswerKey(row.turn))"
-                    @click="toggleSpeak(planAnswerKey(row.turn), row.flow.answer)"
-                  >
-                    <el-icon :class="{ 'is-loading': isPreparing(planAnswerKey(row.turn)) }">
-                      <Loading v-if="isPreparing(planAnswerKey(row.turn))" />
-                      <VideoPause v-else-if="isPlaying(planAnswerKey(row.turn))" />
-                      <VideoPlay v-else />
-                    </el-icon>
-                  </button>
-                </el-tooltip>
-                <el-tooltip v-if="isSpeaking(planAnswerKey(row.turn))" content="停止朗读" placement="top">
-                  <button type="button" class="speak-icon stop" aria-label="停止朗读" @click="stopSpeech">
-                    <el-icon><Close /></el-icon>
-                  </button>
-                </el-tooltip>
-              </div>
+              <SpeakActions
+                :speak-key="planAnswerKey(row.turn)"
+                :speaking="isSpeaking(planAnswerKey(row.turn))"
+                :preparing="isPreparing(planAnswerKey(row.turn))"
+                :playing="isPlaying(planAnswerKey(row.turn))"
+                :hint="speakHintOf(planAnswerKey(row.turn))"
+                @toggle="toggleSpeak(planAnswerKey(row.turn), row.flow.answer)"
+                @stop="stopSpeech"
+              />
             </div>
             <div
               class="md answer"
@@ -316,200 +286,24 @@
           <div v-if="isWorkbench && participantFeedOf(row.turn).length" class="wb-actors">
             <WorkbenchActorTree :cards="participantFeedOf(row.turn)">
               <template #default="{ card }">
-              <section class="wb-actor" :class="'is-' + card.kind">
                 <!--
-                  头像与名称、角标同一行并垂直居中（对照 temp/test.html / test-l.html）。
-                  下方思考 / 工具 / 气泡 / 工作流卡缩进到名称列，不把头像拉高到整块高度。
+                  单卡渲染整体下沉到 WorkbenchActorCard：壳层只负责投影、hold 与整会话可点规则。
+                  点选仍回到 onChoice，不另发用户气泡，也不在卡片里判断「是不是最后一条」。
+                  入口预处理排序所需的 beforeAttachments 只对网关卡回溯，其余卡传共用空表。
                 -->
-                <div class="wb-actor-topline">
-                  <ActorAvatar
-                    :look="card.look"
-                    :workflow="isWorkflowCard(card)"
-                    :running="card.pending === true"
-                    :fallback-name="card.title"
-                    :style="participantAvatarStyle(card)"
-                    :title="card.title"
-                  />
-                  <div class="wb-actor-head">
-                    <span class="wb-actor-name">{{ card.title }}</span>
-                    <!--
-                      角标读配置与卡片类型：入口「对话入口」、方案「方案」、单兵专家「Agent」、工作流「工作流 WF」。
-                      is-wf 只给工作流块上紫色底，其余角标样式完全不变。
-                    -->
-                    <span
-                      v-if="actorRoleBadge(card)"
-                      class="wb-actor-role"
-                      :class="{ 'is-wf': !!card.workflow }"
-                    >{{ actorRoleBadge(card) }}</span>
-                  </div>
-                </div>
-                <div class="wb-actor-main">
-                  <!--
-                    入口预处理收在网关过程里、判定句之前。直播与回放都读卡片上的同一份投影，
-                    不再在网关卡片上方另顶一块。正文横排，默认只露前段。
-                  -->
-                  <PreprocessResultBox
-                    v-if="card.kind === 'gateway' && card.preprocess"
-                    :title="card.preprocess.title"
-                    :items="gatewayPreprocessItems(row.turn, card)"
-                  />
-                  <!--
-                    有子卡或汇总时，外框就是这一张方案。思考、工具、正文留在框的上半，
-                    专家卡和汇总画在框内，不再跟方案并排，也不把专家名单再写一遍当正文。
-                    方案框与子卡顺序由 SchemeCard 负责，壳层只传投影好的成员。
-                  -->
-                  <SchemeCard :members="schemeMembers(card)">
-                  <!-- 思考区：进行中先出这一行并保持可看；结束后默认收起，点左侧箭头再展开 -->
-                  <div
-                    v-if="showThoughtToggle(row.turn, card)"
-                    class="wb-actor-thought"
-                    :class="{
-                      'is-streaming': actorThinkOpenByDefault(row.turn, card),
-                      'is-folded': !isOpen(row.turn, actorThinkPart(card), actorThinkOpenByDefault(row.turn, card))
-                    }"
-                  >
-                    <button
-                      type="button"
-                      class="wb-thought-head"
-                      :aria-expanded="isOpen(row.turn, actorThinkPart(card), actorThinkOpenByDefault(row.turn, card))"
-                      :aria-label="thoughtToggleLabel(row.turn, card)"
-                      @click.stop.prevent="toggle(row.turn, actorThinkPart(card), actorThinkOpenByDefault(row.turn, card))"
-                    >
-                      <span
-                        class="thought-chevron"
-                        :class="{ open: isOpen(row.turn, actorThinkPart(card), actorThinkOpenByDefault(row.turn, card)) }"
-                        aria-hidden="true"
-                      />
-                      <span class="section-label">{{ thoughtToggleLabel(row.turn, card) }}</span>
-                    </button>
-                    <div
-                      class="wb-actor-fold"
-                      :class="{ 'is-collapsed': !isOpen(row.turn, actorThinkPart(card), actorThinkOpenByDefault(row.turn, card)) }"
-                    >
-                      <div
-                        :ref="actorFoldRef(row.turn.key, card.key)"
-                        class="wb-actor-fold-body"
-                      >
-                        <p v-if="actorThinkingText(card)" class="wb-actor-thinking">{{ actorThinkingText(card) }}</p>
-                      </div>
-                    </div>
-                  </div>
-                  <!--
-                    工具调用胶囊：同名调用聚合成一条；调用中蓝、有失败红、全成功绿，点开看逐次入参出参。
-                    三拍时序：只有思考这一拍结束（工具或结果已出现）后才允许出胶囊，失败也一样。
-                  -->
-                  <ToolPillList
-                    v-if="!actorThinkingBeat(row.turn, card) && actorToolPills(card).length"
-                    :items="actorToolItems(card)"
-                    :open="toolDetailOpen"
-                    @toggle="toggleToolDetail"
-                  />
-                  <!--
-                    工作流执行卡片：壳层只决定「这条运行用到工作流」，卡片本身的
-                    状态 / 时限 / 节点过程 / 停等选项 / 结果文件全部由 WorkflowRunCard 负责。
-                    投影仍是同一条：这里传入的就是直播、收尾、回放共用的 card.workflow。
-                  -->
-                  <WorkflowRunCard
-                    v-if="card.workflow"
-                    :turn="row.turn"
-                    :card="card"
-                    :hold="actorHoldOf(row.turn, card)"
-                    :choice-enabled="choiceClickable(row.turn)"
-                    :page-active="pageActive"
-                    :workbench="isWorkbench"
-                    @choose="onChoice(row.turn, $event)"
-                  />
-                  <!--
-                    空终态说明在正文框外面。它不是正文，也不占四行框。
-                  -->
-                  <p v-if="card.terminalNote && !card.workflow" class="wb-terminal-note">{{ card.terminalNote }}</p>
-                  <!--
-                    内容框（气泡）：只放判定句、分流句、报错、正文和选项。
-                    正文默认四行，框内可滚；被截断时底部常驻「展开全文」，再点收回。
-                    文件不进这个框，在框下面单独一行。
-                  -->
-                  <div
-                    v-if="actorHasBubble(row.turn, card)"
-                    class="answer-block"
-                    :class="{ 'is-process-bubble': !card.answer }"
-                  >
-                    <p
-                      v-for="(line, resultIndex) in actorResultLines(card)"
-                      :key="'r-' + resultIndex"
-                      class="wb-actor-result"
-                    >{{ line }}</p>
-                    <p
-                      v-for="(err, errIndex) in card.errors"
-                      :key="'err-' + errIndex"
-                      class="wb-soft-error"
-                    >
-                      {{ err }}
-                      <router-link
-                        v-if="showModelConfigLink(err)"
-                        class="wb-error-action"
-                        to="/access/models"
-                      >去绑定模型</router-link>
-                      <router-link
-                        v-if="showReceptionConfigLink(err)"
-                        class="wb-error-action"
-                        :to="receptionConfigHref"
-                      >去配置对话路由</router-link>
-                    </p>
-                    <ResultTextBox
-                      v-if="card.answer"
-                      :action="bodyExpandActionOf(row.turn, card)"
-                      :copy-text="card.answer"
-                      @copy="copyResult(card.answer)"
-                      @toggle="toggleMidBoxExpand(row.turn.key, card.key)"
-                    >
-                      <div
-                        :ref="answerTextRef(row.turn.key, card.key)"
-                        class="md answer"
-                        :class="bodyTextClass(row.turn, card)"
-                        v-html="markdown(row.turn.key + ':' + card.key, displayAnswer(card.answer), row.turn.status === 'streaming' && card.pending)"
-                      />
-                    </ResultTextBox>
-                    <!--
-                      引用贴在结果框内部、正文下面。数据是卡片上已有的 tool_result，
-                      直播和回放同一份投影；这里不改正文，也不在没有出处时占位。
-                    -->
-                    <WorkbenchCitations
-                      v-if="showAnswerCitations(card)"
-                      attached
-                      :items="workbenchCitations(card)"
-                    />
-                    <!--
-                      已答复的方案询问：选项清掉，只在卡内留一行「您的选择」。
-                      这是停等续跑的回执，不再额外冒一条用户气泡，也不把问句整段清空。
-                      可点选项：模型需要用户拍板时给的 chips（机器块已从正文里摘掉）。
-                      只有「整轮最后一条助手消息」上的选项可点：历史轮次的选项已失效，
-                      再点会续作到已经翻页的上下文里。点击走断点续作，不重走判词。
-                    -->
-                    <ChoiceChips
-                      v-if="card.choice && (card.choice.reply || card.choice.options.length)"
-                      :extra-class="card.choice.reply ? 'wb-choice-replied' : ''"
-                      :question="card.choice.question"
-                      :options="card.choice.options"
-                      :reply="card.choice.reply"
-                      :waiting="card.choice.waiting && !card.choice.reply"
-                      :disabled="!choiceClickable(row.turn)"
-                      @choose="onChoice(row.turn, $event)"
-                    />
-                  </div>
-                  <!--
-                    这一步已经结束、但没有成文正文时，出处仍挂在原卡上。
-                    进行中且正文还没落地时不提前摆出来，免得插在过程和结果中间。
-                  -->
-                  <WorkbenchCitations
-                    v-if="showOrphanCitations(card)"
-                    :items="workbenchCitations(card)"
-                  />
-                  <div v-if="!card.workflow && card.files.length" class="wb-file-row">
-                    <FileCard v-for="file in card.files" :key="file.fileName" :file="file" />
-                  </div>
-                  </SchemeCard>
-                </div>
-              </section>
+                <WorkbenchActorCard
+                  :turn="row.turn"
+                  :card="card"
+                  :workbench="isWorkbench"
+                  :hold="actorHoldOf(row.turn, card)"
+                  :choice-enabled="choiceClickable(row.turn)"
+                  :can-config-model="canConfigModel"
+                  :can-config-reception="canConfigReception"
+                  :reception-config-to="receptionConfigHref"
+                  :page-active="pageActive"
+                  :before-attachments="card.kind === 'gateway' && card.preprocess ? attachmentsBefore(row.turn) : NO_ATTACHMENTS"
+                  @choose="onChoice(row.turn, $event)"
+                />
               </template>
             </WorkbenchActorTree>
           </div>
@@ -601,32 +395,15 @@
               <div class="answer-block">
               <div v-if="!isWorkbench && row.turn.status !== 'streaming'" class="answer-head">
                 <div class="section-label answer-label">最终回答</div>
-                <div class="speak-actions">
-                  <el-tooltip :content="speakHintOf(blockAnswerKey(row.turn, block))" placement="top">
-                    <button
-                      type="button"
-                      class="speak-icon"
-                      :class="{ active: isSpeaking(blockAnswerKey(row.turn, block)) }"
-                      :aria-label="speakHintOf(blockAnswerKey(row.turn, block))"
-                      @click="toggleSpeak(blockAnswerKey(row.turn, block), block.text)"
-                    >
-                      <el-icon :class="{ 'is-loading': isPreparing(blockAnswerKey(row.turn, block)) }">
-                        <Loading v-if="isPreparing(blockAnswerKey(row.turn, block))" />
-                        <VideoPause v-else-if="isPlaying(blockAnswerKey(row.turn, block))" />
-                        <VideoPlay v-else />
-                      </el-icon>
-                    </button>
-                  </el-tooltip>
-                  <el-tooltip
-                    v-if="isSpeaking(blockAnswerKey(row.turn, block))"
-                    content="停止朗读"
-                    placement="top"
-                  >
-                    <button type="button" class="speak-icon stop" aria-label="停止朗读" @click="stopSpeech">
-                      <el-icon><Close /></el-icon>
-                    </button>
-                  </el-tooltip>
-                </div>
+                <SpeakActions
+                  :speak-key="blockAnswerKey(row.turn, block)"
+                  :speaking="isSpeaking(blockAnswerKey(row.turn, block))"
+                  :preparing="isPreparing(blockAnswerKey(row.turn, block))"
+                  :playing="isPlaying(blockAnswerKey(row.turn, block))"
+                  :hint="speakHintOf(blockAnswerKey(row.turn, block))"
+                  @toggle="toggleSpeak(blockAnswerKey(row.turn, block), block.text)"
+                  @stop="stopSpeech"
+                />
               </div>
               <div
                 class="md answer"
@@ -667,180 +444,37 @@
       </div>
     </div>
 
-    <div
-      class="composer"
-      :class="{ 'has-at-panel': atPanelOpen, 'is-drop': fileDragOver }"
-      @paste="onComposerPaste"
-      @dragenter="onComposerDragEnter"
-      @dragover="onComposerDragOver"
-      @dragleave="onComposerDragLeave"
-      @drop="onComposerDrop"
-    >
-      <!-- 待发附件：图片缩略图和文件行在同一份列表里，发送前可逐个移除 -->
-      <UserAttachmentStrip
-        v-if="attachments.length"
-        removable
-        :disabled="sending"
-        :items="pendingViews"
-        @remove="removeAttachment"
-      />
-      <!-- @ 提及片：与正文分离，不进 {query} -->
-      <div v-if="isWorkbench && selectedRoute?.agentName" class="mention-chip-row">
-        <span class="mention-chip">
-          @{{ selectedRoute.agentName }}
-          <button
-            type="button"
-            class="mention-chip-x"
-            :disabled="sending"
-            aria-label="取消指定线路"
-            @click="emit('clear-route')"
-          >
-            ×
-          </button>
-        </span>
-      </div>
-      <!-- @ 候选面板：展示名检索，不暴露 route_key -->
-      <ul v-if="atPanelOpen" class="at-panel" role="listbox" aria-label="指定线路">
-        <li v-if="!filteredAtCandidates.length" class="at-empty">无匹配线路</li>
-        <li
-          v-for="(item, index) in filteredAtCandidates"
-          :key="item.routeKey"
-          class="at-item"
-          :class="{ active: index === atActiveIndex }"
-          role="option"
-          :aria-selected="index === atActiveIndex"
-          @mousedown.prevent="confirmAtPick(item)"
-        >
-          <span class="at-name">{{ item.agentName || '未命名线路' }}</span>
-          <span v-if="item.intentDesc" class="at-desc">{{ item.intentDesc }}</span>
-          <span v-if="item.targetType && item.targetType !== 'AGENT'" class="at-type">
-            {{ item.targetType === 'MA' ? '方案' : item.targetType === 'WORKFLOW' ? '工作流' : '' }}
-          </span>
-        </li>
-      </ul>
-      <el-input
-        v-model="text"
-        type="textarea"
-        :rows="2"
-        :autosize="{ minRows: 2, maxRows: 10 }"
-        resize="none"
-        maxlength="8000"
-        :placeholder="composerPlaceholder"
-        :disabled="!canSend || sending"
-        @keydown="onComposerKeydown"
-        @input="onComposerInput"
-      />
-      <div class="composer-bar">
-        <div class="composer-left">
-          <!--
-            自动朗读开关（喇叭）。开启后只朗读「之后完成」的最终回答（绑了 TTS 走模型音频，否则浏览器），
-            绝不补读历史记录；关闭不再自动读，且立刻停掉正在朗读的那一条。
-            开/关不用文字标注：开启时实心高亮，关闭时描边，靠形态与颜色一起区分。
-          -->
-          <el-tooltip v-if="!isWorkbench" :content="speakerHint" placement="top">
-            <button
-              type="button"
-              class="voice-icon-btn speaker-btn"
-              :class="{ on: autoSpeak }"
-              :aria-pressed="autoSpeak"
-              :aria-label="autoSpeak ? '关闭自动朗读' : '开启自动朗读'"
-              @click="toggleAutoSpeak"
-            >
-              <el-icon><Headset /></el-icon>
-            </button>
-          </el-tooltip>
-          <!--
-            语音听写：未落地能力在工作台不摆可点按钮（避免伪装可用）；
-            调试形态仍保留置灰入口并说明原因。
-          -->
-          <el-tooltip v-if="showMicBtn" :content="recordHint" placement="top">
-            <button
-              type="button"
-              class="voice-icon-btn mic-btn"
-              :class="{ recording: voiceRecording, muted: !canRecord && !voiceRecording && !transcribing }"
-              :aria-disabled="!canRecord && !voiceRecording"
-              :aria-label="voiceRecording ? '结束录音并识别' : '开始语音输入'"
-              @click="toggleRecording"
-            >
-              <el-icon :class="{ 'is-loading': transcribing }">
-                <Loading v-if="transcribing" />
-                <Microphone v-else />
-              </el-icon>
-            </button>
-          </el-tooltip>
-          <el-tooltip v-if="voiceRecording" content="取消本次录音" placement="top">
-            <button type="button" class="voice-icon-btn cancel-btn" aria-label="取消本次录音" @click="cancelVoiceRecording">
-              <el-icon><Close /></el-icon>
-            </button>
-          </el-tooltip>
-          <el-tooltip v-if="showImageBtn && (!isWorkbench || entryComposer)" :content="uploadHint" placement="top">
-            <button
-              type="button"
-              class="voice-icon-btn attach-btn"
-              :class="{ muted: !canUploadNow }"
-              :aria-disabled="!canUploadNow"
-              aria-label="添加附件"
-              @click="pickImages"
-            >
-              <el-icon><Paperclip /></el-icon>
-            </button>
-          </el-tooltip>
-          <!-- 首页只在已开视觉时保留原来的图片入口，不换成管理端的附件按钮 -->
-          <el-tooltip v-else-if="showImageBtn" :content="uploadHint" placement="top">
-            <button
-              type="button"
-              class="voice-icon-btn image-btn"
-              :class="{ muted: !canUploadNow }"
-              :aria-disabled="!canUploadNow"
-              aria-label="上传图片或文件"
-              @click="pickImages"
-            >
-              <el-icon><Picture /></el-icon>
-            </button>
-          </el-tooltip>
-          <input
-            ref="filePicker"
-            type="file"
-            accept="image/png,image/jpeg,image/webp,image/gif,.pdf,.txt,.csv,.xlsx,.xls,.docx,.doc,.pptx,.ppt,.zip,.webm,.wav,.mp3,.m4a,.ogg"
-            multiple
-            class="file-input"
-            @change="onFilesPicked"
-          />
-          <!--
-            工作台路由展示已换成每轮助手块顶部的常驻路由行（见 .wb-route-chain），
-            输入条不再保留仅注解的「自动匹配专家」徽标。
-            正文还在加载时同样不提示「请先新建会话」：那不是用户此刻的状态。
-          -->
-          <span class="hint">{{ threadLoading || sessionReady ? '' : blockedHint || '请先新建会话或从左侧选择' }}</span>
-        </div>
-        <!--
-          停止按钮：管理端运行（非 workbench）保持原样；
-          工作台只有在显式传入 can-stop（运行态可停）时才出现，
-          复用同一个 skin 的 MA 运行输入条没有停止处理器，不能露出死按钮。
-          工作流停在「等待用户回复」时这一轮已不在流式中，但用户仍要能停掉挂起的运行，
-          因此 waiting-reply 为真时停止与发送同时出现（发送＝这就是那句回复）。
-        -->
-        <el-button
-          v-if="canSend && ((sending && (!isWorkbench || canStop !== undefined)) || waitingReply)"
-          type="danger"
-          plain
-          :disabled="sending && canStop === false"
-          :title="sending && canStop === false ? '暂时不能停止，请稍候' : undefined"
-          @click="requestStop"
-        >
-          停止
-        </el-button>
-        <el-button
-          v-if="canSend && !(sending && (!isWorkbench || canStop !== undefined))"
-          type="primary"
-          :loading="sending"
-          :disabled="!sessionReady || sending"
-          @click="submit"
-        >
-          发送
-        </el-button>
-      </div>
-    </div>
+    <!--
+      输入条整块下沉到 ChatComposer：正文 / 附件 / 草稿 / 语音 / @ 面板 / 拖拽 / 停止发送自带状态。
+      composerOnly（MA 运行页）由上面 `v-if="!composerOnly"` 只隐藏消息区，这里始终是同一个根级
+      子组件，DOM 与拆前一致，MaRunFlow 的 composer-only 用法零改动。
+    -->
+    <ChatComposer
+      ref="composerRef"
+      :workbench="isWorkbench"
+      :sending="sending"
+      :can-send="canSend"
+      :session-ready="sessionReady"
+      :blocked-hint="blockedHint"
+      :thread-loading="threadLoading"
+      :draft-key="draftKey"
+      :entry-composer="entryComposer"
+      :vision-enabled="visionEnabled"
+      :asr-enabled="asrEnabled"
+      :agent-id="agentId"
+      :can-pick-route="canPickRoute"
+      :route-candidates="routeCandidates"
+      :selected-route="selectedRoute"
+      :can-stop="canStop"
+      :waiting-reply="waitingReply"
+      :auto-speak="autoSpeak"
+      :speaker-hint="speakerHint"
+      @send="onComposerSend"
+      @stop="emit('stop')"
+      @pick-route="onComposerPickRoute"
+      @clear-route="emit('clear-route')"
+      @toggle-auto-speak="toggleAutoSpeak"
+    />
   </div>
 </template>
 
@@ -859,18 +493,14 @@
  *
  * 折叠默认展开，仅当用户点过标题才收起；终答出现也不自动收起。
  */
-import { computed, onBeforeUnmount, onErrorCaptured, onMounted, onUpdated, reactive, ref, watch } from 'vue'
-import { Microphone, Paperclip, Picture, Headset, VideoPlay, VideoPause, Loading, Close } from '@element-plus/icons-vue'
+import { computed, onErrorCaptured, onMounted, onUpdated, reactive, ref, watch } from 'vue'
 import type {
   AssistantBlock,
   ChatTurn,
   RouterTraceView
 } from '@/types/runtime'
 import type { WorkbenchRouteOption } from '@/types/workbench'
-import type { AgentRobotShape } from '@/constants/agentRobotShapes'
 import { ElMessage } from 'element-plus'
-import { transcribeAudio } from '@/api/voice'
-import { useVoiceRecorder } from '@/composables/voiceRecorder'
 import { useSpeechPlayer } from '@/composables/speechPlayer'
 import {
   entryRouteTextsOf,
@@ -880,21 +510,16 @@ import {
   isPlanFlow,
   lanesForDebugSkin,
   planStateText,
-  orderPreprocessItems,
   processLanes,
   splitPreprocessItems,
   stepStateText,
   turnSections
 } from '@/components/runtime/trialMessages'
 import {
-  classifyUserFile,
-  clipboardAttachments,
-  MAX_FILE_BYTES,
-  MAX_USER_ATTACHMENTS,
+  attachmentsOfTurn,
   type OutgoingFile,
   type UserAttachmentView
 } from '@/components/runtime/userMessageImages'
-import UserAttachmentStrip from '@/components/runtime/UserAttachmentStrip.vue'
 import PreprocessResultBox from '@/components/runtime/PreprocessResultBox.vue'
 import type { TurnSections } from '@/components/runtime/trialMessages'
 import ProcessTimeline from '@/components/runtime/ProcessTimeline.vue'
@@ -904,65 +529,26 @@ import type {
   ParticipantCard,
   ParticipantChoiceOption
 } from '@/components/runtime/workbench/workbenchParticipantFeed'
-import { aggregateToolPills, maskToolCallNames, presentToolDetail, toolFaceName } from '@/components/runtime/workbench/workbenchToolPill'
 import { schemeChildrenSettled } from '@/components/runtime/workbench/workflowOutputView'
 import {
-  isMidProcessBox,
-  isThinkOpenByDefault,
-  BOX_MAX_LINES,
-  bodyExpandAction,
-  foldOpenOf,
-  formatThoughtElapsed,
-  isUnlimitedAnswerBox,
   answerClampOf,
-  tableFoldedByDefault,
+  foldOpenOf,
   nextFoldValue
 } from '@/components/runtime/workbench/workbenchContentBox'
-import { WORKFLOW_ROLE_LABEL } from '@/components/runtime/workbench/workbenchThinkTimeline'
-import WorkflowRunCard from '@/components/runtime/workbench/chat/WorkflowRunCard.vue'
 import RouterTimeline from '@/components/runtime/RouterTimeline.vue'
 import FileCard from '@/components/runtime/FileCard.vue'
 import WorkbenchActorTree from '@/components/runtime/workbench/WorkbenchActorTree.vue'
-import SchemeCard from '@/components/runtime/workbench/chat/SchemeCard.vue'
-import ActorAvatar from '@/components/runtime/workbench/chat/ActorAvatar.vue'
-import ToolPillList from '@/components/runtime/workbench/chat/ToolPillList.vue'
-import type { ToolPillItem } from '@/components/runtime/workbench/chat/toolPill'
-import ResultTextBox from '@/components/runtime/workbench/chat/ResultTextBox.vue'
-import ChoiceChips from '@/components/runtime/workbench/chat/ChoiceChips.vue'
-import { loadToolTitles, toolTitleByName } from '@/components/runtime/workbench/chat/toolTitles'
-import WorkbenchCitations from '@/components/runtime/workbench/WorkbenchCitations.vue'
+import WorkbenchActorCard from '@/components/runtime/workbench/chat/WorkbenchActorCard.vue'
+import UserTurnRow from '@/components/runtime/workbench/chat/UserTurnRow.vue'
+import SpeakActions from '@/components/runtime/workbench/chat/SpeakActions.vue'
+import ChatComposer from '@/components/runtime/workbench/chat/ChatComposer.vue'
+import { useChatFollow } from '@/components/runtime/workbench/chat/useChatFollow'
+import { loadToolTitles } from '@/components/runtime/workbench/chat/toolTitles'
+import { createActorIdentity, routeAgentName } from '@/components/runtime/workbench/chat/actorIdentity'
+import { displayAnswerText, displayErrorTextOf, markdownText, thinkTextOf } from '@/components/runtime/workbench/chat/chatText'
 import ElapsedSeconds from '@/components/runtime/ElapsedSeconds.vue'
 import AgentLookArt from '@/components/agent/AgentLookArt.vue'
-import WorkflowGearGlyph from '@/components/runtime/workbench/WorkflowGearGlyph.vue'
-import { WORKFLOW_AVATAR_COLOR, isWorkflowAvatarCard } from '@/components/runtime/workbench/workbenchAvatar'
-import { resolveFollowAfterScroll } from '@/components/runtime/chatFollow'
-import { presentVisibleResult } from '@/components/runtime/workbench/workbenchVisibleText'
-import { citationsFromToolSteps, type WorkbenchCitationView } from '@/components/runtime/workbench/workbenchCitations'
-import { renderMarkdownMemo } from '@/utils/simpleMarkdown'
-import {
-  classifyWorkbenchError,
-  friendlyWorkbenchError,
-  stripWorkbenchLeadHeadings,
-  type WorkbenchErrorKind
-} from '@/utils/workbenchFriendlyError'
-import {
-  detectWorkbenchAtTrigger,
-  filterWorkbenchAtCandidates,
-  stripWorkbenchAtFragment
-} from '@/utils/workbenchAtRoute'
-import {
-  resolveWorkbenchAgentName,
-  stripRouteDecisionJson,
-  stripWorkbenchInternalKeys
-} from '@/components/runtime/workbench/workbenchMessageMeta'
-import {
-  USER_AVATAR_FALLBACK_COLOR,
-  initialOf,
-  resolveAgentAvatar,
-  resolveAvatarUrl,
-  resolveFallbackRobotAvatar
-} from '@/constants/agentLooks'
-import { useUserStore } from '@/stores/user'
+import { isModelConfigActionable, isRouteConfigActionable } from '@/utils/workbenchFriendlyError'
 
 const props = defineProps<{
   turns: ChatTurn[]
@@ -1105,14 +691,35 @@ const emit = defineEmits<{
 }>()
 
 /**
- * 通知外层停掉正在执行的这一轮。连点由外层忽略，这里不把按钮改成不可再点。
+ * 输入条句柄：空态快捷卡只通过 {@link ChatComposer.sendPrompt} 走同一条发送逻辑，
+ * 壳层不再另存一份正文（第二个真源会让草稿与附件状态对不上）。
  */
-function requestStop() {
-  // 等待回复时这一轮不在流式中，但仍有挂起的运行可停：不能再用 sending 当门槛
-  if (!props.sending && !props.waitingReply) {
-    return
-  }
-  emit('stop')
+const composerRef = ref<InstanceType<typeof ChatComposer>>()
+
+/**
+ * 转发输入条的发消息事件：正文 / 图片 / 文件 / 图文顺序原样交给外层，协议不变。
+ *
+ * @param content 正文（只发附件时为空串）
+ * @param images  图片 dataUrl 列表
+ * @param files   文件列表（含 dataUrl）
+ * @param order   附件在待发条里的原始顺序
+ */
+function onComposerSend(
+  content: string,
+  images?: string[],
+  files?: OutgoingFile[],
+  order?: Array<'image' | 'file'>
+) {
+  emit('send', content, images, files, order)
+}
+
+/**
+ * 转发输入条的 @ 选线路：候选只在输入条里展示，壳层只把 routeKey 交给外层。
+ *
+ * @param routeKey 选中的线路键
+ */
+function onComposerPickRoute(routeKey: string) {
+  emit('pick-route', routeKey)
 }
 
 /** 是否工作台沉浸皮肤 */
@@ -1120,257 +727,28 @@ const isWorkbench = computed(() => props.skin === 'workbench')
 /** 工作台思考过程默认收起；调试仍默认展开 */
 const thinkDefaultOpen = computed(() => !isWorkbench.value)
 
-const userStore = useUserStore()
-/** 当前登录用户展示名 */
-const userDisplayName = computed(
-  () => userStore.profile?.nickname || userStore.profile?.username || '用户'
-)
-const userInitial = computed(() => initialOf(userDisplayName.value))
-const userAvatarSrc = computed(() => resolveAvatarUrl(userStore.profile?.avatarUrl))
-const userAvatarStyle = computed(() =>
-  userAvatarSrc.value
-    ? undefined
-    : { background: USER_AVATAR_FALLBACK_COLOR, color: '#fff' }
-)
-
-/** 气泡用的 Agent 形象解析结果 */
-interface AssistantLookView {
-  name: string
-  initial: string
-  iconSrc?: string
-  /** 线稿图元（未命中机器人时为 undefined） */
-  art?: AgentRobotShape[] | null
-  /** 底座色：恒为白底方座 */
-  color: string
-  /** 线稿色 / 首字兜底色 */
-  initialColor: string
-  /** 自定义上传图：铺满裁切 */
-  custom: boolean
-}
-
 /**
- * 解析本轮 AI 气泡形象：候选按 agentId / 名称匹配；多专家同会话时优先用思考车道里的 Agent 名。
- * 未配置形象时与时间线一致，走固定机器人兜底（不再是首字方座）。
+ * 参与者身份解析（形象 / 展示名 / 简介）。
  *
- * @param turn 本轮对话
+ * <p>行首 AI 头像、投影回调（`lookOf` / `descriptionOf`）与参与者卡共用同一份实现；
+ * 入参一律用 getter，候选池异步到达、@ 选中线路与 agentId 变化都会立刻反映。
  */
-function assistantLook(turn: ChatTurn): AssistantLookView {
-  const candidates = props.routeCandidates || []
-  let matched: WorkbenchRouteOption | undefined
-  // 1) 思考车道里的 Agent 名（多专家时更能对上本轮实际线路）
-  for (const lane of lanesOf(turn)) {
-    if (lane.kind !== 'agent') {
-      continue
-    }
-    const name = routeAgentName(lane.title) || lane.title
-    if (!name) {
-      continue
-    }
-    matched = candidates.find((item) => (item.agentName || '').trim() === name.trim())
-    if (matched) {
-      break
-    }
-  }
-  // 2) @ 选定 / 当前强制线路
-  if (!matched && props.selectedRoute) {
-    matched = props.selectedRoute
-  }
-  // 3) 调试皮肤：按当前 agentId
-  if (!matched && props.agentId != null) {
-    matched = candidates.find((item) => item.agentId === props.agentId)
-  }
-  const name =
-    (matched?.agentName || '').trim() ||
-    (props.routeHint || '').trim() ||
-    '助手'
-  // 与时间线共用同一套兜底：没配形象 / 配置认不出图形时给固定机器人，
-  // 气泡里也不再只露「企」这种首字方座
-  const view = lookOf(name)
-  return {
-    name,
-    initial: view.initial,
-    iconSrc: view.iconSrc,
-    art: view.art,
-    color: view.color,
-    initialColor: view.initialColor,
-    custom: view.custom
-  }
-}
+const actorIdentity = createActorIdentity({
+  routeCandidates: () => props.routeCandidates || [],
+  selectedRoute: () => props.selectedRoute,
+  agentId: () => props.agentId,
+  routeHint: () => props.routeHint,
+  // 泳道解析在下方声明（函数声明提升），只读本轮块，不参与循环依赖
+  lanesOf
+})
+const { lookOf, descriptionOf } = actorIdentity
+/** 行首 AI 头像形象 */
+const assistantLook = actorIdentity.assistantLook
+/** 行首 AI 头像内联样式 */
+const assistantAvatarStyle = actorIdentity.avatarStyle
+/** 工作台 AI 名称行文案 */
+const assistantDisplayName = actorIdentity.displayName
 
-/**
- * AI 头像样式：白底方座不变色；首字兜底时文字用该套霓虹色。
- *
- * @param turn 本轮
- */
-function assistantAvatarStyle(turn: ChatTurn) {
-  const look = assistantLook(turn)
-  return {
-    background: look.color,
-    color: look.initialColor
-  }
-}
-
-/**
- * 工作台 AI 名称行文案：优先取本轮思考车道里真实出现的「路由到 XXX」，
- * 多专家同会话时各条用自己的名称；候选里有规范展示名则用规范名。
- * 没有车道（单专家直答）时退回当前线路展示名；仍为空或占位则「智能助手」。
- *
- * @param turn 本轮助手消息
- * @return 可展示的 Agent 名称
- */
-function assistantDisplayName(turn: ChatTurn): string {
-  const candidates = props.routeCandidates || []
-  for (const lane of lanesOf(turn)) {
-    if (lane.kind !== 'agent') {
-      continue
-    }
-    const laneName = routeAgentName(lane.title)
-    if (!laneName) {
-      continue
-    }
-    // 车道名可能只是 Agent 简称，候选里能对上时用统一展示名
-    const matched = candidates.find((item) => (item.agentName || '').trim() === laneName)
-    return resolveWorkbenchAgentName(matched?.agentName || laneName)
-  }
-  // 无车道：沿用头像解析出的线路名，但过滤掉「线路已失效」等状态占位
-  return resolveWorkbenchAgentName(assistantLook(turn).name)
-}
-
-/** @ 面板是否打开 */
-const atPanelOpen = ref(false)
-/** @ 后的检索片段（不含 @） */
-const atQuery = ref('')
-/** 键盘高亮下标 */
-const atActiveIndex = ref(0)
-/**
- * 触发 @ 时，输入框里「@检索片段」的起始下标；关闭面板时用于剥离。
- * -1 表示当前没有挂起的 @ 片段。
- */
-const atTriggerStart = ref(-1)
-
-/** 按展示名过滤候选；永不展示 route_key */
-const filteredAtCandidates = computed(() =>
-  filterWorkbenchAtCandidates(props.routeCandidates, atQuery.value)
-)
-
-/** 工作台占位：恢复带「@ 指定线路」的原文，@ 的能力与列表逻辑都不改 */
-const composerPlaceholder = computed(() =>
-  isWorkbench.value
-    ? '输入问题，@ 指定线路；Enter 发送，Shift+Enter 换行'
-    : '输入问题，Enter 发送，Shift+Enter 换行'
-)
-
-/**
- * 根据 textarea 内容同步 @ 面板开闭与检索词。
- * 只认最后一个未闭合的 @（其后无空格）；有提及片后仍可再 @ 换人。
- */
-function syncAtPanelFromText() {
-  if (!isWorkbench.value || props.canPickRoute === false) {
-    closeAtPanel()
-    return
-  }
-  const hit = detectWorkbenchAtTrigger(text.value)
-  if (!hit) {
-    closeAtPanel()
-    return
-  }
-  atTriggerStart.value = hit.start
-  atQuery.value = hit.query
-  if (!atPanelOpen.value) {
-    atActiveIndex.value = 0
-  }
-  atPanelOpen.value = true
-  // 检索变化时把高亮钳在范围内
-  if (atActiveIndex.value >= filteredAtCandidates.value.length) {
-    atActiveIndex.value = Math.max(0, filteredAtCandidates.value.length - 1)
-  }
-}
-
-/** 关闭 @ 面板（不改正文） */
-function closeAtPanel() {
-  atPanelOpen.value = false
-  atQuery.value = ''
-  atTriggerStart.value = -1
-  atActiveIndex.value = 0
-}
-
-/**
- * 选定候选：剥离输入框里的 @片段，发出 pick-route；提及片由外层 selectedRoute 驱动。
- *
- * @param item 候选
- */
-function confirmAtPick(item: WorkbenchRouteOption) {
-  if (!item?.routeKey) {
-    return
-  }
-  text.value = stripWorkbenchAtFragment(text.value, atTriggerStart.value)
-  closeAtPanel()
-  emit('pick-route', item.routeKey)
-}
-
-/**
- * 输入区键盘：面板打开时上下/Enter/Esc 优先；否则 Enter 发送。
- *
- * @param event 键盘事件（el-input 透传）
- */
-function onComposerKeydown(event: Event | KeyboardEvent) {
-  const e = event as KeyboardEvent
-  if (!e || typeof e.key !== 'string') {
-    return
-  }
-  if (atPanelOpen.value) {
-    if (e.key === 'ArrowDown') {
-      e.preventDefault()
-      const max = filteredAtCandidates.value.length
-      if (max > 0) {
-        atActiveIndex.value = (atActiveIndex.value + 1) % max
-      }
-      return
-    }
-    if (e.key === 'ArrowUp') {
-      e.preventDefault()
-      const max = filteredAtCandidates.value.length
-      if (max > 0) {
-        atActiveIndex.value = (atActiveIndex.value - 1 + max) % max
-      }
-      return
-    }
-    if (e.key === 'Escape') {
-      e.preventDefault()
-      // Esc：关掉面板并剥离未完成的 @片段，正文保留其余
-      text.value = stripWorkbenchAtFragment(text.value, atTriggerStart.value)
-      closeAtPanel()
-      return
-    }
-    if (e.key === 'Enter' && !e.shiftKey) {
-      e.preventDefault()
-      const pick = filteredAtCandidates.value[atActiveIndex.value]
-      if (pick) {
-        confirmAtPick(pick)
-      }
-      return
-    }
-  }
-  // 面板关闭：Enter 发送，Shift+Enter 换行（不 prevent）
-  if (e.key === 'Enter' && !e.shiftKey) {
-    e.preventDefault()
-    submit()
-  }
-}
-
-/** el-input 内容变化时同步 @ 面板 */
-function onComposerInput() {
-  syncAtPanelFromText()
-}
-
-watch(
-  () => props.canPickRoute,
-  (ok) => {
-    if (ok === false) {
-      closeAtPanel()
-    }
-  }
-)
 /** 快捷提问：外层传入；空则三条中性示例（不编造未接入能力） */
 const quickPromptList = computed(() =>
   props.quickPrompts?.length
@@ -1381,19 +759,6 @@ const quickPromptList = computed(() =>
         '帮我看看当前有什么需要优先处理的事项'
       ]
 )
-
-/** 待发送的图片或文件。id 只用于列表 key 与删除定位，图和文件共用这一份 */
-interface Attachment {
-  id: number
-  name: string
-  size: number
-  kind: 'image' | 'file'
-  /** data:{mime};base64,…，随发送一起提交给后端 */
-  dataUrl: string
-}
-
-/** 单张图片的字节上限。与后端 VisionOcrTexts.MAX_IMAGE_CHARS 的量级对齐（约 6MB） */
-const MAX_IMAGE_BYTES = 6 * 1024 * 1024
 
 /** 非计划流程里「思考过程」的折叠键后缀。 */
 const THINK_KEY = 'think'
@@ -1453,252 +818,16 @@ function planTagType(state?: string): 'primary' | 'success' | 'info' | 'warning'
   return 'danger'
 }
 
-const text = ref('')
 const scroller = ref<HTMLElement>()
-/** 原生文件选择器句柄。用 input 而非 el-upload：只需读文件转 base64，不需要上传进度与分片 */
-const filePicker = ref<HTMLInputElement>()
-/** 已选待发图片。发送成功后才清空，失败保留让用户重试 */
-const attachments = ref<Attachment[]>([])
-/** 自增 id，仅用于列表 key 与删除定位 */
-let attachmentSeq = 0
-
 /**
- * 一条会话的未发送输入。
- * 图片 / 文件带 base64，故只留在内存，且限制条目数（见 MAX_COMPOSER_DRAFTS）。
+ * 跟滚组合式：挂在现有 `.messages` 滚动容器上，生命周期与帧清理由组合式自己收口。
+ * 发问 / 切会话强制回底；用户上翻后不拽回。模板只需绑定 onScroll，onUpdated 调 scheduleFollowBottom。
  */
-interface ComposerDraft {
-  text: string
-  attachments: Attachment[]
-}
-
-/**
- * 工作台按会话保存的未发送正文与附件（键见 ChatPanel 的 draftKey 入参）。
- *
- * <p>为什么必须有这一份：ChatPanel 在切会话时不卸载，单个 `text` / `attachments`
- * 会把 A 的字带到 B。这里不新做协议，只是把同一份本地输入按会话分槽。
- */
-const composerDrafts = new Map<string, ComposerDraft>()
-/** 草稿槽条数上限：长时间来回切会话时，不要为每条会话都留一份 */
-const MAX_COMPOSER_DRAFTS = 20
-/** 草稿槽总字符上限（附件是 base64）：条数不爆，但大附件仍可能把内存撑高，按量再兜一层 */
-const MAX_COMPOSER_DRAFT_CHARS = 32 * 1024 * 1024
-
-/** 一条草稿的近似占用：正文 + 各附件 dataUrl 长度（base64 已含在字符串长度里） */
-function composerDraftWeight(draft: ComposerDraft): number {
-  return draft.text.length + draft.attachments.reduce((sum, item) => sum + item.dataUrl.length, 0)
-}
-
-/**
- * 把当前输入存进指定会话槽。
- *
- * <p>空正文 + 空附件不占槽：既避免无意义条目，也保证「手动清空后切走再回来」是空输入。
- * Map 重新插入以刷新顺序，超条数或超总量时从最早的一条开始淘汰（不淘汰刚写入的这条）。
- *
- * @param key 会话槽键（真实会话 / 临时草稿各自唯一）
- */
-function stashComposerDraft(key: string) {
-  const hasContent = text.value.trim().length > 0 || attachments.value.length > 0
-  composerDrafts.delete(key)
-  if (!hasContent) {
-    return
-  }
-  composerDrafts.set(key, { text: text.value, attachments: [...attachments.value] })
-  let totalChars = 0
-  for (const draft of composerDrafts.values()) {
-    totalChars += composerDraftWeight(draft)
-  }
-  while (composerDrafts.size > MAX_COMPOSER_DRAFTS || totalChars > MAX_COMPOSER_DRAFT_CHARS) {
-    const oldest = composerDrafts.keys().next().value
-    if (oldest === undefined || oldest === key) {
-      break
-    }
-    const oldestDraft = composerDrafts.get(oldest)
-    composerDrafts.delete(oldest)
-    if (oldestDraft) {
-      totalChars -= composerDraftWeight(oldestDraft)
-    }
-  }
-}
-
-/**
- * 从会话槽恢复输入；没存过就回到空输入，绝不沿用上一条会话的内容。
- *
- * @param key 目标会话槽键
- */
-function restoreComposerDraft(key: string) {
-  const saved = composerDrafts.get(key)
-  text.value = saved ? saved.text : ''
-  attachments.value = saved ? [...saved.attachments] : []
-  // 旧会话的 @ 检索态不属于新正文，切过来先收起候选面板
-  closeAtPanel()
-}
-
-/** 语音转写进行中：按钮转圈，避免用户连点重复上传 */
-const transcribing = ref(false)
-
-/** 听写是否可用。入口允许未绑 ASR 也录音，失败写在预处理步骤上。 */
-const canRecord = computed(() => {
-  if (props.sending || transcribing.value) {
-    return false
-  }
-  if (props.entryComposer === true) {
-    return true
-  }
-  return props.asrEnabled === true && !!props.agentId
-})
-
-const {
-  recording: voiceRecording,
-  seconds: voiceSeconds,
-  start: startVoiceRecording,
-  stop: stopVoiceRecording,
-  cancel: cancelVoiceRecording
-} = useVoiceRecorder({
-  // 60 秒与后端 max-audio-bytes（10MB）是同一档量级：正常 webm/opus 远小于 10MB
-  maxSeconds: 60,
-  maxBytes: 10 * 1024 * 1024,
-  onComplete: handleRecorded,
-  onCancel: () => ElMessage.info('已取消录音'),
-  onError: (message) => ElMessage.warning(message)
-})
-
-/**
- * 草稿随会话切换：先存旧键、再读新键。
- *
- * <p>只在传入 draftKey 时生效；管理端运行 / MA 运行不传，单个输入的行为与改前一致。
- * 之所以放在组件内而不是提到外层：正文、附件、粘贴 / 拖入都在这份本地输入里，
- * 由外层持有再回传只会多一层容易走样的同步。
- *
- * <p>注册点必须在录音组合式之后：切会话要取消正在录的音，回调里用到该句柄。
- */
-watch(
-  () => props.draftKey,
-  (nextKey, prevKey) => {
-    if (nextKey === prevKey) {
-      return
-    }
-    if (prevKey) {
-      stashComposerDraft(prevKey)
-    }
-    // 正在录的音不属于任何一条会话：切走先取消，避免录完后落进新会话的附件
-    cancelVoiceRecording()
-    if (nextKey) {
-      restoreComposerDraft(nextKey)
-    }
-  },
-  { immediate: true }
+const { onScroll, scheduleFollowBottom } = useChatFollow(
+  scroller,
+  () => props.turns,
+  () => props.sending
 )
-
-/** 入口始终摆麦克风；管理端工作台未绑 ASR 时仍隐藏，避免伪装可用 */
-const showMicBtn = computed(
-  () =>
-    props.entryComposer === true ||
-    !isWorkbench.value ||
-    props.asrEnabled === true ||
-    voiceRecording.value
-)
-/** 入口始终摆附件；管理端工作台未绑视觉时仍隐藏图片入口 */
-const showImageBtn = computed(
-  () => props.entryComposer === true || !isWorkbench.value || props.visionEnabled === true
-)
-
-/** 「说话」按钮的 Hover 说明。图标按钮没有可见文字，状态与原因全部靠它交代 */
-const recordHint = computed(() => {
-  if (props.entryComposer === true) {
-    if (voiceRecording.value) {
-      return `录音中 ${voiceSeconds.value}s，点击结束并作为附件发送`
-    }
-    if (props.asrEnabled !== true) {
-      return '入口未绑定语音识别模型时仍可录音发送，过程里会说明失败原因'
-    }
-    return '点击开始录音，再点一次结束；录音作为本轮附件发出，过程里可见转写'
-  }
-  if (!props.agentId) {
-    return '当前会话没有 Agent，无法使用语音输入'
-  }
-  if (props.asrEnabled !== true) {
-    return '未绑定语音识别模型，请前往 Agent 的「模型配置」Tab 绑定 ASR 模型'
-  }
-  if (transcribing.value) {
-    return '正在识别，请稍候'
-  }
-  if (voiceRecording.value) {
-    return `录音中 ${voiceSeconds.value}s，点击结束并识别（不会自动发送）`
-  }
-  return '点击开始录音，再点一次结束并识别（识别后不会自动发送）'
-})
-
-/** 点「说话」：未在录音则开始，录音中则结束并转写。 */
-async function toggleRecording() {
-  if (voiceRecording.value) {
-    stopVoiceRecording()
-    return
-  }
-  if (!canRecord.value) {
-    return
-  }
-  try {
-    await startVoiceRecording()
-  } catch (error) {
-    ElMessage.warning(errorMessage(error, '无法开始录音，请检查麦克风权限'))
-  }
-}
-
-/**
- * 录音结束 → 调后端识别 → 把文字填进输入框。
- * 明确不自动发送：用户确认文字后再点发送，避免识别错误直接进入会话。
- *
- * @param audio 整段录音
- */
-async function handleRecorded(audio: Blob) {
-  if (props.entryComposer === true) {
-    const file = new File([audio], recordingFileName(audio), { type: audio.type || 'audio/webm' })
-    await addImageFiles([file])
-    return
-  }
-  const agentId = props.agentId
-  if (!agentId) {
-    return
-  }
-  transcribing.value = true
-  try {
-    const recognized = (await transcribeAudio(agentId, audio, recordingFileName(audio))).trim()
-    if (!recognized) {
-      ElMessage.warning('没有识别到内容，请靠近麦克风再说一次')
-      return
-    }
-    // 已有草稿时追加，避免覆盖用户手打的内容
-    text.value = text.value.trim() ? `${text.value.trim()} ${recognized}` : recognized
-  } catch (error) {
-    ElMessage.warning(errorMessage(error, '语音识别失败，请重试'))
-  } finally {
-    transcribing.value = false
-  }
-}
-
-/**
- * 上传文件名：扩展名决定上游按什么容器解码，必须与录音 MIME 一致。
- *
- * @param audio 录音 Blob
- * @return 带扩展名的文件名
- */
-function recordingFileName(audio: Blob): string {
-  const type = audio.type.toLowerCase()
-  if (type.includes('wav')) {
-    return 'voice.wav'
-  }
-  if (type.includes('mpeg') || type.includes('mp3')) {
-    return 'voice.mp3'
-  }
-  if (type.includes('mp4') || type.includes('m4a')) {
-    return 'voice.m4a'
-  }
-  if (type.includes('ogg')) {
-    return 'voice.ogg'
-  }
-  return 'voice.webm'
-}
-
 /**
  * 朗读播放器：同一条回答支持 播放 / 暂停 / 继续 / 停止。
  * 绑定 TTS 走模型音频；未绑定或合成失败自动降级浏览器朗读。
@@ -1932,9 +1061,7 @@ watch(
   () => props.turns,
   () => {
     feedCache.clear()
-    // 切会话：上一份时间线的测量缓存 / 思考节拍状态都不再有效
-    midBoxMeasuredLen.clear()
-    openThinkKeys.clear()
+    // 参与者卡自己的四行实测 / 思考节拍缓存随卡片实例走，这里只清投影
   }
 )
 
@@ -2155,16 +1282,6 @@ function routeChainOf(turn: ChatTurn): WorkbenchRouteChain {
   return { label: gateway ? '入口' : '交给', names }
 }
 
-/**
- * 错误分类：模板里按原始文案实时判定，深链与展示共用同一口径。
- *
- * @param text 原始错误文案
- * @return 展示分类
- */
-function workbenchErrorKindOf(text: string): WorkbenchErrorKind {
-  return classifyWorkbenchError(text)
-}
-
 /** 「去配置对话路由」的实际地址：工作台传具体方案的抽屉，其它入口退回列表 */
 const receptionConfigHref = computed(
   () => (props.receptionConfigTo || '').trim() || '/orchestration/multi-agent'
@@ -2174,7 +1291,8 @@ const receptionConfigHref = computed(
  * 该条错误是否该给「去配置对话路由」。
  *
  * <p>只认分类为 route 的可行动错误；手动停止 / 中断留下的「判路由失败：已中断」
- * 不应再引导去改配置——那是本轮被打断，不是配置缺失。
+ * 不应再引导去改配置——那是本轮被打断，不是配置缺失。判定收在
+ * {@link isRouteConfigActionable}，参与者卡共用同一口径。
  *
  * @param text 原始错误文案
  * @return true 表示渲染路由配置深链
@@ -2183,16 +1301,14 @@ function showReceptionConfigLink(text: string): boolean {
   if (!isWorkbench.value || !props.canConfigReception) {
     return false
   }
-  if (/已?中断|已?中止|已?取消|已停止/.test(text || '')) {
-    return false
-  }
-  return workbenchErrorKindOf(text) === 'route'
+  return isRouteConfigActionable(text)
 }
 
 /**
  * 该条错误是否该给「去绑定模型」。
  *
- * <p>与路由同一口径：中断不是模型没配，保留原话即可，不再挂深链。
+ * <p>与路由同一口径：中断不是模型没配，保留原话即可，不再挂深链。判定收在
+ * {@link isModelConfigActionable}，参与者卡共用同一口径。
  *
  * @param text 原始错误文案
  * @return true 表示渲染模型中心深链
@@ -2201,24 +1317,9 @@ function showModelConfigLink(text: string): boolean {
   if (!isWorkbench.value || !props.canConfigModel) {
     return false
   }
-  if (/已?中断|已?中止|已?取消|已停止/.test(text || '')) {
-    return false
-  }
-  return workbenchErrorKindOf(text) === 'model'
+  return isModelConfigActionable(text)
 }
 
-/**
- * 方案框里要排的成员：直接子卡在前，汇总在最后。
- *
- * <p>子卡是投影按 begin 收好的，这里只决定框内顺序，不再重算谁属于哪个方案。
- *
- * @param card 当前这张卡
- * @return 框内成员；没有子卡也没有汇总时为空
- */
-function schemeMembers(card: ParticipantCard): ParticipantCard[] {
-  const children = Array.isArray(card.children) ? card.children : []
-  return card.summary ? [...children, card.summary] : children
-}
 
 /**
  * 收尾时丢掉没有 begin 身份、只剩状态句的卡。直播保留，框里的子卡和汇总同一口径。
@@ -2297,273 +1398,6 @@ function hasParticipantFeed(turn: ChatTurn): boolean {
   })
 }
 
-/** 工作流头像齿轮的线稿色：固定近黑，与消息流里的名称文字同色系，不走 lookOf 的彩色 */
-const WORKFLOW_GEAR_COLOR = WORKFLOW_AVATAR_COLOR
-
-/**
- * 是不是工作流块（执行卡片或它的占位块）。
- *
- * <p>口径集中在 `workbenchAvatar`：有卡片快照，或角色位就是「工作流 WF」。
- *
- * @param card 参与者卡片
- * @return true 表示这一块是工作流
- */
-function isWorkflowCard(card: ParticipantCard): boolean {
-  return isWorkflowAvatarCard(card)
-}
-
-/**
- * 参与者头像样式：圆圈中间白底，银圈由样式画；线稿色用该套形象色。
- *
- * <p>工作流是唯一例外：头像固定白底黑齿轮，不读 lookOf（有没有保存形象都不改）。
- *
- * @param card 参与者卡片
- * @return 内联样式
- */
-function participantAvatarStyle(card: ParticipantCard) {
-  // 圆圈中间固定白底，描边由样式画成银圈；形象色只留给字，不再铺成方座底色
-  if (isWorkflowCard(card)) {
-    return {
-      background: '#fff',
-      color: WORKFLOW_GEAR_COLOR
-    }
-  }
-  return {
-    background: '#fff',
-    color: card.look?.initialColor || '#111827'
-  }
-}
-
-/**
- * 该候选的简介 / 意图说明：判路由命中时后端 reason 只是内部标签，
- * 这是网关句唯一能引用的「为什么是它」事实依据（现网字段 `intentDesc`）。
- *
- * @param name 展示名
- * @return 简介；候选不在本会话或没有简介时为空串
- */
-function descriptionOf(name: string): string {
-  return (candidateOf(name)?.intentDesc || '').trim()
-}
-
-/**
- * 按展示名取候选项：用于目标类型与形象解析；对不上返回 undefined（按普通 Agent 处理）。
- *
- * @param name 展示名
- * @return 候选；空表示不在本会话候选里
- */
-function candidateOf(name: string) {
-  const wanted = (name || '').trim()
-  if (!wanted) {
-    return undefined
-  }
-  return (props.routeCandidates || []).find((item) => (item.agentName || '').trim() === wanted)
-}
-
-/**
- * 该名字的形象配置：先查入口候选，再查方案内部的子候选。
- *
- * <p>方案内部子专家不在入口候选池里，形象只能从入口方案那一行的 `children` 取；
- * 两者都没有返回 undefined，交给调用方决定兜底（方案用固定机器人，专家用首字）。
- *
- * @param name 展示名
- * @return 形象配置；未配置 / 不认识的参与者为 undefined
- */
-function avatarConfigOf(name: string) {
-  const top = candidateOf(name)
-  if (top) {
-    return top.avatarConfig || undefined
-  }
-  const wanted = (name || '').trim()
-  if (!wanted) {
-    return undefined
-  }
-  for (const option of props.routeCandidates || []) {
-    const child = (option.children || []).find((item) => (item.agentName || '').trim() === wanted)
-    if (child) {
-      return child.avatarConfig || undefined
-    }
-  }
-  return undefined
-}
-
-/**
- * 专家 / 方案形象：已配置的用配置，没配置（或配置认不出图形）的一律给固定机器人。
- *
- * <p>为什么不再退「首字方座」：时间线、方案块、子专家块都是「参与者」，只露一个汉字
- * 既分不清谁是谁，也和单兵专家的机器人形象不在同一套里。兜底用
- * {@link resolveFallbackRobotAvatar} 按名字稳定挑现成 8 套之一，刷新不会变脸；
- * 不新增上传链路，也不另造 MA 形象协议。
- *
- * @param name 展示名
- * @return 时间线内的小头像视图
- */
-function lookOf(name: string) {
-  const config = avatarConfigOf(name)
-  let view = config ? resolveAgentAvatar(config, name) : null
-  if (!view || (!view.imgSrc && !view.art)) {
-    // 未配置 / 配置形态认不出：走固定机器人，避免「企」「制」这种首字方座
-    view = resolveFallbackRobotAvatar(name)
-  }
-  return {
-    initial: view.initial,
-    iconSrc: view.imgSrc || undefined,
-    art: view.art,
-    color: view.background,
-    initialColor: view.initialColor,
-    custom: view.isCustom
-  }
-}
-
-/**
- * 参与者名称右侧的角标：入口「对话入口」、方案「方案」、单兵专家「Agent」。
- *
- * <p>口径读配置与卡片类型，不写死展示名：
- * <ul>
- *   <li>入口块（kind=gateway）：名称是配置里的入口方案名（如 Router），角标恒为「对话入口」；</li>
- *   <li>方案（roleLabel=方案）：分流与框内汇总都标「方案」；</li>
- *   <li>整轮收口（roleLabel=最终产物）：标「最终产物」，排在全部方案卡之后；</li>
- *   <li>其余参与者（单兵专家 / 方案内部子专家）：标「Agent」，不允许空着。</li>
- * </ul>
- *
- * @param card 参与者卡片
- * @return 角标文案；不会返回空串
- */
-function actorRoleBadge(card: ParticipantCard): string {
-  if (card.kind === 'gateway') {
-    return '对话入口'
-  }
-  if (card.roundDeliverable || card.roleLabel === '最终产物') {
-    return '最终产物'
-  }
-  if (card.roleLabel === '方案') {
-    return '方案'
-  }
-  // 工作流块：角标固定「工作流 WF」，与卡片里的执行流是同一件事
-  if (card.workflow || card.roleLabel === WORKFLOW_ROLE_LABEL) {
-    return WORKFLOW_ROLE_LABEL
-  }
-  return 'Agent'
-}
-
-/**
- * 这位参与者的思考折叠键。默认收起，点开才看思考和工具。
- *
- * @param card 参与者卡片
- * @return 折叠区段名
- */
-function actorThinkPart(card: ParticipantCard): string {
-  return `actor-think:${card.key}`
-}
-
-/**
- * 折叠区里要展示的说明行：网关判定句 / 方案分流句已经在内容框里出现过，
- * 不再进折叠（否则同一句出现两次）。
- *
- * @param card 参与者卡片
- * @return 折叠区说明行
- */
-function actorFoldLines(card: ParticipantCard): string[] {
-  const lines = Array.isArray(card.lines) ? card.lines : []
-  if (card.kind === 'gateway' || card.roleLabel === '方案') {
-    return []
-  }
-  return lines
-}
-
-/**
- * 内容框里的本步结果句：网关写判定（分发给谁），方案写分给谁。
- * 专家用自己的正文 / 报错 / 文件卡，不走这里（返回空数组）。
- *
- * @param card 参与者卡片
- * @return 可见结果行；没有时为空数组
- */
-function actorResultLines(card: ParticipantCard): string[] {
-  const lines = Array.isArray(card.lines) ? card.lines : []
-  if (card.kind !== 'gateway' && card.roleLabel !== '方案') {
-    return []
-  }
-  return lines
-}
-
-
-/**
- * 一张卡上的引用缓存。
- *
- * <p>投影按内容签名重建卡片，签名变了就是新对象，缓存跟着失效。
- * 同一帧模板会问多次，不必把工具结果再解析几遍。
- */
-const citationMemo = new WeakMap<ParticipantCard, WorkbenchCitationView[]>()
-
-/**
- * 读这张卡上已经投影好的工具结果，抽出出处。
- *
- * <p>只在工作台皮肤计算。管理端运行不走这条模板，这里再挡一次，避免共用组件时带出去。
- * 直播和回放都读 card.steps，不另拼一层、不改 turns。
- *
- * @param card 参与者卡片
- * @return 可点来源；没有时为空数组
- */
-function workbenchCitations(card: ParticipantCard): WorkbenchCitationView[] {
-  if (!isWorkbench.value) {
-    return []
-  }
-  const cached = citationMemo.get(card)
-  if (cached) {
-    return cached
-  }
-  const items = citationsFromToolSteps(card.steps)
-  citationMemo.set(card, items)
-  return items
-}
-
-/**
- * 正文已经落地时，引用贴在结果框里。
- *
- * @param card 参与者卡片
- * @return true 表示画在结果框内部
- */
-function showAnswerCitations(card: ParticipantCard): boolean {
-  return !!card.answer && workbenchCitations(card).length > 0
-}
-
-
-/**
- * 这一步已经结束，但没有成文正文。出处仍挂在原卡上，不插进还在生成的过程里。
- *
- * @param card 参与者卡片
- * @return true 表示在结果框外单独挂引用
- */
-function showOrphanCitations(card: ParticipantCard): boolean {
-  if (card.answer || (card.workflow?.answer || '') || card.pending === true) {
-    return false
-  }
-  return workbenchCitations(card).length > 0
-}
-
-
-/**
- * 思考区里要展示的内容：只有推理正文，工具调用单独做胶囊、不堆进思考正文。
- *
- * <p>演示稿的思考框是一段连续文字；工具是它下面的独立胶囊。
- * 因此这里把 tool_call / tool_result 从推理文本里摘出去，避免同一件事出现两遍。
- *
- * @param card 参与者卡片
- * @return 推理文本；没有时为空
- */
-function actorThinkingText(card: ParticipantCard): string {
-  return cardViewOf(card).thinkingText
-}
-
-/**
- * 从参与者块里取工具胶囊，按工具名聚合。
- *
- * @param card 参与者卡片
- * @return 胶囊列表（按工具首次出现顺序）
- */
-function actorToolPills(card: ParticipantCard): ToolPillView[] {
-  return cardViewOf(card).pills
-}
-
 /**
  * 拉一次工具项目录，只用已有的 title 字段。
  *
@@ -2572,623 +1406,6 @@ function actorToolPills(card: ParticipantCard): ToolPillView[] {
  */
 async function loadToolFaceTitles() {
   await loadToolTitles(isWorkbench.value)
-}
-
-/**
- * 胶囊上的一句。聚合仍按英文调用名，句子里只放中文名。
- *
- * @param pill 聚合后的胶囊
- * @return 如「已调用【知识库检索】」
- */
-function toolPhrase(pill: ToolPillView): string {
-  const face = `【${toolFaceName(pill.name, toolTitleByName)}】`
-  if (pill.state === 'running') {
-    const times = pill.total > 1 ? `（${pill.total}）` : ''
-    return `正在调用${face}${times}…`
-  }
-  if (pill.state === 'done') {
-    const times = pill.total > 1 ? `（${pill.total} 次）` : ''
-    return `已调用${face}${times}`
-  }
-  const error = pill.firstError ? ` · ${pill.firstError}` : ''
-  return `${face}：成功 ${pill.ok} / 失败 ${pill.failed}${error}`
-}
-
-/**
- * 工具胶囊组件的入参：展示句与详情先在这里算好，组件只负责画。
- *
- * <p>聚合、中文名替换与「能不能看详情」都留在壳层，共享组件不读卡片结构。
- *
- * @param card 参与者卡片
- * @return 可直接交给 ToolPillList 的条目
- */
-function actorToolItems(card: ParticipantCard): ToolPillItem[] {
-  return actorToolPills(card).map((pill) => ({
-    key: pill.key,
-    state: pill.state,
-    label: toolPhrase(pill),
-    detail: pill.detail ? presentToolDetail(pill.detail) : ''
-  }))
-}
-
-/** 思考耗时的刷新时钟。只有本轮还在流式时才走表，回放不编造秒数。 */
-const thoughtNow = ref(Date.now())
-/** 这一位思考开始的时刻（只记本次页面上看见它还在跑的时候） */
-const thinkStartedAt = new Map<string, number>()
-/** 这一位结束后冻住的毫秒，避免停表后还跟着时钟涨 */
-const thinkFrozenMs = new Map<string, number>()
-let thoughtTimer = 0
-
-/**
- * 思考行上的耗时。没在这次停留里看见它跑过，就不写秒数（回放没有逐步耗时）。
- *
- * @param turn 本轮
- * @param card 参与者
- * @return 毫秒；没有观察起点时为 null
- */
-function observedThoughtMs(turn: ChatTurn, card: ParticipantCard): number | null {
-  const key = `${turn.key}:${card.key}`
-  const now = thoughtNow.value
-  const running = turn.status === 'streaming' && card.pending === true
-  if (running) {
-    if (!thinkStartedAt.has(key)) {
-      thinkStartedAt.set(key, now)
-    }
-    return Math.max(0, now - (thinkStartedAt.get(key) as number))
-  }
-  if (thinkFrozenMs.has(key)) {
-    return thinkFrozenMs.get(key) as number
-  }
-  if (thinkStartedAt.has(key)) {
-    const elapsed = Math.max(0, now - (thinkStartedAt.get(key) as number))
-    thinkFrozenMs.set(key, elapsed)
-    return elapsed
-  }
-  return null
-}
-
-/**
- * 折叠行文案。有真实耗时才带「(耗时 Xs)」。
- *
- * @param turn 本轮
- * @param card 参与者
- * @return 一行标题
- */
-function thoughtToggleLabel(turn: ChatTurn, card: ParticipantCard): string {
-  const elapsed = formatThoughtElapsed(observedThoughtMs(turn, card) ?? 0)
-  return elapsed ? `思考与工具执行过程 (耗时 ${elapsed})` : '思考与工具执行过程'
-}
-
-/**
- * 思考行什么时候出现。
- *
- * <p>已经有推理就一直在。还在跑、结果还没落地时也先把这一行摆上，
- * 不等整轮结束才出现。结束后如果从头到尾没有推理，就不留空行。
- *
- * @param turn 本轮
- * @param card 参与者
- * @return true 表示画出折叠行
- */
-function showThoughtToggle(turn: ChatTurn, card: ParticipantCard): boolean {
-  // 工作流卡的思考已经挂在各节点内部：卡外不再出一个空思考折叠行
-  if (card.workflow) {
-    return false
-  }
-  if (actorHasThink(card)) {
-    return true
-  }
-  return card.pending === true && turn.status === 'streaming' && !actorHasResult(card)
-}
-
-
-/**
- * 复制结果框里用户看见的正文（检索 JSON 已收成引用文本）。
- *
- * @param raw 卡片上的原文
- */
-async function copyResult(raw: string) {
-  const text = displayAnswer(raw)
-  if (!text) {
-    return
-  }
-  try {
-    await navigator.clipboard.writeText(text)
-    ElMessage.success('已复制')
-  } catch {
-    ElMessage.error('复制失败')
-  }
-}
-
-/** 卡片派生视图：思考正文 + 工具胶囊（模板每块要问多次，只算一次） */
-interface CardView {
-  thinkingText: string
-  pills: ToolPillView[]
-}
-
-/**
- * 卡片派生视图缓存。
- *
- * <p>为什么用 WeakMap 按卡片对象缓存：投影按内容签名重建卡片（签名变了就是新对象），
- * 因此缓存天然随投影失效，不需要额外的签名比对；而同一帧内模板对同一块会问 4 次以上
- * 「思考文本 / 工具胶囊」，每次都要遍历全部步骤并拼接全文，长思考 + 多工具时是纯浪费。
- */
-const cardViewMemo = new WeakMap<ParticipantCard, CardView>()
-
-/**
- * 取（或首次计算）一张卡片的派生视图。
- *
- * @param card 参与者卡片
- * @return 思考正文与工具胶囊
- */
-function cardViewOf(card: ParticipantCard): CardView {
-  const hit = cardViewMemo.get(card)
-  if (hit) {
-    return hit
-  }
-  const view: CardView = {
-    thinkingText: buildThinkingText(card),
-    pills: aggregateToolPills(card.key, Array.isArray(card.steps) ? card.steps : [])
-  }
-  cardViewMemo.set(card, view)
-  return view
-}
-
-/**
- * 计算一张卡片的思考正文（只有推理，不含工具调用）。
- *
- * @param card 参与者卡片
- * @return 推理文本；没有时为空
- */
-function buildThinkingText(card: ParticipantCard): string {
-  const steps = Array.isArray(card.steps) ? card.steps : []
-  const parts: string[] = []
-  for (const step of steps) {
-    if (step.type !== 'reasoning') {
-      continue
-    }
-    const text = (step.text || '').trim()
-    if (text) {
-      parts.push(text)
-    }
-  }
-  // 专家块还会把依据句放进 lines；网关 / 方案的话已经在内容框里，不重复
-  return [...actorFoldLines(card), ...parts].join('\n').trim()
-}
-
-/**
- * 工具胶囊条目：同一参与者、同一工具名的**所有调用**合成一条。
- *
- * <p>聚合规则收在 {@link aggregateToolPills}（纯函数，有单测）：
- * 同名并行只出一条、计数正确、首错优先且不被熔断文案覆盖。
- */
-type ToolPillView = ReturnType<typeof aggregateToolPills>[number]
-
-/**
- * 工具详情是否展开（键 = 胶囊 key）。
- *
- * <p>成功胶囊可点开看入参出参；失败胶囊原因已写在胶囊上，点开可看细节。
- */
-const toolDetailOpen = reactive<Record<string, boolean>>({})
-
-/**
- * 切换某条工具胶囊的详情展开态。
- *
- * @param key 胶囊 key
- */
-function toggleToolDetail(key: string) {
-  toolDetailOpen[key] = toolDetailOpen[key] !== true
-}
-
-/**
- * 正文节点 / 思考文字的 DOM 句柄。键为「轮 key:参与者 key」。
- *
- * <p>正文限高四行，展开看全文，不在框里跟滚。思考文字单独限高四行并在框内滚动，
- * 所以滚动句柄登记在思考文字上，不登记在带标题的整框上。
- */
-const answerTextEls = new Map<string, HTMLElement>()
-const actorFoldEls = new Map<string, HTMLElement>()
-
-/**
- * 正文节点 ref：用来量这段文字有没有超过四行。文件行不进这个节点。
- *
- * @param turnKey 本轮 key
- * @param cardKey 参与者 key
- * @return Vue 的 ref 回调
- */
-function answerTextRef(turnKey: string, cardKey: string) {
-  const key = `${turnKey}:${cardKey}`
-  return (el: unknown) => {
-    if (el instanceof HTMLElement) {
-      answerTextEls.set(key, el)
-    } else {
-      answerTextEls.delete(key)
-    }
-  }
-}
-
-/**
- * 思考文字 ref：滚动发生在这四行文字里，标题行不跟着滚。
- *
- * @param turnKey 本轮 key
- * @param cardKey 参与者 key
- * @return Vue 的 ref 回调
- */
-function actorFoldRef(turnKey: string, cardKey: string) {
-  const key = `${turnKey}:${cardKey}`
-  return (el: unknown) => {
-    if (el instanceof HTMLElement) {
-      const thinking = el.querySelector('.wb-actor-thinking')
-      actorFoldEls.set(key, thinking instanceof HTMLElement ? thinking : el)
-    } else {
-      actorFoldEls.delete(key)
-    }
-  }
-}
-
-/** 需要在本次更新后执行「中间框跟滚」的轮次；同一帧只处理一次 */
-const pendingScrollKeys = new Set<string>()
-/** 上一帧仍处于「思考这一拍」的块（键＝轮:参与者）；用于识别刚收起的那一拍 */
-const openThinkKeys = new Set<string>()
-/** 已排队的跟滚帧号；0 表示当前没有排队 */
-let actorScrollFrame = 0
-
-/**
- * 把仍在流式中的思考文字滚到底部（跟看最后一行）。
- *
- * 思考文字和结果框都在四行里跟到最新一行。
- * 用户往上翻过（离开底部超过一行）就不再拽回去。
- */
-function tickMidProcessScroll() {
-  actorScrollFrame = 0
-  for (const key of pendingScrollKeys) {
-    const fold = actorFoldEls.get(key)
-    if (fold) {
-      followScrollable(fold)
-    }
-    const answer = answerTextEls.get(key)
-    // 展开后的全文不再被四行框拽到底；收在四行里时才跟最新一行
-    if (answer && answer.classList.contains('is-clamped')) {
-      followScrollable(answer)
-    }
-  }
-  pendingScrollKeys.clear()
-}
-
-/**
- * 把可滚动元素滚到底，但只在用户仍停在底部附近时执行。
- *
- * @param el 可滚动容器
- */
-function followScrollable(el: HTMLElement) {
-  const distance = el.scrollHeight - el.scrollTop - el.clientHeight
-  // 离开底部超过一行的距离，视为用户正在回看历史，不再拽回底部
-  if (distance > 48) {
-    return
-  }
-  el.scrollTop = el.scrollHeight
-}
-
-/**
- * 登记所有仍在流式中的轮次，等下一帧统一跟滚。
- *
- * <p>由 {@link onUpdated} 在增量真正写进 DOM 之后调用：一帧最多读一次 scrollHeight、
- * 写一次 scrollTop，不随每个 delta 抖动。
- *
- * <p>同时识别「思考这一拍刚结束」的块（展开 → 收起）：折叠动画开始前先把内框滚到底，
- * 让收起时看到的是最后一行，而不是被裁在中段；也避免内外两层滚动在同一帧互相拽位置。
- */
-function requestMidProcessScroll() {
-  if (!isWorkbench.value) {
-    return
-  }
-  let dirty = false
-  for (const turn of props.turns) {
-    if (turn.role !== 'assistant' || turn.status !== 'streaming') {
-      continue
-    }
-    for (const card of participantFeedOf(turn)) {
-      const key = `${turn.key}:${card.key}`
-      if (actorThinkOpenByDefault(turn, card)) {
-        openThinkKeys.add(key)
-      } else if (openThinkKeys.delete(key)) {
-        // 刚结束第一拍：折叠前把内框滚到底（一次布局读，每个块每拍只发生一次）
-        const fold = actorFoldEls.get(key)
-        if (fold) {
-          fold.scrollTop = fold.scrollHeight
-        }
-      }
-      // 只跟中间过程：最终结果不限高，不需要跟滚
-      if (!actorBoxMidProcess(turn, card)) {
-        continue
-      }
-      pendingScrollKeys.add(key)
-      dirty = true
-    }
-  }
-  if (!dirty || actorScrollFrame) {
-    return
-  }
-  actorScrollFrame = requestAnimationFrame(tickMidProcessScroll)
-}
-
-/**
- * 正文是否被用户展开（键 = 「轮 key:参与者 key」）。
- *
- * <p>中间过程正文默认四行。点「展开全文」去掉限高，点「收起」恢复。
- * 思考框不走这个开关，它在四行里滚动。
- */
-const midBoxExpanded = reactive<Record<string, boolean>>({})
-/**
- * 中间过程框被四行截断的判定缓存（键 = 「轮 key:参与者 key」）。
- *
- * <p>只在渲染后实测一次 scrollHeight / clientHeight，模板不读布局：
- * 流式期每帧在模板里读布局会强制同步排版，长会话会明显掉帧。
- * 展开后仍记为「本可截断」，这样「收起」入口不会因为框已放开而消失。
- */
-const midBoxOverflow = reactive<Record<string, boolean>>({})
-
-/**
- * 正文单行高度（px）：与 `.chat.is-workbench .md.answer` 的
- * `font-size: 14px` × `line-height: 1.6` 一致。
- *
- * <p>为什么用常量而不是 `getComputedStyle(el).lineHeight`：读计算样式会强制同步样式计算，
- * 流式期每帧对每个块各读一次，是和 `scrollHeight` 一起把主线程拖住的主要原因。
- * 这两处样式属于界面固定口径，改字号时同步改这里（下方 CSS 注释也留了对照）。
- */
-const MID_BOX_LINE_HEIGHT_PX = 14 * 1.6
-/** 两次实测之间的最小间隔（毫秒）：流式期降频，攒到下一个间隔再统一量 */
-const MID_BOX_MEASURE_MIN_GAP_MS = 80
-/** 每个框上次测量时的内容长度：长度没变就不可能溢出，直接跳过读布局 */
-const midBoxMeasuredLen = new Map<string, number>()
-/** 上一次真正测量的时间戳（毫秒） */
-let midBoxMeasuredAt = 0
-
-/**
- * 量一次每段正文是否超过四行，决定要不要给「展开全文」。
- *
- * <p>只量正文节点，不把文件卡、终态说明算进去。文件在框外，说明也在框外，
- * 它们都很矮，若和正文量在一起，点展开不会改变看见的高度。
- * 展开之后 max-height 是 none，仍用「四行行高」和 scrollHeight 比，收起入口才不会丢。
- *
- * <p>降频与去重（P0-B9）：
- * <ul>
- *   <li>行高 / 内边距用常量，不再每帧 `getComputedStyle`；</li>
- *   <li>内容长度没变的框直接跳过，不读 `scrollHeight`；</li>
- *   <li>流式期两次实测至少间隔 {@link MID_BOX_MEASURE_MIN_GAP_MS}，
- *       结束态（非流式）不节流，保证「展开全文」在终答落地那一帧就能出；</li>
- *   <li>判定值不变就不写回响应式，避免额外一次重渲染。</li>
- * </ul>
- */
-function measureMidBoxOverflow() {
-  if (!isWorkbench.value) {
-    return
-  }
-  const now = Date.now()
-  const throttled = now - midBoxMeasuredAt < MID_BOX_MEASURE_MIN_GAP_MS
-  // 四行正文：限高加在文字上，内边距在外层气泡，不计入这四行
-  const limit = BOX_MAX_LINES * MID_BOX_LINE_HEIGHT_PX
-  for (const turn of props.turns) {
-    if (turn.role !== 'assistant') {
-      continue
-    }
-    // 方案框里的子卡不在根列表上。不顺着框往下量，中间过程就没有展开箭头。
-    for (const card of visitParticipantCards(participantFeedOf(turn))) {
-      const key = `${turn.key}:${card.key}`
-      const el = answerTextEls.get(key)
-      // 最终结果不限高；没有正文节点也不给展开按钮
-      if (!bodyTextLimited(turn, card)) {
-        if (midBoxOverflow[key]) {
-          midBoxOverflow[key] = false
-        }
-        continue
-      }
-      if (!el) {
-        continue
-      }
-      // 内容长度没变：上一拍量过且结论没变，不必再读一次布局
-      const contentLength = boxContentLength(card)
-      if (midBoxMeasuredLen.get(key) === contentLength) {
-        continue
-      }
-      // 流式期降频：同一帧量所有块代价最高，攒到下一个间隔统一量
-      if (throttled && turn.status === 'streaming') {
-        continue
-      }
-      // 四行按文字节点的 scrollHeight 和四行行高比，不读整只气泡
-      const overflowing = el.scrollHeight - limit > 2
-      midBoxMeasuredLen.set(key, contentLength)
-      if (midBoxOverflow[key] !== overflowing) {
-        midBoxOverflow[key] = overflowing
-      }
-    }
-  }
-  if (!throttled) {
-    midBoxMeasuredAt = now
-  }
-}
-
-/**
- * 正文长度：只用来判断「文字有没有变」，不是展示值。文件名不算，避免文件一到就误判成正文变了。
- *
- * @param card 参与者卡片
- * @return 正文字符数
- */
-function boxContentLength(card: ParticipantCard): number {
-  if (card.workflow) {
-    return (card.workflow.answer || '').length
-  }
-  return (card.answer || '').length
-}
-
-/**
- * 这一段正文现在该出「展开全文」还是「收起」。
- *
- * <p>没超过四行时是 none：按钮不出现，避免点了高度不变。
- *
- * @param turn 本轮助手消息
- * @param card 参与者卡片
- * @return none / expand / collapse
- */
-function bodyExpandActionOf(turn: ChatTurn, card: ParticipantCard) {
-  const key = `${turn.key}:${card.key}`
-  return bodyExpandAction(
-    bodyTextLimited(turn, card),
-    midBoxExpanded[key] === true,
-    midBoxOverflow[key] === true
-  )
-}
-
-/**
- * 展开 / 收起一个中间过程框：只影响该框，不改其它参与者。
- *
- * @param turnKey 本轮 key
- * @param cardKey 参与者 key
- */
-function toggleMidBoxExpand(turnKey: string, cardKey: string) {
-  const key = `${turnKey}:${cardKey}`
-  // 限高加在正文节点的 is-clamped 上：这里一翻转，四行和全文就会换过来
-  midBoxExpanded[key] = midBoxExpanded[key] !== true
-}
-
-/**
- * 是否有可折叠的思考。空壳和状态句已在投影里去掉，这里不再补「没有额外的思考记录」。
- *
- * <p>判定口径是「这一块**真的有推理文字**」：思考框里只画推理，
- * 工具调用在它下面单独做胶囊。因此只有工具、没有推理的步骤不画思考框
- * （否则点开是空框）；判定 / 分流这一步的判定句与分流句在内容框里，也不算思考。
- *
- * @param card 参与者卡片
- * @return true 表示画出「查看思考过程与工具调用」
- */
-function actorHasThink(card: ParticipantCard): boolean {
-  return actorThinkingText(card).length > 0
-}
-
-/**
- * 这一块是否已经出现工具调用 / 工具结果。
- *
- * <p>只看过程事件本身：有 tool_call 或 tool_result 就说明工具这一拍已经开始，
- * 与它的成功 / 失败无关——失败也要等思考结束后才允许出红色胶囊。
- *
- * @param card 参与者卡片
- * @return true 表示已有工具事件
- */
-function actorHasTool(card: ParticipantCard): boolean {
-  const steps = Array.isArray(card.steps) ? card.steps : []
-  return steps.some((step) => step.type === 'tool_call' || step.type === 'tool_result')
-}
-
-/**
- * 这一块的**真实结果**是否已经出现。
- *
- * <p>网关 / 方案（分流那条）的结果是内容框里那句判定句 / 分流句，写在 lines 里；
- * 专家与汇总的结果是正文 / 报错 / 产物。专家折叠区的「依据」行不算结果——
- * 它一直在，若算结果，思考框就永远不会展开。
- *
- * @param card 参与者卡片
- * @return true 表示已有真实结果
- */
-function actorHasResult(card: ParticipantCard): boolean {
-  if (card.kind === 'gateway' || (card.kind === 'actor' && card.roleLabel === '方案')) {
-    return actorResultLines(card).length > 0
-  }
-  const answer = (card.answer || '').trim()
-  const errors = Array.isArray(card.errors) ? card.errors : []
-  const files = Array.isArray(card.files) ? card.files : []
-  return !!answer || errors.length > 0 || files.length > 0
-}
-
-/**
- * 思考区是否还在流式（＝这一步仍处在「三拍」的第一拍）。
- *
- * <p>三拍时序的唯一判定入口：思考框展开跟滚、工具胶囊是否出现、结果框是否出现，
- * 全部读这一个函数，避免三处各判各的、出现「思考还在滚，胶囊先冒出来」。
- *
- * @param turn 本轮助手消息
- * @param card 参与者卡片
- * @return true 表示仍在第一拍
- */
-function actorThinkOpenByDefault(turn: ChatTurn, card: ParticipantCard): boolean {
-  return isThinkOpenByDefault(
-    card,
-    turn.status === 'streaming',
-    card.pending,
-    actorHasTool(card),
-    actorHasResult(card)
-  )
-}
-
-/**
- * 这一步是否仍在思考（且真有可见推理）：只有此时才禁止出工具胶囊与结果框。
- *
- * @param turn 本轮助手消息
- * @param card 参与者卡片
- * @return true 表示思考框正在流式输出
- */
-function actorThinkingBeat(turn: ChatTurn, card: ParticipantCard): boolean {
-  return actorHasThink(card) && actorThinkOpenByDefault(turn, card)
-}
-
-
-/**
- * 内容框是否处于「中间过程」形态：最高四行、框内滚动。
- *
- * <p>口径收在 {@link isMidProcessBox} 里（纯函数，有单测）：
- * 流式过程中所有块都限高；本轮结束后只有整轮**最后一条**（`card.isFinal`）放开、
- * 完整展开，其余已经写完的块仍保持四行——不要把某位子专家放大成终局。
- *
- * @param turn 本轮助手消息
- * @param card 参与者卡片
- * @return true 表示需要限高
- */
-function actorBoxMidProcess(turn: ChatTurn, card: ParticipantCard): boolean {
-  return isMidProcessBox(card, turn.status === 'streaming')
-}
-
-/**
- * 这段正文是否按四行截断。
- *
- * <p>入口、专家、分流的普通正文停在四行里滚。方案框里的中间过程即使带表也先收四行，
- * 点开后再整表放进结果框。本轮最后一份（投影 isFinal）和综答里的表不收四行。
- * 用户点了展开之后，限高类名去掉，这里对仍限高的块返回 true，好让收回箭头留在页面上。
- *
- * @param turn 本轮助手消息（签名与调用处对齐，限高不看整轮状态）
- * @param card 参与者卡片
- * @return true 表示这段文字处在四行口径下
- */
-function bodyTextLimited(turn: ChatTurn, card: ParticipantCard): boolean {
-  const text = card.answer || ''
-  if (!text.trim()) {
-    return false
-  }
-  // 综答随流式全文往下长。入口、专家、分流的普通正文仍停在四行里滚。
-  if (isUnlimitedAnswerBox(card)) {
-    return false
-  }
-  // 有表时只放开本轮最后一份。中间过程仍限四行，避免方案框里的子结果整表铺开。
-  if (answerClampOf(text) === 'table' && !tableFoldedByDefault(card, turn.status === 'streaming')) {
-    return false
-  }
-  return true
-}
-
-/**
- * 正文节点的限高类名。展开时去掉 is-clamped，高度立刻放开；收起时加回来。
- *
- * @param turn 本轮助手消息
- * @param card 参与者卡片
- * @return 类名表
- */
-function bodyTextClass(turn: ChatTurn, card: ParticipantCard): Record<string, boolean> {
-  const key = `${turn.key}:${card.key}`
-  const expanded = midBoxExpanded[key] === true
-  const text = card.answer || ''
-  const limited = bodyTextLimited(turn, card) && !expanded
-  // 中间过程的表先走四行；展开后，以及本轮最后一份，才进框内滚动，两套类名不要叠在一起。
-  return {
-    'is-clamped': limited,
-    'is-table-scroll': answerClampOf(text) === 'table' && !limited
-  }
 }
 
 /**
@@ -3203,35 +1420,6 @@ function bodyTextClass(turn: ChatTurn, card: ParticipantCard): Record<string, bo
  */
 function actorHoldOf(turn: ChatTurn, card: ParticipantCard): boolean {
   return !schemeChildrenSettled(participantFeedOf(turn), card)
-}
-
-/**
- * 内容框是否要画：必须已有本步**真实结果**，且思考这一拍已经结束。
- *
- * <p>不再用 `pending` 兜底：进行中挂一块空结果框（还带闪烁光标），正是要修掉的
- * 「结果框提前出现」。网关与方案的话就是那句结果，必须有框；专家有正文 / 报错 / 产物才出框。
- *
- * @param turn 本轮助手消息
- * @param card 参与者卡片
- * @return true 表示画出内容框
- */
-function actorHasBubble(turn: ChatTurn, card: ParticipantCard): boolean {
-  // 工作流块画的是执行卡片，不再套一层内容框（否则会出现「卡片 + 空框」两层）
-  if (card.workflow) {
-    return false
-  }
-  if (actorThinkingBeat(turn, card)) {
-    return false
-  }
-  const errors = Array.isArray(card.errors) ? card.errors : []
-  return !!(
-    card.answer ||
-    actorResultLines(card).length ||
-    errors.length ||
-    // 文件在框外单独一行，不因为有文件就再套一只空正文框
-    // 只有一组可点选项、没有正文的块也是「本步结果」：不把它判成空壳，否则用户看不到按钮
-    (card.choice && card.choice.options.length)
-  )
 }
 
 /**
@@ -3286,179 +1474,12 @@ function onChoice(turn: ChatTurn, option: ParticipantChoiceOption) {
 }
 
 /**
- * 生成结束 → 延迟约 500ms 自动收起。
- *
- * <p>为什么留这 500ms：终答最后一个字刚落地就立刻收掉，用户来不及看到最后一条思考；
- * 留半秒既能看到收尾，又不会一直占着版面。
- *
- * @param key 本轮 key
- */
-function scheduleAutoCollapse(key: string) {
-  if (autoCollapseTimers.has(key)) {
-    return
-  }
-  const timer = window.setTimeout(() => {
-    autoCollapseTimers.delete(key)
-    // 用户已手动操作过就不自动收起，避免和用户抢方向盘
-    if (typeof userThinkOpen[key] !== 'boolean') {
-      autoCollapsedThink[key] = true
-    }
-  }, AUTO_COLLAPSE_DELAY_MS)
-  autoCollapseTimers.set(key, timer)
-}
-
-/**
- * 自动收起的最小依赖签名：只收「哪些助手轮存在、是否仍在流式」两个浅字段。
- * 流式增量只改块正文，不会让签名变化，因此不会每个 delta 都重扫。
- */
-const thinkSignature = computed(() =>
-  props.turns
-    .filter((turn) => turn.role === 'assistant')
-    .map((turn) => `${turn.key}|${turn.status}`)
-    .join(';')
-)
-
-/** 本次挂载期间真正见过「流式中」的轮次；只有它们才配 500ms 延迟收起 */
-const seenStreamingTurns = new Set<string>()
-
-/**
- * 记录上一帧仍是「流式中」的轮次，用于识别「刚结束」这一拍。
- *
- * <p>结束瞬间要做两件事：把内容框滚回第一行，再取消中间过程的高度限制。
- * 两件事必须同一拍处理——先滚回顶部再放开高度，用户才会从第一行完整读，
- * 而不是停在四行窗口的底部看一个被截断的尾巴。
- */
-const wasStreamingTurns = new Set<string>()
-
-/** 待处理「刚结束」的轮次；与跟滚一样合批到下一帧 */
-const pendingFinishKeys = new Set<string>()
-/** 结束复位帧号；0 表示没有排队 */
-let finishFrame = 0
-
-/**
- * 流式结束时把思考文字滚回第一行。
- *
- * <p>正文不再在框内滚动，所以这里不碰正文节点。
- *
- * @param key 「轮 key:参与者 key」
- */
-function scrollThinkToTop(key: string) {
-  const fold = actorFoldEls.get(key)
-  if (fold) {
-    fold.scrollTop = 0
-  }
-}
-
-/**
- * 把刚结束的轮次里的思考文字滚回顶部。
- *
- * <p>最终卡的正文限高由投影的 isFinal 撤掉，这里不改样式。
- */
-function tickFinishReset() {
-  finishFrame = 0
-  for (const key of pendingFinishKeys) {
-    scrollThinkToTop(key)
-  }
-  pendingFinishKeys.clear()
-}
-
-/**
- * 识别「流式刚结束」的轮次：登记它们的全部内容框 / 思考区，下一帧滚回第一行。
- *
- * @param turn 本轮助手消息
- */
-function scheduleFinishReset(turn: ChatTurn) {
-  if (!isWorkbench.value) {
-    return
-  }
-  for (const card of participantFeedOf(turn)) {
-    pendingFinishKeys.add(`${turn.key}:${card.key}`)
-  }
-  if (!pendingFinishKeys.size || finishFrame) {
-    return
-  }
-  finishFrame = requestAnimationFrame(tickFinishReset)
-}
-
-/**
- * 生成结束 → 排一次自动收起；重新进入流式则撤销收起，让面板再次展开。
- * 只作用于工作台皮肤，且只对真有过程内容的轮次生效。
- * 历史回放（从未见过流式）直接收起，避免刷新后满屏展开的思考面板。
- */
-watch(thinkSignature, () => {
-  if (!isWorkbench.value) {
-    return
-  }
-  for (const turn of props.turns) {
-    if (turn.role !== 'assistant') {
-      continue
-    }
-    if (turn.status === 'streaming') {
-      // 同一轮重新开跑（继续生成 / 批准后续跑）：撤销自动收起
-      seenStreamingTurns.add(turn.key)
-      wasStreamingTurns.add(turn.key)
-      delete autoCollapsedThink[turn.key]
-      continue
-    }
-    // 上一帧还在流、这一帧结束了：先滚回第一行，再放开高度限制（同一拍）
-    if (wasStreamingTurns.has(turn.key)) {
-      wasStreamingTurns.delete(turn.key)
-      scheduleFinishReset(turn)
-    }
-    if (!hasProcess(turn)) {
-      continue
-    }
-    if (seenStreamingTurns.has(turn.key)) {
-      scheduleAutoCollapse(turn.key)
-    } else {
-      autoCollapsedThink[turn.key] = true
-    }
-  }
-})
-
-/**
- * 首次挂载时把历史轮次标记为已收起：回放会话不该一进来就铺开所有思考面板。
- * 只有真正在本次停留期间流式过的轮次才会在结束后延迟收起。
+ * 首次挂载时加载工具展示名。
+ * 思考面板的展开 / 收起只认用户点击，不再在挂载时批量写入收起状态。
  */
 onMounted(() => {
-  if (!isWorkbench.value) {
-    return
-  }
-  for (const turn of props.turns) {
-    if (turn.role === 'assistant' && turn.status !== 'streaming' && hasProcess(turn)) {
-      autoCollapsedThink[turn.key] = true
-    }
-  }
   void loadToolFaceTitles()
 })
-
-/**
- * 只有还有人在跑时才刷新思考行上的耗时。回放没有流式轮次，不启动这只表。
- */
-watch(
-  () =>
-    props.pageActive !== false &&
-    props.turns.some((turn) => turn.role === 'assistant' && turn.status === 'streaming'),
-  (live) => {
-    if (live && !thoughtTimer) {
-      thoughtNow.value = Date.now()
-      thoughtTimer = window.setInterval(() => {
-        thoughtNow.value = Date.now()
-      }, 400)
-      return
-    }
-    if (!live && thoughtTimer) {
-      window.clearInterval(thoughtTimer)
-      thoughtTimer = 0
-      // 本轮真结束才补一次时刻。只是页签失活时不写，避免后台再触发一轮渲染
-      if (props.pageActive !== false) {
-        thoughtNow.value = Date.now()
-      }
-    }
-  },
-  { immediate: true }
-)
-
 
 /**
  * 兜底触发：本轮发送结束（sending 由 true 变 false）后再扫一次。
@@ -3490,63 +1511,19 @@ function blockAnswerKey(item: ChatTurn, block: AssistantBlock): string {
   return `block:${item.key}:${block.id ?? block.kind}`
 }
 
-/**
- * @param error    捕获到的异常
- * @param fallback 兜底文案
- * @return 可展示的中文原因
- */
-function errorMessage(error: unknown, fallback: string): string {
-  return error instanceof Error && error.message ? error.message : fallback
-}
-
-// 切 Agent 必须停掉正在进行的朗读与录音：上一条回答的声音不能串到新 Agent 的会话里
+// 切 Agent 必须停掉正在进行的朗读：上一条回答的声音不能串到新 Agent 的会话里。
+// 录音的取消随输入条一起走（ChatComposer 监听同一个 agentId），壳层只留播放器单例。
 watch(
   () => props.agentId,
   () => {
     stopSpeech()
-    cancelVoiceRecording()
   }
 )
 
-/** 待发附件，图和文件加在一起，和已发送用同一条附件条 */
-const pendingViews = computed<UserAttachmentView[]>(() =>
-  attachments.value.map((item) => ({
-    kind: item.kind,
-    url: item.dataUrl,
-    name: item.name,
-    size: item.size
-  }))
-)
-
-/** 图标按钮：发送中不可再选；到 9 个上限时也不可再选。没有视觉模型仍可加文件。 */
-const canUploadNow = computed(() => !props.sending && attachments.value.length < MAX_USER_ATTACHMENTS)
-
-/** 按钮旁的说明。没有视觉模型时说清楚图片不会加入，文件仍然可以。 */
-const uploadHint = computed(() => {
-  if (attachments.value.length >= MAX_USER_ATTACHMENTS) {
-    return `一次最多 ${MAX_USER_ATTACHMENTS} 个附件`
-  }
-  if (props.entryComposer === true) {
-    return '可添加图片、文档或录音，单个文件不超过 12MB'
-  }
-  if (props.visionEnabled !== true) {
-    return '未配置视觉模型，图片不会加入；文档仍可添加'
-  }
-  return '可添加图片或文档，单个文件不超过 12MB'
-})
 /** 用户点标题后的折叠覆盖；未写入时用调用方给的默认态。键为「轮 key + 区段后缀」。 */
 const foldOverride = reactive<Record<string, boolean>>({})
 /** 长工具结果是否展开。 */
 const resultOpen = reactive<Record<string, boolean>>({})
-
-/** 工作台思考面板：用户显式点过的展开态（键 = 轮 key）；一旦写入，自动收起不再覆盖 */
-const userThinkOpen = reactive<Record<string, boolean | undefined>>({})
-/** 已自动收起的轮次；仅在用户没点过时生效 */
-const autoCollapsedThink = reactive<Record<string, true>>({})
-/** 自动收起定时器；同一轮只挂一个，卸载时统一清掉 */
-const autoCollapseTimers = new Map<string, number>()
-/** 正文结束后延迟多少毫秒收起思考面板（留半秒让用户看到最后一条思考） */
-const AUTO_COLLAPSE_DELAY_MS = 500
 
 /**
  * 渲染行：每条对话配上它的计划分段视图（非计划流程为 undefined）。
@@ -3605,119 +1582,11 @@ function routerCardStatus(item: ChatTurn): 'running' | 'done' | 'error' {
   return item.status === 'error' ? 'error' : 'done'
 }
 
-/**
- * 用户是否仍停在对话底部附近。
- * 只有它为 true 时才跟滚：上翻阅读历史时，不能被流式增量硬拽回底部。
- */
-const nearBottom = ref(true)
-
-/** 距底部多少像素内算「仍在底部」；略大于一行高度，避免轻微抖动就被判成上翻 */
-const NEAR_BOTTOM_PX = 80
-
-/** 已排队但还没执行的跟滚帧；同一帧内的多次更新只滚一次 */
-let followFrame = 0
-
-/**
- * 上一次由程序写入 `scrollTop` 后读回的实际值（-1 表示本轮还没写过）。
- *
- * <p>用途：区分「用户滚动」与「我们自己滚到底」。后者同样会派发 scroll 事件，
- * 且派发时正文可能又长了，若当成用户上翻就会把跟滚关掉（见 {@link resolveFollowAfterScroll}）。
- */
-let selfScrollTop = -1
-
-/**
- * 记录滚动位置：只在滚动事件里读一次布局，判断是否仍在底部附近。
- * 把布局读取从「每个增量」挪到「用户真的滚动」，避免流式期每帧强制同步布局。
- */
-function onScroll() {
-  const element = scroller.value
-  if (!element) {
-    return
-  }
-  nearBottom.value = resolveFollowAfterScroll({
-    scrollTop: element.scrollTop,
-    scrollHeight: element.scrollHeight,
-    clientHeight: element.clientHeight,
-    selfScrollTop,
-    previous: nearBottom.value,
-    threshold: NEAR_BOTTOM_PX
-  })
-}
-
-/**
- * 强制恢复「跟到底部」。
- *
- * <p>用于语义上必然是「要看最新内容」的时刻：用户刚发问、刚切到另一个会话。
- * 这两处若沿用上一次的滚动状态，从旧会话带着「已上翻」进来就会一直不滚。
- */
-function followToBottom() {
-  nearBottom.value = true
-  scheduleFollowBottom()
-}
-
-/**
- * 把跟滚合批到下一帧：一帧最多读一次 scrollHeight、写一次 scrollTop。
- *
- * <p>由 {@link onUpdated} 在内容（含 Markdown 增量）真正写进 DOM 之后触发；
- * 用户已上翻则直接跳过，不抢回滚动位置。
- */
-function scheduleFollowBottom() {
-  if (followFrame) {
-    return
-  }
-  followFrame = requestAnimationFrame(() => {
-    followFrame = 0
-    if (!nearBottom.value) {
-      return
-    }
-    const element = scroller.value
-    if (!element) {
-      return
-    }
-    // 读布局与写滚动在同一帧完成，只触发一次布局失效，替代原先每个 delta 一次
-    element.scrollTop = element.scrollHeight
-    // 读回钳制后的真实值：内容不足一屏时会被夹到 0，下次判定要认这个值
-    selfScrollTop = element.scrollTop
-  })
-}
-
-// 用户发问（sending 由 false 变 true）即视为「要看最新内容」：无论之前是否上翻，都重新跟到底
-watch(
-  () => props.sending,
-  (now) => {
-    if (now) {
-      followToBottom()
-    }
-  }
-)
-
-/**
- * 会话身份（首轮 key）变化：新建会话或切到另一个会话，都要从底部开始看。
- * 不能只依赖上一次的滚动状态，否则从「上翻着的旧会话」切过来会停在顶部。
- */
-watch(
-  () => props.turns[0]?.key ?? '',
-  () => {
-    followToBottom()
-  }
-)
-
-// 每次组件更新（流式增量 / 新轮次 / 排版变化）后安排一次跟滚；不再深监听整棵 turns
+// 每次组件更新（流式增量 / 新轮次 / 排版变化）后安排一次跟滚；不再深监听整棵 turns。
+// 参与者卡内部的四行实测与中间框跟滚随卡片走（`WorkbenchActorCard` 自己的 onUpdated）。
 onUpdated(() => {
   scheduleFollowBottom()
-  // 中间过程内容框 / 思考区在框内跟滚（最终结果不限高，不参与）；
-  // 顺带识别「思考刚收起」并在折叠前把内框滚到底
-  requestMidProcessScroll()
-  // 量一次是否被四行截断，决定要不要出「展开全文」（常量算上限 + 按内容长度/间隔降频）
-  measureMidBoxOverflow()
 })
-
-/**
- * 挂载时先定位到最新一条。
- * <p>抽屉关掉再打开、页签切回来都会重建组件，而挂载那一刻没有数据变化、不会触发 onUpdated，
- * 不补这一步就会停在最顶部，看起来像「没有自动定位」。
- */
-onMounted(followToBottom)
 
 /**
  * 子组件渲染兜底。所属域：runtime（前端对话区）。
@@ -3735,38 +1604,6 @@ onErrorCaptured((error, _instance, info) => {
     return false
   }
   return undefined
-})
-
-// 卸载时取消未执行的帧，避免回调在已销毁组件上读 DOM
-onBeforeUnmount(() => {
-  if (followFrame) {
-    cancelAnimationFrame(followFrame)
-    followFrame = 0
-  }
-  // 中间过程跟滚 / 结束复位两帧同理：销毁后回调不能再读 DOM
-  if (actorScrollFrame) {
-    cancelAnimationFrame(actorScrollFrame)
-    actorScrollFrame = 0
-  }
-  if (finishFrame) {
-    cancelAnimationFrame(finishFrame)
-    finishFrame = 0
-  }
-  if (thoughtTimer) {
-    window.clearInterval(thoughtTimer)
-    thoughtTimer = 0
-  }
-  pendingScrollKeys.clear()
-  pendingFinishKeys.clear()
-  openThinkKeys.clear()
-  midBoxMeasuredLen.clear()
-  answerTextEls.clear()
-  actorFoldEls.clear()
-  // 自动收起定时器同理：组件销毁后不能再写响应式状态
-  for (const timer of autoCollapseTimers.values()) {
-    window.clearTimeout(timer)
-  }
-  autoCollapseTimers.clear()
 })
 
 /** 状态码换成商城同款短句。未知阶段不显示空标签。 */
@@ -3799,21 +1636,6 @@ function phaseLabel(phase?: string) {
 }
 
 /**
- * 网关卡里的识别条目。按这一轮用户附件的发送顺序排，和回放同一份拆分。
- *
- * @param turn 助手轮
- * @param card 入口卡
- * @return 识别框条目；没有预处理时为空
- */
-function gatewayPreprocessItems(turn: ChatTurn, card: ParticipantCard) {
-  const shown = card.preprocess
-  if (!shown) {
-    return []
-  }
-  return orderPreprocessItems(shown.items || [], attachmentsBefore(turn))
-}
-
-/**
  * 管理端图片文字预览。按图序拆开，默认由识别框折叠。入口页不走这里。
  *
  * @param text 视觉事件正文
@@ -3834,11 +1656,20 @@ function attachmentsBefore(turn: ChatTurn): UserAttachmentView[] {
   const index = list.findIndex((row) => row.turn.key === turn.key)
   for (let i = index - 1; i >= 0; i -= 1) {
     if (list[i].turn.role === 'user') {
-      return attachmentItems(list[i].turn)
+      return attachmentsOfTurn(list[i].turn)
     }
   }
   return []
 }
+
+/**
+ * 非网关卡共用的空附件表。
+ *
+ * <p>只有入口卡要用本轮用户附件排识别顺序；专家 / 方案 / 工作流传同一份空数组，
+ * 避免每张卡每次渲染都新建一个 `[]`（参与者卡按 props 浅比较时也不会白更新）。
+ * 这一份只读使用，任何地方都不得 push / splice。
+ */
+const NO_ATTACHMENTS: UserAttachmentView[] = []
 
 /**
  * 本轮思考泳道。
@@ -3854,15 +1685,6 @@ function lanesOf(item: ChatTurn) {
     return processLanes(item.blocks)
   }
   return lanesForDebugSkin(foldInterimAnswers(item.blocks))
-}
-
-/** 从「路由到 {名}」抽出子 Agent 显示名，供红色强调。 */
-function routeAgentName(title: string) {
-  const prefix = '路由到 '
-  if (!title.startsWith(prefix)) {
-    return ''
-  }
-  return title.slice(prefix.length).trim()
 }
 
 function hasProcess(item: ChatTurn) {
@@ -3981,22 +1803,11 @@ function lastAssistantIndex(item: ChatTurn) {
 }
 
 /**
- * 首个助手正文块的下标：工作台把作答 Agent 展示名挂在它上方，
- * 只在第一条正文前出现一次，后续正文块不再重复。
- *
- * @param item 助手轮
- * @return 下标；没有正文块时为 -1
- */
-function firstAssistantIndex(item: ChatTurn) {
-  return item.blocks.findIndex((block) => block.kind === 'assistant')
-}
-
-/**
  * 思考与终答共用轻量 Markdown。流式走安全前缀+表渐进，结束后完整终渲。
  * 原文标签不会执行。
  *
- * <p>按「渲染位置」缓存结果：流式期每帧只有正在增长的那一块签名会变，
- * 历史块的 HTML 直接命中缓存，不再每帧把全部历史重新跑一遍正则。
+ * <p>实现收在 {@link markdownText}，参与者卡共用同一份缓存口径；
+ * 壳层只剩这一层薄包装，管理端调试皮肤也走这里。
  *
  * @param slot      渲染位置键（轮次 + 块 + 区段），同一位置必须稳定不变
  * @param value     Markdown 原文
@@ -4004,7 +1815,7 @@ function firstAssistantIndex(item: ChatTurn) {
  * @return 可直接 v-html 的 HTML
  */
 function markdown(slot: string, value: string, streaming = false) {
-  return renderMarkdownMemo(slot, value, streaming)
+  return markdownText(slot, value, streaming)
 }
 
 /**
@@ -4015,7 +1826,7 @@ function markdown(slot: string, value: string, streaming = false) {
  * @return 可展示文本
  */
 function thinkText(raw: string) {
-  return isWorkbench.value ? stripWorkbenchInternalKeys(raw) : raw
+  return thinkTextOf(raw, isWorkbench.value)
 }
 
 /**
@@ -4026,22 +1837,14 @@ function thinkText(raw: string) {
  * @return 交给 Markdown 的可见正文
  */
 function displayAnswer(raw: string) {
-  // 气泡正文是用户可见终稿：路由 JSON 与检索结构都不原样铺出来
-  if (!isWorkbench.value) {
-    return raw
-  }
-  // 调用名换成目录标题：胶囊已是中文，正文不再重复函数名。目录未到时原样
-  return maskToolCallNames(
-    presentVisibleResult(stripRouteDecisionJson(stripWorkbenchLeadHeadings(raw))),
-    toolTitleByName
-  )
+  return displayAnswerText(raw, isWorkbench.value)
 }
 
 /**
  * 工作台错误展示：硬核不可用 → 友好灰字；其它原样。调试形态原样红字。
  */
 function displayErrorText(raw: string) {
-  return isWorkbench.value ? friendlyWorkbenchError(raw) : raw
+  return displayErrorTextOf(raw, isWorkbench.value)
 }
 
 /** 计划流终答的缓存槽键。与朗读键区分：这里只标识渲染位置 */
@@ -4091,349 +1894,21 @@ function thinkToggleLabel(item: ChatTurn) {
 }
 
 /**
- * 空状态快捷卡片：填入输入框并立刻发送（与点发送等价）。
+ * 空状态快捷卡片：交给输入条填入并立刻发送（与点发送等价）。
+ *
+ * <p>正文、附件与发送前校验都在 ChatComposer 里，壳层不另存一份 `text`；
+ * 这里只通过 expose 的 sendPrompt 走同一条 submit。
  *
  * @param prompt 卡片文案
  */
 function sendQuick(prompt: string) {
-  const content = prompt.trim()
-  if (!content || !props.canSend || !props.sessionReady || props.sending) {
-    return
-  }
-  text.value = content
-  submit()
+  composerRef.value?.sendPrompt(prompt)
 }
 
-function submit() {
-  const content = text.value.trim()
-  // 未绑定视觉模型时图片不提交：后端会直接拒。文件不走视觉，没有视觉模型也可以发。
-  const sendingItems = attachments.value.filter(
-    (item) =>
-      item.kind === 'file' ||
-      (item.kind === 'image' && (props.visionEnabled === true || props.entryComposer === true))
-  )
-  const images = sendingItems.filter((item) => item.kind === 'image').map((item) => item.dataUrl)
-  const files: OutgoingFile[] = sendingItems
-    .filter((item) => item.kind === 'file')
-    .map((item) => ({ name: item.name, size: item.size, dataUrl: item.dataUrl }))
-  const order = sendingItems.map((item) => item.kind)
-  // 只发图、只发文件，或和文字一起发都可以
-  if ((!content && images.length === 0 && files.length === 0) || !props.canSend || !props.sessionReady || props.sending) {
-    return
-  }
-  emit(
-    'send',
-    content,
-    images.length ? images : undefined,
-    files.length ? files : undefined,
-    files.length ? order : undefined
-  )
-  text.value = ''
-  attachments.value = []
-  // 发出即丢掉这条会话的未发送槽：失败轮自己已有气泡可重试，输入框里不再留副本；
-  // 草稿会话随后会换成真实主键，新键同样是空输入
-  if (props.draftKey) {
-    composerDrafts.delete(props.draftKey)
-  }
-}
-
-/**
- * 把选中或粘贴的文件并进同一份待发列表。图片仍走贴图；文档显示文件名和大小。
- *
- * @param files 按用户给出的顺序
- */
-async function addImageFiles(files: File[]) {
-  if (!files.length) {
-    return
-  }
-  let warnedImage = false
-  let droppedByCap = 0
-  for (const file of files) {
-    const kind = classifyUserFile(file)
-    const name = file.name || '未命名文件'
-    if (kind === 'blocked') {
-      ElMessage.warning(`${name} 是可执行文件，不能发送`)
-      continue
-    }
-    if (kind === 'file' && name.length > 80) {
-      ElMessage.warning(`${name} 文件名过长，请缩短后再发送`)
-      continue
-    }
-    if (kind === 'unsupported') {
-      ElMessage.warning(`${name} 不支持。仅支持 pdf、txt、csv、xlsx、xls、docx、doc、pptx、ppt、zip 以及录音`)
-      continue
-    }
-    if (kind === 'image') {
-      if (props.visionEnabled !== true && props.entryComposer !== true) {
-        if (!warnedImage) {
-          ElMessage.warning('未配置视觉模型，图片未加入')
-          warnedImage = true
-        }
-        continue
-      }
-      if (attachments.value.length >= MAX_USER_ATTACHMENTS) {
-        droppedByCap += 1
-        continue
-      }
-      if (!file.type.startsWith('image/') && !['png', 'jpg', 'jpeg', 'webp', 'gif'].includes(extensionOfName(name))) {
-        continue
-      }
-      if (file.size > MAX_IMAGE_BYTES) {
-        ElMessage.warning(`${name} 超过 6MB，请压缩后再上传`)
-        continue
-      }
-      try {
-        const dataUrl = await readAsDataUrl(file)
-        attachmentSeq += 1
-        attachments.value = [
-          ...attachments.value,
-          { id: attachmentSeq, name: file.name || `图片 ${attachmentSeq}`, size: file.size, kind: 'image', dataUrl }
-        ]
-      } catch {
-        ElMessage.warning(`${name} 读取失败`)
-      }
-      continue
-    }
-    if (attachments.value.length >= MAX_USER_ATTACHMENTS) {
-      droppedByCap += 1
-      continue
-    }
-    if (file.size > MAX_FILE_BYTES) {
-      ElMessage.warning(`${name} 超过 12MB，请压缩后再上传`)
-      continue
-    }
-    try {
-      const dataUrl = await readAsDataUrl(file)
-      attachmentSeq += 1
-      attachments.value = [
-        ...attachments.value,
-        { id: attachmentSeq, name, size: file.size, kind: 'file', dataUrl }
-      ]
-    } catch {
-      ElMessage.warning(`${name} 读取失败`)
-    }
-  }
-  if (droppedByCap > 0) {
-    ElMessage.info(`一次最多 ${MAX_USER_ATTACHMENTS} 个附件，其余未加入`)
-  }
-}
-
-/**
- * 文件名的小写扩展名。空类型的 png 也要能认成图片。
- *
- * @param name 文件名
- * @return 不含点的扩展名；没有点时为空串
- */
-function extensionOfName(name: string): string {
-  const dot = name.lastIndexOf('.')
-  if (dot < 0 || dot === name.length - 1) {
-    return ''
-  }
-  return name.slice(dot + 1).toLowerCase()
-}
-
-/**
- * 输入框粘贴。剪贴板是文件时收进待发列表；是图片时仍走贴图；是文字则不拦截。
- *
- * @param event 输入框上的粘贴事件
- */
-function onComposerPaste(event: ClipboardEvent) {
-  const picks = clipboardAttachments(event.clipboardData)
-  if (!picks.length || event.defaultPrevented) {
-    return
-  }
-  event.preventDefault()
-  if (props.sending) {
-    return
-  }
-  void addImageFiles(picks.map((item) => item.file))
-}
-
-/** 拖入高亮。只在拖的是文件时亮，离开输入区就灭 */
-const fileDragOver = ref(false)
-
-/**
- * 剪贴板和拖入都认 Files。文字拖动不拦截，避免挡住输入框里的选区拖动。
- *
- * @param event 拖放事件
- * @return 载荷里有文件才为 true
- */
-function dragHasFiles(event: DragEvent): boolean {
-  const types = event.dataTransfer?.types
-  if (!types) {
-    return false
-  }
-  return Array.from(types).includes('Files')
-}
-
-/**
- * 拖进输入区。子元素之间移动不算离开，避免高亮闪一下。
- *
- * @param event 拖入事件
- */
-function onComposerDragEnter(event: DragEvent) {
-  if (!dragHasFiles(event)) {
-    return
-  }
-  event.preventDefault()
-  fileDragOver.value = true
-}
-
-/**
- * 必须 preventDefault，浏览器才允许在这块区域松开文件。
- *
- * @param event 拖过事件
- */
-function onComposerDragOver(event: DragEvent) {
-  if (!dragHasFiles(event)) {
-    return
-  }
-  event.preventDefault()
-  if (event.dataTransfer) {
-    event.dataTransfer.dropEffect = 'copy'
-  }
-  fileDragOver.value = true
-}
-
-/**
- * 指针还在输入区内部（进了文本框或缩略图）时不取消高亮。
- *
- * @param event 拖离事件
- */
-function onComposerDragLeave(event: DragEvent) {
-  const host = event.currentTarget as HTMLElement | null
-  const next = event.relatedTarget as Node | null
-  if (host && next && host.contains(next)) {
-    return
-  }
-  fileDragOver.value = false
-}
-
-/**
- * 松开后进入与选附件、Ctrl+V 同一份待发列表。文件夹不递归。
- *
- * @param event 松开事件
- */
-function onComposerDrop(event: DragEvent) {
-  fileDragOver.value = false
-  if (!dragHasFiles(event)) {
-    return
-  }
-  event.preventDefault()
-  if (props.sending) {
-    return
-  }
-  const dropped = filesFromDrop(event.dataTransfer)
-  if (dropped.directories > 0) {
-    ElMessage.warning('不支持拖入文件夹，请改为拖入文件')
-  }
-  if (dropped.files.length) {
-    void addImageFiles(dropped.files)
-  }
-}
-
-/** 资源管理器拖入的一项。目录用 webkitGetAsEntry 识别，不能靠文件大小猜 */
-interface DropEntry {
-  isDirectory: boolean
-  isFile: boolean
-}
-
-/**
- * 按拖入顺序收集文件。目录只计数，不展开。
- *
- * @param data 拖放载荷，可空
- * @return 文件按松开时的顺序；directories 大于 0 表示其中夹了文件夹
- */
-function filesFromDrop(data: DataTransfer | null): { files: File[]; directories: number } {
-  if (!data) {
-    return { files: [], directories: 0 }
-  }
-  const files: File[] = []
-  let directories = 0
-  const items = data.items
-  if (items && items.length) {
-    for (const item of Array.from(items)) {
-      if (item.kind !== 'file') {
-        continue
-      }
-      const entry = (item as DataTransferItem & { webkitGetAsEntry?: () => DropEntry | null }).webkitGetAsEntry?.()
-      if (entry?.isDirectory) {
-        directories += 1
-        continue
-      }
-      const file = item.getAsFile()
-      if (file) {
-        files.push(file)
-      }
-    }
-    return { files, directories }
-  }
-  return { files: Array.from(data.files || []), directories: 0 }
-}
-
-/**
- * 按添加顺序画的附件。旧的纯图片消息只有 images，这里补成同一份列表。
- *
- * @param turn 用户轮
- * @return 图和文件
- */
-function attachmentItems(turn: ChatTurn): UserAttachmentView[] {
-  if (turn.attachments?.length) {
-    return turn.attachments
-  }
-  return (turn.images || []).map((url) => ({ kind: 'image' as const, url }))
-}
-
-/** 点附件：走原生文件选择器，图片和允许的文档同一次选出，不另开上传接口 */
-function pickImages() {
-  if (!canUploadNow.value) {
-    if (!props.sending) {
-      ElMessage.warning(uploadHint.value)
-    }
-    return
-  }
-  filePicker.value?.click()
-}
-
-/**
- * 文件选择器与粘贴共用同一份待发列表。
- *
- * @param event 原生 input 的 change 事件
- */
-async function onFilesPicked(event: Event) {
-  const input = event.target as HTMLInputElement
-  const files = Array.from(input.files || [])
-  // 立刻清空 value：否则同一个文件再次选择不会触发 change
-  input.value = ''
-  await addImageFiles(files)
-}
-
-/**
- * @param file 浏览器 File
- * @return data:{mime};base64,… 形式的字符串
- */
-function readAsDataUrl(file: File): Promise<string> {
-  return new Promise((resolve, reject) => {
-    const reader = new FileReader()
-    reader.onload = () => resolve(String(reader.result || ''))
-    reader.onerror = () => reject(new Error('read failed'))
-    reader.readAsDataURL(file)
-  })
-}
-
-/**
- * 移除一张待发图片。
- * @param index 在 attachments 中的位置
- */
-function removeAttachment(index: number) {
-  if (props.sending) {
-    return
-  }
-  attachments.value = attachments.value.filter((_, i) => i !== index)
-}
 </script>
 
 <style scoped src="../../styles/chat-markdown.css"></style>
+<style scoped src="../../styles/workbench-chat.css"></style>
 
 <style scoped>
 .chat {
@@ -4563,23 +2038,8 @@ function removeAttachment(index: number) {
   min-width: 0;
 }
 
-.msg-avatar {
-  display: grid;
-  place-items: center;
-  width: 36px;
-  height: 36px;
-  overflow: hidden;
-  flex: none;
-  border-radius: 50%;
-  font-size: 14px;
-  font-weight: 650;
-}
-
-.msg-avatar img {
-  width: 100%;
-  height: 100%;
-  object-fit: cover;
-}
+/* 头像基类（.msg-avatar / img）与文件行、结果框外壳、错误深链已收进
+   `styles/workbench-chat.css`，这里只留工作台行首「方座」形态的差异 */
 
 /* Agent 形象为「白底圆角方座 + 线框」，与列表/详情同形：方座等比圆角，不做正圆裁切；
    白底落在白卡上会糊，用内描边兜住轮廓 */
@@ -4601,92 +2061,6 @@ function removeAttachment(index: number) {
   font-size: 14px;
   font-weight: 600;
   line-height: 1.3;
-}
-
-.bubble {
-  /* 宽度跟文字走，上限是外层 user-stack 的 78%。再套一层百分比会把「差旅」收成一个字宽。 */
-  width: fit-content;
-  max-width: 100%;
-  padding: 10px 12px;
-  border-radius: 12px;
-  background: #efeefe;
-  line-height: 1.55;
-  white-space: pre-wrap;
-  word-break: normal;
-  overflow-wrap: break-word;
-}
-
-.bubble-images {
-  display: flex;
-  flex-direction: column;
-  gap: 8px;
-}
-
-.bubble-images + .bubble-text {
-  margin-top: 8px;
-}
-
-.bubble-image {
-  width: 220px;
-  max-width: 100%;
-  border-radius: 8px;
-  overflow: hidden;
-  background: #fff;
-  cursor: zoom-in;
-}
-
-.bubble-image :deep(img) {
-  display: block;
-  width: 100%;
-  max-height: 180px;
-  object-fit: contain;
-  background: #f7f8fb;
-}
-
-.bubble-image-error,
-.bubble-file-error {
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  width: 220px;
-  max-width: 100%;
-  min-height: 72px;
-  padding: 8px;
-  color: #b45309;
-  background: #fff7ed;
-  font-size: 12px;
-  line-height: 1.4;
-  text-align: center;
-  white-space: normal;
-}
-
-.bubble-file {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 12px;
-  width: 220px;
-  max-width: 100%;
-  padding: 8px 10px;
-  border-radius: 8px;
-  background: #fff;
-  /* 用户气泡是紫底白字；附件名必须用深色，否则只剩右侧文件大小 */
-  color: #1f2937;
-  text-decoration: none;
-}
-
-.bubble-file-name {
-  overflow: hidden;
-  font-size: 13px;
-  font-weight: 500;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.bubble-file-size {
-  flex: none;
-  color: #6b7280;
-  font-size: 12px;
 }
 
 .card {
@@ -4722,7 +2096,8 @@ function removeAttachment(index: number) {
   font-weight: 650;
 }
 
-.chat.is-workbench .bubble {
+/* 用户行已下沉为子组件：作用域样式用 :deep 命中其内部气泡，工作台皮肤与原观感一致 */
+.chat.is-workbench :deep(.bubble) {
   background: var(--ah-primary, #635bff);
   color: #fff;
   border-radius: 14px;
@@ -4735,53 +2110,8 @@ function removeAttachment(index: number) {
   border-radius: 0;
 }
 
-/*
- * 结果框（答案）：白底 + 正文墨色，是整段对话里最“实”的一块。
- * 过程块（折叠思考 / 工具胶囊 / 工作流卡）统一降一档底与描边，
- * 让读者不用费力分辨哪块是最终回答；色值只取 DESIGN 已有令牌。
- */
-.chat.is-workbench .answer-block {
-  position: relative;
-  width: 100%;
-  box-sizing: border-box;
-  background-color: var(--ah-surface, #fff);
-  padding: 16px 20px;
-  border: 1px solid var(--ah-border, #ebeef5);
-  border-radius: 12px;
-  border-bottom-left-radius: 4px;
-}
-
-/*
- * 结果正文：默认四行，框内滚动。展开后去掉 is-clamped，高度回到全文。
- * 四行 = 4 × 1.6em。14px / 1.6 与 MID_BOX_LINE_HEIGHT_PX 是同一口径。
- */
-.chat.is-workbench .md.answer.is-clamped {
-  max-height: calc(4 * 1.6em);
-  overflow-x: hidden;
-  overflow-y: auto;
-  overscroll-behavior: contain;
-  scrollbar-width: thin;
-}
-
-
-/* 文件在正文框下面单独一行，宽度跟结果框对齐，不进气泡，也不替换正文 */
-.chat.is-workbench .wb-file-row {
-  display: flex;
-  flex-direction: column;
-  gap: 8px;
-  width: 100%;
-  margin-top: 8px;
-}
-
-/* 没有正文时的终态说明：框外一行，不装进四行正文框 */
-.chat.is-workbench .wb-terminal-note {
-  margin: 8px 0 0;
-  max-width: min(100%, 640px);
-  color: #6b7280;
-  font-size: 13px;
-  line-height: 1.5;
-}
-
+/* 结果框外壳、四行截断、文件行与终态说明已随参与者卡下沉；
+   共享部分（.answer-block / .wb-file-row / .wb-error-action）见 styles/workbench-chat.css */
 
 .chat.is-workbench .think-toggle {
   padding: 0 0 4px;
@@ -4794,37 +2124,6 @@ function removeAttachment(index: number) {
   max-width: min(100%, 640px);
   margin: 10px 0 4px;
   font-size: 13px;
-}
-
-/* 正文气泡上方的身份行：小头像 + 名称，与气泡左缘对齐 */
-.chat.is-workbench .wb-answer-head {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  margin: 10px 0 6px;
-}
-
-.chat.is-workbench .wb-answer-head .msg-name {
-  margin: 0;
-}
-
-.chat.is-workbench .wb-answer-avatar {
-  display: grid;
-  place-items: center;
-  flex: none;
-  width: 24px;
-  height: 24px;
-  overflow: hidden;
-  border-radius: 7px;
-  box-shadow: inset 0 0 0 1px #e5e7eb;
-  font-size: 11px;
-  font-weight: 650;
-}
-
-.chat.is-workbench .wb-answer-avatar img {
-  width: 100%;
-  height: 100%;
-  object-fit: cover;
 }
 
 /* 消息流：网关 / 方案 / 专家同一种聊天块，一律左对齐头像 + 名称 + 一块内容框。
@@ -4874,421 +2173,14 @@ function removeAttachment(index: number) {
 }
 
 /*
- * 原先消息流底部的「四拍提示」已移除：它与右上角按钮上的
- * 「执行中 · 12.3s」重复播报同一件事，留着会让两处抢注意力。
- * 过程状态仍由各参与者自己的银圈、折叠思考与工具胶囊承担。
+ * 单卡（顶行头像 + 名称 + 角标、内容框、思考折叠、工具胶囊、工作流卡、引用与选项）
+ * 已整体下沉到 `workbench/chat/WorkbenchActorCard.vue`；壳层只保留上方路由行与下方容器。
+ * 过程块的降档底色、思考框形态由参与者卡与 FoldSection 自己承担。
  */
-
-.wb-actor {
-  display: flex;
-  flex-direction: column;
-  gap: 6px;
-  align-items: stretch;
-}
-
-/* 头像 + 名称 + 角标同一行垂直居中；下方内容缩进到名称列 */
-.wb-actor-topline {
-  display: flex;
-  align-items: center;
-  gap: 12px;
-  min-width: 0;
-}
-
-.wb-actor-main {
-  min-width: 0;
-  /* 同一轮里思考框、结果框、工作流卡共用这一档宽度，不再按每张卡的字数各缩各的 */
-  width: min(100%, 640px);
-  /* 36px 头像 + 12px 间距，与名称列左缘对齐 */
-  margin-left: 48px;
-  max-width: min(100%, 640px);
-}
-
-/*
- * ===== 过程块降一档 =====
- * 结果框（.answer-block）是白底 + 正文墨色；思考、工具胶囊、工作流卡与方案外框
- * 用更轻的底 / 描边，避免和答案同权重。全部限定在 .chat.is-workbench，
- * 不改管理端运行与多智能体运行共用的默认皮肤。
- */
-.chat.is-workbench .wb-actor-thought:not(.is-folded) {
-  /* 折叠思考：静灰底 + 发丝线，读起来是「可展开的过程」，不是答案 */
-  background: var(--ah-input-fill, #f5f7fa);
-  border-color: var(--ah-border-soft, #f2f6fc);
-}
-
-.chat.is-workbench .wb-actor-thought.is-folded:hover {
-  background: var(--ah-border-soft, #f2f6fc);
-  border-color: var(--ah-border, #ebeef5);
-}
-
-/* 网关判定 / 方案分流的「过程气泡」：只有分流句、没有正文答案，降回过程档 */
-.chat.is-workbench .answer-block.is-process-bubble {
-  background: var(--ah-input-fill, #f5f7fa);
-  border-color: var(--ah-border-soft, #f2f6fc);
-}
-
-
-
-.wb-actor-head {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  min-width: 0;
-}
-
-.wb-actor-name {
-  font-size: 14px;
-  font-weight: 650;
-  color: #1f2430;
-}
-
-.wb-actor-role {
-  padding: 0 6px;
-  border-radius: 999px;
-  background: #f4f3ff;
-  color: #635bff;
-  font-size: 12px;
-  line-height: 18px;
-}
-
-/* 工作流角标：演示稿的紫色标签底（只在工作流块上加，不影响专家 / 方案 / 入口） */
-.wb-actor-role.is-wf {
-  background: #f3e8ff;
-  color: #7e22ce;
-  border: 1px solid #d8b4fe;
-}
-
-.wb-actor-fold .think-toggle {
-  padding: 0;
-}
-
-/* 中间过程框被四行截断时的展开入口：小号文字按钮，不抢内容框的视觉 */
-.wb-actor-more {
-  margin: 4px 0 0 2px;
-  padding: 0;
-  border: 0;
-  background: transparent;
-  color: var(--ah-primary, #635bff);
-  font: inherit;
-  font-size: 12px;
-  line-height: 1.5;
-  cursor: pointer;
-}
-
-.wb-actor-more:hover {
-  text-decoration: underline;
-}
-
-/* 框内的本步结果句（网关判定 / 方案分流）：内容框里的第一段正文，
-   不再自带边框 / 底色 / 缩进——它已经在气泡内，不能看起来像另一条提示 */
-.wb-actor-result {
-  margin: 0;
-  color: #1f2937;
-  font-size: 14px;
-  line-height: 1.6;
-}
-
-/* 结果句后面还有正文（方案有真汇总）时留一点间距，读起来是同一块的「分流 + 结论」 */
-.wb-actor-result + .md.answer,
-.wb-actor-result + .wb-soft-error {
-  margin-top: 10px;
-}
-
-/* 卡内失败句后面的深链：跟正文同一条流，不加第二块红条 */
-.wb-error-action {
-  margin-left: 8px;
-  color: var(--ah-primary, #635bff);
-  font-size: 13px;
-  font-weight: 600;
-  text-decoration: none;
-  white-space: nowrap;
-}
-
-.wb-error-action:hover,
-.wb-error-action:focus-visible {
-  text-decoration: underline;
-}
-
-/* ===== 思考框（对齐 temp/test.html 的 .thought-box）===== */
-
-/* 整块是一个浅灰圆角框。思考文字自己限高四行并在框内滚动，标题不跟着滚 */
-.wb-actor-thought {
-  width: 100%;
-  box-sizing: border-box;
-  margin: 0 0 8px;
-  border: 1px solid #e5e7eb;
-  border-radius: 8px;
-  background: #f9fafb;
-  overflow: hidden;
-  transition: background 0.18s ease, border-color 0.18s ease;
-}
-
-/* 已收起：只剩标题那一行，点标题展开；底与描边淡出，读起来像一行可点文字 */
-.wb-actor-thought.is-folded {
-  background: transparent;
-  border-color: transparent;
-  /* 收起时保留与流式相同的高度上限：
-     从「流式中」到「已收起」只改一帧，若这里放开 max-height，
-     整框会先弹到全文高度再收起，看起来就是「闪一下」。
-     41~88px 之间只有标题行，不会被裁到。 */
-  max-height: 88px;
-}
-
-.wb-actor-thought.is-folded:hover {
-  background: #f3f4f6;
-  border-color: #e5e7eb;
-}
-
-/* 标题行：整行可点，与演示的 thought-header 一致 */
-.wb-thought-head {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  width: 100%;
-  margin: 0;
-  padding: 8px 12px;
-  border: 0;
-  background: transparent;
-  color: #9ca3af;
-  font: inherit;
-  font-size: 13px;
-  font-weight: 400;
-  text-align: left;
-  cursor: pointer;
-  user-select: none;
-}
-
-.wb-thought-head:hover {
-  color: #4f46e5;
-}
-
-.thought-chevron {
-  flex: none;
-  width: 0;
-  height: 0;
-  border-top: 4px solid transparent;
-  border-bottom: 4px solid transparent;
-  border-left: 5px solid currentColor;
-  transition: transform 0.2s ease;
-}
-
-.thought-chevron.open {
-  transform: rotate(90deg);
-}
-
-/* 思考正文：固定四行，超出在这四行里面滚动，不把整段铺到页面上 */
-.wb-actor-thinking {
-  margin: 0;
-  padding: 0 12px 12px;
-  max-height: calc(4 * 1.6em + 12px);
-  overflow-y: auto;
-  overscroll-behavior: contain;
-  scrollbar-width: thin;
-  color: #4b5563;
-  font-size: 13px;
-  line-height: 1.6;
-  font-family: ui-monospace, Consolas, monospace;
-  white-space: pre-wrap;
-  word-break: break-word;
-}
-
-/* 思考内容区：思考框自己限高，这里不再二次限制，只保证长文本可读。
- *
- * 折叠动画走「grid 行高 1fr ↔ 0fr」而不是 v-show 的 display 瞬切：
- * display 切换没有过渡，三拍切换（思考 → 胶囊 / 结果框）时整段内容会瞬间消失，
- * 看起来就是「跳一下」。行高可以连续过渡，形态与结构完全不变。 */
-.wb-actor-fold {
-  display: grid;
-  grid-template-rows: 1fr;
-  transition: grid-template-rows 0.24s ease;
-}
-
-.wb-actor-fold.is-collapsed {
-  grid-template-rows: 0fr;
-}
-
-.wb-actor-fold-body {
-  max-height: none;
-  /* 0fr 要真正收起，子元素必须允许被压到 0：min-height + overflow 是这套写法的前提 */
-  min-height: 0;
-  overflow: hidden;
-  margin: 0;
-  padding: 0;
-  border: 0;
-  background: transparent;
-  font-size: 13px;
-  line-height: 1.55;
-}
-
-.wb-actor-line,
-.wb-actor-reasoning {
-  margin: 0 0 6px;
-  color: #4b5160;
-  font-size: 13px;
-  line-height: 1.55;
-  white-space: pre-wrap;
-}
-
-.wb-actor-steps {
-  margin: 0;
-  padding: 0;
-  list-style: none;
-}
-
-.wb-actor-step-title {
-  display: block;
-  margin-bottom: 2px;
-  color: #6b7280;
-  font-size: 12px;
-}
-
-.wb-actor-pre {
-  margin: 0 0 8px;
-  white-space: pre-wrap;
-  word-break: break-word;
-  color: #374151;
-  font-size: 12px;
-  font-family: inherit;
-}
 
 /* 有思考面板时行首不再有大头像，卡片直接占满宽度 */
 .chat.is-workbench .speak-row.is-assistant > .card {
   width: 100%;
-}
-
-.chat.is-workbench .think-toggle.is-summary .section-label,
-.chat.is-workbench .section-label.is-summary {
-  color: #9ca3af;
-  font-size: 12px;
-  font-weight: 400;
-}
-
-/* 生成中标题：只在文字上跑一道浅浅的高光，不做色块 / 进度条 / 跑马灯 */
-.chat.is-workbench .think-toggle .section-label.is-streaming {
-  background: linear-gradient(90deg, #9ca3af 0%, #635bff 45%, #9ca3af 90%);
-  background-size: 220% 100%;
-  background-clip: text;
-  -webkit-background-clip: text;
-  color: transparent;
-  animation: wb-think-shimmer 1.8s linear infinite;
-}
-
-@keyframes wb-think-shimmer {
-  0% {
-    background-position: 120% 0;
-  }
-
-  100% {
-    background-position: -120% 0;
-  }
-}
-
-
-.mention-chip-row {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 6px;
-  margin: 0 0 8px;
-}
-
-.mention-chip {
-  display: inline-flex;
-  align-items: center;
-  gap: 4px;
-  padding: 2px 8px 2px 10px;
-  border-radius: 999px;
-  background: #efeefe;
-  color: var(--ah-primary, #635bff);
-  font-size: 12px;
-  font-weight: 600;
-  line-height: 1.4;
-}
-
-.mention-chip-x {
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  width: 16px;
-  height: 16px;
-  padding: 0;
-  border: none;
-  border-radius: 50%;
-  background: transparent;
-  color: inherit;
-  font: inherit;
-  font-size: 14px;
-  line-height: 1;
-  cursor: pointer;
-}
-
-.mention-chip-x:hover:not(:disabled) {
-  background: rgba(99, 91, 255, 0.15);
-}
-
-.mention-chip-x:disabled {
-  opacity: 0.5;
-  cursor: not-allowed;
-}
-
-.at-panel {
-  position: absolute;
-  left: 12px;
-  right: 12px;
-  bottom: calc(100% + 6px);
-  z-index: 12;
-  max-height: 220px;
-  margin: 0;
-  padding: 6px 0;
-  overflow: auto;
-  list-style: none;
-  border: 1px solid var(--ah-border-soft, #e8eaef);
-  border-radius: 12px;
-  background: #fff;
-  box-shadow: 0 8px 24px rgba(15, 23, 42, 0.08);
-}
-
-.at-item {
-  display: flex;
-  flex-wrap: wrap;
-  align-items: baseline;
-  gap: 6px 10px;
-  padding: 8px 14px;
-  cursor: pointer;
-}
-
-.at-item:hover,
-.at-item.active {
-  background: #f5f3ff;
-}
-
-.at-name {
-  color: var(--ah-text, #1f2937);
-  font-size: 13px;
-  font-weight: 600;
-}
-
-.at-desc {
-  flex: 1;
-  min-width: 0;
-  color: #9ca3af;
-  font-size: 12px;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.at-type {
-  flex: none;
-  padding: 0 6px;
-  border-radius: 4px;
-  background: #f3f4f6;
-  color: #6b7280;
-  font-size: 11px;
-}
-
-.at-empty {
-  padding: 10px 14px;
-  color: #9ca3af;
-  font-size: 12px;
 }
 
 .phase {
@@ -5417,12 +2309,6 @@ function removeAttachment(index: number) {
   font-size: 12px;
   font-weight: 650;
   line-height: 1.3;
-}
-
-.route-key {
-  color: #98a2b3;
-  font-size: 11px;
-  font-weight: 500;
 }
 
 .lane-body {
@@ -5742,50 +2628,6 @@ function removeAttachment(index: number) {
   flex: 1;
 }
 
-/* 朗读控制：准备中 / 播放中 / 暂停共用同一组图标按钮，避免每态换一套 DOM 也不写旁注文字 */
-.speak-actions {
-  display: inline-flex;
-  align-items: center;
-  gap: 2px;
-  padding-bottom: 8px;
-  white-space: nowrap;
-}
-
-/* 单条回答的播放 / 暂停 / 停止：图标按钮，默认低饱和，播放中才点亮主色 */
-.speak-icon {
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  width: 24px;
-  height: 24px;
-  padding: 0;
-  color: var(--ah-text-secondary, #6b7280);
-  background: transparent;
-  border: none;
-  border-radius: 6px;
-  cursor: pointer;
-  transition: color 0.15s, background 0.15s;
-}
-
-.speak-icon .el-icon {
-  font-size: 16px;
-}
-
-.speak-icon:hover {
-  color: var(--el-color-primary, #635bff);
-  background: #f2f1ff;
-}
-
-/* 这一条正在出声 / 合成：保持主色，用户能一眼看出声音来自哪条回答 */
-.speak-icon.active {
-  color: var(--el-color-primary, #635bff);
-}
-
-.speak-icon.stop:hover {
-  color: var(--el-color-danger, #f56c6c);
-  background: #fff1f3;
-}
-
 .answer {
   margin-top: 8px;
   color: var(--ah-text);
@@ -5799,289 +2641,10 @@ function removeAttachment(index: number) {
   font-size: 12px;
 }
 
-/* 图片文字：与「思考过程」同构，默认收起，正文用等宽便于比对识别结果 */
-.vision-block {
-  margin-top: 8px;
-}
-
-/* 入口预处理：在网关过程内部、判定句之前。横排段落，默认只露前段 */
-.wb-preprocess {
-  margin: 0 0 8px;
-}
-
-.wb-preprocess-title {
-  margin: 0;
-  color: var(--ah-text, #1f2937);
-  font-size: 13px;
-  font-weight: 600;
-  line-height: 1.5;
-}
-
-.wb-preprocess-body {
-  margin: 6px 0 0;
-  color: var(--ah-text-secondary, #4b5563);
-  font-size: 13px;
-  line-height: 1.6;
-  white-space: pre-wrap;
-  word-break: break-word;
-  writing-mode: horizontal-tb;
-}
-
-.wb-preprocess-more {
-  margin-top: 4px;
-  padding: 0;
-  border: none;
-  background: transparent;
-  color: var(--ah-primary, #635bff);
-  font-size: 12px;
-  cursor: pointer;
-}
-
-.vision-body {
-  margin: 8px 0 0;
-  padding: 8px 10px;
-  border-radius: 8px;
-  border: 1px solid #e5e7eb;
-  background: #f7f8fb;
-  color: var(--ah-text-secondary, #6b7280);
-  font-size: 12px;
-  line-height: 1.5;
-  white-space: pre-wrap;
-  word-break: break-word;
-  max-height: 240px;
-  overflow: auto;
-}
-
 .error {
   margin: 8px 0 0;
   color: var(--el-color-danger);
 }
 
 
-/*
- * 输入条与首页同一套：浅底圆角容器，正文在上，工具和发送在容器内底行。
- * 工作台只额外限宽居中，不另画一层面板。
- */
-.composer {
-  position: relative;
-  flex: none;
-  margin-top: 12px;
-  padding: 12px 14px 10px;
-  border: 1px solid transparent;
-  border-radius: 16px;
-  background: #f5f7fa;
-  box-shadow: none;
-  box-sizing: border-box;
-}
-
-.composer:focus-within,
-.composer.is-drop {
-  background: #fff;
-  border-color: var(--ah-primary, #635bff);
-  box-shadow: 0 0 0 3px rgba(99, 91, 255, 0.22);
-}
-
-.composer :deep(.el-textarea__inner) {
-  background: transparent !important;
-  box-shadow: none !important;
-  border-color: transparent !important;
-  /* 与对话页同一高度：两行起，没有拉高手柄；字多了再一起长高 */
-  resize: none;
-  padding: 6px 0;
-  min-height: 56px;
-  line-height: 1.7;
-}
-
-/* 缩略图行：紧贴在输入框上方，横向排列，超出可横向滚动 */
-.thumbs {
-  display: flex;
-  flex-wrap: nowrap;
-  gap: 8px;
-  margin-bottom: 8px;
-  padding-bottom: 2px;
-  overflow-x: auto;
-}
-
-.thumb {
-  position: relative;
-  flex: none;
-  width: 64px;
-  height: 64px;
-  border: 1px solid #e5e7eb;
-  border-radius: 8px;
-  overflow: hidden;
-  background: #f7f8fb;
-}
-
-.thumb img {
-  width: 100%;
-  height: 100%;
-  object-fit: cover;
-  display: block;
-}
-
-/* 删除角标：右上角小圆点，hover 才明显，避免压住缩略图主体 */
-.thumb-remove {
-  position: absolute;
-  top: 2px;
-  right: 2px;
-  width: 18px;
-  height: 18px;
-  padding: 0;
-  border: 0;
-  border-radius: 50%;
-  background: rgba(0, 0, 0, 0.55);
-  color: #fff;
-  font-size: 13px;
-  line-height: 18px;
-  text-align: center;
-  cursor: pointer;
-}
-
-.thumb-remove:hover {
-  background: var(--el-color-danger, #f56c6c);
-}
-
-.thumb-remove:disabled {
-  cursor: not-allowed;
-  opacity: 0.5;
-}
-
-.thumb.is-file {
-  width: auto;
-  min-width: 140px;
-  max-width: 220px;
-  height: 64px;
-  padding: 8px 22px 8px 10px;
-  overflow: hidden;
-}
-
-.file-chip-body {
-  display: flex;
-  flex-direction: column;
-  justify-content: center;
-  min-width: 0;
-  line-height: 1.3;
-}
-
-.file-chip-name {
-  overflow: hidden;
-  color: #1f2937;
-  font-size: 12px;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.file-chip-size {
-  margin-top: 2px;
-  color: #6b7280;
-  font-size: 11px;
-}
-
-.composer-bar {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 8px;
-  margin-top: 8px;
-}
-
-.composer-bar :deep(.el-button) {
-  flex: none;
-}
-
-.composer-left {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  min-width: 0;
-}
-
-/* 附件按钮与语音按钮共用 .voice-icon-btn；回形针只表示「添加附件」，不另做一套图标 */
-
-/*
- * 语音图标按钮（喇叭 / 说话 / 取消）：只放图标，不排文字。
- * 图标比常见小按钮略大（16→18px）并统一用主色，disabled 不用灰线框，
- * 而是「保留颜色 + 降透明度 + 拦截点击」，这样一眼能看出它属于哪个能力，而不是坏掉。
- */
-.voice-icon-btn {
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  width: 30px;
-  height: 30px;
-  padding: 0;
-  color: var(--el-color-primary, #635bff);
-  background: transparent;
-  border: 1px solid transparent;
-  border-radius: 8px;
-  cursor: pointer;
-  transition: color 0.15s, background 0.15s, opacity 0.15s;
-}
-
-.voice-icon-btn .el-icon {
-  font-size: 18px;
-}
-
-.voice-icon-btn:hover {
-  background: #f2f1ff;
-}
-
-/* 喇叭开启：实心主色块。开/关不只差一点颜色，形态本身就不一样 */
-.speaker-btn.on {
-  color: #fff;
-  background: var(--el-color-primary, #635bff);
-}
-
-.speaker-btn.on:hover {
-  background: #5148e0;
-}
-
-/* 未绑 ASR：按钮仍可 hover 出说明，但点击不生效，仅降透明度 */
-.voice-icon-btn.muted {
-  color: var(--el-color-primary, #635bff);
-  opacity: 0.35;
-  cursor: not-allowed;
-}
-
-/* 禁用态不给 hover 底色：避免看起来像可点，实际点了没反应 */
-.voice-icon-btn.muted:hover {
-  background: transparent;
-}
-
-/* 录音中：红色 + 图标脉动，明确「正在采集」而不是普通点击态 */
-.voice-icon-btn.recording {
-  color: #d03050;
-  background: #fff1f3;
-}
-
-.voice-icon-btn.recording .el-icon {
-  animation: voice-pulse 1s ease-in-out infinite;
-}
-
-/* 取消录音：中性色，不与「正在录音」抢视觉 */
-.cancel-btn {
-  color: var(--ah-text-muted, #9ca3af);
-}
-
-@keyframes voice-pulse {
-  0%,
-  100% {
-    opacity: 1;
-  }
-
-  50% {
-    opacity: 0.35;
-  }
-}
-
-/* 原生 file input 只做逻辑承载，不占版面 */
-.file-input {
-  display: none;
-}
-
-.hint {
-  color: var(--ah-text-muted);
-  font-size: 12px;
-}
 </style>

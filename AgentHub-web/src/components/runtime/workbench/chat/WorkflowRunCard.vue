@@ -55,13 +55,6 @@
               <span v-if="node.code && node.code !== node.name" class="wf-step-code">{{ node.code }}</span>
             </div>
             <div class="wf-step-note">{{ wfStepNote(node, card.closed) }}</div>
-            <!-- 仅图上 TOOL 节点出胶囊；AGENT 内部工具未进快照，不编造 -->
-            <ToolPillList
-              v-if="nodePills(node).length"
-              class="wf-step-tools"
-              readonly
-              :items="nodePills(node)"
-            />
             <!--
               询问节点的问句与选项画在节点内部：等待时是表单，回复后随 choice 清空，
               节点按完成态收起。单专家选项仍走卡外那套。
@@ -75,41 +68,43 @@
               @choose="emit('choose', $event)"
             />
             <!--
-              节点内分两层，各占各的显示范围：
-              1) 过程（思考 / 工具）单独一块折叠区——运行中自动展开、结束后自动收起，
+              节点内分三层，各占各的显示范围：
+              1) 过程（思考）单独一块折叠区——运行中且尚未出现工具步时自动展开，
+                 思考这一拍结束（工具出现）或节点结束后自动收起，
                  用户点过就以点击为准，与单 Agent / MA 的思考区同一口径；
-              2) 正文单独进四行窗口，超出才出「展开全文」。
+              2) 工具胶囊放在折叠外，与方案参与者卡同一套接法，折叠里只留思考正文；
+              3) 正文单独进四行窗口，超出才出「展开全文」。
               两处状态都只由「用户点击 / 节点真实运行态」决定，直播增量与重挂不会掰回去。
             -->
             <div v-if="wfNodeHasBody(node, card)" class="wf-node-body">
               <FoldSection
-                v-if="wfNodeHasProcess(node)"
+                v-if="wfNodeHasThinking(node)"
                 :open="nodeThinkOpen(node)"
-                :label="wfNodeThinkLabel(node)"
+                :label="WF_NODE_THINK_LABEL"
                 :streaming="wfNodeRunning(node, card)"
                 head-class="wf-thought-head"
                 @toggle="toggleNodeThink(node)"
               >
-                <!-- 展开后的过程：限四行内滚，不把整段思考铺满卡片 -->
+                <!-- 展开后的思考：限四行内滚，不把整段思考铺满卡片；工具不在这里 -->
                 <div
                   :ref="nodeThinkRef(node)"
                   class="wf-node-thought-body"
                   :data-wf-running="wfNodeRunning(node, card) ? '1' : undefined"
                 >
-                  <template v-for="(step, stepIndex) in wfNodeSteps(node)" :key="'wf-step-' + stepIndex">
-                    <div v-if="step.type === 'REASONING'" class="wf-node-think">{{ step.content }}</div>
-                    <div v-else class="wf-node-tool" :class="'is-' + wfStepToolState(step)">
-                      <span class="wf-node-tool-icon" aria-hidden="true">
-                        <template v-if="wfStepToolState(step) === 'running'">◠</template>
-                        <template v-else-if="wfStepToolState(step) === 'done'">✓</template>
-                        <template v-else>✕</template>
-                      </span>
-                      <span class="wf-node-tool-name">调用工具 {{ step.name || '工具' }}</span>
-                      <span v-if="step.content" class="wf-node-tool-brief">{{ wfToolBrief(step.content) }}</span>
-                    </div>
-                  </template>
+                  <div class="wf-node-think">{{ wfNodeThinkingText(node) }}</div>
                 </div>
               </FoldSection>
+              <!--
+                工具胶囊在折叠外：文案仍走工作流自己的 workflowNodeToolLabel，
+                胶囊样式与点击 / 详情展开复用方案参与者卡同一份 ToolPillList。
+              -->
+              <ToolPillList
+                v-if="nodePills(node).length"
+                class="wf-step-tools"
+                :items="nodePills(node)"
+                :open="toolDetailOpen"
+                @toggle="toggleToolDetail"
+              />
               <!--
                 正文：只有真的产出了正文才占位置；等待询问时问句在表单里，这里不出框。
                 与卡级结果框同一形态——正文、复制、展开全文都收在同一个框里。
@@ -244,6 +239,7 @@ import { citationsOf, hasWorkflowCitations } from '@/components/runtime/workbenc
 import { copyAnswerText } from '@/components/runtime/workbench/chat/clipboard'
 import { toolTitleByName } from '@/components/runtime/workbench/chat/toolTitles'
 import {
+  WF_NODE_THINK_LABEL,
   wfAnswerOf,
   wfCardTitle,
   wfCompleted,
@@ -253,14 +249,14 @@ import {
   wfNodeChoice,
   wfNodeFiles,
   wfNodeHasBody,
-  wfNodeHasProcess,
+  wfNodeHasThinking,
   wfNodeLabelStatus,
   wfNodeOutputText,
   wfNodeQuestion,
   wfNodeReply,
   wfNodeRunning,
-  wfNodeSteps,
-  wfNodeThinkLabel,
+  wfNodeStepToolPills,
+  wfNodeThinkingText,
   wfNodeToolPills,
   wfOutputTip,
   wfResultTitle,
@@ -268,8 +264,6 @@ import {
   wfStatusText,
   wfStepNote,
   wfStepState,
-  wfStepToolState,
-  wfToolBrief,
   wfLimitLines
 } from '@/components/runtime/workbench/chat/workflowCardView'
 import {
@@ -282,7 +276,7 @@ import {
   tableFoldedByDefault
 } from '@/components/runtime/workbench/workbenchContentBox'
 import { workflowNodeToolLabel } from '@/components/runtime/workbench/workbenchWorkflowNode'
-import { toolFaceName } from '@/components/runtime/workbench/workbenchToolPill'
+import { presentToolDetail, toolFaceName } from '@/components/runtime/workbench/workbenchToolPill'
 
 const props = withDefaults(
   defineProps<{
@@ -314,6 +308,8 @@ const MEASURE_MIN_GAP_MS = 80
 
 /** 节点过程区的展开覆盖（键 = 轮:参与者:node:编码）；用户点过就以点击为准 */
 const thinkOverride = reactive<Record<string, boolean>>({})
+/** 工具胶囊详情是否展开（键 = 轮:参与者:node:编码 + 胶囊）；与参与者卡同一套点开 / 收起 */
+const toolDetailOpen = reactive<Record<string, boolean>>({})
 /** 节点正文四行窗口是否由用户展开 */
 const nodeExpanded = reactive<Record<string, boolean>>({})
 /** 节点正文是否被四行截断的实测缓存 */
@@ -341,9 +337,34 @@ function nodeKey(node: TrialWorkflowNodeView): string {
   return `${props.turn.key}:${props.card.key}:node:${node.code || ''}`
 }
 
-/** 节点过程区未操作时的默认态：只有「这个节点此刻真的在跑」才展开 */
+/**
+ * 这个节点是否已经出现工具步。
+ *
+ * <p>与方案参与者卡的 {@code actorHasTool} 同口径：只看过程事件本身，
+ * 与该次工具成功 / 失败无关——失败也说明思考这一拍已经结束。
+ *
+ * @param node 节点视图
+ * @return true 表示已有 TOOL 步
+ */
+function nodeHasToolStep(node: TrialWorkflowNodeView): boolean {
+  const steps = Array.isArray(node.steps) ? node.steps : []
+  return steps.some((step) => step.type === 'TOOL')
+}
+
+/**
+ * 节点过程区未操作时的默认态：节点仍在跑、且还没出现工具步才展开。
+ *
+ * <p>与方案参与者卡的「三拍」同口径：思考写完（工具出现）或节点结束就收起，
+ * 让位给折叠外的工具胶囊与四行正文。用户点过的覆盖值仍优于此默认态。
+ *
+ * @param node 节点视图
+ * @return true 表示默认展开思考
+ */
 function nodeThinkOpenByDefault(node: TrialWorkflowNodeView): boolean {
-  return wfNodeRunning(node, props.card)
+  if (!wfNodeRunning(node, props.card)) {
+    return false
+  }
+  return !nodeHasToolStep(node)
 }
 
 /** 节点过程区当前是否展开 */
@@ -431,17 +452,95 @@ function setLegacyBodyEl(el: unknown): void {
   legacyBodyEl = el instanceof HTMLElement ? el : null
 }
 
-/** 节点工具胶囊：只读，文案与单专家卡同一套中文名规则 */
+/**
+ * 节点胶囊的短路缓存：模板同一帧会取两次（`v-if` 与 `:items`），
+ * 不重复做同名合并与详情拼接。
+ */
+const nodePillMemo = new WeakMap<
+  TrialWorkflowNodeView,
+  { closed?: string; items: ReturnType<typeof buildNodePills> }
+>()
+
+/**
+ * 节点工具胶囊：图上 TOOL 节点 + AGENT 节点过程里的工具调用，统一画在折叠外。
+ *
+ * <p>文案仍走工作流自己的 {@link workflowNodeToolLabel}（与参与者卡的 `toolPhrase` 不混用），
+ * 次数与详情结构对齐方案参与者卡：同名工具的多次调用合成一条并带「（N 次）」，
+ * 详情按次列出每次的结果。样式与详情展开复用参与者卡同一份 `ToolPillList`。
+ * 胶囊 key 拼上节点键，同一工具出现在多个节点时详情状态互不串。
+ *
+ * @param node 节点视图
+ * @return 可直接交给 ToolPillList 的条目
+ */
 function nodePills(node: TrialWorkflowNodeView) {
-  return wfNodeToolPills(node, props.card.closed).map((pill) => ({
-    key: pill.key,
+  const hit = nodePillMemo.get(node)
+  if (hit && hit.closed === props.card.closed) {
+    return hit.items
+  }
+  const items = buildNodePills(node)
+  nodePillMemo.set(node, { closed: props.card.closed, items })
+  return items
+}
+
+/**
+ * 真正装配节点胶囊（缓存命中时不走这里）。
+ *
+ * @param node 节点视图
+ * @return 节点级 + 步级胶囊
+ */
+function buildNodePills(node: TrialWorkflowNodeView) {
+  const prefix = nodeKey(node)
+  // 节点级胶囊（TOOL 节点）：状态读节点本身；快照没有入参出参，不给详情
+  const nodeItems = wfNodeToolPills(node, props.card.closed).map((pill) => ({
+    key: prefix + ':pill:' + pill.key,
     state: pill.state,
     label: workflowNodeToolLabel(
       pill,
       wfNodeLabelStatus(node, props.card.closed),
       toolFaceName(pill.name, toolTitleByName)
-    )
+    ),
+    detail: ''
   }))
+  // 步级胶囊（AGENT 节点内部工具）：同名已合并并带真实次数，详情是逐次结果摘录
+  const stepItems = wfNodeStepToolPills(node, props.card.closed).map((pill) => ({
+    key: prefix + ':steppill:' + pill.key,
+    state: pill.state,
+    label: workflowNodeToolLabel(
+      pill,
+      stepPillStatus(pill.state),
+      toolFaceName(pill.name, toolTitleByName)
+    ),
+    detail: pill.detail ? presentToolDetail(pill.detail) : ''
+  }))
+  return [...nodeItems, ...stepItems]
+}
+
+/**
+ * 工具步三态 → 胶囊文案用的状态码。
+ *
+ * <p>步级胶囊没有节点状态可读，只能按自身三态落到「已调用 / 调用失败 / 正在调用」；
+ * 与节点级胶囊共用 `workflowNodeToolLabel`，不另写一句文案。
+ *
+ * @param state 工具步三态
+ * @return 状态码
+ */
+function stepPillStatus(state: 'running' | 'done' | 'error'): string {
+  if (state === 'running') {
+    return 'RUNNING'
+  }
+  if (state === 'error') {
+    return 'FAILED'
+  }
+  return 'SUCCESS'
+}
+
+/**
+ * 切换某条工具胶囊的详情展开态。
+ *
+ * @param key 胶囊 key
+ */
+function toggleToolDetail(key: string): void {
+  toolDetailOpen[key] = toolDetailOpen[key] !== true
 }
 
 /** 运行时限制行：读投影给的绝对截止，不重新计时 */
@@ -635,6 +734,7 @@ onBeforeUnmount(() => {
 </script>
 
 <style scoped src="../../../../styles/chat-markdown.css"></style>
+<style scoped src="../../../../styles/workbench-chat.css"></style>
 
 <style scoped>
 /*
@@ -867,11 +967,12 @@ onBeforeUnmount(() => {
 }
 
 .wf-step-tools {
-  margin: 8px 0 0;
+  /* 折叠外紧跟在思考下面；胶囊与方案参与者卡同一份，底部留出与结果框的间距 */
+  margin: 8px 0 10px;
 }
 
-/* 节点内工具胶囊只读：快照没有入参出参，不可点开详情 */
-.wf-step-tools :deep(.wb-tool-pill) {
+/* 没有详情可开的胶囊（TOOL 节点快照没有入参出参）保持静态，不像可点 */
+.wf-step-tools :deep(span.wb-tool-pill) {
   cursor: default;
 }
 
@@ -941,55 +1042,11 @@ onBeforeUnmount(() => {
   overflow-x: auto;
 }
 
+/* 折叠里只剩一段思考正文：工具已挪到折叠外的胶囊，不再有工具行与相邻间距 */
 .wf-node-think {
   color: #64748b;
   white-space: pre-wrap;
   word-break: break-word;
-}
-
-.wf-node-think + .wf-node-think,
-.wf-node-think + .wf-node-tool,
-.wf-node-tool + .wf-node-think,
-.wf-node-tool + .wf-node-tool,
-.wf-node-think + .wf-node-text,
-.wf-node-tool + .wf-node-text {
-  margin-top: 8px;
-}
-
-/* 工具行只占一行：名称 + 状态 + 一行结果摘录，不铺整段日志 */
-.wf-node-tool {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  min-width: 0;
-  color: #64748b;
-  font-size: 12px;
-}
-
-.wf-node-tool.is-running {
-  color: #2563eb;
-}
-
-.wf-node-tool.is-error {
-  color: #b91c1c;
-}
-
-.wf-node-tool-icon {
-  flex: none;
-}
-
-.wf-node-tool-name {
-  flex: none;
-  font-weight: 500;
-}
-
-.wf-node-tool-brief {
-  flex: 1 1 auto;
-  min-width: 0;
-  overflow: hidden;
-  color: #94a3b8;
-  text-overflow: ellipsis;
-  white-space: nowrap;
 }
 
 /* 节点正文走 Markdown，但去掉结果框的内边距 / 边框，避免灰框里再套一层框 */
@@ -1038,15 +1095,6 @@ onBeforeUnmount(() => {
 
 /* 节点文件的单独一行：不进四行窗口，节点折叠后仍在 */
 .wf-node-files {
-  margin-top: 8px;
-}
-
-/* 文件在正文框下面单独一行，宽度跟结果框对齐，不进气泡，也不替换正文 */
-.chat.is-workbench .wb-file-row {
-  display: flex;
-  flex-direction: column;
-  gap: 8px;
-  width: 100%;
   margin-top: 8px;
 }
 

@@ -142,6 +142,40 @@ export function friendlyWorkbenchError(raw: string): string {
 }
 
 /**
+ * 这条错误是否该给「去绑定模型」深链。
+ *
+ * <p>只负责可行动性判定：中断 / 取消不是模型没配，保留原话即可。
+ * 皮肤与权限由调用方先挡（壳层计划流与参与者卡共用这一条口径）。
+ *
+ * @param raw 原始错误文案
+ * @return true 表示分类为 model 且不是中断类
+ */
+export function isModelConfigActionable(raw: string): boolean {
+  const text = raw || ''
+  if (/已?中断|已?中止|已?取消|已停止/.test(text)) {
+    return false
+  }
+  return classifyWorkbenchError(text) === 'model'
+}
+
+/**
+ * 这条错误是否该给「去配置对话路由」深链。
+ *
+ * <p>与 {@link isModelConfigActionable} 同一口径：只认分类为 route 的可行动错误；
+ * 手动停止 / 中断留下的「判路由失败：已中断」不应再引导去改配置。
+ *
+ * @param raw 原始错误文案
+ * @return true 表示分类为 route 且不是中断类
+ */
+export function isRouteConfigActionable(raw: string): boolean {
+  const text = raw || ''
+  if (/已?中断|已?中止|已?取消|已停止/.test(text)) {
+    return false
+  }
+  return classifyWorkbenchError(text) === 'route'
+}
+
+/**
  * 工作台正文展示：剥掉开头的人设/调试小节标题（Markdown ATX heading），不改落库。
  * 例如「### 通用接待：寒暄、能力介绍…」这类，只留真正对用户说的话。
  * 不误伤正文中间的标题、列表、代码块；也不动折叠行「> 已匹配…」。

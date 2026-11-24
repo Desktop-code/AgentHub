@@ -248,6 +248,25 @@ export function pendingAttachments(
 }
 
 /**
+ * 按添加顺序还原一轮用户消息的附件，供用户气泡与入口预处理排序共用。
+ *
+ * <p>新事件带 attachments（图与文件混排）；旧数据只有 images，统一补成同一份列表，
+ * 顺序不变。它不属于任何单个组件：用户行和 `attachmentsBefore` 都要读同一份。
+ *
+ * @param turn 用户轮（只读 attachments / images 两个字段）
+ * @return 按添加顺序的附件；没有附件时为空数组
+ */
+export function attachmentsOfTurn(turn: {
+  attachments?: UserAttachmentView[]
+  images?: string[]
+}): UserAttachmentView[] {
+  if (turn.attachments?.length) {
+    return turn.attachments
+  }
+  return (turn.images || []).map((url) => ({ kind: 'image' as const, url }))
+}
+
+/**
  * 给 img / 预览用的地址。data URI 与 http(s) 原样返回；相对路径拼 API 根。
  *
  * @param raw 事件里的地址或发送前的 data URI

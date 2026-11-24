@@ -1,0 +1,72 @@
+/**
+ * 工作台对话共享样式。所属域：runtime（前端展示）。
+ *
+ * <p>由 ChatPanel / WorkbenchActorCard / WorkflowRunCard / UserTurnRow 以
+ * `<style scoped src>` 引入（与 chat-markdown.css 同一做法）：scoped 样式不会跨组件生效，
+ * 同一形态被多个组件使用时必须收进共享文件，否则每处各写一份会慢慢长歪。
+ *
+ * <p>这里只放「同一形态确实被两个以上组件使用」的规则，不放某一个组件的私有布局。
+ */
+
+/* 文件在正文框下面单独一行，宽度跟结果框对齐，不进气泡，也不替换正文。
+   ChatPanel（参与者卡拆分前）与 WorkflowRunCard 曾各写一份，现统一到这里 */
+.chat.is-workbench .wb-file-row {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  width: 100%;
+  margin-top: 8px;
+}
+
+/* 头像基类：行首助手头像与用户行头像共用；圆形、固定 36px、照片铺满裁切。
+   .is-assistant（方座）与 .is-user（照片 / 首字）等形态差异仍留在各自组件里 */
+.msg-avatar {
+  display: grid;
+  place-items: center;
+  width: 36px;
+  height: 36px;
+  overflow: hidden;
+  flex: none;
+  border-radius: 50%;
+  font-size: 14px;
+  font-weight: 650;
+}
+
+.msg-avatar img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+}
+
+/* 结果框（答案）外框：计划终答与参与者卡正文共用同一只气泡形态。
+   正文限高、朗读按钮、引用等仍由各组件自己决定 */
+.answer-block {
+  margin-top: 14px;
+}
+
+.chat.is-workbench .answer-block {
+  position: relative;
+  width: 100%;
+  box-sizing: border-box;
+  background-color: var(--ah-surface, #fff);
+  padding: 16px 20px;
+  border: 1px solid var(--ah-border, #ebeef5);
+  border-radius: 12px;
+  border-bottom-left-radius: 4px;
+}
+
+/* 卡内失败句后面的深链：跟正文同一条流，不加第二块红条。
+   ChatPanel（计划 / 松块错误）与参与者卡错误气泡共用 */
+.wb-error-action {
+  margin-left: 8px;
+  color: var(--ah-primary, #635bff);
+  font-size: 13px;
+  font-weight: 600;
+  text-decoration: none;
+  white-space: nowrap;
+}
+
+.wb-error-action:hover,
+.wb-error-action:focus-visible {
+  text-decoration: underline;
+}

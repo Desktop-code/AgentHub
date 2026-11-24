@@ -16,7 +16,19 @@ import type {
 } from '@/types/runtime'
 import type { ParticipantCard } from '@/components/runtime/workbench/workbenchParticipantFeed'
 import { workflowOutputState } from '@/components/runtime/workbench/workflowOutputView'
-import { workflowNodeToolPill } from '@/components/runtime/workbench/workbenchWorkflowNode'
+import {
+  aggregateWorkflowToolPills,
+  workflowNodeToolPill,
+  type WorkflowNodeToolPill
+} from '@/components/runtime/workbench/workbenchWorkflowNode'
+
+/**
+ * 节点过程折叠标题：与方案参与者卡 `thoughtToggleLabel()` 的「无耗时」那句完全一致。
+ *
+ * <p>工作流节点没有逐节点思考秒表，不补「(耗时 Xs)」；也不再带「(N 条)」——
+ * 工具已经挪到折叠外的胶囊里，条数不再表示这一块的内容。
+ */
+export const WF_NODE_THINK_LABEL = '思考与工具执行过程'
 
 /**
  * 工作流卡片：状态徽标是否已完成（成功后描边与头部才转绿）。
@@ -291,6 +303,24 @@ export function wfNodeToolPills(node: TrialWorkflowNodeView, closed?: string) {
 }
 
 /**
+ * 节点内工具调用（AGENT 节点 steps 里的 TOOL 步）→ 折叠外的胶囊。
+ *
+ * <p>同名工具合成一条并带真实调用次数（口径与方案参与者卡一致），详情保留每一次的结果；
+ * 聚合规则在 {@link aggregateWorkflowToolPills}，这里只负责把节点 `steps` 喂进去。
+ * 整轮已中断但步仍写 running 时同样停转，与节点级胶囊同一口径。
+ *
+ * @param node   工作流卡节点
+ * @param closed 这一位的终态
+ * @return 胶囊列表（按工具首次出现顺序）；没有工具步时为空表
+ */
+export function wfNodeStepToolPills(
+  node: TrialWorkflowNodeView,
+  closed?: string
+): WorkflowNodeToolPill[] {
+  return aggregateWorkflowToolPills(wfNodeSteps(node), closed)
+}
+
+/**
  * 工具胶囊标签用的节点状态：中断后把残留的 RUNNING 当作已取消，句子落到终态。
  *
  * @param node   工作流卡节点
@@ -317,6 +347,29 @@ export function wfCardTitle(card: ParticipantCard): string {
 /** 节点自己的过程步；旧快照没有该字段时为空表。 */
 export function wfNodeSteps(node: TrialWorkflowNodeView): TrialWorkflowStepView[] {
   return Array.isArray(node.steps) ? node.steps : []
+}
+
+/**
+ * 节点自己的思考正文：只取 REASONING 步，按发生顺序拼接。
+ *
+ * <p>工具调用不进这里：它们改为折叠外的胶囊，不再和思考正文混在同一层，
+ * 也不再把工具步算进折叠标题。
+ *
+ * @param node 工作流卡节点
+ * @return 思考正文；没有推理时为空串
+ */
+export function wfNodeThinkingText(node: TrialWorkflowNodeView): string {
+  const parts: string[] = []
+  for (const step of wfNodeSteps(node)) {
+    if (step.type !== 'REASONING') {
+      continue
+    }
+    const text = (step.content || '').trim()
+    if (text) {
+      parts.push(text)
+    }
+  }
+  return parts.join('\n').trim()
 }
 
 /** 节点产出的文件；旧快照没有该字段时为空表。 */
@@ -403,39 +456,35 @@ export function wfNodeOutputText(node: TrialWorkflowNodeView, card: ParticipantC
   return (node.output || '').trim()
 }
 
-/** 节点是否有需要在四行窗口里展示的过程或正文。 */
+/**
+ * 节点是否有需要在过程区展示的内容：思考、折叠外的工具胶囊、或四行正文。
+ *
+ * <p>工具也纳入判定：只有工具、没有思考和正文的节点仍要出胶囊，
+ * 不能因为「没有思考」把整块过程区一起藏掉。
+ *
+ * @param node 节点视图
+ * @param card 参与者卡片（取节点正文与终态）
+ * @return true 表示画过程区
+ */
 export function wfNodeHasBody(node: TrialWorkflowNodeView, card: ParticipantCard): boolean {
-  return wfNodeSteps(node).length > 0 || !!wfNodeOutputText(node, card)
+  return (
+    wfNodeHasThinking(node) ||
+    wfNodeToolPills(node, card.closed).length > 0 ||
+    wfNodeStepToolPills(node, card.closed).length > 0 ||
+    !!wfNodeOutputText(node, card)
+  )
 }
 
 /**
- * 节点是否有可折叠的过程（思考 / 工具）。
+ * 节点是否有可折叠的思考。
+ *
+ * <p>只认推理正文：工具单独做折叠外的胶囊，只有工具的节点不再出一个空折叠。
  *
  * @param node 节点视图
  * @return true 表示画折叠标题行
  */
-export function wfNodeHasProcess(node: TrialWorkflowNodeView): boolean {
-  return wfNodeSteps(node).length > 0
-}
-
-/**
- * 过程折叠区的标题：按实际内容说明这一行是什么，不写死「思考过程」。
- *
- * @param node 节点视图
- * @return 形如「思考过程（3 条）」「调用工具（2 次）」「思考与工具（5 条）」
- */
-export function wfNodeThinkLabel(node: TrialWorkflowNodeView): string {
-  const steps = wfNodeSteps(node)
-  // 只区分推理与工具两类：REASONING 之外的步骤都是工具调用 / 工具结果
-  const think = steps.filter((step) => step.type === 'REASONING').length
-  const tools = steps.length - think
-  if (tools <= 0) {
-    return `思考过程（${think} 条）`
-  }
-  if (think <= 0) {
-    return `调用工具（${tools} 次）`
-  }
-  return `思考与工具（${steps.length} 条）`
+export function wfNodeHasThinking(node: TrialWorkflowNodeView): boolean {
+  return wfNodeThinkingText(node).length > 0
 }
 
 /** 节点是否正在运行：运行中的四行窗口跟最新内容走。整卡已收口时不再当运行中。 */
@@ -444,27 +493,6 @@ export function wfNodeRunning(node: TrialWorkflowNodeView, card: ParticipantCard
     return false
   }
   return (node.status || '').toUpperCase() === 'RUNNING'
-}
-
-/** 工具步状态：旧数据没有 state 时按已完成展示。 */
-export function wfStepToolState(step: TrialWorkflowStepView): 'running' | 'done' | 'error' {
-  const state = (step.state || '').toLowerCase()
-  if (state === 'running') {
-    return 'running'
-  }
-  if (state === 'error') {
-    return 'error'
-  }
-  return 'done'
-}
-
-/** 工具结果只出一行短摘录：四行窗口里不铺大段日志。 */
-export function wfToolBrief(content: string | undefined): string {
-  const line = (content || '').replace(/\s+/g, ' ').trim()
-  if (line.length <= 80) {
-    return line
-  }
-  return line.slice(0, 80) + '…'
 }
 
 /**
