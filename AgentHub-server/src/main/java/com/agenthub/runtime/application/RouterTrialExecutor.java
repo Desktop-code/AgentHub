@@ -18,6 +18,8 @@ import com.agenthub.runtime.application.router.AnswerAggregator;
 import com.agenthub.runtime.application.router.BlockedCandidate;
 import com.agenthub.runtime.application.router.Candidate;
 import com.agenthub.runtime.application.router.Candidates;
+import com.agenthub.runtime.application.router.RouterCandidateLoader;
+import com.agenthub.runtime.application.router.RouterJudgePromptFactory;
 import com.agenthub.runtime.application.router.ChildOutcome;
 import com.agenthub.runtime.application.router.ChildRunner;
 import com.agenthub.runtime.application.router.EntryQuestionSplitter;
@@ -114,25 +116,6 @@ public class RouterTrialExecutor {
     private static final int COMPETE_ANSWER_LIMIT = 3000;
 
     /**
-     * 判路由系统提示里的用户原文槽。
-     * <p>
-     * ROUTER 模板的 {@code {{user_query}}} 在装配时先占上这个槽，同一轮各问只替换槽里的问句，
-     * 不再为每一问重跑 L1 与种子契约的组装。槽值不会出现在候选名单和调度规则里。
-     */
-    private static final String JUDGE_USER_SLOT = "\u0001agenthub-user-query\u0001";
-
-    /**
-     * 历史迁移生成的方案编码前缀（见 `sql/temp/data-migrate-ma-def-from-router.sql`）。
-     *
-     * <p>这类方案是「旧 ROUTER Agent 的包装副本」。它若被当成子候选，同一轮就会出现
-     * 两条同名综合台同时跑；装载候选时按本前缀 + 同名判定挡掉。
-     */
-    private static final String MIGRATED_MA_CODE_PREFIX = "ma_from_agent_";
-
-    /** 迁移脚本给方案名加的后缀，比较名称时先去掉它 */
-    private static final String MIGRATED_MA_NAME_SUFFIX = "（迁移）";
-
-    /**
      * 参与者一个字都没产出时的终态说明。
      *
      * <p>为什么要落成正文而不是直接 return：卡片已经因为 begin 建出来了，没有正文也没有结束标记，
@@ -190,6 +173,10 @@ public class RouterTrialExecutor {
 
     private final AgentRouteRepository routes;
     private final AgentDefRepository agents;
+    /** 候选装载：旧路由行 / 方案候选表的过滤与去重口径都在这里，执行器只拿结果 */
+    private final RouterCandidateLoader candidateLoader;
+    /** 判路由提示词装配：提示词逐字与用户槽替换口径都在这里 */
+    private final RouterJudgePromptFactory judgePrompts;
     private final TrialBindingLoader loader;
     private final ReActTrialExecutor react;
     private final SystemPromptAssembler prompts;
@@ -253,6 +240,8 @@ public class RouterTrialExecutor {
                                WorkflowTargetRunner workflowTargets) {
         this.routes = routes;
         this.agents = agents;
+        this.candidateLoader = new RouterCandidateLoader(routes, agents);
+        this.judgePrompts = new RouterJudgePromptFactory(prompts);
         this.loader = loader;
         this.react = react;
         this.prompts = prompts;
@@ -413,7 +402,7 @@ public class RouterTrialExecutor {
         try {
             assertParentDeadline(deadlineNanos);
             // 候选按当前配置重新装载：停等期间被停用的成员不应继续跑，也不静默换成别人
-            Candidates loaded = loadCandidates(rootId(parent), runtime, spec);
+            Candidates loaded = candidateLoader.load(rootId(parent), runtime, spec);
             Map<String, Candidate> byKey = new LinkedHashMap<>();
             for (Candidate candidate : loaded.usable()) {
                 String key = routeKeyOf(candidate);
@@ -739,7 +728,7 @@ public class RouterTrialExecutor {
         RouteSpan route = RouteSpan.open(trace, "judge", rootId(parent));
         try {
             assertParentDeadline(deadlineNanos);
-            Candidates loaded = loadCandidates(rootId(parent), runtime, spec);
+            Candidates loaded = candidateLoader.load(rootId(parent), runtime, spec);
             List<Candidate> candidates = loaded.usable();
             List<BlockedCandidate> blockedCandidates = loaded.blocked();
             if (candidates.isEmpty()) {
@@ -896,7 +885,7 @@ public class RouterTrialExecutor {
         RouteSpan route = RouteSpan.open(trace, parallel ? "fixed-parallel" : "fixed-sequence", rootId(parent));
         try {
             assertParentDeadline(deadlineNanos);
-            Candidates loaded = loadCandidates(rootId(parent), runtime, spec);
+            Candidates loaded = candidateLoader.load(rootId(parent), runtime, spec);
             List<Candidate> enabled = loaded.usable();
             List<BlockedCandidate> blockedCandidates = loaded.blocked();
             // M4 精神：固定模板没有判路由兜底，零可用候选必须整次 FAIL，不能空跑出「无实质回答」
@@ -1045,7 +1034,7 @@ public class RouterTrialExecutor {
         RouteSpan route = RouteSpan.open(trace, "compete", rootId(parent));
         try {
             assertParentDeadline(deadlineNanos);
-            Candidates loaded = loadCandidates(rootId(parent), runtime, spec);
+            Candidates loaded = candidateLoader.load(rootId(parent), runtime, spec);
             List<Candidate> enabled = loaded.usable();
             List<BlockedCandidate> blockedCandidates = loaded.blocked();
             // 竞争选优没有「判路由兜底」：少于 2 个可用候选就不是竞争，必须中文 FAIL
@@ -1382,7 +1371,7 @@ public class RouterTrialExecutor {
         RouteSpan route = RouteSpan.open(trace, "router-then-sequence", rootId(parent));
         try {
             assertParentDeadline(deadlineNanos);
-            Candidates loaded = loadCandidates(rootId(parent), runtime, spec);
+            Candidates loaded = candidateLoader.load(rootId(parent), runtime, spec);
             List<Candidate> candidates = loaded.usable();
             // M4：本模板先判路由再串行，判路由本身没有「降级兜底」，零可用候选必须整次 FAIL
             if (candidates.isEmpty()) {
@@ -1548,7 +1537,7 @@ public class RouterTrialExecutor {
         String degradeNote = null;
         try {
             assertParentDeadline(deadlineNanos);
-            Candidates loaded = loadCandidates(rootId(parent), runtime, spec);
+            Candidates loaded = candidateLoader.load(rootId(parent), runtime, spec);
             Long criticId = runtime.getMaCriticAgentId();
             Candidate executor = pickCriticExecutor(loaded, criticId);
             AgentDef criticAgent = pickCriticAgent(runtime, criticId, executor);
@@ -2249,7 +2238,7 @@ public class RouterTrialExecutor {
         boolean forceMissed = false;
         // 1) 手动换线优先于一切：用户已经指定线路，不再花一次判路由，也不再被关键字抢先
         if (hint != null && hint.forced()) {
-            Candidate forced = byRouteKey(candidates, hint.forceRouteKey());
+            Candidate forced = RouterCandidateLoader.byRouteKey(candidates, hint.forceRouteKey());
             if (forced != null) {
                 // 强制轮恒为单意图：用户选的是一个候选，不是协作。
                 // 理由只作为「来源标记」传给前端识别手动换线，前端不会把它当判定依据展示
@@ -2317,7 +2306,7 @@ public class RouterTrialExecutor {
             String judgeUser = hint != null && hint.judgeInput() != null ? hint.judgeInput() : userText;
             String reply = judgeReply(
                     MeterScope.console(rootId(parent), parentModel.get(), sessionId, userId),
-                    judgePrompt(parent, candidates, runtime, userText, hint, spec), judgeUser, judgeLimits,
+                    judgePrompts.judgePrompt(parent, candidates, runtime, userText, hint, spec), judgeUser, judgeLimits,
                     progress);
             List<String> keys = candidates.stream()
                     .map(item -> item.route().getRouteKey())
@@ -2403,7 +2392,7 @@ public class RouterTrialExecutor {
         Map<Long, List<EntrySchemePreference.MemberDuty>> duties = isEntryRouter(spec)
                 ? entryMemberDuties(candidates) : Map.of();
         // 同一轮各问共用一份已装配的 ROUTER 前缀；第一次真正打模型时才装配，点名/关键字/覆盖不触发
-        TurnJudgePrompt sharedPrompt = new TurnJudgePrompt();
+        RouterJudgePromptFactory.TurnJudgePrompt sharedPrompt = judgePrompts.newTurnPrompt();
         Map<String, RoutedIntent> byKey = new LinkedHashMap<>();
         for (int i = 0; i < parts.size(); i++) {
             EntryQuestionSplitter.Question question = parts.get(i);
@@ -2446,7 +2435,7 @@ public class RouterTrialExecutor {
                                           List<Candidate> candidates,
                                           Map<Long, List<EntrySchemePreference.MemberDuty>> duties,
                                           long userId, long sessionId, long deadlineNanos,
-                                          TrialProgress progress, TurnJudgePrompt sharedPrompt) {
+                                          TrialProgress progress, RouterJudgePromptFactory.TurnJudgePrompt sharedPrompt) {
         String text = question.text() == null ? "" : question.text().trim();
         String query = question.subQuery() == null || question.subQuery().isBlank() ? text : question.subQuery();
         // 1) 这一问点名了某个方案：只把这一问交给它，不再牵连其它问题
@@ -2496,7 +2485,7 @@ public class RouterTrialExecutor {
                         .toList();
                 List<RouteDecisionParser.Item> parsed = RouteDecisionParser.parse(reply, keys, 1, text);
                 for (RouteDecisionParser.Item item : parsed) {
-                    Candidate hit = byRouteKey(candidates, item.routeKey());
+                    Candidate hit = RouterCandidateLoader.byRouteKey(candidates, item.routeKey());
                     if (hit != null) {
                         // 理由随判定一次产出；为空就留空，由前端降级成中性句，不在这里补系统标签
                         return new RoutedIntent(hit, query, item.reason());
@@ -2772,30 +2761,6 @@ public class RouterTrialExecutor {
     }
 
     /**
-     * 按 route_key 找候选（大小写不敏感）；找不到返回 null。
-     *
-     * <p>手动换线与沿用线路都要按「方案里的键」定位候选，不允许调用方自己拼匹配逻辑，
-     * 否则大小写 / 首尾空格的差异会让同一个键一处命中、一处落空。
-     *
-     * @param candidates 可用候选
-     * @param routeKey   目标键；可空
-     * @return 命中的候选；无匹配时为空
-     */
-    private static Candidate byRouteKey(List<Candidate> candidates, String routeKey) {
-        if (routeKey == null || routeKey.isBlank()) {
-            return null;
-        }
-        String wanted = routeKey.trim().toLowerCase();
-        for (Candidate candidate : candidates) {
-            String key = candidate.route().getRouteKey();
-            if (key != null && key.trim().toLowerCase().equals(wanted)) {
-                return candidate;
-            }
-        }
-        return null;
-    }
-
-    /**
      * 线路类可见说明：手动换线 / 强制目标失效。
      *
      * <p>只写用户能理解的中文与候选展示名，不暴露 route_key；
@@ -2892,7 +2857,7 @@ public class RouterTrialExecutor {
                     Math.min(parentLimits.timeoutMs(), remainingMs));
             reply = judgeReply(
                     MeterScope.console(rootId(parent), parentModel.get(), sessionId, userId),
-                    judgePrompt(parent, candidates, runtime, userText, null, spec), userText, judgeLimits,
+                    judgePrompts.judgePrompt(parent, candidates, runtime, userText, null, spec), userText, judgeLimits,
                     progress);
         } catch (TrialFailure ex) {
             // 墙钟属于整次失败，保持 finishReason 供上层识别；其它判路由错误统一加中文前缀
@@ -3025,545 +2990,6 @@ public class RouterTrialExecutor {
     }
 
     /**
-     * 判路由提示词（内置组装）。所属域：runtime。
-     *
-     * <p>结构固定为三段，页面 / 方案都不再参与组装：
-     * <ol>
-     *   <li>网关调度指令：只派活、不答题；</li>
-     *   <li>【可用专家】：本方案启用候选的 route_key｜展示名｜Agent 简介（简介单一真源在 Agent）；</li>
-     *   <li>【调度规则】：只输出候选内的键；寒暄 / 问能力 / 无匹配 / 不当内容派给聊天机器人；
-     *       禁止派给名单外或另一个 Router。</li>
-     * </ol>
-     *
-     * <p>{@code hint} 有沿用线路时追加一段「本会话当前线路是 X」的说明：
-     * 只建议优先沿用，不剥夺判路由改派的能力——用户明显换了业务仍应输出新键。
-     * 提示词注入失败或模型不听话都以判路由结果为准，不阻塞主路径。
-     *
-     * @param parent           编排根（取用途模板前缀）
-     * @param candidates       可用候选
-     * @param runtime          运行配置（多意图开关 / 上限）
-     * @param userText         用户原问（填进模板里的用户原文槽；调度规则与候选名单不随它变化）
-     * @param hint             线路提示；可空
-     * @param spec             方案执行来源；可空（旧口径没有方案）
-     * @return 完整提示词
-     */
-    private String judgePrompt(AgentDef parent, List<Candidate> candidates, AgentRuntimeConfig runtime,
-                               String userText, RouteHint hint, MaRunSpec spec) {
-        return assembleJudgePrompt(parent, candidates, runtime, hint, spec).forQuestion(userText);
-    }
-
-    /**
-     * 装配一轮判路由的系统提示，用户原文先占槽。
-     * <p>
-     * L1、种子契约、网关规则和候选名单只在这里生成一次。同一轮的多问通过
-     * {@link TurnJudgePrompt} 复用这份结果，各问只替换槽里的问句。
-     * 粘性说明仍由 {@code hint} 决定，多问路径传入空 hint，与原先逐问不带粘性一致。
-     *
-     * @param parent     编排根
-     * @param candidates 可用候选
-     * @param runtime    运行配置
-     * @param hint       线路提示；可空
-     * @param spec       方案执行来源；可空
-     * @return 带用户原文槽的系统提示
-     */
-    private SharedJudgePrompt assembleJudgePrompt(AgentDef parent, List<Candidate> candidates,
-                                                  AgentRuntimeConfig runtime, RouteHint hint, MaRunSpec spec) {
-        StringBuilder prompt = new StringBuilder();
-        // ROUTER 用途模板可能自带 {{user_query}}。先放入槽，避免严格模式因缺变量失败；
-        // 真正的问句在 forQuestion 时替换，同一轮不重复装配。
-        // 有方案时走 assembleRouter：模板引用与追加要求来自默认接待页（ma_def.config_json），
-        // 与专家人设的 agent_def 列分开，改 Router 不会动到需求拆解等专家。
-        String assembled;
-        if (spec != null) {
-            SystemPromptAssembler.Assembled routerPrompt =
-                    prompts.assembleRouter(rootName(parent, spec), runtime, JUDGE_USER_SLOT);
-            assembled = routerPrompt == null ? null : routerPrompt.text();
-        } else {
-            assembled = prompts.build(parent, JUDGE_USER_SLOT);
-        }
-        if (assembled != null && !assembled.isBlank()) {
-            prompt.append(assembled).append("\n\n");
-        }
-        // 网关调度指令：平台内置文案，用户与方案都不能改，避免「一套方案一套口径」
-        prompt.append("你是平台的调度网关：只负责把用户这一轮请求派给【可用专家】里最合适的一位，"
-                + "不直接回答用户问题，也不替专家作答。\n");
-        // 输出契约与 RouteDecisionParser 同口径：多意图开关只影响条数上限，不影响解析格式。
-        // reason 必须随同一次判定产出：工作台智能网关步骤直接展示它，
-        // 不允许事后再打一轮模型「解释一下为什么」，也不允许模板泄露内部键。
-        String reasonRule = "每项都必须带一句中文 reason：说明为什么选这位（引用该专家简介里的职责，"
-                + "或指出用户这句请求的关键特征），只写一句、不超过 40 字；"
-                + "禁止出现 route_key、模板名、父模型、子模型、作为 AI 模型、根据系统设定等内部说法。";
-        int maxN = runtime.maxRouteChildrenOrDefault();
-        if (runtime.multiIntentOn()) {
-            prompt.append("本次做意图路由：用户可能含多个意图。输出 JSON 数组，每项 ")
-                    .append("{\"route_key\":\"...\",\"sub_query\":\"切给该子的子问题\",\"reason\":\"一句话依据\"}。")
-                    .append(reasonRule)
-                    .append("同一件事的先后步骤仍是一个意图，只派一位最合适的；")
-                    .append("只有用户明确提出互不包含的几件事时才输出多项。")
-                    .append("同 route_key 只出现一次；最多 ").append(maxN).append(" 项。")
-                    .append("单意图则数组长度为 1。不要解释。都不合适时回复 []。\n");
-        } else {
-            prompt.append("本次只做路由选择：输出 JSON 数组且仅一项 ")
-                    .append("{\"route_key\":\"...\",\"sub_query\":\"...\",\"reason\":\"一句话依据\"}，"
-                            + "或只回复一个 route_key。")
-                    .append(reasonRule)
-                    .append("不要解释。都不合适时回复 [] 或 NONE。\n");
-        }
-        // 沿用线路说明放在候选列表之前：先给定上下文，再看候选，模型更容易「先认同再选择」
-        if (hint != null && hint.stickyRouteKey() != null) {
-            Candidate sticky = byRouteKey(candidates, hint.stickyRouteKey());
-            prompt.append("本会话当前线路是 ").append(hint.stickyRouteKey().trim());
-            if (sticky != null) {
-                prompt.append("（候选名 ").append(childLabel(sticky.agent())).append("）");
-            }
-            prompt.append("；若本轮仍属同一业务，请继续输出 ").append(hint.stickyRouteKey().trim())
-                    .append("；明显切换业务时再输出新的 route_key。\n");
-        }
-        // 动态专家列表：职责简介只读单一真源（Agent 用 agent_def.description，
-        // MA 候选用目标方案的 ma_def.description），不再读 ma_candidate.intent_desc
-        prompt.append("\n【可用专家】（route_key｜专家｜职责简介）\n");
-        for (Candidate candidate : candidates) {
-            String key = candidate.route().getRouteKey();
-            if (key == null || key.isBlank()) {
-                continue;
-            }
-            prompt.append("- ").append(key.trim()).append('｜').append(childLabel(candidate.agent()));
-            String brief = RouterTexts.descriptionOf(candidate.agent());
-            if (brief != null) {
-                prompt.append('｜').append(brief);
-            }
-            // 入口才标出方案 / 专家，避免模型把方案当成又一个单兵
-            if (isEntryRouter(spec)) {
-                prompt.append(candidate.isMaTarget() ? "｜方案"
-                        : candidate.isWorkflowTarget() ? "｜工作流" : "｜专家");
-            }
-            prompt.append('\n');
-        }
-        // 调度规则：兜底目标固定为第一位候选；默认接待里它是聊天机器人（只认 Agent，MA 目标不接管兜底）
-        Candidate fallback = candidates.get(0);
-        boolean receptionLabel = false;
-        if (spec != null && spec.receptionDefault()) {
-            // 聊天机器人已被挡下（停用 / 未授权）时不要把它写进兜底文案，否则模型会输出一个不存在的键
-            Candidate assistant = spec.firstAgentCandidate()
-                    .map(item -> byRouteKey(candidates, item.getRouteKey()))
-                    .orElse(null);
-            if (assistant != null) {
-                fallback = assistant;
-                receptionLabel = true;
-            }
-        }
-        String fallbackLabel = fallbackLabel(fallback, receptionLabel);
-        prompt.append("\n【调度规则】\n")
-                .append("1) route_key 只能取自上面的【可用专家】，不得编造，也不得指向名单外的 Agent、"
-                        + "另一个 Router、方案或你自己。\n")
-                .append("2) 用户只是寒暄、致谢、询问你能做什么、需求还说不清，或者没有合适的专家时，"
-                        + "派给 ").append(fallbackLabel).append("。\n")
-                .append("3) 用户明显换到另一类业务时，改派给对应专家；始终只输出 route_key 与子问题，不输出解释。\n");
-        if (isEntryRouter(spec)) {
-            prompt.append("4) 用户点名了名单中某个方案的名称时，只派给该方案，不要改派给它的成员或职责相近的单个专家。\n")
-                    .append("5) 用户这一句同时包含多项交付，且某个方案的简介或成员能覆盖这些交付时，只派给该方案，"
-                            + "由方案再分发；只涉及一项时可以直接派给对应专家。闲聊仍按第 2 条。\n");
-        }
-        return new SharedJudgePrompt(prompt.toString());
-    }
-
-    /**
-     * 一轮判路由已经装配好的系统提示。所属域：runtime。
-     * <p>
-     * 用户原文只占 {@link #JUDGE_USER_SLOT}。同一轮各问替换这个槽，不再重跑 L1 与种子契约。
-     * 替换值不再回扫，问句里即使带有槽字符也不会被当成占位符。
-     */
-    private static final class SharedJudgePrompt {
-
-        /** 已拼好的系统提示，其中用户原文仍是槽 */
-        private final String text;
-
-        /**
-         * @param text 带用户原文槽的系统提示；空按空串
-         */
-        private SharedJudgePrompt(String text) {
-            this.text = text == null ? "" : text;
-        }
-
-        /**
-         * 把槽换成这一问的用户文本。
-         *
-         * @param userText 这一问的用户文本；空则按空串填槽
-         * @return 可直接送给判定模型的系统提示
-         */
-        private String forQuestion(String userText) {
-            String value = userText == null ? "" : userText;
-            // 槽出现几次就换几次（模板与追加区都可能引用用户原文）；换进去的问句不再回扫
-            return text.replace(JUDGE_USER_SLOT, value);
-        }
-    }
-
-    /**
-     * 同一轮多次判定共用的系统提示。所属域：runtime。
-     * <p>
-     * 第一次真正打模型时才装配。点名、关键字、覆盖都不触发，避免没打模型也去装一整份 ROUTER。
-     * 多问路径固定传入空的线路提示，粘性说明与原先逐问不带粘性一致。
-     */
-    private final class TurnJudgePrompt {
-
-        /** 本轮已装配的前缀；未打过模型时为空 */
-        private SharedJudgePrompt cached;
-
-        /**
-         * 取这一问的系统提示。同一轮内前缀只装配一次。
-         *
-         * @param parent     编排根
-         * @param candidates 可用候选
-         * @param runtime    运行配置
-         * @param hint       线路提示；多问路径固定为空
-         * @param spec       方案执行来源
-         * @param userText   这一问的用户文本
-         * @return 系统提示
-         */
-        private String forQuestion(AgentDef parent, List<Candidate> candidates, AgentRuntimeConfig runtime,
-                                   RouteHint hint, MaRunSpec spec, String userText) {
-            if (cached == null) {
-                cached = assembleJudgePrompt(parent, candidates, runtime, hint, spec);
-            }
-            return cached.forQuestion(userText);
-        }
-    }
-
-    /**
-     * 兜底专家的文案：默认接待明确叫「聊天机器人」，其它方案按「第一位候选」表述。
-     *
-     * @param fallback         第一位候选
-     * @param receptionDefault 是否平台默认接待
-     * @return 形如「reception_assistant（聊天机器人）」
-     */
-    private String fallbackLabel(Candidate fallback, boolean receptionDefault) {
-        String key = fallback.route().getRouteKey() == null ? "" : fallback.route().getRouteKey().trim();
-        String name = childLabel(fallback.agent());
-        String label;
-        if (receptionDefault) {
-            // 首位候选就是聊天机器人；名字本身已是「聊天机器人」时不再重复
-            label = "聊天机器人".equals(name) ? "聊天机器人" : "聊天机器人「" + name + "」";
-        } else {
-            label = name + "，首位候选";
-        }
-        return key.isEmpty() ? label : key + "（" + label + "）";
-    }
-
-    /**
-     * 装载候选，并把「未获本编排允许」的子单独挑出来。
-     * <p>四道过滤：路由行启用 → 子未删且启用 → 子 run_mode ∈ {REACT, PLAN_AND_EXECUTE} →
-     * 子 allow_orchestrated=1 → 子 run_mode ∈ 父 {@code maChildRunModesAllowed}。
-     * 后两道单独收集而不是静默丢弃：上层要在路由时间线写「已跳过」原因，
-     * 并在过滤后零可用时给出明确中文失败，而不是让用户对着「没有可用子」猜原因。
-     *
-     * <p>子 ROUTER 仍静默丢弃（结构上就不该存在；写入侧已被 AgentRoutePolicy 挡住）。
-     *
-     * @param parentId 编排根主键
-     * @param runtime  编排根运行配置（读 maChildRunModesAllowed）
-     * @return usable=可执行候选；blocked=被开关/子模式挡下的候选
-     */
-    private Candidates loadCandidates(Long parentId, AgentRuntimeConfig runtime) {
-        return loadCandidates(parentId, runtime, null);
-    }
-
-    /**
-     * 候选装载（方案优先）。
-     *
-     * <p>读源纪律：{@code spec} 非空时只用 {@code ma_candidate}，<b>不再</b>读 {@code agent_route}——
-     * 这正是「改方案候选不经旧编排 Tab 也能影响下一轮」的落点。{@code spec} 为空才是旧口径。
-     * 过滤顺序与旧实现一致：子未删且启用 → 子 run_mode 合法 → 本编排允许该子模式 → 子允许被编排。
-     *
-     * @param parentId 编排根主键；虚拟根为空，仅旧口径会用到
-     * @param runtime  编排根运行配置（读 maChildRunModesAllowed）
-     * @param spec     方案执行来源；可空
-     * @return usable=可执行候选；blocked=被开关/子模式挡下的候选
-     */
-    private Candidates loadCandidates(Long parentId, AgentRuntimeConfig runtime, MaRunSpec spec) {
-        // 方案链路走专表：候选可能是子 Agent，也可能是另一套方案（刀5）
-        if (spec != null) {
-            return loadSpecCandidates(spec, runtime);
-        }
-        List<Candidate> usable = new ArrayList<>();
-        List<BlockedCandidate> blocked = new ArrayList<>();
-        List<AgentRoute> routeRows = routes.listByParentId(parentId);
-        for (AgentRoute route : routeRows) {
-            if (route.getStatus() == null || route.getStatus() != AgentStatus.ENABLED) {
-                continue;
-            }
-            Optional<AgentDef> found = agents.findById(route.getChildAgentId())
-                    .filter(item -> item.getStatus() != null && item.getStatus() == AgentStatus.ENABLED)
-                    .filter(item -> AgentRuntimeConfig.validChildRunMode(item.getRunMode()));
-            if (found.isEmpty()) {
-                continue;
-            }
-            Candidate candidate = new Candidate(route, found.get());
-            String runMode = found.get().getRunMode();
-            // 子运行模式必须先被本编排允许，再看被编排开关：两者都关时才给一条最贴近原因的跳过文案
-            if (!runtime.allowsChildRunMode(runMode)) {
-                blocked.add(new BlockedCandidate(candidate, runMode == null ? "" : runMode,
-                        "本编排未允许子使用" + childModeText(runMode) + "模式"));
-            } else if (!found.get().allowOrchestratedOn()) {
-                blocked.add(new BlockedCandidate(candidate, runMode, "专家未允许被编排调用"));
-            } else {
-                usable.add(candidate);
-            }
-        }
-        return new Candidates(usable, blocked);
-    }
-
-    /**
-     * 方案候选装载（含 MA / 工作流目标）。所属域：runtime。
-     *
-     * <p>读源纪律：只认 {@code ma_candidate}，已按启用过滤、按 sort_no 排好序，不再重排。
-     * 三类候选的门闩不同：
-     * <ul>
-     *   <li>AGENT：子未删且启用 → run_mode 合法 → 本编排允许该子模式 → 允许被编排（与旧口径一致）；</li>
-     *   <li>MA：只要求目标方案的执行来源已装载（装载时已校验启用 / 同租户 / 非默认接待 / 只一层）。
-     *       目标方案若在装载后被停用或删除，本轮按「已跳过」处理，不静默换成别的候选。</li>
-     *   <li>WORKFLOW（刀5B）：只要求目标工作流的执行来源已装载（装载时已校验同租户 / 已发布 /
-     *       有默认发布指针 / 说明非空）。取消发布或移出池后同样按「已跳过」处理。</li>
-     * </ul>
-     *
-     * <p><b>同一轮不许把「自己」再包一层</b>：历史迁移数据里存在 `ma_from_agent_{agentId}`
-     * 这类「旧 Router 包装出来的方案」。它若被当成某个方案的子候选，就会在时间线上再出现
-     * 一次同名综合台（同一条链里两条综合台同时在跑，用户看到的就是「企业综合台出现两次」）。
-     * 这里在装载时把它挡掉：目标方案与当前方案同主键、或目标只是「当前方案/其根的迁移副本」时，
-     * 一律按 `blocked` 跳过并留中文原因。
-     *
-     * @param spec    方案执行来源（非空）
-     * @param runtime 编排根运行配置（读 maChildRunModesAllowed）
-     * @return usable=可执行候选；blocked=被门闩挡下的候选
-     */
-    private Candidates loadSpecCandidates(MaRunSpec spec, AgentRuntimeConfig runtime) {
-        List<Candidate> usable = new ArrayList<>();
-        List<BlockedCandidate> blocked = new ArrayList<>();
-        /*
-         * 同一轮不跑迁移副本：先收集「非迁移候选」的展示名。
-         * 历史迁移把旧 ROUTER Agent 包装成 ma_from_agent_* 方案，它往往和真方案同名并列在候选池里；
-         * 只靠 isSelfWrappedTarget（目标是不是当前方案的副本）挡不住「入口方案 → 子方案」这种层间副本。
-         * 这里按名字判断：池里已有真的一份时，迁移副本静默跳过，不画「已跳过」行。
-         */
-        java.util.Set<String> realNames = new java.util.HashSet<>();
-        for (MaCandidate item : spec.candidates()) {
-            if (item.getEnabled() == null || item.getEnabled() != AgentStatus.ENABLED) {
-                continue;
-            }
-            if (!item.isMaTarget()) {
-                continue;
-            }
-            MaRunSpec target = spec.maTarget(item.getMaDefId()).orElse(null);
-            if (target == null || target.code() == null || !target.code().startsWith(MIGRATED_MA_CODE_PREFIX)) {
-                realNames.add(normalizeSchemeName(target == null ? item.getRouteKey() : target.name()));
-            }
-        }
-        for (MaCandidate item : spec.candidates()) {
-            if (item.getEnabled() == null || item.getEnabled() != AgentStatus.ENABLED) {
-                continue;
-            }
-            AgentRoute route = routeOf(item);
-            // MA 目标：装载时就定好执行来源，缺失只能跳过，不能再下探第二层
-            if (item.isMaTarget()) {
-                AgentDef shell = maShell(spec, item);
-                Candidate candidate = new Candidate(route, shell, spec.maTarget(item.getMaDefId()).orElse(null));
-                // 装载时没把超限的下一跳放进目标表；这里给出熔断文案，不要写成「已停用」
-                if (MaNestedContext.depth() >= AgentRuntimeConfig.MAX_MA_NEST_DEPTH) {
-                    blocked.add(new BlockedCandidate(candidate, MaCandidate.TARGET_MA,
-                            AgentRuntimeConfig.NEST_DEPTH_REJECTED));
-                    continue;
-                }
-                if (candidate.maTarget() == null) {
-                    blocked.add(new BlockedCandidate(candidate, MaCandidate.TARGET_MA,
-                            "目标编排方案「" + childLabel(shell) + "」已停用、已删除或不允许作为路由目标"));
-                    continue;
-                }
-                /*
-                 * 迁移副本：候选池里若同时有同名的真方案，本轮只跑真方案。
-                 * 静默跳过（不进 blocked）：留一行「已跳过 企业综合台（迁移）」等于让综合台在页面上出现两次。
-                 */
-                String targetName = normalizeSchemeName(candidate.maTarget().name());
-                String targetCode = candidate.maTarget().code() == null ? "" : candidate.maTarget().code().trim();
-                if (targetCode.startsWith(MIGRATED_MA_CODE_PREFIX) && !targetName.isEmpty()
-                        && realNames.contains(targetName)) {
-                    log.warn("方案候选含迁移副本且已有同名真方案，已跳过 maId={} targetCode={}",
-                            spec.maId(), targetCode);
-                    continue;
-                }
-                // 自指 / 迁移副本：同一轮里不该再套一层同名方案
-                if (isSelfWrappedTarget(spec, candidate.maTarget())) {
-                    /*
-                     * 静默跳过，不进 blocked：
-                     * blocked 会在时间线上画一条「已跳过 企业综合台（迁移）」，
-                     * 用户仍然会看到综合台出现两次。这里只记日志，页面保持「同一轮只有一行综合台」。
-                     */
-                    log.warn("方案候选指向自己的迁移副本，已跳过 maId={} targetCode={}",
-                            spec.maId(), candidate.maTarget().code());
-                    continue;
-                }
-                usable.add(candidate);
-                continue;
-            }
-            // 工作流目标（刀5B）：只认装载成功的目标；定义被取消发布 / 移出池都按「已跳过」处理
-            if (item.isWorkflowTarget()) {
-                WorkflowRunSpec target = spec.workflowTarget(item.getWorkflowDefId()).orElse(null);
-                AgentDef shell = workflowShell(item, target);
-                Candidate candidate = new Candidate(route, shell, null, target);
-                if (target == null) {
-                    blocked.add(new BlockedCandidate(candidate, MaCandidate.TARGET_WORKFLOW,
-                            "目标工作流「" + childLabel(shell) + "」未发布、已删除或已被移出路由池"));
-                } else {
-                    usable.add(candidate);
-                }
-                continue;
-            }
-            Optional<AgentDef> found = agents.findById(item.getAgentId())
-                    .filter(agent -> agent.getStatus() != null && agent.getStatus() == AgentStatus.ENABLED)
-                    .filter(agent -> AgentRuntimeConfig.validChildRunMode(agent.getRunMode()));
-            if (found.isEmpty()) {
-                continue;
-            }
-            Candidate candidate = new Candidate(route, found.get());
-            String runMode = found.get().getRunMode();
-            if (!runtime.allowsChildRunMode(runMode)) {
-                blocked.add(new BlockedCandidate(candidate, runMode == null ? "" : runMode,
-                        "本编排未允许子使用" + childModeText(runMode) + "模式"));
-            } else if (!found.get().allowOrchestratedOn()) {
-                blocked.add(new BlockedCandidate(candidate, runMode, "专家未允许被编排调用"));
-            } else {
-                usable.add(candidate);
-            }
-        }
-        return new Candidates(usable, blocked);
-    }
-
-    /**
-     * 目标方案是否只是「当前方案自己」的包装副本。
-     *
-     * <p>历史迁移脚本会把每个 ROUTER 类型 Agent 迁成 `ma_from_agent_{agentId}` 方案。
-     * 若手工方案里又把这份迁移副本当子候选加进池，同一条链就会出现两个同名综合台。
-     * 判定只用已有事实：
-     * <ul>
-     *   <li>同主键：显式自指；</li>
-     *   <li>目标编码是 {@code ma_from_agent_} 前缀，且它的名称与当前方案同名
-     *       （迁移脚本生成的名字是「原名（迁移）」，这里按去掉后缀后比较）。</li>
-     * </ul>
-     *
-     * @param current 当前正在执行的方案
-     * @param target  候选指向的目标方案
-     * @return true 表示是「自己」的包装副本，本轮应跳过
-     */
-    private static boolean isSelfWrappedTarget(MaRunSpec current, MaRunSpec target) {
-        if (current == null || target == null) {
-            return false;
-        }
-        if (current.maId() != null && current.maId().equals(target.maId())) {
-            return true;
-        }
-        String code = target.code() == null ? "" : target.code().trim();
-        if (!code.startsWith(MIGRATED_MA_CODE_PREFIX)) {
-            return false;
-        }
-        return sameSchemeName(current.name(), target.name());
-    }
-
-    /**
-     * 迁移方案的名称比较：迁移脚本写成「原名（迁移）」，比较时去掉这个后缀。
-     *
-     * @param left  当前方案名
-     * @param right 迁移方案名
-     * @return true 表示指向同一位方案
-     */
-    private static boolean sameSchemeName(String left, String right) {
-        String a = normalizeSchemeName(left);
-        String b = normalizeSchemeName(right);
-        return !a.isEmpty() && a.equals(b);
-    }
-
-    /**
-     * @param name 方案名
-     * @return 去掉迁移后缀与空白后的名称；空名为空串
-     */
-    private static String normalizeSchemeName(String name) {
-        String text = name == null ? "" : name.trim();
-        if (text.endsWith(MIGRATED_MA_NAME_SUFFIX)) {
-            text = text.substring(0, text.length() - MIGRATED_MA_NAME_SUFFIX.length()).trim();
-        }
-        return text;
-    }
-
-    /**
-     * MA 候选的只读外壳：让判路由提示词、时间线标题与汇总都按 Agent 口径复用同一套文案工具。
-     *
-     * <p>外壳主键为空、不落库：执行分支按 {@link Candidate#isMaTarget()} 直接委托给目标方案，
-     * 任何按 agentId 回查 Agent 的地方都不会走到这里。
-     *
-     * @param parent 当前方案（拼兜底文案用）
-     * @param item   MA 候选行
-     * @return 展示用外壳（名称 / 编码 / 说明 / ROUTER 模式）
-     */
-    private AgentDef maShell(MaRunSpec parent, MaCandidate item) {
-        MaRunSpec target = parent.maTarget(item.getMaDefId()).orElse(null);
-        AgentDef shell = new AgentDef();
-        shell.setRunMode(AgentRunMode.ROUTER.name());
-        shell.setStatus(AgentStatus.ENABLED);
-        if (target != null) {
-            shell.setName(target.name());
-            shell.setCode(target.code());
-            shell.setDescription(target.description());
-        }
-        if (shell.getName() == null || shell.getName().isBlank()) {
-            shell.setName(item.getRouteKey() == null ? "编排方案" : item.getRouteKey().trim());
-        }
-        return shell;
-    }
-
-    /**
-     * 工作流候选的只读外壳（刀5B）：让判路由提示词、时间线标题与汇总按同一套 Agent 口径复用。
-     *
-     * <p>外壳主键为空、不落库；{@code runMode} 填 ROUTER 只是为了与方案外壳保持一致的展示口径，
-     * 执行分支在读取运行模式之前就按 {@link Candidate#isWorkflowTarget()} 委托出去。
-     * 职责简介取 {@code workflow_def.description}（意图说明唯一真源）。
-     *
-     * @param item   工作流候选行
-     * @param target 目标工作流快照；未装载时为空（外壳仍要能显示名称，用于「已跳过」文案）
-     * @return 展示用外壳
-     */
-    private AgentDef workflowShell(MaCandidate item, WorkflowRunSpec target) {
-        AgentDef shell = new AgentDef();
-        shell.setRunMode(AgentRunMode.ROUTER.name());
-        shell.setStatus(AgentStatus.ENABLED);
-        if (target != null) {
-            shell.setName(target.name());
-            shell.setCode(target.code());
-            shell.setDescription(target.description());
-        }
-        if (shell.getName() == null || shell.getName().isBlank()) {
-            shell.setName(item.getRouteKey() == null ? "工作流" : item.getRouteKey().trim());
-        }
-        return shell;
-    }
-
-    /**
-     * 方案候选 → 执行器内部认的路由行（单条）。
-     *
-     * <p>只借 {@link AgentRoute} 的展示字段（route_key / sort_order）：
-     * {@code parentAgentId} 填方案 id 只是为了日志可读，执行器不会再用它查路由。
-     * MA 候选的 {@code childAgentId} 恒为 null（没有子 Agent），按 route_key 定位。
-     *
-     * @param item 方案候选
-     * @return 路由行
-     */
-    private static AgentRoute routeOf(MaCandidate item) {
-        AgentRoute route = new AgentRoute();
-        route.setId(item.getId());
-        route.setParentAgentId(item.getMaId());
-        route.setChildAgentId(item.getAgentId());
-        route.setRouteKey(item.getRouteKey());
-        route.setSortOrder(item.getSortNo());
-        route.setStatus(AgentStatus.ENABLED);
-        return route;
-    }
-
-    /**
      * 判路由 / 汇总模型解析：方案优先，旧 Agent 试跑才回落 Agent 模型槽。
      * 实现见 {@link AnswerAggregator#resolveRouterModel}.
      *
@@ -3655,18 +3081,10 @@ public class RouterTrialExecutor {
             String reason = blockedItem.reason();
             outcomes.add(ChildOutcome.skipped(
                     new RoutedIntent(candidate, userText, reason,
-                            "已跳过 " + label + "：" + reason + "（" + childModeText(blockedItem.runMode()) + "）"),
+                            "已跳过 " + label + "：" + reason + "（" + RouterCandidateLoader.childModeText(blockedItem.runMode()) + "）"),
                     "「" + label + "」" + reason + "，已跳过"));
         }
         return outcomes;
-    }
-
-    /**
-     * @param runMode REACT / PLAN_AND_EXECUTE
-     * @return 中文模式名
-     */
-    private static String childModeText(String runMode) {
-        return AgentRunMode.PLAN_AND_EXECUTE.name().equals(runMode) ? "计划执行" : "ReAct";
     }
 
     /**
@@ -3678,7 +3096,7 @@ public class RouterTrialExecutor {
      * @return 对应候选；键对不上时退回首位，保证不因脏数据中断一轮
      */
     private Candidate candidateOf(List<Candidate> candidates, AgentRoute route) {
-        Candidate byKey = byRouteKey(candidates, route.getRouteKey());
+        Candidate byKey = RouterCandidateLoader.byRouteKey(candidates, route.getRouteKey());
         return byKey != null ? byKey : find(candidates, route.getChildAgentId());
     }
 

@@ -77,26 +77,12 @@ public class WorkflowEngine {
     /** 埋点端口：根 trace + 每节点 TASK 步；实现失败只记日志，不影响调度 */
     private final WorkflowTraceWriter traces;
 
-    /**
-     * 当前执行线程上的节点观察者。
-     *
-     * <p>为什么用 ThreadLocal 而不是把参数一路传到底：一次 {@code execute} 会穿过
-     * {@code pickNext / executeNode / succeed / handleFailure} 等十来个私有方法，
-     * 逐个加参数只会把「谁在观察」这件事摊进调度代码；而引擎本来就是**同步顺序执行**
-     * （FORK 也不并发），一次调用内同线程唯一，ThreadLocal 与显式参数等价且改动最小。
-     *
-     * <p>清理放在 {@code execute} 的 finally：池线程复用不会把上一位的观察者带给下一位。
-     */
-    private final ThreadLocal<WorkflowRunListener> listenerHolder = new ThreadLocal<>();
-
-    /**
-     * 当前执行线程上的时限账本（整段上限 / 截止 / 单节点上限 / 是否在等待）。
-     *
-     * <p>与 {@link #listenerHolder} 同生命周期：一次 {@code execute} 一份，finally 清理。
-     * 截止时刻在首次调度时**落库**，之后每次调度只读库里的那一份——
-     * 这样刷新页面、离开再进、回放看到的都是同一个截止，不会重新从头上计时。
-     */
-    private final ThreadLocal<RunClock> clockHolder = new ThreadLocal<>();
+    /** 图 / 上下文读写：入参映射、已完成产出一律走这里 */
+    private final WorkflowContextSupport context;
+    /** 时限账本：上限 / 截止 / 单节点超时；按线程存放，execute 收尾清理 */
+    private final WorkflowRunClockKeeper clockKeeper;
+    /** 卡片观察者发布：节点变更与时限；observer 异常吞掉，不影响调度结论 */
+    private final WorkflowCardPublisher publisher;
 
     /**
      * @param runs         run 仓储
@@ -127,6 +113,9 @@ public class WorkflowEngine {
         this.properties = properties;
         this.json = json;
         this.traces = traces;
+        this.context = new WorkflowContextSupport(json);
+        this.clockKeeper = new WorkflowRunClockKeeper(runs, properties);
+        this.publisher = new WorkflowCardPublisher(clockKeeper);
     }
 
     /**
@@ -157,18 +146,18 @@ public class WorkflowEngine {
             executeInternal(run, operatorId);
             return;
         }
-        listenerHolder.set(listener);
+        publisher.bind(listener);
         try {
             executeInternal(run, operatorId);
         } finally {
-            listenerHolder.remove();
+            publisher.clear();
             // 时限账本同样按调用清理：池线程不携带上一轮的上限与截止
-            clockHolder.remove();
+            clockKeeper.clear();
         }
     }
 
     /**
-     * 实际调度实现；观察者从 {@link #listenerHolder} 取。
+     * 实际调度实现；观察者从 {@link WorkflowCardPublisher} 取。
      *
      * @param run        已落库的 run
      * @param operatorId 操作人
@@ -206,7 +195,7 @@ public class WorkflowEngine {
 
         WorkflowGraph graph = codec.parse(run.getGraphJson());
         WorkflowRuntimeGraph runtime = WorkflowRuntimeGraph.of(graph);
-        ObjectNode input = readObject(run.getInputJson());
+        ObjectNode input = context.readObject(run.getInputJson());
         List<WorkflowNodeRun> rows = ensureNodeRuns(run, runtime);
         Map<String, WorkflowNodeRun> rowByNode = new LinkedHashMap<>();
         for (WorkflowNodeRun row : rows) {
@@ -217,12 +206,12 @@ public class WorkflowEngine {
          * 放在 publishStarted 之前：卡片第一帧就要看到整段上限，不能等第一次节点变更才补。
          */
         long platformMs = properties.effectiveWallMs();
-        RunClock clock = openClock(run, graph, platformMs, operatorId);
-        clockHolder.set(clock);
-        publishLimits(null, null);
+        WorkflowRunClockKeeper.RunClock clock = clockKeeper.open(run, graph, platformMs, operatorId);
+        clockKeeper.bind(clock);
+        publisher.limits(null, null);
         // 卡片先按图顺序铺出完整时间轴（全部未开始），后续节点状态再逐个点亮
-        publishStarted(runtime, rows);
-        ObjectNode outputs = collectOutputs(runtime, rows);
+        publisher.started(runtime, rows);
+        ObjectNode outputs = context.collectOutputs(runtime, rows);
         ObjectNode ctx = JsonLogicEvaluator.context(input, outputs, json.createObjectNode());
 
         // 无进展守卫：正常 DAG 每节点最多推进 2 拍（执行 + 跳过判定），这里留足冗余
@@ -307,185 +296,6 @@ public class WorkflowEngine {
     }
 
     /**
-     * 通知观察者「本次调度的全部节点与当前状态」。
-     *
-     * @param runtime 图
-     * @param rows    与图顺序一致的运行态行
-     */
-    private void publishStarted(WorkflowRuntimeGraph runtime, List<WorkflowNodeRun> rows) {
-        WorkflowRunListener listener = listenerHolder.get();
-        if (listener == null) {
-            return;
-        }
-        try {
-            listener.runStarted(runtime.nodes(), rows);
-        } catch (RuntimeException ex) {
-            // 观察是旁路：画不出卡片不能把一次正常的 run 变成失败
-            log.warn("工作流节点观察失败 action=runStarted type={}", ex.getClass().getSimpleName(), ex);
-        }
-    }
-
-    /**
-     * 通知观察者某节点状态已迁移（在落库之后调用）。
-     *
-     * @param node 节点定义
-     * @param row  已更新的运行态
-     */
-    private void publishNode(WorkflowNode node, WorkflowNodeRun row) {
-        WorkflowRunListener listener = listenerHolder.get();
-        if (listener == null || node == null || row == null) {
-            return;
-        }
-        /*
-         * 顺序有意为之：先把时限（含当前节点截止）交给观察者，再报节点状态。
-         * 观察者的 nodeChanged 会立刻推一帧快照，此时账本已是新的，
-         * 卡片就能一次画全「节点 + 该节点上限 + 剩余」，不会出现落后一帧的剩余时间。
-         */
-        publishLimits(node, row);
-        try {
-            listener.nodeChanged(node, row);
-        } catch (RuntimeException ex) {
-            log.warn("工作流节点观察失败 action=nodeChanged nodeCode={} type={}",
-                    node.getCode(), ex.getClass().getSimpleName(), ex);
-        }
-    }
-
-    /**
-     * 建本轮时限账本：上限 = min(工作流配置, 平台硬顶)，截止时刻首次调度时落库。
-     *
-     * <p>为什么截止要落库而不是每次调度现算：卡片要能刷新、离开再进、回放。
-     * 只有「同一个截止」才能让这些场景看到的剩余时间一致，而不是每帧重头计时。
-     *
-     * <p>等待不计入：从 WAITING_REPLY / PAUSED_HUMAN 恢复时，把 {@code waiting_since}
-     * 到现在的时长补回截止，并清空 {@code waiting_since}——
-     * 这样同一段等待只补一次，等待期间也不消耗整段上限与平台硬顶。
-     *
-     * @param run        已落库的 run（状态已是 RUNNING）
-     * @param graph      本轮图快照（取工作流自身配置的两项上限）
-     * @param platformMs 平台硬顶（毫秒），来自 {@code agenthub.workflow.wall-ms}
-     * @param operatorId 操作人
-     * @return 本轮账本
-     */
-    private RunClock openClock(WorkflowRun run, WorkflowGraph graph, long platformMs, long operatorId) {
-        WorkflowRunLimits resolved = resolveRunLimits(run, graph, platformMs);
-        long runLimitMs = resolved.runLimitMs();
-        long nodeLimitMs = resolved.nodeLimitMs();
-        long nowMs = System.currentTimeMillis();
-        Long waitingSinceMs = run.getWaitingSince() == null ? null : toEpochMs(run.getWaitingSince());
-        // 恢复调度：先把等待时长补回截止，再决定落库值
-        long deadlineMs;
-        if (run.getRunDeadline() == null) {
-            // 首次调度：从现在起算整段上限
-            deadlineMs = nowMs + runLimitMs;
-        } else {
-            deadlineMs = toEpochMs(run.getRunDeadline());
-        }
-        if (waitingSinceMs != null) {
-            long pausedMs = Math.max(0L, nowMs - waitingSinceMs);
-            deadlineMs += pausedMs;
-            log.info("工作流恢复调度，等待时长不计入运行时限 runId={} pausedMs={} runLimitMs={}",
-                    run.getId(), pausedMs, runLimitMs);
-        }
-        boolean needsPersist = run.getRunDeadline() == null
-                || waitingSinceMs != null
-                || run.getRunLimitMs() == null
-                || run.getNodeLimitMs() == null;
-        if (needsPersist) {
-            LocalDateTime deadlineAt = toLocalDateTime(deadlineMs);
-            /*
-             * 落库失败不阻断调度：本次仍按内存账本执行（最坏是重启后按图重新解析一次上限）。
-             * 但 waiting_since 必须一并清空，否则同一段等待会在下一次恢复时被重复补回。
-             */
-            runs.updateRunLimits(run.getId(), runLimitMs, nodeLimitMs, deadlineAt, null, operatorId);
-            run.setRunLimitMs(runLimitMs);
-            run.setNodeLimitMs(nodeLimitMs);
-            run.setRunDeadline(deadlineAt);
-            run.setWaitingSince(null);
-        }
-        return new RunClock(runLimitMs, deadlineMs, nodeLimitMs, null);
-    }
-
-    /**
-     * 解析本轮两项上限。
-     *
-     * <p>run 上已落过的值优先（重启后仍按最初那一刻的上限执行），再与当前平台硬顶取小：
-     * 运维把 yml 调小后，在途 run 也必须立刻服从新的硬顶。
-     *
-     * @param run        已落库的 run
-     * @param graph      本轮图快照
-     * @param platformMs 平台硬顶（毫秒）
-     * @return 生效的整段 / 单节点上限
-     */
-    private WorkflowRunLimits resolveRunLimits(WorkflowRun run, WorkflowGraph graph, long platformMs) {
-        WorkflowRunLimits fromGraph;
-        try {
-            fromGraph = WorkflowRunLimits.resolve(graph, platformMs);
-        } catch (RuntimeException ex) {
-            // 图 JSON 坏掉不能把 run 直接打死：按平台硬顶跑，问题留给校验器
-            log.warn("解析工作流时限失败，按平台硬顶执行 runId={} type={}",
-                    run.getId(), ex.getClass().getSimpleName());
-            fromGraph = WorkflowRunLimits.resolve(null, platformMs);
-        }
-        long runLimitMs = run.getRunLimitMs() != null && run.getRunLimitMs() > 0
-                ? Math.min(run.getRunLimitMs(), platformMs)
-                : fromGraph.runLimitMs();
-        long nodeLimitMs = run.getNodeLimitMs() != null && run.getNodeLimitMs() > 0
-                ? Math.min(run.getNodeLimitMs(), runLimitMs)
-                : fromGraph.nodeLimitMs();
-        return WorkflowRunLimits.of(runLimitMs, nodeLimitMs);
-    }
-
-    /**
-     * 把时限快照交给观察者（只更新账本，不单独推帧）。
-     *
-     * <p>观察者是旁路：这里抛异常只记日志，不能影响调度结论。
-     *
-     * @param node 当前要展示的节点；null 表示不展示节点级时限
-     * @param row  该节点的运行态；为空或非 RUNNING 时不展示节点级时限
-     */
-    private void publishLimits(WorkflowNode node, WorkflowNodeRun row) {
-        WorkflowRunListener listener = listenerHolder.get();
-        RunClock clock = clockHolder.get();
-        if (listener == null || clock == null) {
-            return;
-        }
-        Long nodeLimitMs = null;
-        Long nodeDeadlineMs = null;
-        String nodeCode = null;
-        String nodeName = null;
-        // 只有「该节点正在跑 + 配了单节点上限」才给节点行：其余状态画上限没有意义
-        if (node != null && row != null && clock.nodeLimitMs > 0
-                && WorkflowNodeRunStatus.parse(row.getStatus()) == WorkflowNodeRunStatus.RUNNING
-                && row.getStartTime() != null) {
-            nodeLimitMs = clock.nodeLimitMs;
-            nodeDeadlineMs = toEpochMs(row.getStartTime()) + clock.nodeLimitMs;
-            nodeCode = node.getCode();
-            nodeName = node.getName();
-        }
-        try {
-            listener.limits(new WorkflowCardLimits(clock.runLimitMs, clock.deadlineMs, clock.waitingAtMs,
-                    nodeCode, nodeName, nodeLimitMs, nodeDeadlineMs));
-        } catch (RuntimeException ex) {
-            log.warn("工作流时限观察失败 nodeCode={} type={}",
-                    nodeCode, ex.getClass().getSimpleName(), ex);
-        }
-    }
-
-    /**
-     * 该节点是否已超过单节点上限。未配置上限 / 节点没有开始时间时恒 false。
-     *
-     * @param row 运行态行
-     * @return true 表示这一步已超时
-     */
-    private boolean nodeTimedOut(WorkflowNodeRun row) {
-        RunClock clock = clockHolder.get();
-        if (clock == null || clock.nodeLimitMs <= 0 || row == null || row.getStartTime() == null) {
-            return false;
-        }
-        return System.currentTimeMillis() > toEpochMs(row.getStartTime()) + clock.nodeLimitMs;
-    }
-
-    /**
      * 单节点超时收口：节点 FAILED、run FAILED，对话只给「这一步运行超时，已停止」。
      *
      * <p>不走 ERROR 边：超时是「这一步没做完」，继续走错误分支容易把半成品当正常产出。
@@ -497,10 +307,9 @@ public class WorkflowEngine {
      * @return 恒 false，表示本次调度到此停止
      */
     private boolean failNodeTimeout(WorkflowRun run, WorkflowNode node, WorkflowNodeRun row, long operatorId) {
-        RunClock clock = clockHolder.get();
+        WorkflowRunClockKeeper.RunClock clock = clockKeeper.clock();
         long limitMs = clock == null ? 0L : clock.nodeLimitMs;
-        long costMs = row.getStartTime() == null ? 0L
-                : Math.max(0L, System.currentTimeMillis() - toEpochMs(row.getStartTime()));
+        long costMs = clockKeeper.costMs(row);
         // 内部细节只进日志：节点、生效上限、实际耗时
         log.warn("工作流单节点运行超时 runId={} nodeCode={} nodeLimitMs={} costMs={}",
                 run.getId(), node.getCode(), limitMs, costMs);
@@ -509,41 +318,9 @@ public class WorkflowEngine {
         row.setEndTime(LocalDateTime.now());
         row.setSelectedEdges("");
         nodeRuns.update(row);
-        publishNode(node, row);
+        publisher.node(node, row);
         failRun(run, WorkflowOutcomeTexts.NODE_TIMEOUT_TEXT, operatorId);
         return false;
-    }
-
-    /** epoch 毫秒 → 服务器时区 LocalDateTime（落库列类型是 DATETIME） */
-    private static LocalDateTime toLocalDateTime(long epochMs) {
-        return LocalDateTime.ofInstant(Instant.ofEpochMilli(epochMs), ZoneId.systemDefault());
-    }
-
-    /** LocalDateTime（服务器时区）→ epoch 毫秒 */
-    private static long toEpochMs(LocalDateTime time) {
-        return time.atZone(ZoneId.systemDefault()).toInstant().toEpochMilli();
-    }
-
-    /**
-     * 单次调度的时限账本（线程内）。
-     *
-     * @param runLimitMs  整段上限（毫秒）
-     * @param deadlineMs  整段截止（epoch 毫秒）
-     * @param nodeLimitMs 单节点上限（毫秒）；<=0 表示未配置
-     * @param waitingAtMs 进入等待的时刻（epoch 毫秒）；null 表示正在跑
-     */
-    private static final class RunClock {
-        private final long runLimitMs;
-        private final long deadlineMs;
-        private final long nodeLimitMs;
-        private Long waitingAtMs;
-
-        private RunClock(long runLimitMs, long deadlineMs, long nodeLimitMs, Long waitingAtMs) {
-            this.runLimitMs = runLimitMs;
-            this.deadlineMs = deadlineMs;
-            this.nodeLimitMs = nodeLimitMs;
-            this.waitingAtMs = waitingAtMs;
-        }
     }
 
     /**
@@ -596,7 +373,7 @@ public class WorkflowEngine {
     private boolean anySelected(List<WorkflowEdge> incoming, Map<String, WorkflowNodeRun> rowByNode) {
         for (WorkflowEdge edge : incoming) {
             WorkflowNodeRun source = rowByNode.get(edge.getSource());
-            if (source != null && selectedEdgeIds(source).contains(edge.getId())) {
+            if (source != null && context.selectedEdgeIds(source).contains(edge.getId())) {
                 return true;
             }
         }
@@ -614,7 +391,7 @@ public class WorkflowEngine {
         row.setStatus(WorkflowStateMachine.requireNode(from, WorkflowNodeRunStatus.SKIPPED).name());
         row.setEndTime(LocalDateTime.now());
         nodeRuns.update(row);
-        publishNode(node, row);
+        publisher.node(node, row);
     }
 
     /**
@@ -631,7 +408,7 @@ public class WorkflowEngine {
         row.setStartTime(LocalDateTime.now());
         nodeRuns.update(row);
         // 落库之后再报「正在跑」：卡片上的蓝点与库里的 RUNNING 是同一时刻的事实
-        publishNode(node, row);
+        publisher.node(node, row);
 
         WorkflowNodeType type = runtime.type(node.getId());
         // 埋点：节点步在这里开，收口统一放 finally（成功 / 失败 / 取消都落终态）
@@ -639,14 +416,14 @@ public class WorkflowEngine {
         try {
             switch (type) {
                 case START -> {
-                    row.setInputJson(inputOf(ctx, null).toString());
+                    row.setInputJson(context.inputOf(ctx, null).toString());
                     row.setOutputJson(ctx.get("input") == null
                             ? json.createObjectNode().toString()
                             : ctx.get("input").toString());
-                    succeed(row, node, outputs, defaultEdges(runtime, node), ctx);
+                    succeed(row, node, outputs, context.defaultEdges(runtime, node), ctx);
                 }
                 case END -> {
-                    row.setInputJson(inputOf(ctx, node.getConfig()).toString());
+                    row.setInputJson(context.inputOf(ctx, node.getConfig()).toString());
                     ObjectNode result = WorkflowNodeInputs.mapped(ctx,
                             WorkflowNodeConfig.objectValue(node.getConfig(), "outputMapping"));
                     if (result.isEmpty()) {
@@ -658,7 +435,7 @@ public class WorkflowEngine {
                     succeed(row, node, outputs, List.of(), ctx);
                 }
                 case CONDITION -> {
-                    row.setInputJson(inputOf(ctx, node.getConfig()).toString());
+                    row.setInputJson(context.inputOf(ctx, node.getConfig()).toString());
                     List<WorkflowEdge> chosen = chooseConditionEdge(runtime, node, ctx);
                     if (chosen.isEmpty()) {
                         return handleFailure(run, runtime, node, row,
@@ -672,7 +449,7 @@ public class WorkflowEngine {
                 case PARALLEL_FORK -> {
                     // 并行硬顶：分支数按非 ERROR 出边计；超额直接失败该 FORK，
                     // 错误边可接管，否则整 run FAILED（比「静默排队」更可预期、可测）
-                    int branches = defaultEdges(runtime, node).size();
+                    int branches = context.defaultEdges(runtime, node).size();
                     int limit = properties.effectiveMaxParallelBranches();
                     if (branches > limit) {
                         return handleFailure(run, runtime, node, row,
@@ -681,14 +458,14 @@ public class WorkflowEngine {
                                         + "（agenthub.workflow.max-parallel-branches）；已拒绝本次扇出",
                                 null, operatorId);
                     }
-                    row.setInputJson(inputOf(ctx, node.getConfig()).toString());
+                    row.setInputJson(context.inputOf(ctx, node.getConfig()).toString());
                     row.setOutputJson(json.createObjectNode().toString());
-                    succeed(row, node, outputs, defaultEdges(runtime, node), ctx);
+                    succeed(row, node, outputs, context.defaultEdges(runtime, node), ctx);
                 }
                 case PARALLEL_JOIN -> {
-                    row.setInputJson(inputOf(ctx, node.getConfig()).toString());
+                    row.setInputJson(context.inputOf(ctx, node.getConfig()).toString());
                     row.setOutputJson(json.createObjectNode().toString());
-                    succeed(row, node, outputs, defaultEdges(runtime, node), ctx);
+                    succeed(row, node, outputs, context.defaultEdges(runtime, node), ctx);
                 }
                 case AGENT -> {
                     if (!invokeAgent(run, runtime, node, row, ctx, outputs, operatorId)) {
@@ -760,7 +537,7 @@ public class WorkflowEngine {
          * 单节点上限：出站回来后立刻核对这一步耗时。放在产出落库前，
          * 超时就不再进 succeed / 等待回复，避免「已经超时的节点还挂在等待里」。
          */
-        if (nodeTimedOut(row)) {
+        if (clockKeeper.nodeTimedOut(row)) {
             return failNodeTimeout(run, node, row, operatorId);
         }
         ObjectNode raw = json.createObjectNode();
@@ -776,7 +553,7 @@ public class WorkflowEngine {
         if (awaitReply && !replyProvided(ctx)) {
             return enterReplyWait(run, node, row, shaped, reply.choiceJson(), operatorId);
         }
-        succeed(row, node, outputs, defaultEdges(runtime, node), ctx);
+        succeed(row, node, outputs, context.defaultEdges(runtime, node), ctx);
         return true;
     }
 
@@ -823,7 +600,7 @@ public class WorkflowEngine {
             // 单独留一份 question：后续节点 / 卡片想只取问句时不必再拆正文
             kept.put("question", question.trim());
         }
-        JsonNode choice = parse(choiceJson);
+        JsonNode choice = context.parse(choiceJson);
         if (choice != null && choice.isObject()) {
             /*
              * 存成对象而不是字符串：卡片投影与回放都按同一份结构读取，
@@ -848,7 +625,7 @@ public class WorkflowEngine {
         if (!WorkflowRunStatus.WAITING_REPLY.name().equals(run.getStatus())) {
             return false;
         }
-        publishNode(node, row);
+        publisher.node(node, row);
         return false;
     }
 
@@ -867,7 +644,7 @@ public class WorkflowEngine {
                     "工具「" + node.getCode() + "」没有返回内容", null, operatorId);
         }
         // 工具调用同样受单节点上限约束（MCP 可能长时间不回）
-        if (nodeTimedOut(row)) {
+        if (clockKeeper.nodeTimedOut(row)) {
             return failNodeTimeout(run, node, row, operatorId);
         }
         ObjectNode raw = json.createObjectNode();
@@ -875,7 +652,7 @@ public class WorkflowEngine {
         ObjectNode shaped = WorkflowNodeInputs.shapeOutput(raw,
                 WorkflowNodeConfig.objectValue(node.getConfig(), "outputMapping"));
         row.setOutputJson(shaped.toString());
-        succeed(row, node, outputs, defaultEdges(runtime, node), ctx);
+        succeed(row, node, outputs, context.defaultEdges(runtime, node), ctx);
         return true;
     }
 
@@ -888,7 +665,7 @@ public class WorkflowEngine {
         row.setStatus(WorkflowStateMachine.requireNode(from, WorkflowNodeRunStatus.WAITING_HUMAN).name());
         nodeRuns.update(row);
         // 人工卡点也要点亮：卡片上显示「等待人工处理」，用户才知道卡在哪一步
-        publishNode(node, row);
+        publisher.node(node, row);
 
         HumanTimeoutPolicy policy = HumanTimeoutPolicy.parse(
                 WorkflowNodeConfig.textValue(node.getConfig(), "timeoutPolicy"));
@@ -934,9 +711,9 @@ public class WorkflowEngine {
                 WorkflowNodeRunStatus.parse(row.getStatus()), WorkflowNodeRunStatus.FAILED).name());
         row.setErrorSummary(truncate(message));
         row.setEndTime(LocalDateTime.now());
-        row.setSelectedEdges(joinIds(errorEdges));
+        row.setSelectedEdges(context.joinIds(errorEdges));
         nodeRuns.update(row);
-        publishNode(node, row);
+        publisher.node(node, row);
         if (cause != null) {
             log.warn("工作流节点失败 runId={} nodeCode={} reason={} root={}",
                     run.getId(), node.getCode(), message,
@@ -1006,7 +783,7 @@ public class WorkflowEngine {
     private void succeed(WorkflowNodeRun row, WorkflowNode node, ObjectNode outputs,
                          List<WorkflowEdge> selected, ObjectNode ctx) {
         String code = node.getCode();
-        JsonNode produced = parse(row.getOutputJson());
+        JsonNode produced = context.parse(row.getOutputJson());
         // 并行分支写同名 key：先判冲突再落 SUCCESS，避免「行成功但 run 失败」的半截状态
         if (code != null && !code.isBlank() && produced != null
                 && outputs.has(code) && !outputs.get(code).equals(produced)) {
@@ -1015,9 +792,9 @@ public class WorkflowEngine {
         row.setStatus(WorkflowStateMachine.requireNode(
                 WorkflowNodeRunStatus.parse(row.getStatus()), WorkflowNodeRunStatus.SUCCESS).name());
         row.setEndTime(LocalDateTime.now());
-        row.setSelectedEdges(joinIds(selected));
+        row.setSelectedEdges(context.joinIds(selected));
         nodeRuns.update(row);
-        publishNode(node, row);
+        publisher.node(node, row);
         if (code == null || code.isBlank() || produced == null) {
             return;
         }
@@ -1055,7 +832,7 @@ public class WorkflowEngine {
             }
             if (status == WorkflowNodeRunStatus.SUCCESS && runtime.type(node.getId()) == WorkflowNodeType.END) {
                 endSuccess = true;
-                JsonNode produced = parse(row.getOutputJson());
+                JsonNode produced = context.parse(row.getOutputJson());
                 if (produced != null) {
                     endOutput.set(node.getCode(), produced);
                 }
@@ -1146,18 +923,18 @@ public class WorkflowEngine {
          * 同时把冻结后的剩余交给观察者——等待态卡片不应继续往下扣时间。
          */
         if (to == WorkflowRunStatus.PAUSED_HUMAN || to == WorkflowRunStatus.WAITING_REPLY) {
-            RunClock clock = clockHolder.get();
+            WorkflowRunClockKeeper.RunClock clock = clockKeeper.clock();
             LocalDateTime waitingAt = LocalDateTime.now();
             if (clock != null) {
-                LocalDateTime deadlineAt = toLocalDateTime(clock.deadlineMs);
-                clock.waitingAtMs = toEpochMs(waitingAt);
+                LocalDateTime deadlineAt = WorkflowRunClockKeeper.toLocalDateTime(clock.deadlineMs);
+                clockKeeper.markWaiting(waitingAt);
                 runs.updateRunLimits(run.getId(), clock.runLimitMs, clock.nodeLimitMs,
                         deadlineAt, waitingAt, operatorId);
                 run.setRunLimitMs(clock.runLimitMs);
                 run.setNodeLimitMs(clock.nodeLimitMs);
                 run.setRunDeadline(deadlineAt);
                 run.setWaitingSince(waitingAt);
-                publishLimits(null, null);
+                publisher.limits(null, null);
             }
         }
     }
@@ -1200,89 +977,6 @@ public class WorkflowEngine {
             }
         }
         return ordered;
-    }
-
-    private ObjectNode collectOutputs(WorkflowRuntimeGraph runtime, List<WorkflowNodeRun> rows) {
-        ObjectNode outputs = json.createObjectNode();
-        Map<String, String> codeById = new LinkedHashMap<>();
-        for (WorkflowNode node : runtime.nodes()) {
-            codeById.put(node.getId(), node.getCode());
-        }
-        for (WorkflowNodeRun row : rows) {
-            if (WorkflowNodeRunStatus.parse(row.getStatus()) != WorkflowNodeRunStatus.SUCCESS) {
-                continue;
-            }
-            String code = codeById.get(row.getNodeId());
-            JsonNode produced = parse(row.getOutputJson());
-            if (code != null && !code.isBlank() && produced != null) {
-                outputs.set(code, produced);
-            }
-        }
-        return outputs;
-    }
-
-    private ObjectNode inputOf(ObjectNode ctx, JsonNode config) {
-        ObjectNode mapped = WorkflowNodeInputs.mapped(ctx,
-                WorkflowNodeConfig.objectValue(config, "inputMapping"));
-        if (!mapped.isEmpty()) {
-            return mapped;
-        }
-        JsonNode input = ctx.get("input");
-        if (input instanceof ObjectNode object) {
-            return object.deepCopy();
-        }
-        ObjectNode wrapper = json.createObjectNode();
-        wrapper.set("input", input);
-        return wrapper;
-    }
-
-    private Set<String> selectedEdgeIds(WorkflowNodeRun row) {
-        Set<String> ids = new LinkedHashSet<>();
-        if (row.getSelectedEdges() == null || row.getSelectedEdges().isBlank()) {
-            return ids;
-        }
-        for (String part : row.getSelectedEdges().split(",")) {
-            if (!part.isBlank()) {
-                ids.add(part.trim());
-            }
-        }
-        return ids;
-    }
-
-    private String joinIds(List<WorkflowEdge> edges) {
-        if (edges == null || edges.isEmpty()) {
-            return "";
-        }
-        StringBuilder builder = new StringBuilder();
-        for (WorkflowEdge edge : edges) {
-            if (edge.getId() == null || edge.getId().isBlank()) {
-                continue;
-            }
-            if (builder.length() > 0) {
-                builder.append(',');
-            }
-            builder.append(edge.getId());
-        }
-        return builder.toString();
-    }
-
-    private ObjectNode readObject(String raw) {
-        if (raw == null || raw.isBlank()) {
-            return json.createObjectNode();
-        }
-        JsonNode node = parse(raw);
-        return node != null && node.isObject() ? (ObjectNode) node : json.createObjectNode();
-    }
-
-    private JsonNode parse(String raw) {
-        if (raw == null || raw.isBlank()) {
-            return null;
-        }
-        try {
-            return json.readTree(raw);
-        } catch (Exception ex) {
-            return null;
-        }
     }
 
     /**
