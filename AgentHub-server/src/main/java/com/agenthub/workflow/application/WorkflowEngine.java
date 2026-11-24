@@ -2,10 +2,8 @@ package com.agenthub.workflow.application;
 
 import com.agenthub.common.error.BizException;
 import com.agenthub.common.error.ErrorCode;
-import com.agenthub.common.text.TextClip;
 import com.agenthub.workflow.domain.WorkflowNodeFailure;
 import com.agenthub.workflow.domain.enums.HumanTimeoutPolicy;
-import com.agenthub.workflow.domain.enums.WorkflowEdgeType;
 import com.agenthub.workflow.domain.enums.WorkflowNodeRunStatus;
 import com.agenthub.workflow.domain.enums.WorkflowNodeType;
 import com.agenthub.workflow.domain.enums.WorkflowRunStatus;
@@ -21,11 +19,9 @@ import com.agenthub.workflow.domain.repository.WorkflowRunRepository;
 import com.agenthub.workflow.domain.service.JsonLogicEvaluator;
 import com.agenthub.workflow.domain.service.WorkflowAgentInvoker;
 import com.agenthub.workflow.domain.service.WorkflowAssigneeRule;
-import com.agenthub.workflow.domain.service.WorkflowCardLimits;
 import com.agenthub.workflow.domain.service.WorkflowNodeConfig;
 import com.agenthub.workflow.domain.service.WorkflowNodeInputs;
 import com.agenthub.workflow.domain.service.WorkflowOutcomeTexts;
-import com.agenthub.workflow.domain.service.WorkflowRunLimits;
 import com.agenthub.workflow.domain.service.WorkflowRunListener;
 import com.agenthub.workflow.domain.service.WorkflowStateMachine;
 import com.agenthub.workflow.domain.service.WorkflowToolInvoker;
@@ -38,15 +34,11 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.stereotype.Component;
 
-import java.time.Instant;
 import java.time.LocalDateTime;
-import java.time.ZoneId;
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
-import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
-import java.util.Set;
 
 /**
  * DAG 调度引擎。所属域：workflow 的 application。
@@ -54,6 +46,8 @@ import java.util.Set;
  * 失败时按「ERROR 边优先，否则 FAIL_RUN」收束。
  * <p>边界：只做调度；AGENT / TOOL 的实际出站通过 {@link WorkflowAgentInvoker} /
  * {@link WorkflowToolInvoker} 复用现网入口，引擎内不出现模型 / MCP 细节。
+ * 无外部出站的控制类节点（START / END / CONDITION / FORK / JOIN）的「算」在
+ * {@link WorkflowNodeExecutors}，本类负责分派、落库、发布与失败收口。
  * <p>线程模型：一次调用在请求线程内同步跑完（或停在 HUMAN），
  * FORK 分支按图顺序**顺序**执行而非真并发，语义上等待 JOIN 等齐。
  * <p>取消：协作式——每执行一个节点前重读 run 状态，发现 CANCELLED 立即退出。
@@ -83,6 +77,8 @@ public class WorkflowEngine {
     private final WorkflowRunClockKeeper clockKeeper;
     /** 卡片观察者发布：节点变更与时限；observer 异常吞掉，不影响调度结论 */
     private final WorkflowCardPublisher publisher;
+    /** 控制类节点执行器：START / END / CONDITION / FORK / JOIN 只算不写库 */
+    private final WorkflowNodeExecutors executors;
 
     /**
      * @param runs         run 仓储
@@ -116,6 +112,7 @@ public class WorkflowEngine {
         this.context = new WorkflowContextSupport(json);
         this.clockKeeper = new WorkflowRunClockKeeper(runs, properties);
         this.publisher = new WorkflowCardPublisher(clockKeeper);
+        this.executors = new WorkflowNodeExecutors(json, context, properties);
     }
 
     /**
@@ -203,7 +200,7 @@ public class WorkflowEngine {
         }
         /*
          * 时限账本：上限取「工作流自身配置 ∩ 平台硬顶」，截止时刻首次调度时落库。
-         * 放在 publishStarted 之前：卡片第一帧就要看到整段上限，不能等第一次节点变更才补。
+         * 放在 publisher.started 之前：卡片第一帧就要看到整段上限，不能等第一次节点变更才补。
          */
         long platformMs = properties.effectiveWallMs();
         WorkflowRunClockKeeper.RunClock clock = clockKeeper.open(run, graph, platformMs, operatorId);
@@ -242,7 +239,7 @@ public class WorkflowEngine {
                 }
                 if (System.currentTimeMillis() > clock.deadlineMs) {
                     /*
-                     * 整段超时：等待用户回复 / 人工卡点的时长已在 openClock 里补回截止，
+                     * 整段超时：等待用户回复 / 人工卡点的时长已在时限账本 open 里补回截止，
                      * 这里扣到的都是真正在跑的时长。日志留内部细节，对话只给一句话术。
                      */
                     log.warn("工作流整段运行超时 runId={} runLimitMs={} deadlineMs={} progress={}",
@@ -415,57 +412,26 @@ public class WorkflowEngine {
         traceSafely("beginNode", run.getId(), () -> traces.beginNode(run, node));
         try {
             switch (type) {
-                case START -> {
-                    row.setInputJson(context.inputOf(ctx, null).toString());
-                    row.setOutputJson(ctx.get("input") == null
-                            ? json.createObjectNode().toString()
-                            : ctx.get("input").toString());
-                    succeed(row, node, outputs, context.defaultEdges(runtime, node), ctx);
-                }
-                case END -> {
-                    row.setInputJson(context.inputOf(ctx, node.getConfig()).toString());
-                    ObjectNode result = WorkflowNodeInputs.mapped(ctx,
-                            WorkflowNodeConfig.objectValue(node.getConfig(), "outputMapping"));
-                    if (result.isEmpty()) {
-                        // 没配映射就给节点编码＋输入快照，保证 run 输出不是空对象
-                        result.set("nodeCode", json.getNodeFactory().textNode(node.getCode()));
-                        result.set("input", ctx.get("input"));
+                /*
+                 * 控制类节点（无外部出站）：执行器只算入参 / 产出 / 选中边或失败文案，
+                 * 落库与卡片发布仍由下面统一的 succeed / handleFailure 完成。
+                 * 异常分类（ERROR 边优先于 FAIL_RUN）与 trace 收口保持在外壳里。
+                 */
+                case START, END, CONDITION, PARALLEL_FORK, PARALLEL_JOIN -> {
+                    WorkflowNodeExecutors.ControlOutcome outcome = executors.execute(type, runtime, node, ctx);
+                    if (outcome.failure() != null) {
+                        /*
+                         * 失败前是否写入参与原实现一致：CONDITION 先写 input_json 再失败，
+                         * PARALLEL_FORK 超额则不入参（执行器回 null，这里跳过）。
+                         */
+                        if (outcome.inputJson() != null) {
+                            row.setInputJson(outcome.inputJson());
+                        }
+                        return handleFailure(run, runtime, node, row, outcome.failure(), null, operatorId);
                     }
-                    row.setOutputJson(result.toString());
-                    succeed(row, node, outputs, List.of(), ctx);
-                }
-                case CONDITION -> {
-                    row.setInputJson(context.inputOf(ctx, node.getConfig()).toString());
-                    List<WorkflowEdge> chosen = chooseConditionEdge(runtime, node, ctx);
-                    if (chosen.isEmpty()) {
-                        return handleFailure(run, runtime, node, row,
-                                "条件「" + node.getCode() + "」所有 COND 都为假且没有 DEFAULT 出口", null, operatorId);
-                    }
-                    ObjectNode probe = json.createObjectNode();
-                    probe.put("matchedEdgeId", chosen.get(0).getId());
-                    row.setOutputJson(probe.toString());
-                    succeed(row, node, outputs, chosen, ctx);
-                }
-                case PARALLEL_FORK -> {
-                    // 并行硬顶：分支数按非 ERROR 出边计；超额直接失败该 FORK，
-                    // 错误边可接管，否则整 run FAILED（比「静默排队」更可预期、可测）
-                    int branches = context.defaultEdges(runtime, node).size();
-                    int limit = properties.effectiveMaxParallelBranches();
-                    if (branches > limit) {
-                        return handleFailure(run, runtime, node, row,
-                                "并行分叉「" + node.getCode() + "」有 " + branches
-                                        + " 条分支，超过上限 " + limit
-                                        + "（agenthub.workflow.max-parallel-branches）；已拒绝本次扇出",
-                                null, operatorId);
-                    }
-                    row.setInputJson(context.inputOf(ctx, node.getConfig()).toString());
-                    row.setOutputJson(json.createObjectNode().toString());
-                    succeed(row, node, outputs, context.defaultEdges(runtime, node), ctx);
-                }
-                case PARALLEL_JOIN -> {
-                    row.setInputJson(context.inputOf(ctx, node.getConfig()).toString());
-                    row.setOutputJson(json.createObjectNode().toString());
-                    succeed(row, node, outputs, context.defaultEdges(runtime, node), ctx);
+                    row.setInputJson(outcome.inputJson());
+                    row.setOutputJson(outcome.outputJson());
+                    succeed(row, node, outputs, outcome.selectedEdges(), ctx);
                 }
                 case AGENT -> {
                     if (!invokeAgent(run, runtime, node, row, ctx, outputs, operatorId)) {
@@ -495,7 +461,7 @@ public class WorkflowEngine {
             log.warn("工作流节点执行异常 runId={} nodeCode={} type={} root={}",
                     run.getId(), node.getCode(), type, ex.getClass().getSimpleName(), ex);
             return handleFailure(run, runtime, node, row,
-                    "节点「" + node.getCode() + "」执行异常：" + safe(ex.getMessage()), ex, operatorId);
+                    "节点「" + node.getCode() + "」执行异常：" + context.safe(ex.getMessage()), ex, operatorId);
         } finally {
             // 哪怕上面已 return，也要把节点步收成终态；WAITING_HUMAN 由根 trace 统一收口
             traceSafely("endNode", run.getId(), () -> traces.endNode(run, node, row));
@@ -709,7 +675,7 @@ public class WorkflowEngine {
         List<WorkflowEdge> errorEdges = runtime == null ? List.of() : runtime.errorOutgoing(node.getId());
         row.setStatus(WorkflowStateMachine.requireNode(
                 WorkflowNodeRunStatus.parse(row.getStatus()), WorkflowNodeRunStatus.FAILED).name());
-        row.setErrorSummary(truncate(message));
+        row.setErrorSummary(context.truncate(message));
         row.setEndTime(LocalDateTime.now());
         row.setSelectedEdges(context.joinIds(errorEdges));
         nodeRuns.update(row);
@@ -724,57 +690,6 @@ public class WorkflowEngine {
         }
         failRun(run, "节点「" + node.getCode() + "」失败：" + message, operatorId);
         return false;
-    }
-
-    /**
-     * CONDITION 选路：按图内顺序求值 COND 边，第一条为真即走；都不为真走 DEFAULT。
-     */
-    private List<WorkflowEdge> chooseConditionEdge(WorkflowRuntimeGraph runtime, WorkflowNode node,
-                                                   ObjectNode ctx) {
-        WorkflowEdge fallback = null;
-        for (WorkflowEdge edge : runtime.outgoing(node.getId())) {
-            WorkflowEdgeType type = WorkflowEdgeType.parseOrDefault(edge.getType());
-            if (type == WorkflowEdgeType.DEFAULT) {
-                fallback = edge;
-                continue;
-            }
-            if (type != WorkflowEdgeType.COND) {
-                continue;
-            }
-            JsonNode rule = conditionOf(edge);
-            if (rule == null) {
-                continue;
-            }
-            if (JsonLogicEvaluator.test(rule, ctx)) {
-                return List.of(edge);
-            }
-        }
-        return fallback == null ? List.of() : List.of(fallback);
-    }
-
-    /**
-     * 条件既可能在边上 config.condition，也兼容刀1 前端只写 label 的历史数据；
-     * 后者没有表达式，按「不成立」处理，由 DEFAULT 兜底。
-     */
-    private JsonNode conditionOf(WorkflowEdge edge) {
-        if (edge.getConfig() == null || !edge.getConfig().isObject()) {
-            return null;
-        }
-        JsonNode rule = edge.getConfig().get("condition");
-        return rule == null || rule.isNull() ? null : rule;
-    }
-
-    /**
-     * 普通成功节点的出边：除 ERROR 外全部选中（条件分支的选路由 CONDITION 自己决定）。
-     */
-    private List<WorkflowEdge> defaultEdges(WorkflowRuntimeGraph runtime, WorkflowNode node) {
-        List<WorkflowEdge> edges = new ArrayList<>();
-        for (WorkflowEdge edge : runtime.outgoing(node.getId())) {
-            if (WorkflowEdgeType.parseOrDefault(edge.getType()) != WorkflowEdgeType.ERROR) {
-                edges.add(edge);
-            }
-        }
-        return edges;
     }
 
     /**
@@ -863,12 +778,12 @@ public class WorkflowEngine {
                 ? "工作流失败：" + (firstError == null ? "节点执行失败" : firstError)
                 : "未到达结束节点：可能存在未连通的节点或条件分支全部未选中";
         transitionRun(run, WorkflowRunStatus.RUNNING, WorkflowRunStatus.FAILED,
-                truncate(reason), null, operatorId);
+                context.truncate(reason), null, operatorId);
     }
 
     private void failRun(WorkflowRun run, String reason, long operatorId) {
         transitionRun(run, WorkflowRunStatus.RUNNING, WorkflowRunStatus.FAILED,
-                truncate(reason), null, operatorId);
+                context.truncate(reason), null, operatorId);
     }
 
     /**
@@ -1009,19 +924,5 @@ public class WorkflowEngine {
         String codes = doneCodes.isEmpty() ? "无" : String.join("、", doneCodes);
         return "已完成 " + success + " 个节点（" + codes + "），失败 " + failed
                 + "，等待人工 " + waiting + "，共 " + rowByNode.size() + " 个";
-    }
-
-    /**
-     * 节点错误摘要：500 字上限，null 保持 null。实现见 {@link TextClip#raw(String, int)}。
-     *
-     * @param text 原始原因（可能为空）
-     * @return 不超过 500 字的原文前缀
-     */
-    private String truncate(String text) {
-        return TextClip.raw(text, 500);
-    }
-
-    private String safe(String text) {
-        return text == null || text.isBlank() ? "未知错误" : text;
     }
 }

@@ -1,5 +1,6 @@
 package com.agenthub.workflow.application;
 
+import com.agenthub.common.text.TextClip;
 import com.agenthub.workflow.domain.enums.WorkflowEdgeType;
 import com.agenthub.workflow.domain.enums.WorkflowNodeRunStatus;
 import com.agenthub.workflow.domain.model.WorkflowEdge;
@@ -20,8 +21,9 @@ import java.util.Set;
 /**
  * 工作流调度的图 / 上下文读写。所属域：workflow 的 application。
  *
- * <p>从 {@code WorkflowEngine} 搬出，职责只有一件事：把 run 的输入、已完成节点产出、
- * 节点配置映射与选中边整理成调度器直接可用的对象。不落库、不发布卡片、不判超时。
+ * <p>从 {@code WorkflowEngine} 搬出：把 run 的输入、已完成节点产出、节点配置映射与选中边
+ * 整理成调度器直接可用的对象，并集中落库用的错误摘要文本辅助（截断 / 空错误兜底）。
+ * 不落库、不发布卡片、不判超时。
  *
  * <p>口径保持不变：入参映射优先、缺失时回落 {@code ctx.input}；产出只取 SUCCESS 节点；
  * 选中边按逗号拆分；普通成功节点的默认出边排除 ERROR。
@@ -174,5 +176,28 @@ public class WorkflowContextSupport {
             }
         }
         return edges;
+    }
+
+    /**
+     * 节点错误摘要 / run 失败原因落库前的截断：原样取前 500 字，null 进 null 出。
+     *
+     * <p>与 {@link TextClip#raw(String, int)} 同一语义；集中在这里是为了让引擎内所有
+     * 「错误摘要」共用同一个上限，不各写一个数字。不做 trim、不补省略号。
+     *
+     * @param text 原始原因，可空
+     * @return 不超过 500 字的原文前缀；null 原样返回
+     */
+    public String truncate(String text) {
+        return TextClip.raw(text, 500);
+    }
+
+    /**
+     * 异常文案兜底：空 / 空白一律给「未知错误」，避免库里留下空摘要。
+     *
+     * @param text 异常 message，可空
+     * @return 可直接落库的文案
+     */
+    public String safe(String text) {
+        return text == null || text.isBlank() ? "未知错误" : text;
     }
 }
