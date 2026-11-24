@@ -1,28 +1,29 @@
 package com.agenthub.runtime.application;
 
 import com.agenthub.agent.domain.model.AgentDef;
-import com.agenthub.agent.domain.model.AgentRoute;
 import com.agenthub.agent.domain.model.AgentRunMode;
 import com.agenthub.agent.domain.model.AgentRuntimeConfig;
-import com.agenthub.agent.domain.model.AgentStatus;
-import com.agenthub.agent.domain.model.MaCandidate;
-import com.agenthub.agent.domain.model.RouterAnswerMode;
 import com.agenthub.agent.domain.repository.AgentDefRepository;
 import com.agenthub.agent.domain.repository.AgentRouteRepository;
-import com.agenthub.agent.domain.service.AgentCriticPolicy;
 import com.agenthub.obs.domain.ObsTraceHolder;
 import com.agenthub.obs.domain.ObsTraceScope;
 import com.agenthub.obs.domain.model.SpanType;
 import com.agenthub.runtime.application.router.AggregateOutcome;
 import com.agenthub.runtime.application.router.AnswerAggregator;
-import com.agenthub.runtime.application.router.BlockedCandidate;
 import com.agenthub.runtime.application.router.Candidate;
 import com.agenthub.runtime.application.router.Candidates;
+import com.agenthub.runtime.application.router.CompeteTopology;
+import com.agenthub.runtime.application.router.CriticLoopTopology;
+import com.agenthub.runtime.application.router.FixedTopology;
 import com.agenthub.runtime.application.router.RouterCandidateLoader;
+import com.agenthub.runtime.application.router.RouterJudge;
 import com.agenthub.runtime.application.router.RouterJudgePromptFactory;
+import com.agenthub.runtime.application.router.RouterOutcomeAssembler;
+import com.agenthub.runtime.application.router.RouterParallelTopology;
+import com.agenthub.runtime.application.router.RouterThenSequenceTopology;
+import com.agenthub.runtime.application.router.TurnNotes;
 import com.agenthub.runtime.application.router.ChildOutcome;
 import com.agenthub.runtime.application.router.ChildRunner;
-import com.agenthub.runtime.application.router.EntryQuestionSplitter;
 import com.agenthub.runtime.application.router.MaNestedContext;
 import com.agenthub.runtime.application.router.MaPauseScope;
 import com.agenthub.runtime.application.router.MaPauseSignal;
@@ -41,7 +42,6 @@ import com.agenthub.runtime.domain.model.GeneratedFile;
 import com.agenthub.runtime.domain.model.MaPauseMember;
 import com.agenthub.runtime.domain.model.MaPauseSnapshot;
 import com.agenthub.runtime.domain.model.MaRunSpec;
-import com.agenthub.runtime.domain.model.MeterScope;
 import com.agenthub.runtime.domain.model.ParticipantView;
 import com.agenthub.runtime.domain.model.RouteHint;
 import com.agenthub.runtime.domain.model.RouteSticky;
@@ -49,23 +49,15 @@ import com.agenthub.runtime.domain.model.ScratchBoard;
 import com.agenthub.runtime.domain.model.TrialTurn;
 import com.agenthub.runtime.domain.model.WorkflowRunSpec;
 import com.agenthub.runtime.domain.model.WorkflowRunView;
-import com.agenthub.runtime.application.router.EntrySchemePreference;
 import com.agenthub.runtime.domain.service.CauseDigest;
 import com.agenthub.runtime.domain.service.ChildSubQueryInput;
-import com.agenthub.runtime.domain.service.CompeteVerdictParser;
-import com.agenthub.runtime.domain.service.CriticPrompt;
-import com.agenthub.runtime.domain.service.CriticVerdictParser;
 import com.agenthub.runtime.domain.service.FixedSequenceContext;
 import com.agenthub.runtime.domain.service.LeafChoiceHolder;
-import com.agenthub.runtime.domain.service.LimitHitReasons;
-import com.agenthub.runtime.domain.service.RouteDecisionParser;
-import com.agenthub.runtime.domain.service.RouteKeywordPicker;
 import com.agenthub.runtime.domain.service.RuntimeLimitResolver;
 import com.agenthub.runtime.domain.service.ScratchContext;
 import com.agenthub.runtime.domain.service.SoleChainHolder;
 import com.agenthub.runtime.domain.service.TrialFailure;
 import com.agenthub.runtime.domain.service.TrialProgress;
-import com.agenthub.runtime.domain.service.TrialTexts;
 import com.agenthub.runtime.infra.agentscope.ReActTrialExecutor;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -75,16 +67,10 @@ import org.springframework.scheduling.concurrent.ThreadPoolTaskExecutor;
 import org.springframework.stereotype.Component;
 
 import java.util.ArrayList;
-import java.util.Comparator;
 import java.util.LinkedHashMap;
-import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
-import java.util.Optional;
 import java.util.Set;
-
-import static com.agenthub.runtime.application.router.ChildOutcome.hasAnswer;
-import static com.agenthub.runtime.application.router.ChildOutcome.keyOf;
 
 /**
  * 一层 Router 试跑执行器。所属域：runtime。
@@ -112,9 +98,6 @@ public class RouterTrialExecutor {
 
     private static final Logger log = LoggerFactory.getLogger(RouterTrialExecutor.class);
 
-    /** 竞争选优给评委看的单个子终答长度硬顶：超过就截断，避免一次评选吃掉父墙钟 */
-    private static final int COMPETE_ANSWER_LIMIT = 3000;
-
     /**
      * 参与者一个字都没产出时的终态说明。
      *
@@ -125,24 +108,12 @@ public class RouterTrialExecutor {
     private static final String EMPTY_CONCLUSION_NOTE = "本轮未产出正文（该步骤已结束）。";
 
     /**
-     * 本轮判定 / 汇总推理的暂存（线程级）。
-     *
-     * <p>为什么用线程级而不是一路加参数：判路由发生在 {@code choose} / {@code chooseOrdered}，
-     * 汇总发生在 {@link AnswerAggregator}，两者都不经过模板方法的返回值；把暂存挂在当前
-     * 执行线程上，执行入口负责「进入时新建、退出时清理」，中间任何一层都能写入。
-     *
-     * <p>并发注意：方案嵌套可能以 CallerRuns 内联跑在同一线程上，因此进入时必须保存旧值、
-     * 退出时恢复，不能无条件 remove（否则会把外层的暂存打掉）。
-     */
-    private static final ThreadLocal<TurnNotes> NOTES = new ThreadLocal<>();
-
-    /**
      * 读本轮「是否允许唯一叶子输出可点选项块」。
      *
      * @return true 仅当本轮由工作台显式开启；嵌套方案 / 调试 / 试跑一律 false
      */
     private static boolean notesLeafChoice() {
-        TurnNotes notes = NOTES.get();
+        TurnNotes notes = TurnNotes.current();
         return notes != null && notes.leafChoice;
     }
 
@@ -177,6 +148,8 @@ public class RouterTrialExecutor {
     private final RouterCandidateLoader candidateLoader;
     /** 判路由提示词装配：提示词逐字与用户槽替换口径都在这里 */
     private final RouterJudgePromptFactory judgePrompts;
+    /** 判路由决策：单问 / 多问 / 入口接待偏好 / 严格排序都在 {@code router} 包，本类只按下标回调 */
+    private final RouterJudge judge;
     private final TrialBindingLoader loader;
     private final ReActTrialExecutor react;
     private final SystemPromptAssembler prompts;
@@ -194,6 +167,18 @@ public class RouterTrialExecutor {
     private final ChildRunner children;
     /** 工作流目标执行委托（刀5B）；正常由 runtime.infra 适配器实现，窄测可为空 */
     private final WorkflowTargetRunner workflowTargets;
+    /** 分段 / 说明 / 跳过 / blocked / 汇总 / 粘性线路的组装口径，六套模板共用 */
+    private final RouterOutcomeAssembler assembler;
+    /** 固定模板拓扑：执行器只保留 `executeTemplates` 的早分支分派 */
+    private final FixedTopology fixedTopology;
+    /** ROUTER 并行拓扑：判路由之后的扇出执行体，判路由回调指向 {@link RouterJudge} */
+    private final RouterParallelTopology routerParallelTopology;
+    /** 路由后串行拓扑：判路由之后的串行接力，严格版判路由回调指向 {@link RouterJudge} */
+    private final RouterThenSequenceTopology routerThenSequenceTopology;
+    /** 评审环拓扑：跳过判路由的执行者 → 评审 → 回修串行链 */
+    private final CriticLoopTopology criticLoopTopology;
+    /** 竞争模板拓扑：跳过判路由的同题并行 → 选优，评委提示词与降级口径都在拓扑类里 */
+    private final CompeteTopology competeTopology;
 
     /**
      * 兼容构造：未装配工作流委托（窄测沿用）。
@@ -253,10 +238,32 @@ public class RouterTrialExecutor {
         this.workflowTargets = workflowTargets;
         // 汇总（CONCAT/SUMMARIZE/VOTE）与判路由模型解析由协作者承担；构造器签名保持 10 参不变
         this.answers = new AnswerAggregator(loader, prompts, react);
+        // 判路由决策独立成 RouterJudge：模板拓扑只依赖一个「选谁 / 按什么顺序」的结果，
+        // 提示词仍走已装配的 RouterJudgePromptFactory，执行器不再内联单问 / 多问 / 入口偏好
+        this.judge = new RouterJudge(agents, react, judgePrompts, answers);
         // 子执行同样在构造器内装配：模板执行器只保留「选谁、按什么顺序跑」的编排决策；
         // 刀5 命中 MA 候选时用 this::runMaTarget 回到本执行器，刀5B 工作流候选走注入的实现
         this.children = new ChildRunner(loader, react, memory, planRunner, childApprovals, routerTaskExecutor,
                 this::runMaTarget, workflowTargets);
+        // 组装与固定模板拓扑同样在构造器内装配：直播出口与停等边界判定仍由本执行器持有，按回调注入
+        this.assembler = new RouterOutcomeAssembler();
+        this.fixedTopology = new FixedTopology(candidateLoader, children, answers, assembler,
+                outlet -> childBodyOutlet(outlet, true), RouterTrialExecutor::pauseScopeAllowed);
+        // ROUTER 并行拓扑同样在构造器内装配：判路由走 judge::choose（单问兜底顺序在其内部），
+        // 直播出口与选项块开关按回调注入，不搬冻结面
+        this.routerParallelTopology = new RouterParallelTopology(candidateLoader, children, answers, assembler,
+                outlet -> childBodyOutlet(outlet, true), RouterTrialExecutor::notesLeafChoice, judge::choose);
+        // 路由后串行与评审环同理：严格版判路由走 judge::chooseOrdered（无兜底，原样失败），
+        // 直播出口 / 停等边界 / 根解析都留在本执行器，评审环的阶段正文用静音版出口
+        this.routerThenSequenceTopology = new RouterThenSequenceTopology(candidateLoader, children, answers,
+                assembler, outlet -> childBodyOutlet(outlet, true), RouterTrialExecutor::pauseScopeAllowed,
+                judge::chooseOrdered);
+        this.criticLoopTopology = new CriticLoopTopology(candidateLoader, children, answers, assembler,
+                outlet -> childBodyOutlet(outlet, false), agents);
+        // 竞争模板：同题并行 + 选优；本模板不判路由，评委提示词与降级顺序随拓扑一起搬，
+        // 直播出口仍按回调留下，子正文照旧按身份增量出字
+        this.competeTopology = new CompeteTopology(candidateLoader, children, answers, assembler,
+                outlet -> childBodyOutlet(outlet, true), react, prompts);
     }
 
     /**
@@ -338,8 +345,7 @@ public class RouterTrialExecutor {
      */
     private RoutedTurn execute(AgentDef parent, MaRunSpec spec, String userText, String modelUser, long userId,
                                long sessionId, TrialProgress progress, RouteHint hint, Long schemeObsParent) {
-        // 本轮推理暂存：进入时新建，退出恢复（嵌套方案内联同线程时不能把外层的打掉）
-        TurnNotes previous = NOTES.get();
+        // 本轮推理暂存：进入时换上一份新的，退出恢复（嵌套方案内联同线程时不能把外层的打掉）
         TurnNotes notes = new TurnNotes();
         /*
          * 「可点选项」开关从线程上下文读，而不是再加一个 execute 参数：
@@ -347,7 +353,7 @@ public class RouterTrialExecutor {
          * 改公开签名，会牵动所有既有调用点与桩。入口在调用前放置，这里只读一次。
          */
         notes.leafChoice = LeafChoiceHolder.enabled();
-        NOTES.set(notes);
+        TurnNotes previous = TurnNotes.swap(notes);
         try {
             RoutedTurn routed = executeScoped(parent, spec, userText, modelUser, userId, sessionId, progress, hint,
                     schemeObsParent);
@@ -355,11 +361,7 @@ public class RouterTrialExecutor {
             return routed.withNotes(notes.judgeReasoning.toString(), notes.conclusionName,
                     notes.conclusionReasoning.toString()).withGateway(notes.gateway);
         } finally {
-            if (previous == null) {
-                NOTES.remove();
-            } else {
-                NOTES.set(previous);
-            }
+            TurnNotes.restore(previous);
         }
     }
 
@@ -400,7 +402,7 @@ public class RouterTrialExecutor {
         ObsTraceScope trace = ObsTraceHolder.current();
         RouteSpan route = RouteSpan.open(trace, "resume-sequence", rootId(parent));
         try {
-            assertParentDeadline(deadlineNanos);
+            RouterClock.assertBefore(deadlineNanos);
             // 候选按当前配置重新装载：停等期间被停用的成员不应继续跑，也不静默换成别人
             Candidates loaded = candidateLoader.load(rootId(parent), runtime, spec);
             Map<String, Candidate> byKey = new LinkedHashMap<>();
@@ -546,7 +548,7 @@ public class RouterTrialExecutor {
                     rootName(parent, spec));
             progress.beginParticipant(gateway);
             // 与 SSE 同一份身份，供时间线在入口思考之前落一行 participant
-            TurnNotes current = NOTES.get();
+            TurnNotes current = TurnNotes.current();
             if (current != null) {
                 current.gateway = gateway;
             }
@@ -679,7 +681,7 @@ public class RouterTrialExecutor {
         RuntimeException failure = null;
         // 只有入口智能网关把 judge 挂到网关根上。普通单方案保持父空，退出时还原，不把开关留在内层。
         boolean previousHang = RouteSpan.judgeHangsOnRoot();
-        RouteSpan.judgeHangsOnRoot(isEntryRouter(spec));
+        RouteSpan.judgeHangsOnRoot(RouterJudge.isEntryRouter(spec));
         try {
             return executeTemplates(parent, spec, userText, modelUser, userId, sessionId, progress, runtime,
                     parentLimits, hint);
@@ -701,175 +703,50 @@ public class RouterTrialExecutor {
      *
      * <p>本方法只管执行语义，编排根的观测壳由 {@link #executeRun} 负责，
      * 因此这里不再重复开关根步骤，父子链与拆前完全一致。
+     *
+     * <p>执行体去向：评审环 / 竞争 / 固定模板 / 路由后串行 / ROUTER 并行都已各自成拓扑类
+     * （{@link CriticLoopTopology} / {@link CompeteTopology} / {@link FixedTopology} /
+     * {@link RouterThenSequenceTopology} / {@link RouterParallelTopology}）。
+     * 这里只把判路由回调（{@link RouterJudge}）、直播出口、选项块开关与根解析
+     * 作为现场 / 回调交出去，早分支顺序不变：评审环 → 竞争 → 固定模板 → 路由后串行 → 路由并行。
      */
     private RoutedTurn executeTemplates(AgentDef parent, MaRunSpec spec, String userText, String modelUser,
                                         long userId, long sessionId, TrialProgress progress,
                                         AgentRuntimeConfig runtime, EffectiveLimits parentLimits, RouteHint hint) {
         // 模板早分支：评审环与固定模板都不判路由，整条执行链与判路由路径完全分开，避免语义互相污染
         if (runtime.isCriticLoop()) {
-            return executeCriticLoop(parent, spec, userText, userId, sessionId, progress, runtime, parentLimits);
+            // 评审环不判路由：执行者 / 评审者 / 轮次口径都在拓扑类里，根 id 仍按执行器解析后传入
+            return criticLoopTopology.execute(parent, spec, userText, userId, sessionId, progress, runtime,
+                    parentLimits, rootId(parent));
         }
         // 竞争选优：同题并发 → 选优取 1 个子终答；不判路由、不做多段拼接
         if (runtime.isCompete()) {
-            return executeCompete(parent, spec, userText, modelUser, userId, sessionId, progress, runtime,
-                    parentLimits);
+            return competeTopology.execute(parent, spec, userText, modelUser, userId, sessionId, progress, runtime,
+                    parentLimits, rootId(parent), rootName(parent, spec));
         }
         if (runtime.isFixedTemplate()) {
             return executeFixed(parent, spec, userText, modelUser, userId, sessionId, progress, runtime,
                     parentLimits);
         }
-        // 路由后串行：判路由契约与 ROUTER_PARALLEL 完全相同，只是把扇出换成「按执行顺序串行」
+        // 路由后串行：判路由契约与 ROUTER_PARALLEL 完全相同，只是把扇出换成「按执行顺序串行」。
+        // 严格版 chooseOrdered 在 RouterJudge（无兜底，判路由失败即整次失败）
         if (runtime.isRouterThenSequence()) {
-            return executeRouterThenSequence(parent, spec, userText, modelUser, userId, sessionId, progress,
-                    runtime, parentLimits);
+            return routerThenSequenceTopology.execute(parent, spec, userText, modelUser, userId, sessionId, progress,
+                    runtime, parentLimits, rootId(parent), rootName(parent, spec));
         }
-        long deadlineNanos = System.nanoTime() + Math.max(parentLimits.timeoutMs(), 1000L) * 1_000_000L;
-        ObsTraceScope trace = ObsTraceHolder.current();
-        RouteSpan route = RouteSpan.open(trace, "judge", rootId(parent));
-        try {
-            assertParentDeadline(deadlineNanos);
-            Candidates loaded = candidateLoader.load(rootId(parent), runtime, spec);
-            List<Candidate> candidates = loaded.usable();
-            List<BlockedCandidate> blockedCandidates = loaded.blocked();
-            if (candidates.isEmpty()) {
-                throw new TrialFailure(blockedCandidates.isEmpty()
-                        ? "Router 没有可用的子 Agent"
-                        : "没有可用的子 Agent：" + blockedCandidates.size()
-                                + " 位专家未获本编排允许（" + blockedReasons(blockedCandidates)
-                                + "），请检查编排策略与对应 Agent 配置");
-            }
-            RoutedChoice choice = choose(parent, spec, parentLimits, runtime, userText, candidates,
-                    userId, sessionId, deadlineNanos, hint, progress);
-            List<RoutedIntent> intents = choice.intents();
-            // 关多意图：只保留第一项（强制线路恒为单项，已被 choose 收敛，不在此重复截断）。
-            // 一条消息里的多个问题不受这个开关影响：那是「两问各回各家」，截断会直接丢问题。
-            if (!choice.multiQuestion() && !runtime.multiIntentOn() && intents.size() > 1) {
-                intents = List.of(intents.get(0));
-            }
-            // 手动换线 / 强制目标失效的可见说明：进 SYSTEM 事件，不打断正文。
-            // 沿用线路与本轮选择不一致时不再写「已将线路改派」：入口句已经按本轮选择说出，再补一句就是改口。
-            List<String> routeNotices = routeNotices(choice, intents);
-            List<String> routeLines = new ArrayList<>();
-            for (RoutedIntent intent : intents) {
-                routeLines.add(RouterTexts.routeSummary(intent.candidate(), intent.reason()));
-            }
-            String decisionJson = RouteDecisionParser.toDecisionJson(intents.stream()
-                    .map(item -> new RouteDecisionParser.Item(
-                            item.candidate().route().getRouteKey() == null ? "" : item.candidate().route().getRouteKey(),
-                            item.subQuery()))
-                    .toList());
-            // 多意图 / 多问：只推决策块。各子「路由到」在子开跑的 begin 时再推，位置由 begin 先后决定
-            if (progress != null) {
-                if (intents.size() >= 2) {
-                    /*
-                     * 决策行只告诉入口「拆成了几问、交给谁」。
-                     * 不再在子任务开始前按工作流优先预推无身份的「路由到」：
-                     * 那些行会先占块位，begin 到达后只能原位补身份，卡片就停在预推的位置上。
-                     * 块序只认各自 begin 帧的 depth、kind 和先后。
-                     */
-                    progress.route(choice.multiQuestion()
-                            ? RouterTexts.questionDecisionLine(intents)
-                            : RouterTexts.decisionLine(intents));
-                } else if (!routeLines.isEmpty()) {
-                    progress.route(routeLines.get(0));
-                }
-            }
-            Map<String, Object> routeFields = new LinkedHashMap<>();
-            routeFields.put("ma.template", runtime.maTemplateOrDefault());
-            routeFields.put("ma.aggregate", runtime.answerModeEnum().name());
-            // 上下文策略只落扁平 attrs，不动父链
-            routeFields.put("ma.context", runtime.maContextPolicyOrDefault());
-            // 绑根没有合成根步骤：方案标识补在这里，两条入口都能按 ma.def_id 检索
-            routeFields.putAll(RouterObs.maAttrs(spec));
-            /*
-             * 多问拆分的只读打点：只写「是否拆分 / 问题条数 / 去重目标数」三个计数，
-             * 不写问题正文与目标名，也不改变分流结果。块序不靠这几个数重排。
-             */
-            RouterObs.questionAttrs(routeFields, choice.multiQuestion(), intents.size(),
-                    RouterTexts.distinctLabels(intents).size());
-            // 共享草稿只写键数 / 冲突次数（有则显示），不写任何 key / value 正文
-            routeFields.putAll(RouterObs.scratchAttrs());
-            route.ok(String.join("；", routeLines), decisionJson,
-                    intents.size() == 1 ? intents.get(0).candidate().agent().getId() : null,
-                    intents.size() <= 1 ? "路由到 " + childLabel(intents.get(0).candidate().agent())
-                            : "多意图路由×" + intents.size(),
-                    routeFields);
-
-            /*
-             * 多子 / SUMMARIZE / VOTE：子侧正文**照样按身份增量出字**（见 childBodyOutlet）。
-             * 旧实现把每个子的 assistant 整段静音、等该子结束才补一次，页面就是
-             * 「泳道转很久 → 各子同时冒出整段」。前端早已按 participantId 分块，
-             * 交错增量不会串块，所以这里不再压住正文。
-             * 仍然要压的只有选项块：chips 必须挂在真正对用户说话的那一段下面。
-             */
-            boolean multiQuestion = choice.multiQuestion();
-            boolean bodyDeferred = !multiQuestion && (intents.size() > 1
-                    || runtime.answerModeEnum() == RouterAnswerMode.SUMMARIZE
-                    // VOTE 的终答是投票结论，子正文只作为各自的作答展示
-                    || runtime.answerModeEnum() == RouterAnswerMode.VOTE);
-            // 路由列表≥2 强制隔离上下文；单意图继承父历史（兼容追问）
-            boolean isolateChild = intents.size() >= 2;
-            TrialProgress childProgress = childBodyOutlet(progress, true);
-            // 先链后扇：子 AGENT 挂判路由 LLM，禁止挂 ROUTE/根；无 LLM 时退 ROUTE
-            Long childParent = ChildRunner.childAgentParent(trace, route.id());
-            // 选项块只给「单专家」：多意图并行时每个子都抛一组选项会让用户无从拍板；
-            // 汇总 / 投票时同样不开——chips 必须挂在真正对用户说话的那一段下面
-            boolean leafChoice = !multiQuestion && intents.size() == 1 && !bodyDeferred && notesLeafChoice();
-            List<ChildOutcome> outcomes = children.runChildren(parent, intents, modelUser, userText, userId, sessionId,
-                    deadlineNanos, childProgress, trace, childParent, isolateChild, leafChoice);
-            // 路由侧说明先写：换线 / 改派要排在本轮子结果之前，时间线顺序才符合因果
-            List<String> notices = new ArrayList<>(routeNotices);
-            List<RouteSegment> segments = new ArrayList<>();
-            for (int i = 0; i < outcomes.size(); i++) {
-                ChildOutcome outcome = outcomes.get(i);
-                notices.addAll(outcome.notices());
-                String line = i < routeLines.size() ? routeLines.get(i)
-                        : RouterTexts.routeSummary(outcome.intent().candidate(), outcome.intent().reason());
-                segments.add(ranSegment(outcome, line));
-            }
-            /*
-             * 未允许被编排调用的子不参与判路由，但必须在时间线留「已跳过」：
-             * 只写 routeLine + notice，不塞进 outcomes，避免改变终答拼接与流式推送口径。
-             */
-            for (ChildOutcome blocked : blockedOutcomes(blockedCandidates, userText)) {
-                notices.addAll(blocked.notices());
-                segments.add(new RouteSegment(blocked.intent().routeLine(), null, null));
-            }
-            AggregateOutcome aggregate = multiQuestion
-                    ? answers.separateAnswers(rootName(parent, spec), outcomes, progress)
-                    : answers.finishAnswer(parent, spec, parentLimits, runtime, userText, outcomes, intents,
-                            userId, sessionId, deadlineNanos, progress, trace, route.id());
-            // 投票结论也要进时间线：winner 一行 + 降级 / 跳过投票的中文说明
-            applyAggregate(segments, notices, aggregate);
-            TrialTurn turn = aggregate.turn();
-            String decisionBlock = intents.size() >= 2
-                    ? (multiQuestion ? RouterTexts.questionDecisionLine(intents) : RouterTexts.decisionLine(intents))
-                    : null;
-            // 单意图沿用本条线路；多意图清空（下一轮重判，避免把协作误降级成单人）
-            RouteSticky sticky = intents.size() >= 2
-                    ? RouteSticky.clear()
-                    : RouteSticky.keep(intents.get(0).candidate().route().getRouteKey(),
-                            intents.get(0).candidate().agent().getId());
-            return new RoutedTurn(String.join("；", routeLines), decisionBlock, segments, notices, turn, sticky);
-        } catch (RuntimeException ex) {
-            // 路由失败同样是关键 catch：带 Throwable 打全栈，并在 ROUTE 步骤写脱敏 cause
-            log.warn("Router 执行失败 parentId={} type={} cause={}",
-                    rootId(parent), ex.getClass().getSimpleName(), CauseDigest.of(ex), ex);
-            route.error("路由失败", ex);
-            throw ex;
-        } finally {
-            RouteSpan.unbind(trace);
-        }
+        // ROUTER 并行模板：判路由 + 扇出的执行体已搬到 RouterParallelTopology。
+        // 判路由走 RouterJudge（点名 → 关键字 → 职责覆盖 → 模型 → 第一条兜底不变），
+        // 直播出口 / 选项块开关 / 根解析也留在本类，早分支顺序与返回形状不变。
+        return routerParallelTopology.execute(parent, spec, userText, modelUser, userId, sessionId, progress,
+                runtime, parentLimits, hint, rootId(parent), rootName(parent, spec));
     }
 
     /**
-     * 固定模板执行（FIXED_PARALLEL / FIXED_SEQUENCE）。所属域：runtime。
+     * 固定模板执行（FIXED_PARALLEL / FIXED_SEQUENCE）的分派。所属域：runtime。
      *
-     * <p>与判路由路径的区别：<b>完全跳过判路由 LLM</b>，参与者＝全部启用候选（按 sort_order 升序，
-     * 同序按 id），每个子的 sub_query 都是用户原问全文，不做意图切分。
-     *
-     * <p>观测：根 ROUTE 名称固定为 fixed-parallel / fixed-sequence；因为无判路由 LLM，
-     * 子 AGENT 直接挂 ROUTE。并行子按同父扇出（N.1/N.2），串行子不扇出，泳道时间窗互不重叠。
+     * <p>执行体已搬到 {@link FixedTopology}：候选装载、并行上限、跳过、停等边界、执行、ROUTE 收尾
+     * 与汇总都在拓扑类里，口径与拆前逐字一致。这里只把本轮编排现场（根 id / 根名 / 墙钟）交出去，
+     * `executeTemplates` 的早分支顺序与返回形状不变。
      *
      * @param runtime       已解析的运行配置（模板与上下文策略从这里读）
      * @param parentLimits  父墙钟与轮次上限
@@ -878,1130 +755,8 @@ public class RouterTrialExecutor {
     private RoutedTurn executeFixed(AgentDef parent, MaRunSpec spec, String userText, String modelUser, long userId,
                                     long sessionId, TrialProgress progress, AgentRuntimeConfig runtime,
                                     EffectiveLimits parentLimits) {
-        boolean parallel = runtime.isFixedParallel();
-        String template = runtime.maTemplateOrDefault();
-        long deadlineNanos = System.nanoTime() + Math.max(parentLimits.timeoutMs(), 1000L) * 1_000_000L;
-        ObsTraceScope trace = ObsTraceHolder.current();
-        RouteSpan route = RouteSpan.open(trace, parallel ? "fixed-parallel" : "fixed-sequence", rootId(parent));
-        try {
-            assertParentDeadline(deadlineNanos);
-            Candidates loaded = candidateLoader.load(rootId(parent), runtime, spec);
-            List<Candidate> enabled = loaded.usable();
-            List<BlockedCandidate> blockedCandidates = loaded.blocked();
-            // M4 精神：固定模板没有判路由兜底，零可用候选必须整次 FAIL，不能空跑出「无实质回答」
-            if (enabled.isEmpty()) {
-                String suffix = blockedCandidates.isEmpty() ? ""
-                        : "（其中 " + blockedCandidates.size() + " 位专家未获本编排允许："
-                                + blockedReasons(blockedCandidates) + "）";
-                throw new TrialFailure((parallel
-                        ? "固定并行没有可用的子 Agent：请至少启用 1 个获允许的子 Agent"
-                        : "固定串行没有可用的子 Agent：请至少启用 1 个获允许的子 Agent") + suffix);
-            }
-            // 并行上限复用现网 maxRouteChildren（默认 3，硬顶 5）：超出的按序标 SKIPPED_QUOTA；串行不设上限
-            int cap = runtime.maxRouteChildrenOrDefault();
-            List<Candidate> picked = parallel && enabled.size() > cap
-                    ? new ArrayList<>(enabled.subList(0, cap))
-                    : enabled;
-            List<RoutedIntent> intents = new ArrayList<>(picked.size());
-            for (int i = 0; i < picked.size(); i++) {
-                // sub_query 一律整段用户原问：固定模板不做意图切分，避免子只拿到半句话
-                intents.add(new RoutedIntent(picked.get(i), userText, parallel ? "固定并行" : "固定串行",
-                        fixedRouteLine(picked.get(i), parallel, i + 1, picked.size())));
-            }
-            List<RoutedIntent> skipped = new ArrayList<>();
-            if (parallel && enabled.size() > cap) {
-                for (int i = cap; i < enabled.size(); i++) {
-                    Candidate leftover = enabled.get(i);
-                    skipped.add(new RoutedIntent(leftover, userText, "超出并行上限",
-                            "已跳过「" + childLabel(leftover.agent()) + "」：超出并行上限 " + cap));
-                }
-            }
-            if (progress != null) {
-                progress.route(planLine(parallel, intents.size(), skipped.size(), cap));
-            }
-            // 决策块仍写参与者 route_key + 用户原问：泳道据此给子块打 route_key，但与判路由结果无关
-            String decisionJson = RouteDecisionParser.toDecisionJson(intents.stream()
-                    .map(item -> new RouteDecisionParser.Item(
-                            item.candidate().route().getRouteKey() == null ? ""
-                                    : item.candidate().route().getRouteKey(),
-                            item.subQuery()))
-                    .toList());
-            // 多子或 SUMMARIZE / VOTE：正文仍按身份增量出字，等齐后再由汇总那一步收口终答
-            TrialProgress childProgress = childBodyOutlet(progress, true);
-            /*
-             * 串行方案允许子专家中途询问：工作台开启选项、读到真实方案（spec），
-             * 且这条链上每一层都只派了一位（根层仍是唯一入口，嵌套层要求 SoleChainHolder 为真）。
-             * 并行 / 多成员串行 / 未开放停等的链传 null，行为与现网逐字一致。
-             */
-            boolean serialLeafChoice = !parallel && spec != null && pauseScopeAllowed();
-            TurnNotes pauseNotes = NOTES.get();
-            MaPauseScope pauseScope = serialLeafChoice
-                    ? MaPauseScope.root(spec.maId(), rootName(parent, spec), template,
-                    MaNestedContext.depth(), MaNestedContext.parentKey(), userText, modelUser,
-                    skipped.stream().map(ChildRunner::pauseMemberOfSkipped).toList(),
-                    pauseNotes == null ? null : pauseNotes.gateway,
-                    pauseNotes == null ? null : pauseNotes.judgeReasoning.toString(),
-                    decisionJson)
-                    : null;
-            List<ChildOutcome> outcomes = parallel
-                    ? children.runChildren(parent, intents, modelUser, userText, userId, sessionId, deadlineNanos,
-                    childProgress, trace, route.id(),
-                    // 多子强制隔离；单子按 maAllowParentHistoryWhenSingle 决定是否继承父历史
-                    intents.size() >= 2 || !runtime.allowParentHistoryWhenSingleOn())
-                    : children.runFixedSequence(parent, modelUser, userText, userId, sessionId, deadlineNanos,
-                    childProgress, trace, route.id(), intents, runtime, pauseScope, List.of(), null,
-                    serialLeafChoice);
-            // 串行全失败：与单子失败口径一致，整次 FAIL，不拿占位句伪装成功
-            if (!parallel && !outcomes.isEmpty()
-                    && outcomes.stream().allMatch(outcome -> outcome.turn() == null)) {
-                throw new TrialFailure("固定串行全部子 Agent 均未完成，请检查子 Agent 配置或稍后重试");
-            }
-            List<ChildOutcome> all = new ArrayList<>(outcomes);
-            // 超出上限的候选仍要进汇总与事件，让用户看到「为什么它没跑」
-            for (RoutedIntent skip : skipped) {
-                all.add(ChildOutcome.skipped(skip,
-                        "「" + childLabel(skip.candidate().agent()) + "」超出并行上限 " + cap + "，未执行"));
-            }
-            closeFixedRoute(route, runtime, spec, template, all, decisionJson, parallel);
-            List<String> notices = new ArrayList<>();
-            List<RouteSegment> segments = new ArrayList<>();
-            for (ChildOutcome outcome : all) {
-                notices.addAll(outcome.notices());
-                // 跳过不是失败：只留「已跳过」路由行，不写成子 Agent 失败
-                segments.add(ranSegment(outcome, outcome.intent().routeLine()));
-            }
-            /*
-             * 未允许被编排调用的子：只追加路由行 + notice，不进 all，
-             * 因此不参与终答拼接、不计 token，也不会触发额外的 assistant 推送。
-             */
-            for (ChildOutcome blocked : blockedOutcomes(blockedCandidates, userText)) {
-                notices.addAll(blocked.notices());
-                segments.add(new RouteSegment(blocked.intent().routeLine(), null, null));
-            }
-            AggregateOutcome aggregate = answers.finishAnswer(parent, spec, parentLimits, runtime, userText, all, intents,
-                    userId, sessionId, deadlineNanos, progress, trace, route.id());
-            // 投票结论进时间线 + SYSTEM：winner 一行、降级 / 跳过投票说明
-            applyAggregate(segments, notices, aggregate);
-            TrialTurn turn = aggregate.turn();
-            List<String> lines = segments.stream().map(RouteSegment::routeLine).toList();
-            return new RoutedTurn(String.join("；", lines), null, segments, notices, turn, null);
-        } catch (MaPauseSignal pause) {
-            // 停等是正常控制流：不写失败日志、不把 ROUTE 标成 ERROR，由入口落库并在下一句续跑
-            route.ok("方案停等", null, null, "子专家等待用户回复", java.util.Map.of());
-            throw pause;
-        } catch (RuntimeException ex) {
-            log.warn("固定编排执行失败 parentId={} template={} type={} cause={}",
-                    rootId(parent), template, ex.getClass().getSimpleName(), CauseDigest.of(ex), ex);
-            route.error(parallel ? "固定并行失败" : "固定串行失败", ex);
-            throw ex;
-        } finally {
-            RouteSpan.unbind(trace);
-        }
-    }
-
-    /**
-     * 竞争选优执行（{@code COMPETE}）。所属域：runtime。
-     *
-     * <p>拓扑固定为 <b>同题并行 → 选优 → 终答</b>：
-     * <ul>
-     *   <li>跳过判路由 LLM：每个启用候选都拿<b>同一份用户原问</b>作答，不做意图切分；</li>
-     *   <li>并行纪律与 {@code FIXED_PARALLEL} 完全一致：复用 {@link #runChildren}，超
-     *       {@code maxRouteChildren} 的候选按序标 SKIPPED_QUOTA，单子失败不阻其它子；</li>
-     *   <li>选优策略由 {@code competeStrategy} 决定：
-     *       {@code JUDGE_PICK}（默认，评选模型选 1 个赢家）/{@code FIRST_SUCCESS}（第一个成功子）；</li>
-     *   <li>终答只取赢家正文，不做多段拼接；token 与 traces 仍汇总全部子（每个子都真实消耗了额度）。</li>
-     * </ul>
-     *
-     * <p>降级（写死）：评选模型缺失 / 调用失败（非超时）/ 给出非法赢家时，
-     * 只要还有成功子就降级 {@code FIRST_SUCCESS}，并在时间线写 SYSTEM 说明；
-     * 全部子失败才整次 FAIL。超时仍按统一口径 FAIL，不把墙钟耗尽伪装成成功。
-     *
-     * @param parent       绑根的 ROUTER；虚拟根为合成的只读壳
-     * @param spec         方案执行来源；可空
-     * @param userText     用户原文（所有候选共用）
-     * @param modelUser    已注入记忆的用户侧文本
-     * @param progress     可空；子正文被静音，等齐后只推赢家终答
-     * @param runtime      已解析的运行配置（模板、策略、并行上限从这里读）
-     * @param parentLimits 父墙钟与轮次上限
-     * @return 终答＝赢家正文；segments 保留每个候选的标题与选优结论
-     */
-    private RoutedTurn executeCompete(AgentDef parent, MaRunSpec spec, String userText, String modelUser,
-                                      long userId, long sessionId, TrialProgress progress,
-                                      AgentRuntimeConfig runtime, EffectiveLimits parentLimits) {
-        String strategy = runtime.competeStrategyOrDefault();
-        long deadlineNanos = System.nanoTime() + Math.max(parentLimits.timeoutMs(), 1000L) * 1_000_000L;
-        ObsTraceScope trace = ObsTraceHolder.current();
-        RouteSpan route = RouteSpan.open(trace, "compete", rootId(parent));
-        try {
-            assertParentDeadline(deadlineNanos);
-            Candidates loaded = candidateLoader.load(rootId(parent), runtime, spec);
-            List<Candidate> enabled = loaded.usable();
-            List<BlockedCandidate> blockedCandidates = loaded.blocked();
-            // 竞争选优没有「判路由兜底」：少于 2 个可用候选就不是竞争，必须中文 FAIL
-            if (enabled.size() < AgentRuntimeConfig.MIN_COMPETE_CANDIDATES) {
-                throw new TrialFailure(competeTooFewText(enabled.size(), blockedCandidates));
-            }
-            int cap = runtime.maxRouteChildrenOrDefault();
-            // 并行上限小于 2 与「至少 2 个选手」相矛盾：点明配置问题，而不是偷偷只跑一个
-            if (cap < AgentRuntimeConfig.MIN_COMPETE_CANDIDATES) {
-                throw new TrialFailure("竞争选优的并行上限至少为 " + AgentRuntimeConfig.MIN_COMPETE_CANDIDATES
-                        + "，当前为 " + cap + "：请到编排策略里调高并行上限");
-            }
-            List<Candidate> picked = enabled.size() > cap
-                    ? new ArrayList<>(enabled.subList(0, cap))
-                    : enabled;
-            List<RoutedIntent> intents = new ArrayList<>(picked.size());
-            for (int i = 0; i < picked.size(); i++) {
-                // 同题：sub_query 恒为用户原问全文，防止某个子只拿到半句话导致比较不公平
-                intents.add(new RoutedIntent(picked.get(i), userText, "竞争选优",
-                        competeRouteLine(picked.get(i), i + 1, picked.size())));
-            }
-            List<RoutedIntent> skipped = new ArrayList<>();
-            for (int i = cap; i < enabled.size(); i++) {
-                Candidate leftover = enabled.get(i);
-                skipped.add(new RoutedIntent(leftover, userText, "超出并行上限",
-                        "已跳过「" + childLabel(leftover.agent()) + "」：超出竞争并行上限 " + cap));
-            }
-            if (progress != null) {
-                progress.route(competePlanLine(intents.size(), skipped.size(), cap, strategy));
-            }
-            // 决策块写「参赛者 route_key + 同题」：泳道按序对齐子块，不依赖 sub_query 文本匹配
-            String decisionJson = RouteDecisionParser.toDecisionJson(intents.stream()
-                    .map(item -> new RouteDecisionParser.Item(
-                            item.candidate().route().getRouteKey() == null ? ""
-                                    : item.candidate().route().getRouteKey(),
-                            item.subQuery()))
-                    .toList());
-            // 参赛者各按身份增量出字；收尾只推赢家那条时不把同一段正文再贴一次
-            TrialProgress childProgress = childBodyOutlet(progress, true);
-            List<ChildOutcome> outcomes = children.runChildren(parent, intents, modelUser, userText, userId, sessionId,
-                    deadlineNanos, childProgress, trace, route.id(),
-                    // 同题竞争必须隔离：子只看用户原问，互相不可见，保证比较公平
-                    true);
-            List<ChildOutcome> successes = new ArrayList<>();
-            for (ChildOutcome outcome : outcomes) {
-                if (hasAnswer(outcome)) {
-                    successes.add(outcome);
-                }
-            }
-            // 全部子失败：不拿占位段伪装成功
-            if (successes.isEmpty()) {
-                throw new TrialFailure("竞争选优的全部子 Agent 均未完成，请检查子 Agent 配置或稍后重试");
-            }
-            CompetePick pick = pickCompeteWinner(parent, spec, strategy, userText, successes, userId, sessionId,
-                    deadlineNanos, parentLimits, progress, trace, route.id());
-            String winnerText = pick.outcome().turn().getAssistantText();
-            // 终答只取赢家正文；token / traces 仍按全部子汇总，反映真实消耗
-            TrialTurn turn = answers.mergeTurns(outcomes, winnerText == null ? "" : winnerText);
-            // 各参赛者的结论已经按人推过；这里再推赢家会把同一段正文再贴一次
-            closeCompeteRoute(route, runtime, spec, strategy, outcomes, pick, decisionJson);
-            List<String> notices = new ArrayList<>();
-            if (pick.degraded()) {
-                notices.add(pick.note());
-            }
-            List<RouteSegment> segments = new ArrayList<>();
-            for (ChildOutcome outcome : outcomes) {
-                notices.addAll(outcome.notices());
-                // 跳过不是失败：只留「已跳过」行，不写成子 Agent 失败
-                String line = outcome == pick.outcome()
-                        ? outcome.intent().routeLine() + " · ★ 选中"
-                        : outcome.intent().routeLine();
-                segments.add(ranSegment(outcome, line));
-            }
-            for (RoutedIntent skip : skipped) {
-                segments.add(new RouteSegment(skip.routeLine(), null, null));
-            }
-            /*
-             * 未允许被编排调用的子：只追加路由行 + notice，不进 outcomes，
-             * 因此不参与选优、不计 token，也不会触发额外的 assistant 推送。
-             */
-            for (ChildOutcome blocked : blockedOutcomes(blockedCandidates, userText)) {
-                notices.addAll(blocked.notices());
-                segments.add(new RouteSegment(blocked.intent().routeLine(), null, null));
-            }
-            // 选优结论单独一行（含策略 / winner / 理由），时间线与泳道都能一眼看到为什么是它
-            segments.add(new RouteSegment(pick.routeLine(), null, null));
-            List<String> lines = segments.stream().map(RouteSegment::routeLine).toList();
-            return new RoutedTurn(String.join("；", lines), null, segments, notices, turn, null);
-        } catch (RuntimeException ex) {
-            log.warn("竞争选优执行失败 parentId={} type={} cause={}",
-                    rootId(parent), ex.getClass().getSimpleName(), CauseDigest.of(ex), ex);
-            route.error("竞争选优失败", ex);
-            throw ex;
-        } finally {
-            RouteSpan.unbind(trace);
-        }
-    }
-
-    /**
-     * 选优：按策略取赢家。所属域：runtime。
-     *
-     * <p>{@code FIRST_SUCCESS} 直接取<b>候选顺序</b>第一个成功子（不是完成最快的那个），
-     * 保证同一份配置结果可复现；{@code JUDGE_PICK} 走评选模型，任何失败都降级到前者。
-     *
-     * @param parent        编排根
-     * @param spec          方案来源；可空
-     * @param strategy      已归一的策略码
-     * @param userText      用户原问
-     * @param successes     至少 1 个有正文的子结果，顺序即候选顺序
-     * @param deadlineNanos 父墙钟截止
-     * @param progress      可空
-     * @param trace         可空
-     * @param routeSpan     ROUTE 步骤 id；可空
-     * @return 赢家 + 策略 + 说明；degraded=true 表示发生过降级
-     */
-    private CompetePick pickCompeteWinner(AgentDef parent, MaRunSpec spec, String strategy, String userText,
-                                          List<ChildOutcome> successes, long userId, long sessionId,
-                                          long deadlineNanos, EffectiveLimits parentLimits, TrialProgress progress,
-                                          ObsTraceScope trace, Long routeSpan) {
-        ChildOutcome first = successes.get(0);
-        if (AgentRuntimeConfig.COMPETE_STRATEGY_FIRST_SUCCESS.equals(strategy)) {
-            return new CompetePick(first, AgentRuntimeConfig.COMPETE_STRATEGY_FIRST_SUCCESS,
-                    "按策略「首个成功子」直接出终答", false,
-                    "选优：策略 FIRST_SUCCESS，winner=" + keyOf(first));
-        }
-        Optional<Long> judgeModel = resolveRouterModel(parent, spec);
-        if (judgeModel.isEmpty()) {
-            return degradeToFirst(first, "未配置评选模型（maJudgeModelInstanceId / maJudgeModel），已按「首个成功子」出终答");
-        }
-        try {
-            assertParentDeadline(deadlineNanos);
-            long remainingMs = Math.max(1000L, (deadlineNanos - System.nanoTime()) / 1_000_000L);
-            EffectiveLimits judgeLimits = parentLimits.withTimeoutMs(Math.min(parentLimits.timeoutMs(), remainingMs));
-            if (progress != null) {
-                progress.route("竞争选优：评选模型比较 " + successes.size() + " 个子终答…");
-            }
-            if (trace != null) {
-                // 评选 LLM 挂在 ROUTE 下，与判路由 / 汇总 LLM 同级
-                trace.bindParent(routeSpan);
-            }
-            String reply = react.judge(
-                    MeterScope.console(rootId(parent), judgeModel.get(), sessionId, userId),
-                    competePrompt(rootName(parent, spec), userText, successes), competeUserText(userText, successes), judgeLimits);
-            Optional<CompeteVerdictParser.Verdict> verdict = CompeteVerdictParser.parse(reply,
-                    successes.stream().map(item -> keyOf(item)).toList());
-            if (verdict.isEmpty()) {
-                return degradeToFirst(first, "评选模型未给出合法赢家（" + keyOf(first) + " 兜底）");
-            }
-            String winnerKey = verdict.get().winnerKey();
-            ChildOutcome winner = successes.stream()
-                    .filter(item -> winnerKey.equalsIgnoreCase(keyOf(item)))
-                    .findFirst()
-                    .orElse(first);
-            String reason = verdict.get().reason().isBlank() ? "评选模型未给出理由" : verdict.get().reason();
-            return new CompetePick(winner, AgentRuntimeConfig.COMPETE_STRATEGY_JUDGE_PICK, reason, false,
-                    "选优：策略 JUDGE_PICK，winner=" + keyOf(winner) + "，理由：" + reason);
-        } catch (TrialFailure ex) {
-            // 墙钟超时是统一硬拦，不降级：否则父时间预算已被吃掉，后面的推送也不可信
-            if (LimitHitReasons.TIMEOUT.equals(ex.getFinishReason())) {
-                throw ex;
-            }
-            log.warn("竞争选优评委调用失败 sessionId={} err={}", sessionId, ex.getMessage(), ex);
-            return degradeToFirst(first, "评选模型调用失败，已按「首个成功子」出终答");
-        } catch (RuntimeException ex) {
-            log.warn("竞争选优评委调用异常 sessionId={} type={} cause={}",
-                    sessionId, ex.getClass().getSimpleName(), CauseDigest.of(ex), ex);
-            return degradeToFirst(first, "评选模型调用异常，已按「首个成功子」出终答");
-        } finally {
-            if (trace != null) {
-                trace.bindParent(null);
-            }
-        }
-    }
-
-    /**
-     * 降级到「首个成功子」并给出可读说明。
-     *
-     * @param first 候选顺序第一个成功子
-     * @param note  中文说明，进 notices 与时间线
-     * @return 降级后的选优结论
-     */
-    private static CompetePick degradeToFirst(ChildOutcome first, String note) {
-        return new CompetePick(first, AgentRuntimeConfig.COMPETE_STRATEGY_FIRST_SUCCESS, note, true,
-                "选优降级：" + note + "（winner=" + keyOf(first) + "）");
-    }
-
-    /**
-     * 竞争选优的评委提示词：只要求输出 JSON，不做多轮辩论。
-     *
-     * @param rootName 编排根名（方案名 / 旧 Agent 名）；可空
-     */
-    private String competePrompt(String rootName, String userText, List<ChildOutcome> successes) {
-        StringBuilder prompt = new StringBuilder();
-        // 平台前缀沿用 ROUTER 用途模板，避免和判路由 / 汇总两套前缀并存；
-        // 装配器异常 / 未装配时返回 null，不能把评委提示词整段弄崩
-        String assembled = prompts.buildRoot(rootName, userText);
-        if (assembled != null && !assembled.isBlank()) {
-            prompt.append(assembled).append("\n\n");
-        }
-        prompt.append("你是竞争选优的评委。下面有 ").append(successes.size())
-                .append(" 位专家针对同一个用户问题各自给出的最终答复。\n")
-                .append("请选出整体最准确、最完整、最符合用户意图的一个。\n")
-                .append("只输出 JSON 对象：{\"winner\":\"<route_key>\",\"reason\":\"不超过 30 字的中文理由\"}。\n")
-                .append("不要解释、不要 markdown、不要提及专家姓名。\n")
-                .append("候选：\n");
-        for (ChildOutcome outcome : successes) {
-            prompt.append("- ").append(keyOf(outcome));
-            String intent = outcome.intent().candidate().route().getIntent();
-            if (intent != null && !intent.isBlank()) {
-                prompt.append('：').append(intent.trim());
-            }
-            prompt.append('\n');
-        }
-        return prompt.toString();
-    }
-
-    /**
-     * 评委的用户侧正文：用户原问 + 各子终答（单个回答做长度硬顶，防一次评选吃掉全部预算）。
-     */
-    private String competeUserText(String userText, List<ChildOutcome> successes) {
-        StringBuilder text = new StringBuilder();
-        text.append("用户原问：\n").append(userText == null ? "" : userText.trim()).append("\n\n");
-        text.append("各候选终答：\n");
-        for (ChildOutcome outcome : successes) {
-            text.append("### [").append(keyOf(outcome)).append("] ").append(RouterTexts.sectionTitle(outcome)).append('\n');
-            text.append(TrialTexts.clip(outcome.turn().getAssistantText(), COMPETE_ANSWER_LIMIT)).append("\n\n");
-        }
-        return text.toString();
-    }
-
-    /**
-     * 选优子块标题：与固定模板区分，明确「同题作答」。
-     */
-    private String competeRouteLine(Candidate hit, int index, int total) {
-        return serialRouteLine("竞争选优 ", hit, index, total) + " · 同题作答";
-    }
-
-    /**
-     * 竞争选优的计划行：让用户在子开跑前就知道策略与人数。
-     */
-    private static String competePlanLine(int picked, int skipped, int cap, String strategy) {
-        StringBuilder line = new StringBuilder("竞争选优：")
-                .append(picked).append(" 位候选同题并行，策略 ")
-                .append(AgentRuntimeConfig.COMPETE_STRATEGY_FIRST_SUCCESS.equals(strategy) ? "首个成功子" : "评选模型选优");
-        if (skipped > 0) {
-            line.append("；超出并行上限 ").append(cap).append(" 的 ").append(skipped).append(" 位已跳过");
-        }
-        return line.toString();
-    }
-
-    /**
-     * 竞争选优收尾：ROUTE span 打 attrs（模板 / 策略 / winner / 降级），泳道据此画「选优」一行。
-     */
-    private void closeCompeteRoute(RouteSpan route, AgentRuntimeConfig runtime, MaRunSpec spec, String strategy,
-                                   List<ChildOutcome> outcomes, CompetePick pick, String decisionJson) {
-        int ok = 0;
-        int fail = 0;
-        for (ChildOutcome outcome : outcomes) {
-            if (outcome.error() != null && !outcome.skipped()) {
-                fail++;
-            } else {
-                ok++;
-            }
-        }
-        StringBuilder brief = new StringBuilder("竞争选优×").append(outcomes.size())
-                .append(" → ").append(keyOf(pick.outcome()));
-        if (fail > 0) {
-            brief.append("（失败 ").append(fail).append("）");
-        }
-        Map<String, Object> fields = new LinkedHashMap<>();
-        fields.put("ma.template", runtime.maTemplateOrDefault());
-        // 竞争选优不是拼接也不是模型汇总：单独一个汇总码，泳道才不会误标成 CONCAT / SUMMARIZE
-        fields.put("ma.aggregate", "PICK");
-        fields.put("ma.context", runtime.maContextPolicyOrDefault());
-        // 同题竞争恒无判路由 LLM：显式打点，避免泳道把评选调用误读成判路由
-        fields.put("ma.skip_judge", "true");
-        fields.put("ma.compete.strategy", strategy);
-        fields.put("ma.compete.strategy_used", pick.strategy());
-        fields.put("ma.compete.winner", keyOf(pick.outcome()));
-        fields.put("ma.compete.degraded", pick.degraded() ? "true" : "false");
-        fields.put("ma.compete.ok", String.valueOf(ok));
-        fields.put("ma.compete.fail", String.valueOf(fail));
-        // 绑根没有合成根步骤：方案标识补在这里，按 ma.def_id 检索时不会漏
-        fields.putAll(RouterObs.maAttrs(spec));
-        fields.putAll(RouterObs.scratchAttrs());
-        route.ok("竞争选优完成：winner=" + keyOf(pick.outcome()), decisionJson, null, brief.toString(), fields);
-    }
-
-    /**
-     * 选优结果。所属域：runtime。
-     *
-     * @param outcome  赢家子结果
-     * @param strategy 实际生效的策略（降级后是 FIRST_SUCCESS）
-     * @param note     结论说明（赢家理由或降级原因）
-     * @param degraded 是否发生过降级；true 时上层额外写一条 SYSTEM 说明
-     * @param routeLine 时间线一行（含 winner）
-     */
-    private record CompetePick(ChildOutcome outcome, String strategy, String note, boolean degraded,
-                               String routeLine) {
-    }
-
-    /**
-     * 路由后串行执行（{@code ROUTER_THEN_SEQUENCE}）。所属域：runtime。
-     *
-     * <p>与判路由路径（{@link #execute(AgentDef, String, String, long, long, TrialProgress)}）
-     * <b>共用同一份 JUDGE 契约</b>（同一份提示词与解析器），差别只在扇出方式：
-     * 命中结果按候选的<b>执行顺序</b>串行接力；判定数组只决定选中了谁。
-     *
-     * <p>关键纪律：
-     * <ul>
-     *   <li>判路由不可省：父模型缺失 / 调用失败 / 无有效 route_key 一律整次 FAIL；</li>
-     *   <li>后一步输入＝本步子问 + 前置终答摘要（{@code PRIOR_SUMMARY_ONLY} 为默认），
-     *       摘要硬顶复用 {@link FixedSequenceContext}（单步 2000 / 累计 6000 字符）；</li>
-     *   <li>子步跑在 {@link #runFixedSequence} 上，因此「部分失败继续」与 P&E 单槽冒泡自动继承；</li>
-     *   <li>选中人数超过 {@code maxRouteChildren} 时只跑执行顺序前 N，其余标 SKIPPED_QUOTA；</li>
-     *   <li>汇总复用 CONCAT / SUMMARIZE（{@link AnswerAggregator#finishAnswer}），不另造汇总器。</li>
-     * </ul>
-     *
-     * <p>obs：ROUTE 名为 {@code router-then-sequence}，attrs 写模板 / 汇总 / 上下文三项，
-     * <b>不写</b> {@code ma.skip_judge}——本模板确实调用了判路由 LLM。
-     *
-     * @param parent       已启用的 ROUTER
-     * @param userText     用户原问全文（判路由输入，也是各步摘要区的整体目标）
-     * @param modelUser    已拼好记忆/近轮的用户侧文本（单步可继承父历史时使用）
-     * @param runtime      已解析的运行配置（模板、上下文策略、汇总、上限从这里读）
-     * @param parentLimits 父墙钟与轮次上限
-     * @return 各步分段 + 汇总后的终答
-     */
-    private RoutedTurn executeRouterThenSequence(AgentDef parent, MaRunSpec spec, String userText, String modelUser,
-                                                 long userId, long sessionId, TrialProgress progress,
-                                                 AgentRuntimeConfig runtime, EffectiveLimits parentLimits) {
-        long deadlineNanos = System.nanoTime() + Math.max(parentLimits.timeoutMs(), 1000L) * 1_000_000L;
-        ObsTraceScope trace = ObsTraceHolder.current();
-        RouteSpan route = RouteSpan.open(trace, "router-then-sequence", rootId(parent));
-        try {
-            assertParentDeadline(deadlineNanos);
-            Candidates loaded = candidateLoader.load(rootId(parent), runtime, spec);
-            List<Candidate> candidates = loaded.usable();
-            // M4：本模板先判路由再串行，判路由本身没有「降级兜底」，零可用候选必须整次 FAIL
-            if (candidates.isEmpty()) {
-                throw new TrialFailure(loaded.blocked().isEmpty()
-                        ? "路由后串行没有可用的子 Agent：请至少启用 1 个获允许的子 Agent"
-                        : "路由后串行没有可用的子 Agent：" + loaded.blocked().size()
-                                + " 位专家未获本编排允许（" + blockedReasons(loaded.blocked())
-                                + "），请检查编排策略与对应 Agent 配置");
-            }
-            // 1) JUDGE：严格版判路由，失败即 FAIL，绝不拿第一条候选顶上。
-            // 模型只决定选谁；真正的接力顺序用候选上的执行顺序，不用判定数组的先后
-            List<RoutedIntent> judged = new ArrayList<>(chooseOrdered(parent, spec, parentLimits, runtime, userText,
-                    candidates, userId, sessionId, deadlineNanos, progress));
-            judged.sort(Comparator
-                    .comparingInt((RoutedIntent item) -> {
-                        Integer order = item.candidate().route().getSortOrder();
-                        return order == null ? Integer.MAX_VALUE : order;
-                    })
-                    .thenComparing(item -> item.candidate().route().getRouteKey(),
-                            Comparator.nullsLast(String::compareTo)));
-            // 2) 上限：串行不扇出，超出配置上限的按执行顺序截断并标「已跳过」
-            int cap = runtime.maxRouteChildrenOrDefault();
-            List<RoutedIntent> picked = judged.size() > cap
-                    ? new ArrayList<>(judged.subList(0, cap))
-                    : judged;
-            List<RoutedIntent> intents = new ArrayList<>(picked.size());
-            for (int i = 0; i < picked.size(); i++) {
-                RoutedIntent base = picked.get(i);
-                // 标题在派发前定稿：串行时时间线顺序＝执行顺序
-                intents.add(new RoutedIntent(base.candidate(), base.subQuery(), base.reason(),
-                        serialRouteLine("路由后串行 ", base.candidate(), i + 1, picked.size())));
-            }
-            List<RoutedIntent> skipped = new ArrayList<>();
-            for (int i = cap; i < judged.size(); i++) {
-                RoutedIntent leftover = judged.get(i);
-                skipped.add(new RoutedIntent(leftover.candidate(), leftover.subQuery(), "超出串行上限",
-                        "已跳过「" + childLabel(leftover.candidate().agent()) + "」：超出串行上限 " + cap));
-            }
-            if (progress != null) {
-                progress.route(sequencePlanLine(intents.size(), skipped.size(), cap, runtime.priorSummaryOn()));
-            }
-            // 决策块只写「判定出几个意图、分给谁」的人话；机器可读 JSON 仍进 ROUTE span attrs
-            String decisionJson = RouteDecisionParser.toDecisionJson(intents.stream()
-                    .map(item -> new RouteDecisionParser.Item(
-                            item.candidate().route().getRouteKey() == null ? ""
-                                    : item.candidate().route().getRouteKey(),
-                            item.subQuery()))
-                    .toList());
-            if (progress != null && intents.size() >= 2) {
-                progress.route(RouterTexts.decisionLine(intents));
-            }
-            // 3) 串行 FANOUT：复用固定串行实现，前置摘要 / 部分失败继续 / P&E 冒泡一并继承
-            // 多子 / VOTE 同样按身份增量出字：投票结论只在收尾追加，不压住各路作答
-            TrialProgress childProgress = childBodyOutlet(progress, true);
-            /*
-             * 根层串行方案允许成员中途询问；嵌套方案 / 调试 / 未开启选项时传 null，
-             * 仍走「整轮末尾才出选项」的旧路径。
-             */
-            /*
-             * 串行方案允许成员中途询问：条件与「路由后串行」同一口径——
-             * 工作台开启选项、读到真实方案，且这条链每一层都只派了一位。
-             * 不满足时传 null，仍走「整轮末尾才出选项」的旧路径。
-             */
-            boolean serialLeafChoice = spec != null && pauseScopeAllowed();
-            TurnNotes pauseNotes = NOTES.get();
-            MaPauseScope pauseScope = serialLeafChoice
-                    ? MaPauseScope.root(spec.maId(), rootName(parent, spec), runtime.maTemplateOrDefault(),
-                    MaNestedContext.depth(), MaNestedContext.parentKey(),
-                    userText, modelUser, skipped.stream().map(ChildRunner::pauseMemberOfSkipped).toList(),
-                    pauseNotes == null ? null : pauseNotes.gateway,
-                    pauseNotes == null ? null : pauseNotes.judgeReasoning.toString(),
-                    decisionJson)
-                    : null;
-            List<ChildOutcome> outcomes = children.runFixedSequence(parent, modelUser, userText, userId, sessionId,
-                    deadlineNanos, childProgress, trace, ChildRunner.childAgentParent(trace, route.id()), intents,
-                    runtime, pauseScope, List.of(), null, serialLeafChoice);
-            // 所有执行步都没产出正文：整次 FAIL，不拿占位段假装成功
-            if (!outcomes.isEmpty() && outcomes.stream().allMatch(outcome -> outcome.turn() == null)) {
-                throw new TrialFailure("路由后串行全部子 Agent 均未完成，请检查子 Agent 配置或稍后重试");
-            }
-            List<ChildOutcome> all = new ArrayList<>(outcomes);
-            for (RoutedIntent skip : skipped) {
-                all.add(ChildOutcome.skipped(skip,
-                        "「" + childLabel(skip.candidate().agent()) + "」超出串行上限 " + cap + "，未执行"));
-            }
-            closeRouterThenSequenceRoute(route, runtime, spec, all, decisionJson);
-            List<String> notices = new ArrayList<>();
-            List<RouteSegment> segments = new ArrayList<>();
-            for (ChildOutcome outcome : all) {
-                notices.addAll(outcome.notices());
-                // 跳过不是失败：只留「已跳过」行，不写成子 Agent 失败
-                segments.add(ranSegment(outcome, outcome.intent().routeLine()));
-            }
-            /*
-             * 未获允许的子不参与判路由，但必须在时间线留「已跳过」：
-             * 只写 routeLine + notice，不塞进 all，避免改变终答口径。
-             */
-            for (ChildOutcome blocked : blockedOutcomes(loaded.blocked(), userText)) {
-                notices.addAll(blocked.notices());
-                segments.add(new RouteSegment(blocked.intent().routeLine(), null, null));
-            }
-            // 4) AGGREGATE：串行结束后再汇总，CONCAT / SUMMARIZE / VOTE 与现网同口径
-            AggregateOutcome aggregate = answers.finishAnswer(parent, spec, parentLimits, runtime, userText, all, intents,
-                    userId, sessionId, deadlineNanos, progress, trace, route.id());
-            applyAggregate(segments, notices, aggregate);
-            TrialTurn turn = aggregate.turn();
-            List<String> lines = segments.stream().map(RouteSegment::routeLine).toList();
-            return new RoutedTurn(String.join("；", lines), null, segments, notices, turn, null);
-        } catch (MaPauseSignal pause) {
-            // 停等不是失败：由入口落库，下一句回复时经 resumeSerial 回到同一成员后续跑
-            route.ok("方案停等", null, null, "子专家等待用户回复", java.util.Map.of());
-            throw pause;
-        } catch (RuntimeException ex) {
-            log.warn("路由后串行执行失败 parentId={} type={} cause={}",
-                    rootId(parent), ex.getClass().getSimpleName(), CauseDigest.of(ex), ex);
-            route.error("路由后串行失败", ex);
-            throw ex;
-        } finally {
-            RouteSpan.unbind(trace);
-        }
-    }
-
-    /**
-     * 评审环执行（{@code CRITIC_LOOP}）。所属域：runtime。
-     *
-     * <p>拓扑固定为 <b>执行者 → 评审者 →（REVISE 时）执行者回修</b>，全部串行：
-     * <ul>
-     *   <li>跳过判路由 LLM（不写 ROUTE.route_decision）；</li>
-     *   <li>执行者＝启用候选中恰好 1 个（评审者若也在候选表里，按 id 排除，不计入个数）；</li>
-     *   <li>轮次默认 1（已夹到 1～3）：1 轮＝一次评审判定 + 至多一次回修；
-     *       {@code maxRounds=1} 时回修后直接终稿，不再二次评审；</li>
-     *   <li>终答＝最后一版执行者输出，不跑 SUMMARIZE / CONCAT 拼接；</li>
-     *   <li>评审判定解析失败按 ACCEPT 处理（防死循环），obs 记 {@code ma.critic_parse=fail}；</li>
-     *   <li>评审者失败降级采用当前稿；回修失败降级采用回修前稿（都带中文可见说明）。</li>
-     * </ul>
-     *
-     * <p>批准冒泡：执行者若为 P&E 且自身开启「规划确认」，仍走刀4 的单槽冒泡，
-     * 未获批前不会进入评审；评审环本身不产生新的待批状态。
-     *
-     * @param parent       已启用的 ROUTER
-     * @param userText     用户原问全文；本模板恒按隔离上下文派发（不继承父历史）
-     * @param progress     可空；评审/回修阶段的 assistant 增量被静音，终答等齐后只推一次
-     * @param runtime      已解析的运行配置（模板、评审者、轮次从这里读）
-     * @param parentLimits 父墙钟与轮次上限
-     * @return 终答＝最后一版执行者输出，segments 保留每阶段标题与真实 spans
-     */
-    private RoutedTurn executeCriticLoop(AgentDef parent, MaRunSpec spec, String userText, long userId,
-                                         long sessionId, TrialProgress progress, AgentRuntimeConfig runtime,
-                                         EffectiveLimits parentLimits) {
-        long deadlineNanos = System.nanoTime() + Math.max(parentLimits.timeoutMs(), 1000L) * 1_000_000L;
-        ObsTraceScope trace = ObsTraceHolder.current();
-        RouteSpan route = RouteSpan.open(trace, "critic-loop", rootId(parent));
-        // 评审环的所有阶段都静音 assistant：初稿若直接流出，REVISE 后会变成「两版答复」拼在时间线上
-        // 评审环不按参与者分块交结论：仍只在收尾推一版执行稿，避免和终稿叠成两段
-        TrialProgress stageProgress = childBodyOutlet(progress, false);
-        List<RouteSegment> segments = new ArrayList<>();
-        List<String> notices = new ArrayList<>();
-        List<ChildOutcome> stages = new ArrayList<>();
-        int maxRounds = runtime.criticMaxRoundsOrDefault();
-        int roundsUsed = 0;
-        String decision = CriticVerdictParser.DECISION_ACCEPT;
-        boolean parseFailed = false;
-        String degradeNote = null;
-        try {
-            assertParentDeadline(deadlineNanos);
-            Candidates loaded = candidateLoader.load(rootId(parent), runtime, spec);
-            Long criticId = runtime.getMaCriticAgentId();
-            Candidate executor = pickCriticExecutor(loaded, criticId);
-            AgentDef criticAgent = pickCriticAgent(runtime, criticId, executor);
-            Candidate critic = new Candidate(criticRoute(criticAgent), criticAgent);
-
-            String planLine = "评审环：跳过判路由，执行者出稿 → 评审最多 " + maxRounds + " 轮（不满意则回修）";
-            pushLine(progress, segments, planLine);
-
-            // 初稿：用户原问全文直发执行者；隔离上下文，单子也不继承父历史
-            String draftLine = "评审环 · 执行者出稿";
-            pushLine(progress, segments, draftLine);
-            ChildOutcome draft = runCriticStage(parent, executor, "评审环 · 执行者出稿", userText, userText,
-                    userId, sessionId, deadlineNanos, stageProgress, trace, route.id(), "executor", 0);
-            segments.add(new RouteSegment(draftLine, draft.turn(), null));
-            notices.addAll(draft.notices());
-            stages.add(draft);
-            TrialTurn current = draft.turn();
-            if (current == null) {
-                throw new TrialFailure("评审环执行者未产出稿件，无法评审");
-            }
-
-            for (int round = 1; round <= maxRounds; round++) {
-                assertParentDeadline(deadlineNanos);
-                String reviewLine = "评审环 · 评审（第 " + round + " 轮）";
-                pushLine(progress, segments, reviewLine);
-                String reviewInput = CriticPrompt.review(userText, current.getAssistantText());
-                ChildOutcome reviewed;
-                try {
-                    reviewed = runCriticStage(parent, critic, "评审环 · 评审", reviewInput, reviewInput,
-                            userId, sessionId, deadlineNanos, stageProgress, trace, route.id(), "critic", round);
-                } catch (TrialFailure ex) {
-                    // 墙钟/根取消属于整次失败，不做降级；其它评审失败采用当前稿
-                    if (LimitHitReasons.TIMEOUT.equals(ex.getFinishReason())) {
-                        throw ex;
-                    }
-                    log.warn("评审环评审失败 parentId={} round={} type={} cause={}",
-                            rootId(parent), round, ex.getClass().getSimpleName(), CauseDigest.of(ex), ex);
-                    degradeNote = "评审未完成，已返回执行稿";
-                    segments.add(new RouteSegment(reviewLine + " · 未完成", null, null));
-                    break;
-                } catch (RuntimeException ex) {
-                    log.warn("评审环评审异常 parentId={} round={} type={} cause={}",
-                            rootId(parent), round, ex.getClass().getSimpleName(), CauseDigest.of(ex), ex);
-                    degradeNote = "评审未完成，已返回执行稿";
-                    segments.add(new RouteSegment(reviewLine + " · 未完成", null, null));
-                    break;
-                }
-                segments.add(new RouteSegment(reviewLine, reviewed.turn(), null));
-                stages.add(reviewed);
-                CriticVerdictParser.Verdict verdict = CriticVerdictParser.parse(
-                        reviewed.turn() == null ? null : reviewed.turn().getAssistantText());
-                if (!verdict.parsed()) {
-                    parseFailed = true;
-                }
-                decision = verdict.decision();
-                roundsUsed = round;
-                String verdictLine = "评审环 · 第 " + round + " 轮结论："
-                        + criticDecisionText(verdict.decision())
-                        + (verdict.parsed() ? "" : "（评审输出无法解析，按通过处理）");
-                pushLine(progress, segments, verdictLine);
-                if (!verdict.revise()) {
-                    break;
-                }
-                String reviseLine = "评审环 · 回修（第 " + round + " 轮）";
-                pushLine(progress, segments, reviseLine);
-                String reviseInput = CriticPrompt.revise(userText, current.getAssistantText(),
-                        verdict.feedbackOrEmpty());
-                ChildOutcome revised;
-                try {
-                    revised = runCriticStage(parent, executor, "评审环 · 回修", reviseInput, reviseInput,
-                            userId, sessionId, deadlineNanos, stageProgress, trace, route.id(), "executor", round);
-                } catch (TrialFailure ex) {
-                    if (LimitHitReasons.TIMEOUT.equals(ex.getFinishReason())) {
-                        throw ex;
-                    }
-                    log.warn("评审环回修失败 parentId={} round={} type={} cause={}",
-                            rootId(parent), round, ex.getClass().getSimpleName(), CauseDigest.of(ex), ex);
-                    degradeNote = "回修未完成，已返回上一版执行稿";
-                    segments.add(new RouteSegment(reviseLine + " · 未完成", null, null));
-                    break;
-                } catch (RuntimeException ex) {
-                    log.warn("评审环回修异常 parentId={} round={} type={} cause={}",
-                            rootId(parent), round, ex.getClass().getSimpleName(), CauseDigest.of(ex), ex);
-                    degradeNote = "回修未完成，已返回上一版执行稿";
-                    segments.add(new RouteSegment(reviseLine + " · 未完成", null, null));
-                    break;
-                }
-                segments.add(new RouteSegment(reviseLine, revised.turn(), null));
-                notices.addAll(revised.notices());
-                stages.add(revised);
-                if (revised.turn() == null) {
-                    degradeNote = "回修未产出新稿，已返回上一版执行稿";
-                    break;
-                }
-                current = revised.turn();
-                // 轮次用尽：回修稿直接作为终稿，不再二次评审（P1 默认 1 轮即此路径）。
-                // 单轮是正常路径而不是「超限」，不加降级说明；多轮用尽才提示已到上限
-                if (round >= maxRounds && maxRounds > 1) {
-                    degradeNote = "已达评审轮次上限（" + maxRounds + " 轮），已采用最后一版执行稿";
-                }
-            }
-
-            String finalText = current.getAssistantText() == null ? "" : current.getAssistantText();
-            if (degradeNote != null && !degradeNote.isBlank()) {
-                // 降级说明必须可见：用户要知道这是「执行稿」而不是「评审通过的终稿」
-                finalText = finalText + "\n\n（" + degradeNote + "）";
-                pushLine(progress, segments, degradeNote);
-            }
-            TrialTurn turn = answers.mergeTurns(stages, finalText);
-            if (progress != null) {
-                progress.assistant(turn.getAssistantText());
-            }
-            closeCriticRoute(route, runtime, spec, roundsUsed, decision, parseFailed);
-            /*
-             * 未获允许/被挡下的候选：只追加「已跳过」路由行，不进 stages，
-             * 因此不参与终答、不计 token，也不会触发额外 assistant 推送。
-             */
-            for (ChildOutcome blocked : blockedOutcomes(loaded.blocked(), userText)) {
-                notices.addAll(blocked.notices());
-                segments.add(new RouteSegment(blocked.intent().routeLine(), null, null));
-            }
-            String summary = "评审环：" + roundsUsed + " 轮 · " + criticDecisionText(decision);
-            return new RoutedTurn(summary, null, segments, notices, turn, null);
-        } catch (RuntimeException ex) {
-            log.warn("评审环执行失败 parentId={} type={} cause={}",
-                    rootId(parent), ex.getClass().getSimpleName(), CauseDigest.of(ex), ex);
-            route.error("评审环失败", ex);
-            throw ex;
-        } finally {
-            RouteSpan.unbind(trace);
-        }
-    }
-
-    /**
-     * 解析评审环的执行者：启用可用候选里排除评审者后，必须恰好 1 个。
-     *
-     * @param loaded    候选装载结果（usable 已含 allow_orchestrated / 子模式门闩）
-     * @param criticId  评审者 id；可空（未选时无法排除，也不影响下面的个数校验）
-     * @return 唯一执行者
-     * @throws TrialFailure 0 个或多于 1 个
-     */
-    private Candidate pickCriticExecutor(Candidates loaded, Long criticId) {
-        List<Candidate> executors = new ArrayList<>();
-        for (Candidate candidate : loaded.usable()) {
-            if (criticId != null && criticId.equals(candidate.agent().getId())) {
-                continue;
-            }
-            executors.add(candidate);
-        }
-        // 稳定排序：sort_order 升序、同序 id 升序；恰好 1 个时顺序无影响，多于 1 个时用于报错展示
-        executors.sort(Comparator
-                .comparing((Candidate item) -> item.route().getSortOrder(),
-                        Comparator.nullsFirst(Comparator.naturalOrder()))
-                .thenComparing(item -> item.route().getId(), Comparator.nullsFirst(Comparator.naturalOrder())));
-        if (executors.isEmpty()) {
-            // 评审者恰好就是唯一候选：这不是「没有执行者」，而是自评，要给能直接改配置的文案
-            boolean criticIsOnlyCandidate = criticId != null && loaded.usable().stream()
-                    .anyMatch(item -> criticId.equals(item.agent().getId()));
-            if (criticIsOnlyCandidate) {
-                throw new TrialFailure("评审专家不能与执行者相同：请换一个评审专家，或把候选换成别的执行者");
-            }
-            String suffix = loaded.blocked().isEmpty() ? ""
-                    : "（其中 " + loaded.blocked().size() + " 位专家未获本编排允许：" + blockedReasons(loaded.blocked()) + "）";
-            throw new TrialFailure("评审环需要恰好 1 个启用中的执行者候选，当前 0 个" + suffix
-                    + "：候选需已启用、运行模式获本编排允许且已开启「允许被编排调用」");
-        }
-        if (executors.size() > 1) {
-            List<String> names = executors.stream().map(item -> childLabel(item.agent())).toList();
-            throw new TrialFailure("评审环只允许 1 个执行者候选，当前 " + executors.size() + " 个（"
-                    + String.join("、", names) + "）：请停用多余候选，只保留 1 个执行者");
-        }
-        return executors.get(0);
-    }
-
-    /**
-     * 解析评审者：必填、启用、非 ROUTER、运行模式获本编排允许、允许被编排调用，且不等于执行者。
-     *
-     * @param runtime  编排根运行配置
-     * @param criticId 评审者 id；可空
-     * @param executor 执行者候选
-     * @return 评审者定义
-     * @throws TrialFailure 未选/不存在/不合法/与执行者相同
-     */
-    private AgentDef pickCriticAgent(AgentRuntimeConfig runtime, Long criticId, Candidate executor) {
-        if (criticId == null) {
-            throw new TrialFailure("评审环未选择评审专家：请在「编排」Tab 的评审专家下拉中选择 1 个已启用的子 Agent");
-        }
-        AgentDef critic = agents.findById(criticId).orElse(null);
-        // 与保存侧共用同一份中文原因，避免「保存提示」与「试跑报错」各说一套
-        String problem = AgentCriticPolicy.criticProblem(runtime, critic);
-        if (problem != null) {
-            throw new TrialFailure(problem);
-        }
-        if (executor.agent().getId() != null && executor.agent().getId().equals(critic.getId())) {
-            throw new TrialFailure("评审专家不能与执行者相同：请换一个评审专家，或把候选换成别的执行者");
-        }
-        return critic;
-    }
-
-    /**
-     * 跑一个评审环阶段（执行者出稿 / 评审 / 回修）。全部串行，挂在根 ROUTE 下。
-     *
-     * @param role     角色：executor / critic；只用于 obs attrs 与泳道展示
-     * @param round    轮次；初稿为 0
-     * @param prompt   本次送给子 Agent 的用户侧全文
-     * @param subQuery span 展示用的子问（与 prompt 同源，避免把评审契约当成用户问题展示）
-     * @return 子执行结果
-     */
-    private ChildOutcome runCriticStage(AgentDef parent, Candidate hit, String roleText, String prompt,
-                                        String subQuery, long userId, long sessionId, long deadlineNanos,
-                                        TrialProgress progress, ObsTraceScope trace, Long routeSpan,
-                                        String role, int round) {
-        Map<String, Object> attrs = new LinkedHashMap<>();
-        attrs.put("ma.role", role);
-        attrs.put("ma.critic_round", round);
-        RoutedIntent intent = new RoutedIntent(hit, subQuery, roleText, null);
-        return children.runOneChild(parent, intent, prompt, subQuery, userId, sessionId, deadlineNanos, progress, trace,
-                routeSpan, false, true, Thread.currentThread(), prompt, attrs);
-    }
-
-    /**
-     * 评审者的合成路由行：评审专家不必出现在候选表，运行期只需一个携带 intent 的占位行。
-     *
-     * @param critic 评审者
-     * @return 仅用于 span/展示的 AgentRoute
-     */
-    private static AgentRoute criticRoute(AgentDef critic) {
-        AgentRoute route = new AgentRoute();
-        route.setChildAgentId(critic.getId());
-        route.setRouteKey("");
-        route.setIntent("评审专家");
-        route.setSortOrder(0);
-        route.setStatus(AgentStatus.ENABLED);
-        return route;
-    }
-
-    /**
-     * 同时推进「实时事件」与「落库分段」：两条口径必须一致，否则刷新后时间线会少一段。
-     */
-    private static void pushLine(TrialProgress progress, List<RouteSegment> segments, String line) {
-        if (progress != null) {
-            progress.route(line);
-        }
-        if (line != null && !line.isBlank()) {
-            segments.add(new RouteSegment(line, null, null));
-        }
-    }
-
-    /**
-     * @param decision ACCEPT / REVISE
-     * @return 中文结论（带英文枚举，便于对照日志）
-     */
-    private static String criticDecisionText(String decision) {
-        return CriticVerdictParser.DECISION_REVISE.equals(decision)
-                ? "需要回修（REVISE）"
-                : "评审通过（ACCEPT）";
-    }
-
-    /**
-     * 关闭评审环的根 ROUTE：写模板、跳过判路由、实际轮次与判定。
-     */
-    private void closeCriticRoute(RouteSpan route, AgentRuntimeConfig runtime, MaRunSpec spec, int roundsUsed,
-                                  String decision, boolean parseFailed) {
-        Map<String, Object> fields = new LinkedHashMap<>();
-        fields.put("ma.template", runtime.maTemplateOrDefault());
-        // 评审环没有判路由 LLM：显式打点，泳道据此展示「无判路由」而不是假 JUDGE
-        fields.put("ma.skip_judge", "true");
-        // 绑根没有合成根步骤：方案标识补在这里，按 ma.def_id 检索时不会漏
-        fields.putAll(RouterObs.maAttrs(spec));
-        fields.put("ma.critic_rounds_used", roundsUsed);
-        fields.put("ma.critic_decision", decision);
-        if (parseFailed) {
-            fields.put("ma.critic_parse", "fail");
-        }
-        // 评审环若选了共享草稿：执行者与评审者共享同一块板，统计只写次数不写正文
-        fields.putAll(RouterObs.scratchAttrs());
-        // 评审环不写 route_decision：模板本身不判路由
-        route.ok("评审环完成：" + criticDecisionText(decision) + "，评审 " + roundsUsed + " 轮", null, null,
-                "评审环×" + roundsUsed + " 轮 · " + criticDecisionText(decision), fields);
-    }
-
-    /**
-     * 关闭固定模板的根 ROUTE：写实际模板 / 汇总策略 / 上下文策略，并附跳过与失败计数。
-     */
-    private void closeFixedRoute(RouteSpan route, AgentRuntimeConfig runtime, MaRunSpec spec, String template,
-                                 List<ChildOutcome> outcomes, String decisionJson, boolean parallel) {
-        int ok = 0;
-        int fail = 0;
-        int skipped = 0;
-        for (ChildOutcome outcome : outcomes) {
-            if (outcome.skipped()) {
-                skipped++;
-            } else if (outcome.error() != null) {
-                fail++;
-            } else {
-                ok++;
-            }
-        }
-        StringBuilder brief = new StringBuilder(parallel ? "固定并行×" : "固定串行×").append(outcomes.size());
-        if (fail > 0) {
-            brief.append("（失败 ").append(fail).append("）");
-        }
-        if (skipped > 0) {
-            brief.append("（跳过 ").append(skipped).append("）");
-        }
-        Map<String, Object> fields = new LinkedHashMap<>();
-        fields.put("ma.template", template);
-        fields.put("ma.aggregate", runtime.answerModeEnum().name());
-        fields.put("ma.context", runtime.maContextPolicyOrDefault());
-        // 固定模板恒无判路由 LLM；显式打点，泳道据此显示「无判路由」
-        fields.put("ma.skip_judge", "true");
-        // 绑根没有合成根步骤：方案标识补在这里，按 ma.def_id 检索时不会漏
-        fields.putAll(RouterObs.maAttrs(spec));
-        // 共享草稿只写键数 / 冲突次数（有则显示），不写任何 key / value 正文
-        fields.putAll(RouterObs.scratchAttrs());
-        route.ok((parallel ? "固定并行完成 " : "固定串行完成 ") + ok + " 子", decisionJson, null,
-                brief.toString(), fields);
-    }
-
-    /**
-     * 固定模板的子块标题：与判路由的「路由到…」区分，避免让人误以为走了意图判定。
-     */
-    private String fixedRouteLine(Candidate hit, boolean parallel, int index, int total) {
-        return serialRouteLine(parallel ? "固定并行 " : "固定串行 ", hit, index, total);
-    }
-
-    /**
-     * 串行模板（固定串行 / 路由后串行）的子块标题。
-     *
-     * <p>序号即执行顺序：路由后串行按候选上的执行顺序接力，不按判定数组的先后。
-     *
-     * @param prefix 模板前缀（含结尾空格），如「固定串行 」
-     * @param hit    命中的候选
-     * @param index  1 起的执行序号
-     * @param total  本次执行步数
-     * @return 如「路由后串行 1/3 · 售后专家（after_sale）」
-     */
-    private String serialRouteLine(String prefix, Candidate hit, int index, int total) {
-        StringBuilder line = new StringBuilder(prefix);
-        line.append(index).append('/').append(total).append(" · ").append(childLabel(hit.agent()));
-        String key = hit.route().getRouteKey() == null ? "" : hit.route().getRouteKey().trim();
-        if (!key.isEmpty()) {
-            line.append("（").append(key).append("）");
-        }
-        return line.toString();
-    }
-
-    /**
-     * 路由后串行的总控说明：说明「判路由 → 串行」、上下文口径与被跳过的原因。
-     *
-     * @param picked       实际执行步数
-     * @param skipped      超出上限被跳过的步数
-     * @param cap          配置的串行上限（复用 maxRouteChildren）
-     * @param priorSummary 是否按前置摘要拼后步输入
-     * @return 中文说明
-     */
-    private static String sequencePlanLine(int picked, int skipped, int cap, boolean priorSummary) {
-        StringBuilder line = new StringBuilder("路由后串行：判路由命中 ").append(picked)
-                .append(" 个子，按判定顺序串行执行");
-        line.append(priorSummary ? "（后步会看到前面专家的成文结论）" : "（上下文隔离，后步看不到前置正文）");
-        if (skipped > 0) {
-            line.append("；另 ").append(skipped).append(" 个超出串行上限 ").append(cap).append(" 已跳过");
-        }
-        return line.toString();
-    }
-
-    /**
-     * 固定模板的总控说明：让用户一眼看到「跳过判路由」以及被跳过的原因。
-     */
-    private static String planLine(boolean parallel, int picked, int skipped, int cap) {
-        StringBuilder line = new StringBuilder(parallel
-                ? "固定并行：跳过判路由，直接派给 " + picked + " 个子"
-                : "固定串行：跳过判路由，按顺序执行 " + picked + " 个子");
-        if (skipped > 0) {
-            line.append("；另 ").append(skipped).append(" 个超出并行上限 ").append(cap).append(" 已跳过");
-        }
-        return line.toString();
-    }
-
-    /**
-     * 关闭路由后串行的根 ROUTE：写实际模板 / 汇总策略 / 上下文策略与失败跳过计数。
-     *
-     * <p>与固定模板的关键差别：本模板<b>确实调用了</b>判路由 LLM，因此绝不写
-     * {@code ma.skip_judge}；泳道据模板码区分「JUDGE 后串行」与「无判路由」。
-     */
-    private void closeRouterThenSequenceRoute(RouteSpan route, AgentRuntimeConfig runtime, MaRunSpec spec,
-                                              List<ChildOutcome> outcomes, String decisionJson) {
-        int ok = 0;
-        int fail = 0;
-        int skipped = 0;
-        for (ChildOutcome outcome : outcomes) {
-            if (outcome.skipped()) {
-                skipped++;
-            } else if (outcome.error() != null) {
-                fail++;
-            } else {
-                ok++;
-            }
-        }
-        StringBuilder brief = new StringBuilder("路由后串行×").append(outcomes.size());
-        if (fail > 0) {
-            brief.append("（失败 ").append(fail).append("）");
-        }
-        if (skipped > 0) {
-            brief.append("（跳过 ").append(skipped).append("）");
-        }
-        Map<String, Object> attrs = new LinkedHashMap<>();
-        attrs.put("ma.template", runtime.maTemplateOrDefault());
-        attrs.put("ma.aggregate", runtime.answerModeEnum().name());
-        attrs.put("ma.context", runtime.maContextPolicyOrDefault());
-        // 绑根没有合成根步骤：方案标识补在这里，按 ma.def_id 检索时不会漏
-        attrs.putAll(RouterObs.maAttrs(spec));
-        // 共享草稿只写键数 / 冲突次数（有则显示），不写任何 key / value 正文
-        attrs.putAll(RouterObs.scratchAttrs());
-        route.ok("路由后串行完成 " + ok + " 子", decisionJson, null, brief.toString(), attrs);
-    }
-
-    /**
-     * 把终答汇总结论挂到分段列表：赢家子段打「★ 选中」，再追加投票结论行。
-     *
-     * @param segments  已有子分段（顺序与 outcomes 一致）
-     * @param notices   SYSTEM 说明收集器
-     * @param aggregate 汇总结果
-     */
-    /**
-     * 真正跑过的子段：带上与 SSE begin 相同的身份，供时间线在路由行之前落 participant。
-     *
-     * <p>跳过的子没有 begin，身份留空，避免回放多出一张没开跑的卡。
-     *
-     * @param outcome 子结果
-     * @param line    路由行
-     * @return 分段
-     */
-    private static RouteSegment ranSegment(ChildOutcome outcome, String line) {
-        // 身份只认执行时那一份：事后按 intent 重算在嵌套退出后会退化成 root
-        ParticipantView who = outcome != null && !outcome.skipped() ? outcome.participant() : null;
-        return new RouteSegment(line, outcome.turn(),
-                outcome.skipped() ? null : outcome.error(), outcome.children(), outcome.reasoning(),
-                outcome.workflow(), outcome.conclusionName(), outcome.conclusionReasoning())
-                .withParticipant(who);
-    }
-
-    private void applyAggregate(List<RouteSegment> segments, List<String> notices, AggregateOutcome aggregate) {
-        notices.addAll(aggregate.notices());
-        int winner = aggregate.winnerIndex();
-        // 赢家子段补 ★：与 COMPETE 同一口径，时间线能看出终答取自哪一位
-        if (winner >= 0 && winner < segments.size()) {
-            RouteSegment old = segments.get(winner);
-            segments.set(winner, new RouteSegment(
-                    (old.routeLine() == null ? "" : old.routeLine()) + " · ★ 选中", old.turn(), old.error(),
-                    old.children(), old.reasoning()).withWorkflow(old.workflow())
-                    .withParticipant(old.participant()));
-        }
-        if (aggregate.segmentLine() != null) {
-            segments.add(new RouteSegment(aggregate.segmentLine(), null, null));
-        }
-        // 真汇总的标记与推理交给本轮暂存：写时间线时要先落「方案结论：X」，再落它的思考
-        TurnNotes notes = NOTES.get();
-        if (notes != null && aggregate.conclusionName() != null) {
-            notes.conclusionName = aggregate.conclusionName();
-            if (aggregate.reasoning() != null) {
-                notes.conclusionReasoning.append(aggregate.reasoning());
-            }
-        }
+        return fixedTopology.execute(parent, spec, userText, modelUser, userId, sessionId, progress, runtime,
+                parentLimits, rootId(parent), rootName(parent, spec));
     }
 
     /**
@@ -2183,803 +938,6 @@ public class RouterTrialExecutor {
     }
 
     /**
-     * 调判定模型：有思考出口就走带 {@code progress} 的重载，没有就走不接受推理的同源重载。
-     *
-     * <p>为什么不一律传 {@code progress}：判定执行器的四参版本是「没人接收推理」的既有契约
-     * （调试、单测都按它桩），入口 / 方案分流必须复用同一份判定实现，
-     * 因此这里按「本轮是否有推理出口」选重载，而不是另写一条判定路径。
-     * 两条重载最终都落到同一段流式判定代码，判定结果与提示词完全一致。
-     *
-     * @param scope    父 Agent / 父模型 / 会话
-     * @param prompt   候选与规则提示词
-     * @param userText 用户原文
-     * @param limits   判定生效限制
-     * @param progress 可空思考出口；空则等价于不带推理的四参调用
-     * @return 模型原文（机器 JSON，由调用方解析）
-     */
-    private String judgeReply(MeterScope scope, String prompt, String userText, EffectiveLimits limits,
-                              TrialProgress progress) {
-        if (progress == null) {
-            return react.judge(scope, prompt, userText, limits);
-        }
-        // 判定模型的思考边下发边抄一份：入口 / 方案分流的思考框刷新后要还在
-        TurnNotes notes = NOTES.get();
-        TrialProgress sink = notes == null ? progress
-                : new ReasoningMemo(progress, notes.judgeReasoning);
-        return react.judge(scope, prompt, userText, limits, sink);
-    }
-
-    /**
-     * 判路由主链（并行模板）。所属域：runtime。
-     *
-     * <p>刀3 起多一个可选的 {@link RouteHint}：
-     * <ol>
-     *   <li><b>强制线路</b>：用户手动换线后的一轮，跳过关键字与判路由，直接命中该候选；</li>
-     *   <li><b>沿用线路</b>：把「本会话当前线路是 X，仍属同一业务请继续输出 X」拼进判路由提示词，
-     *       判路由仍可返回别的键（＝Router 改派）；</li>
-     *   <li>{@code hint == null} 时三条路径与刀3 之前完全一致，调试 / 试跑不受影响。</li>
-     * </ol>
-     *
-     * <p>强制目标若已被停用 / 删除（候选不再出现），不伪造命中：回落正常判路由，
-     * 由上层写一条「手动换线目标已失效」的可见说明。
-     *
-     * <p>单问在关键字未命中之后、判定模型之前做多项交付覆盖。覆盖已经能定线就不再打模型，
-     * 避免先打一次再把结果作废。点名、关键字、手动换线仍不打模型。
-     *
-     * @param hint 线路提示；可空
-     * @param progress 可空的思考出口：判定模型的真实推理经它推出，前端归到入口 / 方案块
-     * @return 命中意图 + 是否走了手动换线 + 强制目标是否失效
-     */
-    private RoutedChoice choose(AgentDef parent, MaRunSpec spec, EffectiveLimits parentLimits,
-                                AgentRuntimeConfig runtime, String userText, List<Candidate> candidates,
-                                long userId, long sessionId, long deadlineNanos, RouteHint hint,
-                                TrialProgress progress) {
-        int maxN = runtime.maxRouteChildrenOrDefault();
-        boolean forceMissed = false;
-        // 1) 手动换线优先于一切：用户已经指定线路，不再花一次判路由，也不再被关键字抢先
-        if (hint != null && hint.forced()) {
-            Candidate forced = RouterCandidateLoader.byRouteKey(candidates, hint.forceRouteKey());
-            if (forced != null) {
-                // 强制轮恒为单意图：用户选的是一个候选，不是协作。
-                // 理由只作为「来源标记」传给前端识别手动换线，前端不会把它当判定依据展示
-                return new RoutedChoice(List.of(new RoutedIntent(forced, userText, "手动换线")), true, false);
-            }
-            forceMissed = true;
-        }
-        /*
-         * 2) 一条消息里的多个问题：先切问，再逐问选目标。
-         *
-         * <p>为什么必须排在建点 / 关键字 / 判路由之前：那三处都是「整段只留一个目标」的口径
-         * ——点名方案会把后一问一起交给该方案，多项交付覆盖也会把整段收给同一个方案，
-         * 一旦先跑，第二问就再也出不来（本轮要修的就是这件事）。
-         *
-         * <p>切问只看「是否另有第二件事」，不看入口的「单问多意图协作」开关：
-         * 这里是两个问题各回各家，不是一个问题拆给多人；后者由开关控制。
-         */
-        List<EntryQuestionSplitter.Question> questions = questionsOf(spec, userText, candidates);
-        if (questions.size() >= 2) {
-            return chooseForQuestions(parent, spec, parentLimits, runtime, questions, candidates,
-                    userId, sessionId, deadlineNanos, forceMissed, progress);
-        }
-        // 入口点名方案优先于关键字和模型：裸专家的 route_key 即使撞上问句里的词，也不能把已点名的方案截走
-        RoutedChoice named = entryNamedChoice(spec, userText, candidates, forceMissed);
-        if (named != null) {
-            return named;
-        }
-        List<AgentRoute> keywordHits = RouteKeywordPicker.matchAll(userText,
-                candidates.stream().map(Candidate::route).toList(),
-                runtime.multiIntentOn() ? maxN : 1);
-        if (!keywordHits.isEmpty()) {
-            List<RoutedIntent> intents = new ArrayList<>();
-            for (AgentRoute route : keywordHits) {
-                Candidate hit = candidateOf(candidates, route);
-                // 关键字无法可靠切句，整句作 sub_query；理由只作「来源标记」，前端识别后不会当依据展示
-                intents.add(new RoutedIntent(hit, userText, "关键字"));
-            }
-            RoutedChoice covered = entryCoveringChoice(spec, userText, candidates, forceMissed);
-            if (covered != null) {
-                return covered;
-            }
-            return new RoutedChoice(intents, false, forceMissed);
-        }
-        // 关键字未命中时，多项交付覆盖先于判定模型：已经能定线就不再打一次再作废。
-        // 顺序与逐问路径一致，不改提示词，也不按某一类模板另写特例。
-        RoutedChoice covered = entryCoveringChoice(spec, userText, candidates, forceMissed);
-        if (covered != null) {
-            return covered;
-        }
-        Optional<Long> parentModel = resolveRouterModel(parent, spec);
-        if (parentModel.isEmpty()) {
-            Candidate first = candidates.get(0);
-            // 方案以自己为根：只能靠方案配判路由模型；没配就退化为第一条，文案必须点名是方案缺配置
-            String reason = spec != null
-                    ? "方案未配置判路由模型（maJudgeModelInstanceId / maJudgeModel），未命中关键词，使用第一条候选"
-                    : "未命中关键词且没有可用的判路由模型，使用第一条候选";
-            return new RoutedChoice(List.of(new RoutedIntent(first, userText, reason)), false, forceMissed);
-        }
-        try {
-            assertParentDeadline(deadlineNanos);
-            long remainingMs = Math.max(1000L, (deadlineNanos - System.nanoTime()) / 1_000_000L);
-            EffectiveLimits judgeLimits = parentLimits.withTimeoutMs(Math.min(parentLimits.timeoutMs(), remainingMs));
-            // 判定模型读「带会话前文的用户侧文本」，模板里的 {{user_query}} 仍走 userText：
-            // 前者让「1 / 第二个」这类回答能接上上一轮，后者保持用户原文口径不被历史污染
-            String judgeUser = hint != null && hint.judgeInput() != null ? hint.judgeInput() : userText;
-            String reply = judgeReply(
-                    MeterScope.console(rootId(parent), parentModel.get(), sessionId, userId),
-                    judgePrompts.judgePrompt(parent, candidates, runtime, userText, hint, spec), judgeUser, judgeLimits,
-                    progress);
-            List<String> keys = candidates.stream()
-                    .map(item -> item.route().getRouteKey())
-                    .filter(key -> key != null && !key.isBlank())
-                    .toList();
-            List<RouteDecisionParser.Item> parsed = RouteDecisionParser.parse(reply, keys, maxN, userText);
-            if (!runtime.multiIntentOn() && parsed.size() > 1) {
-                parsed = List.of(parsed.get(0));
-            }
-            if (!parsed.isEmpty()) {
-                Map<String, Candidate> byKey = new LinkedHashMap<>();
-                for (Candidate candidate : candidates) {
-                    String key = candidate.route().getRouteKey();
-                    if (key != null && !key.isBlank()) {
-                        byKey.putIfAbsent(key.trim().toLowerCase(), candidate);
-                    }
-                }
-                List<RoutedIntent> intents = new ArrayList<>();
-                for (RouteDecisionParser.Item item : parsed) {
-                    Candidate hit = byKey.get(item.routeKey().toLowerCase());
-                    if (hit != null) {
-                        // 理由随本次判定产出；为空就留空，由前端降级为中性句，不再补系统标签
-                        intents.add(new RoutedIntent(hit, item.subQuery(), item.reason()));
-                    }
-                }
-                if (!intents.isEmpty()) {
-                    return new RoutedChoice(intents, false, forceMissed);
-                }
-            }
-        } catch (TrialFailure ex) {
-            if (LimitHitReasons.TIMEOUT.equals(ex.getFinishReason())) {
-                throw ex;
-            }
-            Candidate first = candidates.get(0);
-            return new RoutedChoice(List.of(new RoutedIntent(first, userText, "路由模型判定失败，使用第一条")),
-                    false, forceMissed);
-        }
-        Candidate first = candidates.get(0);
-        return new RoutedChoice(List.of(new RoutedIntent(first, userText, "路由模型未给出有效 route_key，使用第一条")),
-                false, forceMissed);
-    }
-
-    /**
-     * 一条消息切成多问时，逐问选目标。所属域：runtime。
-     *
-     * <p>顺序与单问一致（点名方案 → 关键字 → 多项交付覆盖 → 判路由模型 → 第一条兜底），
-     * 但每一处只看**这一问**的原文，不再拿整条消息去截一个目标。
-     * 两问打到同一条线路时并成一次执行、子问题接在后面，绝不丢问题。
-     *
-     * @param parent        编排根；可空
-     * @param spec          当前方案（入口）
-     * @param parentLimits  父墙钟与轮次上限
-     * @param runtime       运行配置
-     * @param questions     已切开的问题（≥2）
-     * @param candidates    本轮可用候选
-     * @param userId        平台用户
-     * @param sessionId     当前会话
-     * @param deadlineNanos 父墙钟截止
-     * @param forceMissed   强制线路已失效，需要带给上层写说明
-     * @param progress      可空思考出口
-     * @return 按问题顺序排列的意图；{@code multiQuestion=true}
-     */
-    private RoutedChoice chooseForQuestions(AgentDef parent, MaRunSpec spec, EffectiveLimits parentLimits,
-                                            AgentRuntimeConfig runtime,
-                                            List<EntryQuestionSplitter.Question> questions,
-                                            List<Candidate> candidates, long userId, long sessionId,
-                                            long deadlineNanos, boolean forceMissed, TrialProgress progress) {
-        /*
-         * 目标数上限用平台硬顶（最多 5 路），不读入口配置里的 maxRouteChildren：
-         * 那个值是「一个问题最多分给几个目标」的协作上限，拿来截断问题条数会把后一问直接丢掉。
-         */
-        int cap = Math.max(2, AgentRuntimeConfig.MAX_ROUTE_CHILDREN_CAP);
-        List<EntryQuestionSplitter.Question> parts = questions.size() > cap
-                ? new ArrayList<>(questions.subList(0, cap)) : new ArrayList<>(questions);
-        // 超过硬顶的问题不丢：并进最后一路的子问题，仍由那一路处理
-        StringBuilder overflow = new StringBuilder();
-        if (questions.size() > cap) {
-            for (int i = cap; i < questions.size(); i++) {
-                overflow.append('\n').append(questions.get(i).subQuery());
-            }
-        }
-        // 多项交付覆盖要读每个方案的启用成员，逐问重复查库没有意义：本轮取一次
-        Map<Long, List<EntrySchemePreference.MemberDuty>> duties = isEntryRouter(spec)
-                ? entryMemberDuties(candidates) : Map.of();
-        // 同一轮各问共用一份已装配的 ROUTER 前缀；第一次真正打模型时才装配，点名/关键字/覆盖不触发
-        RouterJudgePromptFactory.TurnJudgePrompt sharedPrompt = judgePrompts.newTurnPrompt();
-        Map<String, RoutedIntent> byKey = new LinkedHashMap<>();
-        for (int i = 0; i < parts.size(); i++) {
-            EntryQuestionSplitter.Question question = parts.get(i);
-            RoutedIntent one = routeOneQuestion(parent, spec, parentLimits, runtime, question, candidates,
-                    duties, userId, sessionId, deadlineNanos, progress, sharedPrompt);
-            String key = one.candidate().route().getRouteKey();
-            String normalized = key == null || key.isBlank() ? "q-" + i : key.trim().toLowerCase();
-            RoutedIntent existing = byKey.get(normalized);
-            if (existing == null) {
-                byKey.put(normalized, one);
-            } else {
-                // 两问命中同一条线路：一次执行带两个子问题，后一问不能被同名去重吃掉
-                byKey.put(normalized, new RoutedIntent(existing.candidate(),
-                        existing.subQuery() + "\n" + one.subQuery(), existing.reason()));
-            }
-        }
-        List<RoutedIntent> intents = new ArrayList<>(byKey.values());
-        if (overflow.length() > 0 && !intents.isEmpty()) {
-            int last = intents.size() - 1;
-            RoutedIntent tail = intents.get(last);
-            intents.set(last, new RoutedIntent(tail.candidate(),
-                    tail.subQuery() + overflow, tail.reason()));
-        }
-        return new RoutedChoice(intents, false, forceMissed, true);
-    }
-
-    /**
-     * 只针对一个问题的目标选择（多问拆分的每一步）。所属域：runtime。
-     *
-     * <p>禁止在这里再看整条用户消息：点名方案 / 关键字 / 覆盖判定都只作用于这一问，
-     * 否则又会回到「一段话交给一个目标」的老问题。
-     *
-     * @param question     切出来的一问（text 用于判定，subQuery 用于执行）
-     * @param duties       方案 → 启用成员职责；可空
-     * @param sharedPrompt 本轮多次判定共用的系统提示；只在真正打模型时装配一次
-     * @return 该问命中的目标；永不为空（最后兜底第一条候选）
-     */
-    private RoutedIntent routeOneQuestion(AgentDef parent, MaRunSpec spec, EffectiveLimits parentLimits,
-                                          AgentRuntimeConfig runtime, EntryQuestionSplitter.Question question,
-                                          List<Candidate> candidates,
-                                          Map<Long, List<EntrySchemePreference.MemberDuty>> duties,
-                                          long userId, long sessionId, long deadlineNanos,
-                                          TrialProgress progress, RouterJudgePromptFactory.TurnJudgePrompt sharedPrompt) {
-        String text = question.text() == null ? "" : question.text().trim();
-        String query = question.subQuery() == null || question.subQuery().isBlank() ? text : question.subQuery();
-        // 1) 这一问点名了某个方案：只把这一问交给它，不再牵连其它问题
-        if (isEntryRouter(spec)) {
-            Candidate named = EntrySchemePreference.namedScheme(text, candidates);
-            if (named != null) {
-                return new RoutedIntent(named, query, EntrySchemePreference.NAMED_REASON);
-            }
-        }
-        // 2) 这一问的多项交付能被某个方案覆盖：交给方案再分发（同一问，不拆）
-        Candidate covered = isEntryRouter(spec)
-                ? EntrySchemePreference.coveringScheme(text, candidates, duties) : null;
-        // 3) 关键字：只看这一问自己的字面命中
-        List<AgentRoute> keywordHits = RouteKeywordPicker.matchAll(text,
-                candidates.stream().map(Candidate::route).toList(), 1);
-        if (!keywordHits.isEmpty()) {
-            if (covered != null) {
-                return new RoutedIntent(covered, query, EntrySchemePreference.MULTI_REASON);
-            }
-            return new RoutedIntent(candidateOf(candidates, keywordHits.get(0)), query, "关键字");
-        }
-        if (covered != null) {
-            return new RoutedIntent(covered, query, EntrySchemePreference.MULTI_REASON);
-        }
-        // 3b) 明确写了「按工作流跑 / 走方案执行」：该类型只有一个候选时直接命中。
-        //     只认「运行类动词 + 目标类型」，避免把「工作流的节点怎么配置」这种咨询也当运行请求。
-        Candidate byKind = explicitTargetKind(text, candidates);
-        if (byKind != null) {
-            return new RoutedIntent(byKind, query, EXPLICIT_KIND_REASON);
-        }
-        // 4) 判路由模型：每问一次，输入就是这一问，避免模型把两问揉成一条
-        Optional<Long> parentModel = resolveRouterModel(parent, spec);
-        if (parentModel.isPresent()) {
-            try {
-                assertParentDeadline(deadlineNanos);
-                long remainingMs = Math.max(1000L, (deadlineNanos - System.nanoTime()) / 1_000_000L);
-                EffectiveLimits judgeLimits = parentLimits.withTimeoutMs(
-                        Math.min(parentLimits.timeoutMs(), remainingMs));
-                // 系统提示复用本轮已装配的前缀，用户侧只送这一问
-                String reply = judgeReply(
-                        MeterScope.console(rootId(parent), parentModel.get(), sessionId, userId),
-                        sharedPrompt.forQuestion(parent, candidates, runtime, null, spec, text),
-                        text, judgeLimits, progress);
-                List<String> keys = candidates.stream()
-                        .map(item -> item.route().getRouteKey())
-                        .filter(key -> key != null && !key.isBlank())
-                        .toList();
-                List<RouteDecisionParser.Item> parsed = RouteDecisionParser.parse(reply, keys, 1, text);
-                for (RouteDecisionParser.Item item : parsed) {
-                    Candidate hit = RouterCandidateLoader.byRouteKey(candidates, item.routeKey());
-                    if (hit != null) {
-                        // 理由随判定一次产出；为空就留空，由前端降级成中性句，不在这里补系统标签
-                        return new RoutedIntent(hit, query, item.reason());
-                    }
-                }
-            } catch (TrialFailure ex) {
-                if (LimitHitReasons.TIMEOUT.equals(ex.getFinishReason())) {
-                    throw ex;
-                }
-                log.info("工作台入口单问判定失败，使用第一条候选 text={} reason={}", text, ex.getMessage());
-            } catch (RuntimeException ex) {
-                log.warn("工作台入口单问判定异常 text={} type={} cause={}", text,
-                        ex.getClass().getSimpleName(), CauseDigest.of(ex), ex);
-            }
-        }
-        return new RoutedIntent(candidates.get(0), query, "该问题未命中专用目标，使用第一条候选");
-    }
-
-    /**
-     * 这一问是否明确要求「用工作流 / 走方案」执行；该类型只有一个候选时返回它。所属域：runtime。
-     *
-     * <p>只认「目标类型 + 运行类动词」的组合：用户说「按工作流跑一次」意图很明确，
-     * 却可能因为工作流候选的 route_key / 意图描述里没有「工作流」二字而落空；
-     * 反过来，「工作流的节点怎么配置」这种咨询带不上运行动词，不会被误判成运行请求。
-     *
-     * @param text       这一问的原文
-     * @param candidates 本轮可用候选
-     * @return 唯一同类型候选；没有或同类有多个时为空
-     */
-    private static Candidate explicitTargetKind(String text, List<Candidate> candidates) {
-        if (text == null || text.isBlank() || candidates == null) {
-            return null;
-        }
-        boolean runVerb = containsAny(text, List.of("跑", "执行", "运行", "走一遍", "试一下", "试试"));
-        if (!runVerb) {
-            return null;
-        }
-        if (text.contains("工作流")) {
-            Candidate only = null;
-            for (Candidate candidate : candidates) {
-                if (!candidate.isWorkflowTarget()) {
-                    continue;
-                }
-                if (only != null) {
-                    return null;
-                }
-                only = candidate;
-            }
-            return only;
-        }
-        if (text.contains("方案")) {
-            Candidate only = null;
-            for (Candidate candidate : candidates) {
-                if (!candidate.isMaTarget()) {
-                    continue;
-                }
-                if (only != null) {
-                    return null;
-                }
-                only = candidate;
-            }
-            return only;
-        }
-        return null;
-    }
-
-    /** 用户明确点名「按工作流 / 走方案」时写进依据的一句人话。 */
-    private static final String EXPLICIT_KIND_REASON = "用户明确要求按该运行方式执行";
-
-    /** 方案内层按成员职责覆盖命中时写进依据的一句人话。 */
-    private static final String COVERED_REASON = "问句点名了该成员的职责范围，按方案成员分工直接派出";
-
-    /**
-     * 方案链路：这一问按成员名称 / 简介打中了哪几名候选。所属域：runtime。
-     *
-     * <p>口径复用 {@link EntrySchemePreference#coveredBy}（与入口 coveringScheme 同源），
-     * 这里只负责三件衔接工作：
-     * <ol>
-     *   <li>把当前候选拍成「成员名称 + 简介」并保持候选顺序；</li>
-     *   <li>只取子 Agent 候选参与判定——方案 / 工作流目标没有「成员职责」语义，
-     *       它们的说明是线路说明，按名称匹配容易误伤，留给判路由模型判断；</li>
-     *   <li>命中顺序就是派发顺序（上层再按 sortOrder 排一次，两者一致）。</li>
-     * </ol>
-     *
-     * <p>旧 {@code agent_route} 口径（{@code spec == null}）恒返回空表：那条链的候选本来就是
-     * 单兵池，没有「方案成员分工」这层语义，保持现网行为不变。
-     *
-     * @param spec       当前方案执行来源；可空（旧口径）
-     * @param userText   用户原问
-     * @param candidates 本轮可用候选
-     * @return 按候选顺序命中的子 Agent 候选；没有命中或非方案链路时为空表
-     */
-    private List<Candidate> coveredMembers(MaRunSpec spec, String userText, List<Candidate> candidates) {
-        if (spec == null || candidates == null || candidates.isEmpty() || userText == null || userText.isBlank()) {
-            return List.of();
-        }
-        // 只有子 Agent 候选参与：方案 / 工作流目标的说明是线路说明，不按成员名称匹配
-        List<Candidate> plain = new ArrayList<>();
-        List<EntrySchemePreference.MemberDuty> duties = new ArrayList<>();
-        for (Candidate candidate : candidates) {
-            if (candidate == null || candidate.agent() == null || candidate.delegatedTarget()) {
-                continue;
-            }
-            plain.add(candidate);
-            duties.add(new EntrySchemePreference.MemberDuty(
-                    candidate.agent().getName(), candidate.agent().getDescription()));
-        }
-        boolean[] hit = EntrySchemePreference.coveredBy(userText, duties);
-        List<Candidate> covered = new ArrayList<>();
-        for (int i = 0; i < hit.length; i++) {
-            if (hit[i]) {
-                covered.add(plain.get(i));
-            }
-        }
-        return covered;
-    }
-
-    /**
-     * 判断文本是否包含任一标记。
-     *
-     * @param text    原文；可空
-     * @param markers 标记词
-     * @return true 表示命中
-     */
-    private static boolean containsAny(String text, List<String> markers) {
-        if (text == null) {
-            return false;
-        }
-        for (String marker : markers) {
-            if (marker != null && !marker.isEmpty() && text.contains(marker)) {
-                return true;
-            }
-        }
-        return false;
-    }
-
-    /**
-     * 入口候选的展示名，供切问判断「这一段是否在指向另一条线路」。所属域：runtime。
-     *
-     * @param candidates 本轮可用候选
-     * @return 展示名（去空、去重）；无名称时候选为空表
-     */
-    private List<String> candidateNames(List<Candidate> candidates) {        List<String> names = new ArrayList<>();
-        for (Candidate candidate : candidates == null ? List.<Candidate>of() : candidates) {
-            String name = candidate.agent() == null ? "" : candidate.agent().getName();
-            String trimmed = name == null ? "" : name.trim();
-            if (trimmed.length() >= 2 && !names.contains(trimmed)) {
-                names.add(trimmed);
-            }
-        }
-        return names;
-    }
-
-    /**
-     * 切问入口：只有工作台入口才切，其它方案仍按「一段话一个诉求」执行。所属域：runtime。
-     *
-     * @param spec       当前方案；可空
-     * @param userText   用户原话
-     * @param candidates 本轮可用候选
-     * @return 至少一条问题；非入口恒为一条
-     */
-    private List<EntryQuestionSplitter.Question> questionsOf(MaRunSpec spec, String userText,
-                                                            List<Candidate> candidates) {
-        if (!isEntryRouter(spec)) {
-            return List.of(new EntryQuestionSplitter.Question(userText, userText));
-        }
-        return EntryQuestionSplitter.split(userText, candidateNames(candidates));
-    }
-
-    /**
-     * 入口问句点名了某个已启用方案时，整句只交给该方案。
-     *
-     * <p>非入口返回 null，普通方案内部的选人不受影响。手动换线已在调用前返回。
-     *
-     * @param spec        当前方案；入口列是 {@code ENTRY_ROUTER}
-     * @param userText    用户原问
-     * @param candidates  本轮可用候选
-     * @param forceMissed 强制线路已失效，需要带给上层写说明
-     * @return 只含该方案的选择；没有点名时 null
-     */
-    private RoutedChoice entryNamedChoice(MaRunSpec spec, String userText, List<Candidate> candidates,
-                                          boolean forceMissed) {
-        if (!isEntryRouter(spec)) {
-            return null;
-        }
-        Candidate named = EntrySchemePreference.namedScheme(userText, candidates);
-        if (named == null) {
-            return null;
-        }
-        return new RoutedChoice(List.of(new RoutedIntent(named, userText, EntrySchemePreference.NAMED_REASON)),
-                false, forceMissed);
-    }
-
-    /**
-     * 入口问句打中同一方案的多项交付时，丢掉单兵选择，整句交给该方案再分发。
-     *
-     * <p>单项问题打不中两名成员，这里返回 null，原来的专家选择保留。
-     * 成员名称和简介按已装载的子候选现查，不改库里的池和简介。
-     *
-     * @param spec        当前方案
-     * @param userText    用户原问
-     * @param candidates  本轮可用候选
-     * @param forceMissed 强制线路已失效
-     * @return 只含该方案的选择；没有多项覆盖时 null
-     */
-    private RoutedChoice entryCoveringChoice(MaRunSpec spec, String userText, List<Candidate> candidates,
-                                             boolean forceMissed) {
-        if (!isEntryRouter(spec)) {
-            return null;
-        }
-        Candidate covered = EntrySchemePreference.coveringScheme(userText, candidates, entryMemberDuties(candidates));
-        if (covered == null) {
-            return null;
-        }
-        return new RoutedChoice(List.of(new RoutedIntent(covered, userText, EntrySchemePreference.MULTI_REASON)),
-                false, forceMissed);
-    }
-
-    /**
-     * 入口池里每个方案的启用成员（名称 + 简介），供多项交付判定。
-     *
-     * <p>只读已启用的单兵成员。方案套方案的下一层不在这里展开，避免把正常的多层分发误判成覆盖。
-     *
-     * @param candidates 入口本轮可用候选
-     * @return 方案主键 → 成员职责；没有方案候选时为空表
-     */
-    private Map<Long, List<EntrySchemePreference.MemberDuty>> entryMemberDuties(List<Candidate> candidates) {
-        Map<Long, List<Long>> memberIds = new LinkedHashMap<>();
-        List<Long> allIds = new ArrayList<>();
-        for (Candidate candidate : candidates) {
-            if (!candidate.isMaTarget() || candidate.maTarget() == null || candidate.maTarget().maId() == null) {
-                continue;
-            }
-            List<Long> ids = new ArrayList<>();
-            for (MaCandidate member : candidate.maTarget().candidates()) {
-                if (member.getAgentId() == null || member.isMaTarget() || member.isWorkflowTarget()) {
-                    continue;
-                }
-                if (member.getEnabled() != null && member.getEnabled() != AgentStatus.ENABLED) {
-                    continue;
-                }
-                ids.add(member.getAgentId());
-                allIds.add(member.getAgentId());
-            }
-            memberIds.put(candidate.maTarget().maId(), ids);
-        }
-        Map<Long, AgentDef> defs = new LinkedHashMap<>();
-        if (!allIds.isEmpty()) {
-            for (AgentDef agent : agents.findByIds(allIds)) {
-                if (agent != null && agent.getId() != null) {
-                    defs.put(agent.getId(), agent);
-                }
-            }
-        }
-        Map<Long, List<EntrySchemePreference.MemberDuty>> duties = new LinkedHashMap<>();
-        for (Map.Entry<Long, List<Long>> entry : memberIds.entrySet()) {
-            List<EntrySchemePreference.MemberDuty> rows = new ArrayList<>();
-            for (Long id : entry.getValue()) {
-                AgentDef agent = defs.get(id);
-                if (agent == null) {
-                    continue;
-                }
-                rows.add(new EntrySchemePreference.MemberDuty(agent.getName(), agent.getDescription()));
-            }
-            duties.put(entry.getKey(), rows);
-        }
-        return duties;
-    }
-
-    /** 当前执行来源是不是工作台入口。列上的模板码为准，不看配置 JSON 里残留的串行码。 */
-    private static boolean isEntryRouter(MaRunSpec spec) {
-        return spec != null && AgentRuntimeConfig.isEntryRouterTemplate(spec.template());
-    }
-
-    /**
-     * 线路类可见说明：手动换线 / 强制目标失效。
-     *
-     * <p>只写用户能理解的中文与候选展示名，不暴露 route_key；
-     * 这些说明会落成 SYSTEM 事件（思考区），不打断正文。
-     * 沿用线路与本轮选择不同时不写「已将线路改派」：入口路由行已经是本轮的唯一分发，
-     * 再补一条从旧线路指向新线路的说明，页面上就是说完又改口。
-     *
-     * @param choice  判路由结果
-     * @param intents 最终执行的意图（已被多意图开关截断）
-     * @return 中文说明；不需要说明时为空列表
-     */
-    private List<String> routeNotices(RoutedChoice choice, List<RoutedIntent> intents) {
-        List<String> notices = new ArrayList<>();
-        if (choice.forceMissed()) {
-            notices.add("手动换线的目标线路已停用或不存在，本轮改由 Router 重新判定");
-        }
-        if (intents.isEmpty() || !choice.manual()) {
-            return notices;
-        }
-        notices.add("手动换线：本轮按你选择的线路「" + childLabel(intents.get(0).candidate().agent())
-                + "」执行，未走判路由");
-        return notices;
-    }
-
-    /**
-     * 严格版判路由（供 {@code ROUTER_THEN_SEQUENCE} 使用）。所属域：runtime。
-     *
-     * <p>与 {@link #choose} 的唯一差别是<b>不做兜底</b>：判路由是本模板的执行前提，
-     * 父模型缺失 / 调用失败 / 解析不到有效 route_key 都要整次 FAIL。若像并行模板那样
-     * 「拿第一条候选顶上」，用户看到的串行链其实与判路由无关，会把「模板没生效」藏起来。
-     *
-     * <p>解析上限用平台硬顶 {@link AgentRuntimeConfig#MAX_ROUTE_CHILDREN_CAP}：
-     * 判路由提示词仍按配置的 maxRouteChildren 要求模型最多返回 N 项，
-     * 但解析不提前截断，这样「判定条数 > 配置上限」才能被上层识别并标 SKIPPED_QUOTA。
-     *
-     * @param parent       编排根（日志与计量）
-     * @param parentLimits 父墙钟与轮次上限
-     * @param runtime      运行配置（多意图开关 / 上限 / 允许的子模式）
-     * @param userText     用户原问全文
-     * @param candidates   可用候选（已过滤门闩）
-     * @param progress     可空的思考出口：判定模型的真实推理经它推出
-     * @return 按判定数组顺序排列的意图；非空
-     * @throws TrialFailure 判路由不可用或结果不可用；墙钟超时原样抛出
-     */
-    private List<RoutedIntent> chooseOrdered(AgentDef parent, MaRunSpec spec, EffectiveLimits parentLimits,
-                                             AgentRuntimeConfig runtime, String userText,
-                                             List<Candidate> candidates, long userId, long sessionId,
-                                             long deadlineNanos, TrialProgress progress) {
-        int maxN = runtime.maxRouteChildrenOrDefault();
-        /*
-         * 0) 方案链路先做「成员职责覆盖」：与入口 coveringScheme 同一套名称 / 简介口径，
-         *    只是这里数的是「当前方案有几名候选被打中」，不是「有几个方案能覆盖」。
-         *
-         * <p>为什么排在关键字与判定模型之前：本模板的候选是方案成员，route_key 多为
-         * {@code MA_KB_Policy} 这类英文键，对中文问句永远不命中；而判定模型会把握手式的
-         * 「整理要点 + 起草报告」收成「一件事的先后步骤」只派一位，把制度检索那一路丢掉。
-         * 命中几位就派几位，不再让模型决定条数。
-         *
-         * <p>命中 1 位也直接派：这一位已经是被问句明确对应的成员，再问一次模型只是多一次
-         * 出站调用与一次漂移机会。只有一位都没打中，才回到现网的关键字 → 判定模型。
-         *
-         * <p>只对方案链路生效（{@code spec != null}）；旧 {@code agent_route} 口径一行不变。
-         */
-        List<Candidate> covered = coveredMembers(spec, userText, candidates);
-        if (!covered.isEmpty()) {
-            List<RoutedIntent> coveredIntents = new ArrayList<>(covered.size());
-            for (Candidate hit : covered) {
-                // 每一块交付都按整句派：被覆盖的成员各自去处理自己那一块，子问题不再由模型切
-                coveredIntents.add(new RoutedIntent(hit, userText, COVERED_REASON));
-            }
-            return coveredIntents;
-        }
-        // 关键字优先与并行模板同口径：本地命中就不必再花一次判路由调用
-        List<AgentRoute> keywordHits = RouteKeywordPicker.matchAll(userText,
-                candidates.stream().map(Candidate::route).toList(),
-                runtime.multiIntentOn() ? maxN : 1);
-        if (!keywordHits.isEmpty()) {
-            List<RoutedIntent> intents = new ArrayList<>();
-            for (AgentRoute route : keywordHits) {
-                intents.add(new RoutedIntent(candidateOf(candidates, route), userText, "关键字"));
-            }
-            return intents;
-        }
-        Optional<Long> parentModel = resolveRouterModel(parent, spec);
-        if (parentModel.isEmpty()) {
-            throw new TrialFailure("路由后串行需要先判路由：父 Agent 未绑定「路由」用途的文本模型，"
-                    + "请先绑定再试跑（或改用固定串行模板）");
-        }
-        String reply;
-        try {
-            assertParentDeadline(deadlineNanos);
-            long remainingMs = Math.max(1000L, (deadlineNanos - System.nanoTime()) / 1_000_000L);
-            EffectiveLimits judgeLimits = parentLimits.withTimeoutMs(
-                    Math.min(parentLimits.timeoutMs(), remainingMs));
-            reply = judgeReply(
-                    MeterScope.console(rootId(parent), parentModel.get(), sessionId, userId),
-                    judgePrompts.judgePrompt(parent, candidates, runtime, userText, null, spec), userText, judgeLimits,
-                    progress);
-        } catch (TrialFailure ex) {
-            // 墙钟属于整次失败，保持 finishReason 供上层识别；其它判路由错误统一加中文前缀
-            if (LimitHitReasons.TIMEOUT.equals(ex.getFinishReason())) {
-                throw ex;
-            }
-            throw new TrialFailure("判路由失败：" + ex.getMessage());
-        } catch (RuntimeException ex) {
-            log.warn("路由后串行判路由异常 parentId={} type={} cause={}",
-                    rootId(parent), ex.getClass().getSimpleName(), CauseDigest.of(ex), ex);
-            throw new TrialFailure("判路由失败：路由模型调用异常，请稍后重试");
-        }
-        // 解析放在调用失败之外：模型答非所问属于结果问题，不该被包成「调用失败」
-        List<String> keys = candidates.stream()
-                .map(item -> item.route().getRouteKey())
-                .filter(key -> key != null && !key.isBlank())
-                .toList();
-        List<RouteDecisionParser.Item> parsed = RouteDecisionParser.parse(reply, keys,
-                AgentRuntimeConfig.MAX_ROUTE_CHILDREN_CAP, userText);
-        if (!runtime.multiIntentOn() && parsed.size() > 1) {
-            parsed = List.of(parsed.get(0));
-        }
-        if (parsed.isEmpty()) {
-            throw new TrialFailure("判路由失败：模型没有给出可用的 route_key，请检查路由模型或候选意图描述");
-        }
-        Map<String, Candidate> byKey = new LinkedHashMap<>();
-        for (Candidate candidate : candidates) {
-            String key = candidate.route().getRouteKey();
-            if (key != null && !key.isBlank()) {
-                byKey.putIfAbsent(key.trim().toLowerCase(), candidate);
-            }
-        }
-        List<RoutedIntent> intents = new ArrayList<>();
-        for (RouteDecisionParser.Item item : parsed) {
-            Candidate hit = byKey.get(item.routeKey().toLowerCase());
-            if (hit != null) {
-                // 与并行模板同口径：理由随本次判定产出，不在这里补系统标签
-                intents.add(new RoutedIntent(hit, item.subQuery(), item.reason()));
-            }
-        }
-        if (intents.isEmpty()) {
-            throw new TrialFailure("判路由失败：模型给出的 route_key 均未匹配当前候选，请检查候选配置");
-        }
-        return keepRuleCovered(intents, coveredMembers(spec, userText, candidates));
-    }
-
-    /**
-     * 判定模型的结果过一遍规则校验：规则已命中的成员不能被模型丢掉。所属域：runtime。
-     *
-     * <p>覆盖判定已经在模型之前返回，走到说明<b>一位都没被规则打中</b>，正常不会有补齐。
-     * 这里仍做一次并集：同一套匹配在本轮内可能因为调用顺序变化（例如先跑了关键字）
-     * 而让规则命中与模型结果并存，此时以「规则命中的都要留下」为准，
-     * 模型额外给的目标也保留——两边都不丢，顺序仍由上层按 sortOrder 定。
-     *
-     * <p>不在候选里的 route_key 在上一步已按现网丢弃，这里不碰。
-     *
-     * @param intents 判定模型给出的意图（已映射回候选）
-     * @param covered 规则命中的候选
-     * @return 并集；规则集为空时原样返回模型结果
-     */
-    private static List<RoutedIntent> keepRuleCovered(List<RoutedIntent> intents, List<Candidate> covered) {
-        if (covered == null || covered.isEmpty()) {
-            return intents;
-        }
-        Set<Long> present = new LinkedHashSet<>();
-        for (RoutedIntent intent : intents) {
-            Long key = routeIdentity(intent.candidate());
-            if (key != null) {
-                present.add(key);
-            }
-        }
-        List<RoutedIntent> merged = new ArrayList<>(intents);
-        for (Candidate hit : covered) {
-            Long key = routeIdentity(hit);
-            if (key != null && present.add(key)) {
-                merged.add(new RoutedIntent(hit, "", COVERED_REASON));
-            }
-        }
-        return merged;
-    }
-
-    /**
-     * 候选的稳定身份：方案链路按 ma_candidate 主键，旧口径按子 Agent 主键。所属域：runtime。
-     *
-     * @param candidate 候选；可空
-     * @return 身份键；都取不到时为 null
-     */
-    private static Long routeIdentity(Candidate candidate) {
-        if (candidate == null) {
-            return null;
-        }
-        if (candidate.route() != null && candidate.route().getId() != null) {
-            return candidate.route().getId();
-        }
-        return candidate.agent() == null ? null : candidate.agent().getId();
-    }
-
-    /**
-     * 撞到父墙钟即整次 FAIL（不降级）。实现同 {@link RouterClock#assertBefore(long)}，
-     * 保留本方法是为了让六套模板的调用点读起来仍是「本模板的墙钟检查」。
-     *
-     * @param deadlineNanos 父墙钟截止
-     */
-    private void assertParentDeadline(long deadlineNanos) {
-        RouterClock.assertBefore(deadlineNanos);
-    }
-
-    /**
-     * 路由展示摘要。无 route_key 时不拼空括号；子 Agent 优先名称，否则编码。
-     *
-     * <p>只做转发：文案口径单一真源在 {@link RouterTexts#routeSummary}，
-     * 理由为空时不拼「依据：」，由前端降级成中性句。
-     *
-     * @param hit    命中的候选
-     * @param reason 判路由模型给出的依据；可空
-     * @return 「路由到 …」中文摘要
-     */
-    private String routeSummary(Candidate hit, String reason) {
-        return RouterTexts.routeSummary(hit, reason);
-    }
-
-    /**
      * 子 Agent 显示名：名称 → 编码 → 兜底文案。实现见 {@link RouterTexts#childLabel}.
      *
      * @param agent 子 Agent；可空
@@ -2987,18 +945,6 @@ public class RouterTrialExecutor {
      */
     private String childLabel(AgentDef agent) {
         return RouterTexts.childLabel(agent);
-    }
-
-    /**
-     * 判路由 / 汇总模型解析：方案优先，旧 Agent 试跑才回落 Agent 模型槽。
-     * 实现见 {@link AnswerAggregator#resolveRouterModel}.
-     *
-     * @param parent 旧 Agent 试跑的 ROUTER；方案链路为 null
-     * @param spec   方案执行来源；可空
-     * @return 模型实例 id；都不可用时为空
-     */
-    private Optional<Long> resolveRouterModel(AgentDef parent, MaRunSpec spec) {
-        return answers.resolveRouterModel(parent, spec);
     }
 
     /**
@@ -3028,106 +974,18 @@ public class RouterTrialExecutor {
     }
 
     /**
-     * 汇总被挡下候选的具体原因（去重、保持出现顺序），供零可用时的中文失败文案。
-     *
-     * <p>把原因摊开而不是写「被编排开关或子运行模式」这种二选一模糊话术：
-     * 用户需要知道到底是去目标 Agent 开 allow_orchestrated，还是回编排 Tab 勾选「计划执行」。
-     *
-     * @param blocked 被挡下的候选，非空
-     * @return 以「、」连接的中文原因
-     */
-    private static String blockedReasons(List<BlockedCandidate> blocked) {
-        java.util.LinkedHashSet<String> reasons = new java.util.LinkedHashSet<>();
-        for (BlockedCandidate item : blocked) {
-            reasons.add(item.reason());
-        }
-        return String.join("、", reasons);
-    }
-
-    /**
-     * 竞争选优候选不足的中文失败文案。
-     *
-     * <p>把「可用数 / 被挡数 / 原因」一次说清：用户才知道是去加候选、启用候选，还是开 allow_orchestrated。
-     *
-     * @param usable  当前可用候选数
-     * @param blocked 被挡下的候选
-     * @return 中文文案
-     */
-    private static String competeTooFewText(int usable, List<BlockedCandidate> blocked) {
-        StringBuilder text = new StringBuilder("竞争选优至少需要 ")
-                .append(AgentRuntimeConfig.MIN_COMPETE_CANDIDATES)
-                .append(" 个可用候选，当前只有 ").append(usable).append(" 个");
-        if (blocked != null && !blocked.isEmpty()) {
-            text.append("（另有 ").append(blocked.size()).append(" 位专家未获本编排允许：")
-                    .append(blockedReasons(blocked)).append("）");
-        }
-        text.append("：请启用并授权更多候选专家");
-        return text.toString();
-    }
-
-    /**
-     * 把被挡下的子转成「已跳过」占位。
-     * <p>不伪造执行：turn 为空、skipped=true，因此不进终答拼接、不计 token，只在路由时间线留中文原因。
-     *
-     * @param blocked  被挡下的候选
-     * @param userText 用户原问（仅作占位意图的 subQuery，不会真送给子）
-     * @return 跳过占位行，顺序与 blocked 一致
-     */
-    private List<ChildOutcome> blockedOutcomes(List<BlockedCandidate> blocked, String userText) {
-        List<ChildOutcome> outcomes = new ArrayList<>(blocked.size());
-        for (BlockedCandidate blockedItem : blocked) {
-            Candidate candidate = blockedItem.candidate();
-            String label = childLabel(candidate.agent());
-            String reason = blockedItem.reason();
-            outcomes.add(ChildOutcome.skipped(
-                    new RoutedIntent(candidate, userText, reason,
-                            "已跳过 " + label + "：" + reason + "（" + RouterCandidateLoader.childModeText(blockedItem.runMode()) + "）"),
-                    "「" + label + "」" + reason + "，已跳过"));
-        }
-        return outcomes;
-    }
-
-    /**
-     * 按 route_key 定位候选（关键字命中用）。关键字选择器返回的是路由行本身，
-     * 因此优先按 route_key 取；MA 候选没有 child_agent_id，只有这条路可靠。
-     *
-     * @param candidates 可用候选
-     * @param route      关键字命中的路由行
-     * @return 对应候选；键对不上时退回首位，保证不因脏数据中断一轮
-     */
-    private Candidate candidateOf(List<Candidate> candidates, AgentRoute route) {
-        Candidate byKey = RouterCandidateLoader.byRouteKey(candidates, route.getRouteKey());
-        return byKey != null ? byKey : find(candidates, route.getChildAgentId());
-    }
-
-    /**
-     * 按子 Agent 主键找候选（旧路由行兜底）。agentId 为空（MA 候选）时直接退回首位，
-     * 不允许用 {@code equals(null)} 误命中。
-     *
-     * @param candidates 可用候选
-     * @param childId    子 Agent 主键；可空
-     * @return 命中的候选；找不到退回首位
-     */
-    private Candidate find(List<Candidate> candidates, Long childId) {
-        if (childId != null) {
-            for (Candidate item : candidates) {
-                if (childId.equals(item.agent().getId())) {
-                    return item;
-                }
-            }
-        }
-        return candidates.get(0);
-    }
-
-    /**
      * 判路由内部结果。所属域：runtime。
+     *
+     * <p>public 是因为产出方 {@code runtime.application.router.RouterJudge} 与消费方
+     * {@code RouterParallelTopology} 都在 router 包；字段与兼容构造保持拆前语义，
+     * 本刀不搬 DTO，仍随执行器一起演进。
      *
      * @param intents    命中的意图（至少 1 项）
      * @param manual     true 表示本轮由用户手动换线直接命中，跳过了判路由
      * @param forceMissed true 表示手动换线的目标已失效，本轮回落正常判路由
      */
-    private record RoutedChoice(List<RoutedIntent> intents, boolean manual, boolean forceMissed,
-                                boolean multiQuestion) {
+    public record RoutedChoice(List<RoutedIntent> intents, boolean manual, boolean forceMissed,
+                               boolean multiQuestion) {
 
         /**
          * 兼容构造：单问选择（点名 / 关键字 / 覆盖 / 模型 / 兜底）都不带「多问拆分」标记。
@@ -3320,32 +1178,4 @@ public class RouterTrialExecutor {
                     conclusionReasoning == null || conclusionReasoning.isBlank() ? null : conclusionReasoning;
         }
     }
-
-    /**
-     * 本轮判定 / 汇总推理的暂存。所属域：runtime。
-     *
-     * <p>为什么要单独一个对象：判路由与汇总都不把推理放进返回值，而是流式推给页面。
-     * 入口在执行开始时新建一份挂到当前线程，判路由与汇总各自往里写，退出时整体交给返回值落库。
-     *
-     * <p>只保存文本，不保存模型响应对象；不参与任何路由 / 汇总决策。
-     */
-    private static final class TurnNotes {
-        /** 判路由模型这一轮的推理（入口块 / 方案分流块的思考） */
-        private final StringBuilder judgeReasoning = new StringBuilder();
-        /** 真汇总记录名（方案名）；没有真汇总时为 null */
-        private String conclusionName;
-        /** 最外层入口身份；嵌套方案不写 */
-        private ParticipantView gateway;
-        /** 汇总模型这一轮的推理 */
-        private final StringBuilder conclusionReasoning = new StringBuilder();
-        /**
-         * 本轮是否允许唯一叶子输出可点选项块（工作台开启；嵌套方案 / 调试 / 试跑为 false）。
-         *
-         * <p>挂在线程上下文里而不是一路加参数：入口、判路由、汇总、模板分支的签名保持不动，
-         * 只有真正装配叶子的那一处读它；嵌套方案会新开一份 {@code TurnNotes}，天然不会继承外层开关。
-         */
-        private boolean leafChoice;
-    }
-
-
 }

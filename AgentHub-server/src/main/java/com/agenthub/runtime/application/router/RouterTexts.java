@@ -4,6 +4,7 @@ import com.agenthub.agent.domain.model.AgentDef;
 import com.agenthub.agent.domain.model.MaDef;
 
 import java.util.ArrayList;
+import java.util.LinkedHashSet;
 import java.util.List;
 
 /**
@@ -55,6 +56,48 @@ public final class RouterTexts {
         String head = key.isEmpty() ? "路由到 " + label : "路由到 " + label + "（" + key + "）";
         String text = reason == null ? "" : reason.trim();
         return text.isEmpty() ? head : head + "，依据：" + text;
+    }
+
+    /**
+     * 串行类模板的子块标题：执行序号 + 展示名 + 路由键。
+     *
+     * <p>固定串行 / 路由后串行 / 竞争选优共用这一份拼法，避免三处各写一份序号与括号规则。
+     * 序号即执行顺序，不是判定数组的先后。
+     *
+     * @param prefix 模板前缀（含结尾空格），如「固定串行 」「路由后串行 」「竞争选优 」
+     * @param hit    命中的候选
+     * @param index  1 起的执行序号
+     * @param total  本次执行步数
+     * @return 如「固定串行 1/3 · 售后专家（after_sale）」
+     */
+    public static String serialRouteLine(String prefix, Candidate hit, int index, int total) {
+        StringBuilder line = new StringBuilder(prefix);
+        line.append(index).append('/').append(total).append(" · ").append(childLabel(hit.agent()));
+        String key = hit.route().getRouteKey() == null ? "" : hit.route().getRouteKey().trim();
+        if (!key.isEmpty()) {
+            line.append("（").append(key).append("）");
+        }
+        return line.toString();
+    }
+
+    /**
+     * 被挡下候选的原因汇总（去重、保持出现顺序）。
+     *
+     * <p>把原因摊开而不是写「被编排开关或子运行模式」这种模糊话术：用户需要知道到底是去目标
+     * Agent 开 {@code allow_orchestrated}，还是回编排 Tab 勾选「计划执行」。
+     *
+     * @param blocked 被挡下的候选；可空
+     * @return 以「、」连接的中文原因；空表返回空串
+     */
+    public static String blockedReasons(List<BlockedCandidate> blocked) {
+        if (blocked == null || blocked.isEmpty()) {
+            return "";
+        }
+        LinkedHashSet<String> reasons = new LinkedHashSet<>();
+        for (BlockedCandidate item : blocked) {
+            reasons.add(item.reason());
+        }
+        return String.join("、", reasons);
     }
 
     /**
