@@ -397,20 +397,27 @@ export async function streamSessionMessage(
  * 选项可能被分流到别的 Agent 身上，续作就断线了。这个端点由后端直接派回同一位 Agent，
  * 前端只负责把 optionId 原样带上、帧协议照旧解析。
  *
+ * <p>平台追加的「其它，我自己说」没有模型 optionId：此时把用户写下的原文放进
+ * {@code text}，由后端按「本次答复」回到同一位专家；不带 {@code text} 的调用与改前完全一致。
+ *
  * @param prefix  接口前缀，如 `/api/runtime/workbench`
  * @param id      会话主键
- * @param optionId 被点选项的短标识（后端会对照最后一条助手消息上的选项块校验）
+ * @param optionId 被点选项的短标识（后端会对照最后一条助手消息上的选项块校验）；自填时可为空串
  * @param handlers 增量回调，与普通发送完全一致
  * @param signal   中止信号，可空
+ * @param text     自填答复原文；普通点选不传
  */
 export async function streamSessionChoice(
   prefix: string,
   id: number,
   optionId: string,
   handlers: TrialStreamHandlers,
-  signal?: AbortSignal
+  signal?: AbortSignal,
+  text?: string
 ) {
-  return streamSessionEndpoint(`${prefix}/sessions/${id}/choice/stream`, { optionId }, handlers, signal)
+  // text 只在实际自填时进请求体：普通点选保持原载荷，避免后端把选项文案误当自填答复
+  const payload = text ? { optionId, text } : { optionId }
+  return streamSessionEndpoint(`${prefix}/sessions/${id}/choice/stream`, payload, handlers, signal)
 }
 
 /**

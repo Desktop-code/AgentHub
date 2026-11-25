@@ -303,6 +303,7 @@
                   :page-active="pageActive"
                   :before-attachments="card.kind === 'gateway' && card.preprocess ? attachmentsBefore(row.turn) : NO_ATTACHMENTS"
                   @choose="onChoice(row.turn, $event)"
+                  @other="onChoiceOther(row.turn)"
                 />
               </template>
             </WorkbenchActorTree>
@@ -467,11 +468,13 @@
       :selected-route="selectedRoute"
       :can-stop="canStop"
       :resuming="resuming"
+      :card-running="cardRunning"
       :waiting-reply="waitingReply"
+      :custom-answer="customAnswerActive"
       :auto-speak="autoSpeak"
       :speaker-hint="speakerHint"
       @send="onComposerSend"
-      @stop="emit('stop')"
+      @stop="onComposerStop"
       @pick-route="onComposerPickRoute"
       @clear-route="emit('clear-route')"
       @toggle-auto-speak="toggleAutoSpeak"
@@ -494,7 +497,7 @@
  *
  * 折叠默认展开，仅当用户点过标题才收起；终答出现也不自动收起。
  */
-import { computed, onErrorCaptured, onMounted, onUpdated, reactive, ref, watch } from 'vue'
+import { computed, nextTick, onErrorCaptured, onMounted, onUpdated, reactive, ref, watch } from 'vue'
 import type {
   AssistantBlock,
   ChatTurn,
@@ -662,6 +665,14 @@ const props = defineProps<{
    * 缺省 false：管理端运行不传，行为与拆前一致。
    */
   resuming?: boolean
+  /**
+   * 最后一张工作流卡看起来还在跑（刷新丢了接管但卡片仍在转圈）。
+   *
+   * <p>与 {@code resuming} 并列：那一项是「本页重新接上了这一轮」，这一项是
+   * 「卡片自己说还在跑」。刷新后接管没命中时只有后者为真，输入区仍要显示停止。
+   * MA / 单 Agent 轮里没有工作流块，恒为 false。
+   */
+  cardRunning?: boolean
   /** 是否有模型配置权限：无权限时不渲染「去绑定模型」深链 */
   canConfigModel?: boolean
   /** 是否有对话路由配置权限：无权限时不渲染「去配置对话路由」深链 */
@@ -674,7 +685,19 @@ const props = defineProps<{
 }>()
 
 const emit = defineEmits<{
-  send: [content: string, images?: string[], files?: OutgoingFile[], order?: Array<'image' | 'file'>]
+  /**
+   * 发消息：正文 / 图片 / 文件 / 图文顺序，与拆前一致。
+   *
+   * <p>第五位 {@code customAnswer=true} 表示这句是从「其它 / 自填」输入条发出来的答复，
+   * 外层据此决定走 {@code /choice} 的 text 续作；其余入口不传，协议不变。
+   */
+  send: [
+    content: string,
+    images?: string[],
+    files?: OutgoingFile[],
+    order?: Array<'image' | 'file'>,
+    customAnswer?: boolean
+  ]
   /** 批准待执行计划；携带该轮 planId 便于定位 */
   approve: [planId?: string]
   /** 取消待执行计划 */
@@ -700,12 +723,28 @@ const emit = defineEmits<{
 
 /**
  * 输入条句柄：空态快捷卡只通过 {@link ChatComposer.sendPrompt} 走同一条发送逻辑，
- * 壳层不再另存一份正文（第二个真源会让草稿与附件状态对不上）。
+ * 壳层不再另存一份正文（第二个真源会让草稿与附件状态对不上）；
+ * 「其它 / 自填」也用它把焦点交回输入框。
  */
 const composerRef = ref<InstanceType<typeof ChatComposer>>()
 
 /**
+ * 是否处于「其它 / 自填」答复态。
+ *
+ * <p>点平台追加的「其它，我自己说」只置这一位并聚焦输入框，<b>不写回执、不发请求</b>；
+ * 用户自己写好并回车 / 点发送后，才由输入条按答复校验并交给外层：
+ * 单 Agent 选项仍开着时走 {@code /choice} 的 text 续作（回同一位专家、不重新判路由），
+ * 工作流 / 方案等待仍走普通发送续跑。
+ * 发送 / 点普通选项 / 停止 / 切会话任一发生即退出，避免下一条普通提问被当成答复去校验。
+ */
+const customAnswerActive = ref(false)
+
+/**
  * 转发输入条的发消息事件：正文 / 图片 / 文件 / 图文顺序原样交给外层，协议不变。
+ *
+ * <p>自填是一次性的：这里先把状态位取下来（下一条普通提问不再按答复口径校验），
+ * 再把「这句是不是自填答复」作为第五位参数交给外层；外层只在单 Agent 选项仍开着时
+ * 才改走 {@code /choice} 的 text 通道，工作流 / 方案等待仍按原发送续跑。
  *
  * @param content 正文（只发附件时为空串）
  * @param images  图片 dataUrl 列表
@@ -718,7 +757,16 @@ function onComposerSend(
   files?: OutgoingFile[],
   order?: Array<'image' | 'file'>
 ) {
-  emit('send', content, images, files, order)
+  // 自填是一次性的：发出即退出，下一条普通提问不再按答复长度 / 控制字符校验
+  const customAnswer = customAnswerActive.value
+  customAnswerActive.value = false
+  emit('send', content, images, files, order, customAnswer)
+}
+
+/** 转发停止：自填态随这一轮一起结束，避免停掉之后下一条仍被当成答复 */
+function onComposerStop() {
+  customAnswerActive.value = false
+  emit('stop')
 }
 
 /**
@@ -1478,8 +1526,39 @@ function onChoice(turn: ChatTurn, option: ParticipantChoiceOption) {
   if (!choiceClickable(turn) || !option?.id) {
     return
   }
+  // 点了普通项就退出自填态：接下来不会再按答复口径校验下一句
+  customAnswerActive.value = false
   emit('choice-selected', option.id, option.label)
 }
+
+/**
+ * 点平台追加的「其它，我自己说」：只进入输入，不提交任何答复。
+ *
+ * <p>刻意不在这里写回执 / 清选项 / 发请求：那样刷新后会留下「已经答复」的假状态；
+ * 真正的答复要等用户输入后走输入条的发送（工作流 / MA 由外层 send 当答复续跑）。
+ * 必须和普通选项同一道可点闸：历史轮、正在发送时点了也不该把焦点抢走。
+ *
+ * @param turn 选项所在那轮助手消息（仅用于可点性复核）
+ */
+function onChoiceOther(turn: ChatTurn) {
+  if (!choiceClickable(turn)) {
+    return
+  }
+  customAnswerActive.value = true
+  // 选项块在消息流里，输入条在底部：下一拍把焦点交给输入框，用户可直接开始写
+  void nextTick(() => composerRef.value?.focus())
+}
+
+/**
+ * 切会话即退出自填态：上一条会话的「答复」语义不能带到另一条会话的普通提问里。
+ * 停止 / 发送 / 点普通选项的退出点分别在各自回调里，这里只兜会话切换。
+ */
+watch(
+  () => props.draftKey,
+  () => {
+    customAnswerActive.value = false
+  }
+)
 
 /**
  * 首次挂载时加载工具展示名。

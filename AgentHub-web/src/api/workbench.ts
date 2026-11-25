@@ -112,18 +112,23 @@ export async function streamWorkbenchMessage(
  * 选项可能被分给别的 Agent；续作端点由服务端直接派回同一位 Agent，
  * 入口线（sticky）既不改也不清。
  *
+ * <p>点了平台追加的「其它，我自己说」后，用户写下的原文放进 {@code text}：
+ * optionId 可以是空串（自填行没有模型 option id），后端按「本次答复」续跑。
+ *
  * @param id       会话主键
- * @param optionId 被点选项的短标识（服务端对照最后一条助手消息上的选项块校验）
+ * @param optionId 被点选项的短标识（服务端对照最后一条助手消息上的选项块校验）；自填时为空串
  * @param handlers 增量回调，与普通发送完全一致
  * @param signal   中止信号，可空
+ * @param text     自填答复原文；普通点选不传
  */
 export async function streamWorkbenchChoice(
   id: number,
   optionId: string,
   handlers: TrialStreamHandlers,
-  signal?: AbortSignal
+  signal?: AbortSignal,
+  text?: string
 ) {
-  return streamSessionChoice(PREFIX, id, optionId, handlers, signal)
+  return streamSessionChoice(PREFIX, id, optionId, handlers, signal, text)
 }
 
 /**
@@ -132,11 +137,13 @@ export async function streamWorkbenchChoice(
  * <p>仅给不支持 SSE 的调用方兜底；工作台页面统一用 {@link streamWorkbenchChoice}。
  *
  * @param id       会话主键
- * @param optionId 被点选项的短标识
+ * @param optionId 被点选项的短标识；自填时为空串
+ * @param text     自填答复原文；普通点选不传
  * @return 续作后的会话
  */
-export function submitWorkbenchChoice(id: number, optionId: string) {
-  return request.post<Result<TrialSession>>(`${PREFIX}/sessions/${id}/choice`, { optionId })
+export function submitWorkbenchChoice(id: number, optionId: string, text?: string) {
+  const payload = text ? { optionId, text } : { optionId }
+  return request.post<Result<TrialSession>>(`${PREFIX}/sessions/${id}/choice`, payload)
 }
 
 /** 改左栏标题（写入后不再被自动生成覆盖）。 */

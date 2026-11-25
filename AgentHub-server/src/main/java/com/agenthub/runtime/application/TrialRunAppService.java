@@ -89,6 +89,13 @@ public class TrialRunAppService {
 
     private static final Logger log = LoggerFactory.getLogger(TrialRunAppService.class);
 
+    /**
+     * 自填答复的长度上限（按 Unicode 码点，与前端 {@code WORKBENCH_ANSWER_MAX_CHARS} 对齐）。
+     *
+     * <p>超长明确拒绝、不静默截断：只发出一半的答复会被模型当成完整回答处理。
+     */
+    private static final int CUSTOM_REPLY_MAX_CHARS = 2000;
+
     private final RunSessionRepository sessions;
     private final RunEventRepository events;
     private final AgentDefRepository agents;
@@ -399,29 +406,36 @@ public class TrialRunAppService {
      * 前端回传的 optionId 必须在该块内命中，展示文案以后端登记为准，
      * 不采信客户端传来的 label，避免借选项接口往模型上下文里塞任意文本。
      *
+     * <p>例外是平台追加的「其它，我自己说」行：它没有模型 option id，
+     * 用户自己写下的 {@code text} 就是本次答复；仍然只在上一条回答确有选项块时放行，
+     * 且同样由<b>同一位</b>专家续跑，不重新判路由。
+     *
      * @param sessionId 会话
-     * @param optionId  用户点中的选项标识（上一轮块内唯一）
+     * @param optionId  用户点中的选项标识；自填答复时为空
+     * @param text      用户自填的答复原文；普通点选时为空
      * @return 本轮新事件与终答预览
      * @throws BizException 会话不可发、上一轮没有可点选项、选项已处理，或当前线路不是单专家
      */
-    public MessageResp choose(Long sessionId, String optionId) {
-        return continueChoice(sessionId, optionId, null);
+    public MessageResp choose(Long sessionId, String optionId, String text) {
+        return continueChoice(sessionId, optionId, text, null);
     }
 
     /**
-     * 边跑边推的断点续作（点选项后由同一位专家继续）。
+     * 边跑边推的断点续作（点选项 / 自填答复后由同一位专家继续）。
      *
      * <p>失败收口与 {@link #stream} 完全一致：不把堆栈推给页面，只在服务端留栈。
      *
      * @param sessionId 会话
-     * @param optionId  用户点中的选项标识
+     * @param optionId  用户点中的选项标识；自填答复时为空
+     * @param text      用户自填的答复原文；普通点选时为空
      * @param progress  增量出口，不可空
      * @param end       结束出口，不可空
      */
-    public void chooseStream(Long sessionId, String optionId, TrialProgress progress, TrialStreamEnd end) {
+    public void chooseStream(Long sessionId, String optionId, String text, TrialProgress progress,
+                             TrialStreamEnd end) {
         try {
             progress.phase("planning");
-            end.done(continueChoice(sessionId, optionId, progress));
+            end.done(continueChoice(sessionId, optionId, text, progress));
         } catch (BizException ex) {
             end.fail(ex.getMessage());
         } catch (TrialFailure ex) {
@@ -441,27 +455,41 @@ public class TrialRunAppService {
      * 塞进 choose 会让入口判路由与续作共用一条分支，后续想再改任一方的语义都会互相牵扯。
      *
      * @param sessionId 会话
-     * @param optionId  选项标识
+     * @param optionId  选项标识；自填答复时为空
+     * @param text      用户自填的答复原文；普通点选时为空
      * @param progress  增量出口，可空（同步路径）
      * @return 本轮结果
      */
-    private MessageResp continueChoice(Long sessionId, String optionId, TrialProgress progress) {
+    private MessageResp continueChoice(Long sessionId, String optionId, String text, TrialProgress progress) {
         RunSession session = access.require(sessionId);
+        String optionKey = optionId == null ? "" : optionId.trim();
+        String replyText = normalizeCustomReply(text);
+        // 两者都空：既没点选项也没写答复，直接拒绝而不是让模型去猜
+        if (optionKey.isEmpty() && replyText.isEmpty()) {
+            throw new BizException(ErrorCode.BAD_REQUEST, "请选择一个选项");
+        }
         // 先做只读校验再占单飞：选项不合法时不该在会话上留下任何痕迹
         assertSendable(session);
         /*
          * 方案停等询问的选项：与输入框提交共用同一条续跑（同一成员、同一条运行），
          * 不落 USER 事件，选择写进该子专家卡。与工作流等待互斥。
+         *
+         * <p>自填答复时用户文本优先：平台自填行不属于模型的 choice.options，
+         * 按 optionId 命中必然为空，这里直接把它当回复续跑。
          */
         Optional<MaPauseSnapshot> waitingMa = maReplies.waitingRun(sessionId);
         if (waitingMa.isPresent()) {
             MaPauseSnapshot state = waitingMa.get();
-            Optional<AgentChoice.Option> option = state.getChoice() == null
-                    ? Optional.empty() : state.getChoice().find(optionId);
-            if (option.isEmpty()) {
-                throw new BizException(ErrorCode.BAD_REQUEST, "该选项不属于当前等待的询问，请重新选择或直接输入");
+            String userText = replyText;
+            if (userText.isEmpty()) {
+                Optional<AgentChoice.Option> option = state.getChoice() == null
+                        ? Optional.empty() : state.getChoice().find(optionKey);
+                if (option.isEmpty()) {
+                    throw new BizException(ErrorCode.BAD_REQUEST, "该选项不属于当前等待的询问，请重新选择或直接输入");
+                }
+                userText = option.get().label();
             }
-            MessageResp resp = chooseMaReply(session, state, option.get().label(), progress);
+            MessageResp resp = chooseMaReply(session, state, userText, progress);
             if (resp != null) {
                 return resp;
             }
@@ -476,19 +504,22 @@ public class TrialRunAppService {
         Optional<WorkflowRun> waitingWorkflow = workflowReplies.waitingRun(sessionId);
         if (waitingWorkflow.isPresent()) {
             WorkflowRun waiting = waitingWorkflow.get();
-            Optional<String> label = workflowReplies.waitingOptionLabel(waiting, optionId);
-            if (label.isEmpty()) {
-                // 已经停在等待却点了不属于这一步的选项：明确拒绝，不静默吞掉
-                throw new BizException(ErrorCode.BAD_REQUEST, "该选项不属于当前等待的询问，请重新选择或直接输入");
+            String userText = replyText;
+            if (userText.isEmpty()) {
+                Optional<String> label = workflowReplies.waitingOptionLabel(waiting, optionKey);
+                if (label.isEmpty()) {
+                    // 已经停在等待却点了不属于这一步的选项：明确拒绝，不静默吞掉
+                    throw new BizException(ErrorCode.BAD_REQUEST, "该选项不属于当前等待的询问，请重新选择或直接输入");
+                }
+                userText = label.get();
             }
-            String userText = label.get();
             MessageResp resp = chooseWorkflowReply(session, waiting, userText, progress);
             if (resp != null) {
                 return resp;
             }
             // 并发已收口：落到下面按单专家路径处理（通常会明确提示没有可续选项）
         }
-        ChoiceAnchor anchor = requireChoice(sessionId, optionId);
+        ChoiceAnchor anchor = requireChoice(sessionId, optionKey, replyText);
         Long stickyAgentId = session.getStickyAgentId();
         if (stickyAgentId == null) {
             // 方案目标 / 工作流目标没有单专家：这类线路不支持按选项续作，明确拒绝而不是随便挑一位
@@ -681,12 +712,17 @@ public class TrialRunAppService {
      * <p>同时带回<b>上一轮的问句与终答</b>：续作要把三者一起交给同一位专家，
      * 否则模型只看到一句孤立的选项文案，只能回一句「已完成作答」。
      *
+     * <p>自填答复（{@code replyText} 非空）放宽「必须命中模型选项」：平台固定的
+     * 「其它，我自己说」行没有 option id，用户文本本身就是答复；但仍要求上一轮确实
+     * 有可点选项块，避免借续作接口凭空开一轮。
+     *
      * @param sessionId 会话
-     * @param optionId  选项标识
+     * @param optionId  选项标识；自填答复时为空
+     * @param replyText 用户自填的答复原文；普通点选时为空
      * @return 选项（权威展示文案）＋上一轮问句 / 终答
      * @throws BizException 没有可续的选项块、选项不存在，或该断点已处理
      */
-    private ChoiceAnchor requireChoice(Long sessionId, String optionId) {
+    private ChoiceAnchor requireChoice(Long sessionId, String optionId, String replyText) {
         List<RunEvent> rows = events.listBySessionId(sessionId);
         // 第一步：从尾部找回「上一轮正文」的位置；中途撞到 USER 就说明断点已经被续过
         int answerIndex = -1;
@@ -738,11 +774,41 @@ public class TrialRunAppService {
             choice = parsed.choice();
             body = parsed.text();
         }
-        AgentChoice.Option option = choice.find(optionId)
-                .orElseThrow(() -> new BizException(ErrorCode.BAD_REQUEST,
-                        "该选项已失效，请直接输入你的选择"));
+        AgentChoice.Option option;
+        if (replyText != null && !replyText.isBlank()) {
+            // 自填答复：optionId 只用于标识，不参与命中校验（平台自填行没有模型 option id）
+            option = new AgentChoice.Option(optionId == null || optionId.isBlank() ? "custom" : optionId,
+                    replyText.trim());
+        } else {
+            option = choice.find(optionId)
+                    .orElseThrow(() -> new BizException(ErrorCode.BAD_REQUEST,
+                            "该选项已失效，请直接输入你的选择"));
+        }
         // 上一轮的用户问句：续作要把它一起交给专家，否则专家只看得到一句选项文案
         return new ChoiceAnchor(previousQuestionOf(rows, answerIndex), WorkbenchChoiceJson.strip(body), option);
+    }
+
+    /**
+     * 归一用户自填答复：trim 后按 Unicode 码点卡上限。
+     *
+     * <p>空串表示「这是普通点选」，调用方据此回到按 optionId 命中的老路径。
+     * 超长明确拒绝而不是静默截断：半句话会被模型当成完整答复续跑。
+     *
+     * @param text 请求里的自填原文，可空
+     * @return trim 后的答复；空 / 纯空白返回空串
+     * @throws BizException 超过 {@link #CUSTOM_REPLY_MAX_CHARS} 个码点
+     */
+    private static String normalizeCustomReply(String text) {
+        if (text == null || text.isBlank()) {
+            return "";
+        }
+        String reply = text.trim();
+        // 按码点计数：中文与表情都按「一个字」对齐，和前端校验同口径
+        if (reply.codePointCount(0, reply.length()) > CUSTOM_REPLY_MAX_CHARS) {
+            throw new BizException(ErrorCode.BAD_REQUEST,
+                    "答复最多 " + CUSTOM_REPLY_MAX_CHARS + " 字，请删减后再发送");
+        }
+        return reply;
     }
 
     /**

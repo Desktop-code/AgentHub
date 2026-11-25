@@ -241,22 +241,25 @@ public class WorkbenchController {
      * <p>为什么单独一条：这是「已选好，继续」而不是新的问题。走 {@code /messages} 会重新判路由，
      * 把用户的回答当成孤立新问题（典型症状：「1」被判定为诉求不清）。
      *
+     * <p>平台追加的「其它，我自己说」没有模型 option id：此时 {@code text} 就是用户答复，
+     * 同样回到刚才那位专家续跑，不新开一轮。
+     *
      * @param id  会话主键
-     * @param req 选中的选项标识
+     * @param req 选中的选项标识，或自填答复原文
      * @return 本轮助手预览和事件
      */
     @SaCheckPermission(RuntimePermissions.CHAT)
     @PostMapping("/sessions/{id:\\d+}/choice")
     public Result<MessageResp> choose(@PathVariable Long id, @Valid @RequestBody WorkbenchChoiceReq req) {
         Long checked = chats.requireSession(id);
-        return Result.ok(runs.choose(checked, req.getOptionId().trim()));
+        return Result.ok(runs.choose(checked, req.getOptionId(), req.getText()));
     }
 
     /**
      * 点选可点选项的边跑边推版本（与 {@code /choice} 同一套续作语义）。
      *
      * @param id       会话主键
-     * @param req      选中的选项标识
+     * @param req      选中的选项标识，或自填答复原文
      * @param response 直接写 SSE
      */
     @SaCheckPermission(RuntimePermissions.CHAT)
@@ -269,7 +272,7 @@ public class WorkbenchController {
         TrialChunkWriter writer = new TrialChunkWriter(response, json, sseBatch);
         writer.bindSession(checked);
         try {
-            runs.chooseStream(checked, req.getOptionId().trim(), writer, writer);
+            runs.chooseStream(checked, req.getOptionId(), req.getText(), writer, writer);
         } finally {
             // 与发消息同一收尾纪律：任何路径都补一帧结束，内部 CAS 保证只发一次
             writer.ensureFinished();

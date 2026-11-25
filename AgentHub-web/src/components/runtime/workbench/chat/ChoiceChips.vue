@@ -1,7 +1,9 @@
 <template>
   <!--
     可点选项块：单专家卡、工作流询问节点、工作流旧卡底共用这一套芯片。
-    字母序号 + 文案 + 推荐标记；点击只回传原始 option，续作入参不改写。
+    字母序号 + 文案 + 推荐标记；点击普通项只回传原始 option，续作入参不改写。
+    模型选项之后由平台固定追加一行「其它，我自己说」：点了只进入输入，
+    不提交任何文案，必须等用户自己写完后走发送。
   -->
   <div class="wb-choice" :class="extraClass">
     <!-- 已答复回执：选择写在发问专家的卡内，不再额外冒一条用户气泡 -->
@@ -14,11 +16,12 @@
       <div class="wb-choice-options">
         <button
           v-for="row in rows"
-          :key="row.option.id"
+          :key="row.key"
           type="button"
           class="wb-choice-chip"
+          :class="{ 'is-other': row.other }"
           :disabled="disabled"
-          @click.stop.prevent="emit('choose', row.option)"
+          @click.stop.prevent="onRowClick(row)"
         >
           <span class="wb-choice-index" aria-hidden="true">{{ row.letter }}</span>
           <span class="wb-choice-label">{{ row.text }}</span>
@@ -36,10 +39,13 @@
  *
  * <p>职责：只画题面 / 选项 / 已答复回执，不决定能不能点、也不发请求。
  * 「是不是最后一条助手消息」等业务判定由调用方通过 `disabled` 传入。
+ *
+ * <p>「其它 / 自填」是平台固定追加的一行，不属于模型的 choice.options：
+ * 点它只向调用方发 `other`（进入输入），绝不在这里提交文案。
  */
 import { computed } from 'vue'
 import type { ParticipantChoiceOption } from '@/components/runtime/workbench/workbenchParticipantFeed'
-import { choiceRowsOf } from '@/components/runtime/workbench/chat/chipRows'
+import { choiceRowsOf, type ChoiceRenderRow } from '@/components/runtime/workbench/chat/chipRows'
 
 const props = withDefaults(
   defineProps<{
@@ -67,15 +73,35 @@ const props = withDefaults(
 )
 
 const emit = defineEmits<{
-  /** 用户点了某一项；回传原始 option（含 id 与后端 label） */
+  /** 用户点了普通选项；回传原始 option（含 id 与后端 label） */
   choose: [option: ParticipantChoiceOption]
+  /** 用户点了平台追加的「其它 / 自填」行；调用方只负责聚焦输入，不提交 */
+  other: []
 }>()
 
 /** 题面永远有一行：模型给了问题就用它，没给就用「请选择」，不让选项孤零零地出现 */
 const questionText = computed(() => (props.question || '').trim() || '请选择')
 
-/** 渲染行：字母序号 + 展示文案 + 推荐标记 */
+/** 渲染行：模型选项（去重同义「其它」）+ 末尾平台自填行 */
 const rows = computed(() => choiceRowsOf(props.options))
+
+/**
+ * 点一行。普通项照旧把原始 option 交给调用方；平台自填行只发 `other`。
+ *
+ * <p>这里刻意不判断「点了以后要不要写回执」：自填必须等用户在输入框里写下内容
+ * 并主动发送，点击当下写回执 / 提交文案都会造成「还没答就已经答复」的假状态。
+ *
+ * @param row 被点中的渲染行
+ */
+function onRowClick(row: ChoiceRenderRow) {
+  if (row.other) {
+    emit('other')
+    return
+  }
+  if (row.option) {
+    emit('choose', row.option)
+  }
+}
 </script>
 
 <style scoped>
@@ -186,6 +212,11 @@ const rows = computed(() => choiceRowsOf(props.options))
   font-size: 11px;
   font-weight: 600;
   line-height: 1.5;
+}
+
+/* 平台追加的自填行：与模型候选同样式，虚线描边提示「这一行是自己写」 */
+.chat.is-workbench .wb-choice-chip.is-other {
+  border-style: dashed;
 }
 
 /* hover / 键盘聚焦：浅紫底 + 信号紫描边，不用遗留蓝 */

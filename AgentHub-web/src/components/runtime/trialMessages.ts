@@ -159,7 +159,7 @@ export function absorbWaitingWorkflowCards(turns: ChatTurn[]): boolean {
        * 若它变成 SKIPPED / PENDING，说明这句回复被当成新问题、新开了一条运行并跳过了询问；
        * 这时绝不能收旧卡，否则会把「真的又开了一条运行」藏起来。
        */
-      if (!waiting || !continuedSameRun(waiting, target)) {
+      if (!waiting || !continuedSameRun(waiting, target, hasUserTurnBetween(turns, hostIndex, i))) {
         continue
       }
       const takenAnswer = (target.answer || '').trim()
@@ -246,17 +246,49 @@ function waitingCardOf(turn: ChatTurn, target: TrialWorkflowView): TrialWorkflow
 }
 
 /**
+ * 两轮之间是否夹着一条新的用户提问。
+ *
+ * <p>工作流的「回复」不落用户气泡（点选与输入框续跑都不插 USER 事件），
+ * 因此旧等待卡与续跑轮之间不该有用户轮。若真有，说明用户是在这之后重新开了话题——
+ * 那时即便新卡上同一个节点也是 SUCCESS，也不能把上一轮那张卡当成「同一条运行的续跑」收掉。
+ *
+ * @param turns 时间线
+ * @param from  旧卡所在轮的下标（不含）
+ * @param to    续跑轮下标（不含）
+ * @return true 表示中间存在用户轮
+ */
+function hasUserTurnBetween(turns: ChatTurn[], from: number, to: number): boolean {
+  for (let i = from + 1; i < to; i += 1) {
+    if (turns[i]?.role === 'user') {
+      return true
+    }
+  }
+  return false
+}
+
+/**
  * 续跑卡是否确实接着那张等待卡往下走（判定「同一条运行」的可证据化口径）。
  *
  * <p>等待中的节点在续跑后必然被回复收口：状态只会是 SUCCESS（已结束）或 RUNNING（正在跑）。
  * 若在新卡里找不到同编码节点，或它变成 SKIPPED / PENDING，就不是同一条运行的续跑——
  * 多半是这句回复被当成新问题、新运行直接跳过了询问。此时收掉旧卡会把问题藏起来。
  *
- * @param waiting 旧卡（仍在等待回复）
- * @param fresh   续跑轮上的新卡
+ * <p><b>已答复的旧卡同样要认</b>：刷新那一刻读到的骨架可能已被服务端按库里真实状态校准
+ * （{@code WorkflowCardRebuilder}：询问节点改成 SUCCESS、卡片级 choice 被清），
+ * 于是旧卡上**一个 WAITING_REPLY 节点都不剩**。若只认「还在等」，这条旧卡就收不走，
+ * 同一次运行会在时间线上留下两张卡：上面一张停在旧的节点进度上、下面一张是新的运行中卡片。
+ * 这类旧卡的证据改成「已被答复」的那几个节点（节点上记着 {@code reply}），
+ * 它们在新卡里同样必须是 SUCCESS / RUNNING。
+ *
+ * <p>已答复旧卡的放行还要求「中间没有新的用户提问」：那条用户轮说明用户已经重新开了话题，
+ * 新卡很可能是另一条运行，不能借同编码把上一轮的历史卡收掉。
+ *
+ * @param waiting      旧卡（同一工作流、卡片头仍停在等待，可能已被校准成「已答复」）
+ * @param fresh        续跑轮上的新卡
+ * @param userAskedNew true 表示两轮之间夹着新的用户提问（只在「已答复旧卡」这条兜底上生效）
  * @return true 表示同一个等待节点已被答复并继续
  */
-function continuedSameRun(waiting: TrialWorkflowView, fresh: TrialWorkflowView): boolean {
+function continuedSameRun(waiting: TrialWorkflowView, fresh: TrialWorkflowView, userAskedNew = false): boolean {
   /*
    * 残缺卡（历史事件被截断）没有节点表可用：摘要反推出的终态就是证据——
    * 这一条运行确实已经结束在后续状态，同一条运行就被这句话续上了。
@@ -266,15 +298,27 @@ function continuedSameRun(waiting: TrialWorkflowView, fresh: TrialWorkflowView):
     const status = (fresh.status || '').toUpperCase()
     return status === 'SUCCESS' || status === 'FAILED' || status === 'CANCELLED'
   }
-  const waitingCodes = (Array.isArray(waiting.nodes) ? waiting.nodes : [])
+  const oldNodes = Array.isArray(waiting.nodes) ? waiting.nodes : []
+  const waitingCodes = oldNodes
     .filter((node) => (node?.status || '').toUpperCase() === 'WAITING_REPLY')
     .map((node) => (node?.code || '').trim())
     .filter(Boolean)
-  if (!waitingCodes.length) {
+  /*
+   * 旧卡已被校准成「已答复」：改认它上面记着回复的节点。
+   * 先看仍在等待的节点（原始骨架），没有再退到已答复节点（校准过的骨架）。
+   */
+  const answeredCodes = userAskedNew
+    ? []
+    : oldNodes
+        .filter((node) => (node?.reply || '').trim().length > 0)
+        .map((node) => (node?.code || '').trim())
+        .filter(Boolean)
+  const codes = waitingCodes.length ? waitingCodes : answeredCodes
+  if (!codes.length) {
     return false
   }
   const freshNodes = Array.isArray(fresh.nodes) ? fresh.nodes : []
-  return waitingCodes.every((code) => {
+  return codes.every((code) => {
     const node = freshNodes.find((item) => (item?.code || '').trim() === code)
     const status = (node?.status || '').toUpperCase()
     return status === 'SUCCESS' || status === 'RUNNING'
@@ -542,6 +586,145 @@ export function workflowReplyAnswered(view: TrialWorkflowView | undefined): bool
   return nodes.some((node) => (node?.reply || '').trim().length > 0)
 }
 
+/** 卡片头已经收口的状态：这些状态下运行不会再往下走，一律不算「在跑」 */
+const WF_HEAD_CLOSED = new Set(['SUCCESS', 'FAILED', 'CANCELLED', 'UNKNOWN'])
+
+/**
+ * 这张工作流卡**看起来**还在跑。所属域：runtime（前端判定）。
+ *
+ * <p>为什么需要它：刷新把本页对一轮的「接管」弄丢了（{@code sending} / {@code resuming} 都归零），
+ * 而右上角状态与输入区停止 / 发送恰好只看这两个信号，于是卡片还在动、按钮却报「已完成」。
+ * 卡片自己从不看这两个信号（它读节点状态），所以两处会各说各话。这里把「卡片自己的判断」
+ * 提取成一条可复用判定，让按钮与卡片对齐。
+ *
+ * <p>取值全部复用本文件已有的谓词，不另写一套节点判定：
+ * <ul>
+ *   <li>卡片头已收口（SUCCESS / FAILED / CANCELLED / UNKNOWN）→ 否；</li>
+ *   <li>{@link workflowStillWaitingForReply} 为真 → 否。这一拍归 {@code waitingReply} 管
+ *       （停止与发送同现）；这里若也算「在跑」，{@code runBlocksSending} 会把那句答复一起拦掉；</li>
+ *   <li>{@link workflowReplyAnswered} 为真（已答复、正在续跑）→ 是。这一拍卡片头仍是骨架里的
+ *       历史 {@code WAITING_REPLY}，但运行确实在往下走；</li>
+ *   <li>卡片头仍是未收口状态（{@code RUNNING} / {@code CREATED} 等）→ 是；</li>
+ *   <li>卡片头停在等待 / 人工处理、节点却已有 {@code RUNNING}（快照落后一拍）→ 是。</li>
+ * </ul>
+ *
+ * <p>与 {@link workflowReplyResuming} 的区别：那一条是**续订**的证据链（要求询问节点带 reply），
+ * 断一条就停止续订；这一条是**展示**口径（卡片此刻看着还在动），reply 缺失时仍按节点判，
+ * 免得「卡片在转、按钮说已完成」。两条互不替代。
+ *
+ * @param view 工作流卡片视图；可空
+ * @return true 表示卡片看起来仍在运行
+ */
+export function workflowCardRunning(view: TrialWorkflowView | undefined): boolean {
+  if (!view) {
+    return false
+  }
+  const status = (view.status || '').trim().toUpperCase()
+  // 终态 / 详情不可用：卡片已经不会再动
+  if (WF_HEAD_CLOSED.has(status)) {
+    return false
+  }
+  // 真的还在等用户答：归 waitingReply，不算「在跑」
+  if (workflowStillWaitingForReply(view)) {
+    return false
+  }
+  // 已答复、正在续跑：卡片头是历史语义，运行在推进
+  if (workflowReplyAnswered(view)) {
+    return true
+  }
+  // 卡片头仍是未收口状态（RUNNING / CREATED 等）
+  if (status !== 'WAITING_REPLY' && status !== 'PAUSED_HUMAN') {
+    return true
+  }
+  /*
+   * 卡片头停在等待 / 人工处理，节点却已有 RUNNING：骨架比库落后一拍。
+   * 不认这一步的话，正是「节点在转、按钮已完成」的那一拍。
+   */
+  const nodes = Array.isArray(view.nodes) ? view.nodes : []
+  return nodes.some((node) => (node?.status || '').toUpperCase() === 'RUNNING')
+}
+
+/**
+ * 时间线上最后一条助手轮里的工作流卡是否还在跑。所属域：runtime（前端判定）。
+ *
+ * <p>只看**最近一条助手轮**，与 {@code detectWaitingReply} 同口径：更早轮次里已经收过的卡
+ * 不该再影响输入区与右上角状态。
+ *
+ * <p>已收口的两类助手轮直接返回否：
+ * <ul>
+ *   <li>{@code status === 'error'}：用户停止（{@code markHaltedTurn} 会补一条「已中断」）
+ *       或本轮失败说明落在了这里，卡片停在那一刻；</li>
+ *   <li>轮里没有工作流卡：MA / 单 Agent 轮走的就是这一支，本信号对它们恒为假。</li>
+ * </ul>
+ *
+ * @param turns 当前时间线
+ * @return true 表示最后一条助手轮的工作流卡看起来仍在运行
+ */
+export function lastWorkflowCardRunning(turns: ChatTurn[]): boolean {
+  for (let i = turns.length - 1; i >= 0; i -= 1) {
+    const turn = turns[i]
+    if (turn?.role !== 'assistant') {
+      continue
+    }
+    // 这一轮已收口（已中断 / 失败说明）：卡片不会再有增量，不能再占停止按钮
+    if (turn.status === 'error') {
+      return false
+    }
+    const cards = (Array.isArray(turn.blocks) ? turn.blocks : [])
+      .filter((block) => block?.kind === 'workflow' && !!block.workflow)
+    // 同名同编码的卡在同一轮只有一张，取最后一张
+    return workflowCardRunning(cards[cards.length - 1]?.workflow)
+  }
+  return false
+}
+
+/**
+ * 最后一条助手轮的**任一种**执行卡是否看起来还在跑（工作流 / MA / 单 Agent 同一套闸）。
+ * 所属域：runtime（前端判定）。
+ *
+ * <p>为什么不能只认工作流卡：F1 / F2 只在工作流块上补了「还在跑」的证据，
+ * MA 与单 Agent 的轮里没有工作流块，那条证据吃不到——刷新后卡片（专家 / Agent 的
+ * 思考与工具）仍在动，右上角却写「已完成」、输入区还允许发送。这里把同一份事实
+ * （卡片渲染用的 {@code turn.status === 'streaming'}）接进同一个信号，
+ * 不另做一套投影或时间线。
+ *
+ * <p>判定顺序与 {@link lastWorkflowCardRunning} 一致：只看最近一条助手轮，已收口
+ * （{@code status === 'error'}，含用户停止补的「已中断」）一律为假。分两支：
+ * <ul>
+ *   <li>本轮带工作流卡：交给 {@link workflowCardRunning}（卡头终态 / 等待回复 / 节点状态都在那里，
+ *       反向闸不在这里重写）；</li>
+ *   <li>本轮没有工作流卡（MA / 单 Agent）：与消息流卡片动画同源的 {@code turn.status === 'streaming'}。
+ *       刷新前快照、续订重放都会把在跑的一轮标成 streaming，纯回放（已结束）是 done。</li>
+ * </ul>
+ *
+ * @param turns 当前时间线
+ * @return true 表示最后一条助手轮的执行卡看起来仍在运行
+ */
+export function lastAssistantCardRunning(turns: ChatTurn[]): boolean {
+  for (let i = turns.length - 1; i >= 0; i -= 1) {
+    const turn = turns[i]
+    if (turn?.role !== 'assistant') {
+      continue
+    }
+    // 本轮已收口（已中断 / 失败）：卡片不会再动
+    if (turn.status === 'error') {
+      return false
+    }
+    const cards = (Array.isArray(turn.blocks) ? turn.blocks : [])
+      .filter((block) => block?.kind === 'workflow' && !!block.workflow)
+    if (cards.length) {
+      // 工作流轮：反向闸（终态 / 等待回复）全在 workflowCardRunning 里
+      return workflowCardRunning(cards[cards.length - 1]?.workflow)
+    }
+    /*
+     * MA / 单 Agent：卡片动画只看整轮是否 streaming（buildParticipantFeed 的 streaming 入参同源）。
+     * 这里不另判节点 / 参与者状态，避免与卡片各说各话。
+     */
+    return turn.status === 'streaming'
+  }
+  return false
+}
+
 /**
  * 最后一条用户消息之后、最后一张工作流卡的视图。
  *
@@ -591,23 +774,213 @@ export function workflowReplyResuming(events: TrialEvent[]): boolean {
 }
 
 /**
+ * 最后一张工作流卡是否还有没收口的执行内容（F2 放宽后的续订证据）。所属域：runtime（前端续订判定）。
+ *
+ * <p>为什么在 {@link workflowReplyResuming} 之外再放宽：那一条只认「询问已答复」这一种续跑。
+ * 刷新落在循环体 / 点评仍在执行时，或把落库骨架与内存快照合路之后，最后一张卡的头是
+ * {@code RUNNING}（不是骨架里的 {@code WAITING_REPLY}），询问节点也可能还没留下 reply——
+ * 「reply 真相」脱空，续订落进纯回放，卡片不再往前走、停止也停不住。
+ *
+ * <p>取值全部复用 {@link workflowCardRunning}，不另写节点判定：
+ * <ul>
+ *   <li>卡片头已收口（SUCCESS / FAILED / CANCELLED / UNKNOWN）→ 否；</li>
+ *   <li>仍在等用户回复 → 否（这一拍归输入区的 {@code waitingReply} 管）；</li>
+ *   <li>已答复续跑、卡片头仍是未收口的 RUNNING / CREATED、或等待头但节点已有 RUNNING → 是。</li>
+ * </ul>
+ *
+ * <p>本函数只答「卡片看起来还在跑」，不含终态闸：用户已停止的一轮由调用方用
+ * 「已中断」闭环另判（见 {@link stoppedClosure} 与 {@link resumeTurnOpen}），不要在这里猜。
+ *
+ * @param events 同一会话已落库事件（可含内存增量），顺序不限
+ * @return true 表示最后一张工作流卡看起来仍在跑
+ */
+export function workflowCardResuming(events: TrialEvent[]): boolean {
+  return workflowCardRunning(lastWorkflowCardOf(events))
+}
+
+/**
  * 已答复的续跑卡上是否还有节点在跑（PENDING / RUNNING）。
  *
  * <p>用途只有一个：轮询侧据此区分「运行确实在推进」与「运行刚结束、终态卡还没落库」。
  * 后者不该把整段 {@code RESUME_MAX_MS} 全耗在短轮询上。
+ * 与 {@link workflowCardProgressing} 的区别：本条额外要求 reply 证据，只覆盖「点选续跑」。
  *
  * @param events 同一会话已落库事件
  * @return true 表示卡上还有未结束的节点
  */
 export function workflowReplyProgressing(events: TrialEvent[]): boolean {
+  return workflowReplyAnswered(lastWorkflowCardOf(events)) && workflowCardProgressing(events)
+}
+
+/**
+ * 最后一张工作流卡上是否还有没结束的节点（PENDING / RUNNING）。所属域：runtime（前端续订判定）。
+ *
+ * <p>供续订轮询调速：卡片头可以是 {@code RUNNING}（合路后的内存快照），不要求 reply 证据。
+ * 节点已全部结束、只差终态卡落库的这一拍返回 false，调用方据此放慢节奏。
+ *
+ * @param events 同一会话已落库事件（可含内存增量）
+ * @return true 表示卡上还有未结束的节点
+ */
+export function workflowCardProgressing(events: TrialEvent[]): boolean {
   const card = lastWorkflowCardOf(events)
-  if (!workflowReplyAnswered(card)) {
+  if (!workflowCardRunning(card)) {
     return false
   }
   return (card?.nodes || []).some((node) => {
     const status = (node?.status || '').toUpperCase()
     return status === 'PENDING' || status === 'RUNNING'
   })
+}
+
+/**
+ * 最后一条 user 之后是否还有**没有终态**的参与者（MA / 单 Agent 的「卡还在跑」证据）。
+ * 所属域：runtime（前端续订判定）。
+ *
+ * <p>证据形状与工作流卡对称：内存快照里 `beginParticipant` 写开始帧、
+ * `endParticipant` 写 `begin=false + state` 终态帧。某一参与者只有开始、没有终态，
+ * 说明它这一步还在思考 / 跑工具；卡片据此转圈，续订也要据此继续。
+ *
+ * <p>只认这两类帧，不新造协议：{@link readParticipantEvent} 认开始，
+ * {@link readParticipantEnd} 认终态；都不是的身份行（纯归属切换）忽略。
+ *
+ * <p>两类参与者不参与本判据：
+ * <ul>
+ *   <li>{@code workflow}：它的进行态由工作流卡片自己的节点状态负责
+ *       （{@link workflowCardResuming}），两套信号叠加会让终态卡被别的证据续起来；</li>
+ *   <li>{@code gateway}：入口卡从不渲染进行态（{@code toCard} 对入口恒 {@code pending=false}），
+ *       拿它当「卡在跑」会让刷新的普通单 Agent 轮永远续订。</li>
+ * </ul>
+ *
+ * @param events 同一会话事件（可含内存增量），顺序不限
+ * @return true 表示还有参与者没收口
+ */
+export function participantCardResuming(events: TrialEvent[]): boolean {
+  const ordered = [...events].sort((a, b) => (a.seq ?? 0) - (b.seq ?? 0))
+  let lastUser = -1
+  for (let i = 0; i < ordered.length; i += 1) {
+    if (ordered[i].eventType === 'user') {
+      lastUser = i
+    }
+  }
+  const opened = new Set<string>()
+  const closed = new Set<string>()
+  for (let i = lastUser + 1; i < ordered.length; i += 1) {
+    const item = ordered[i]
+    if (item.eventType !== 'participant') {
+      continue
+    }
+    const begin = readParticipantEvent(item)
+    if (begin) {
+      const kind = (begin.kind || '').toLowerCase()
+      if (kind !== 'workflow' && kind !== 'gateway') {
+        opened.add(begin.id)
+      }
+      continue
+    }
+    const end = readParticipantEnd(item)
+    if (end) {
+      closed.add(end.id)
+    }
+  }
+  for (const id of opened) {
+    if (!closed.has(id)) {
+      return true
+    }
+  }
+  return false
+}
+
+/**
+ * 这一轮是否已经留下「用户已停止」的闭环。所属域：runtime（前端续订判定）。
+ *
+ * <p>为什么不能只看 session.status：工作台会话在多轮期间一直是 RUNNING，
+ * 用户停止后也不会把整条会话改成 CANCELLED（要能接着聊）。停止必须落一条
+ * 「已中断」闭环事件，刷新 / 回放据此判定这一轮已经结束；只看状态会把
+ * 已停止的一轮重新续订成运行中。
+ *
+ * <p>只认最后一条 user 之后的 error：上一轮的停止说明不能挡住下一轮。
+ *
+ * @param events 已落库事件与内存快照的合并结果
+ * @return true 表示这一轮已由用户停止
+ */
+export function stoppedClosure(events: TrialEvent[]): boolean {
+  const ordered = [...events].sort((a, b) => (a.seq ?? 0) - (b.seq ?? 0))
+  let lastUser = -1
+  for (let i = 0; i < ordered.length; i += 1) {
+    if (ordered[i].eventType === 'user') {
+      lastUser = i
+    }
+  }
+  for (let i = lastUser + 1; i < ordered.length; i += 1) {
+    const item = ordered[i]
+    if (item.eventType !== 'error') {
+      continue
+    }
+    const text = `${item.contentText || ''} ${item.summary || ''}`
+    if (/已?中断|已?停止|已?取消/.test(text)) {
+      return true
+    }
+  }
+  return false
+}
+
+/**
+ * 刷新 / 续订时，这一轮是否还没收口（F2 / F3 统一口径）。所属域：runtime（前端续订判定）。
+ *
+ * <p>四层，按顺序短路：
+ * <ol>
+ *   <li>末尾还有未写明的轮（{@link hasOpenTurn}）→ 是；</li>
+ *   <li>已落「已中断」闭环（{@link stoppedClosure}）→ 否。这是卡片证据的反向闸：
+ *       停止时快照里可能还留着 RUNNING 卡，不能再把它续起来；</li>
+ *   <li>最后一张工作流卡看起来还在跑（{@link workflowCardResuming}）→ 是。
+ *       兼容「点选已答复续跑」与「合路后卡头仍是 RUNNING」两种证据；</li>
+ *   <li><b>合并了内存快照时</b>，最后一条 user 之后还有没终态的参与者
+ *       （{@link participantCardResuming}）→ 是。MA / 单 Agent 的专家卡就是靠这一条。</li>
+ * </ol>
+ *
+ * <p>为什么参与者证据必须带 {@code live}：落库回放只有开始帧（终态帧只写进内存快照），
+ * 已结束的 MA 轮在纯回放里「所有参与者都没终态」。不看 {@code live} 就会把它们
+ * 一直续到 {@code RESUME_MAX_MS} 硬顶；带上门槛后，回放与改前完全一致。
+ *
+ * @param events 已落库事件（可含内存增量），顺序不限
+ * @param live   true 表示 events 里合并了内存快照（{@code fetchResumeEvents} 的 live 分支）
+ * @return true 表示还应继续续订
+ */
+export function resumeTurnOpen(events: TrialEvent[], live = false): boolean {
+  if (hasOpenTurn(events)) {
+    return true
+  }
+  if (stoppedClosure(events)) {
+    return false
+  }
+  if (workflowCardResuming(events)) {
+    return true
+  }
+  return live && participantCardResuming(events)
+}
+
+/**
+ * 续订这一拍是否还有可跟的进度（决定 2 秒拍还是放慢拍）。所属域：runtime（前端续订判定）。
+ *
+ * <p>与 {@link resumeTurnOpen} 同源，只多一层「末尾仍开口」：常规轮一旦开口，
+ * 哪怕还没有卡片（只有 user），也应保持常规节奏等增量。
+ * 节点 / 参与者全部停下、只差终态卡或终态事件落库时返回 false，调用方据此放慢轮询。
+ *
+ * @param events 已落库事件（可含内存增量）
+ * @param live   是否合并了内存快照
+ * @return true 表示运行确实在推进
+ */
+export function turnProgressing(events: TrialEvent[], live = false): boolean {
+  if (hasOpenTurn(events)) {
+    return true
+  }
+  if (stoppedClosure(events)) {
+    return false
+  }
+  if (workflowCardProgressing(events)) {
+    return true
+  }
+  return live && participantCardResuming(events)
 }
 
 /**
