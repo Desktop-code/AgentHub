@@ -85,6 +85,7 @@
           :page-active="pageActive"
           :workbench="workbench"
           @choose="emit('choose', $event)"
+          @other="emit('other')"
         />
         <!--
           空终态说明在正文框外面。它不是正文，也不占四行框。
@@ -160,6 +161,7 @@
             :waiting="card.choice.waiting && !card.choice.reply"
             :disabled="!choiceEnabled"
             @choose="emit('choose', $event)"
+            @other="emit('other')"
           />
         </div>
         <!--
@@ -191,6 +193,8 @@
  *
  * <p>点击口径保持拆前一致：
  * `ChoiceChips @choose → emit('choose') → 壳层 onChoice(turn, option) → choice-selected`。
+ * 平台追加的「其它 / 自填」行走另一条：`@other → emit('other') → 壳层只聚焦输入`，
+ * 不提交任何文案、也不在这里写回执。
  * 本组件不判断「是不是最后一条助手消息」，也不另发用户气泡。
  *
  * <p>直播、收尾、回放共用同一条投影：本组件只读传入的 `card`，不请求接口、不清空已流出文字，
@@ -274,6 +278,8 @@ const props = withDefaults(
 const emit = defineEmits<{
   /** 用户点了停等 / 询问选项；回传原始 option，由壳层走断点续作 */
   choose: [option: ParticipantChoiceOption]
+  /** 用户点了平台追加的「其它 / 自填」行；壳层只聚焦输入，不提交 */
+  other: []
 }>()
 
 /** 正文单行高度（px）：与 `.chat.is-workbench .md.answer` 的 14px × 1.6 一致，改字号同步改这里 */

@@ -173,6 +173,7 @@
           :can-send="canSend"
           :can-stop="canStopRun"
           :resuming="resuming"
+          :card-running="cardRunning"
           :waiting-reply="waitingReply"
           :session-ready="canSend"
           :blocked-hint="blockedHint"
@@ -350,6 +351,7 @@ const {
   canPickRoute,
   canStopRun,
   waitingReply,
+  cardRunning,
   draftToken,
   init,
   newSession,
@@ -448,13 +450,22 @@ const { view: routerTrace, reload: reloadRouterTrace } = useRouterLane(traceSess
 const canInspect = computed(() => routerTrace.value != null)
 
 /**
- * 本轮是否仍在跑（决定展示紧凑状态卡还是完整泳道）。
+ * 本轮是否仍在跑（决定右上角按钮文案与卡片形态）。
  *
- * <p>以 `traceActive` 为准：它是「这一轮还在发 / 还在续订」的事实来源，
+ * <p>以 {@link traceActive} 为主：它是「这一轮还在发 / 还在续订」的事实来源，
  * 而不是 trace.status —— 收尾时 trace 落库可能晚于 SSE done，用 status 会让
  * 结束态多挂一会儿「运行中」。
+ *
+ * <p>再或上 {@link cardRunning}：刷新那一刻本页对上一轮的接管必然归零
+ * （{@code sending} / {@code resuming} 都为假），若续订没命中，这里就会写「已完成」，
+ * 而执行卡仍在动（工作流节点在跑，或 MA / 单 Agent 的专家卡还在思考 / 跑工具）。
+ * 卡片自己从不看这两个信号，所以必须把它自己的判断并进来，右上角才不会与卡片互相矛盾。
+ *
+ * <p>只并进展示判定、不并进 {@code traceActive}：追踪轮询仍按「本页是否真的在跑」开表，
+ * 不为一轮已经收口的 chat trace 空转请求；展示时钟也只看 {@code traceActive}
+ * （见 {@code inspectClockNeeded} 的入参），不因卡片信号单独把 250ms 表一直挂着。
  */
-const inspectRunning = computed(() => traceActive.value)
+const inspectRunning = computed(() => traceActive.value || cardRunning.value)
 
 /**
  * 展示用时钟：按钮上的耗时与紧凑卡的「已耗时」共用这一个 now。
@@ -491,20 +502,31 @@ let staleTraceId = ''
 /** 上一次的 running 值：区分「收尾跳变」与「挂载时本来就没跑」 */
 let wasRunning = false
 
-/** 当前应展示的卡片形态：运行中紧凑卡，其余完整泳道（打开与否由自动展开规则与用户手动开关共同决定） */
-const inspectMode = computed(() => inspectCardMode(inspectRunning.value))
+/**
+ * 当前应展示的卡片形态：运行中紧凑卡，其余完整泳道（打开与否由自动展开规则与用户手动开关共同决定）。
+ *
+ * <p>判据用 {@link traceActive} 而不是 {@link inspectRunning}：紧凑卡的任务行来自本轮 live 的
+ * trace 树，只有本页真的在发 / 在续订时才有内容。刷新后仅由 {@link cardRunning} 撑起的
+ * 「进行中」并没有新的 trace，弹一张空的紧凑卡只会显示「正在准备编排…」；
+ * 此时按完整泳道展示已落库的明细更诚实。对改动前可达的所有状态，两者取值完全一致。
+ */
+const inspectMode = computed(() => inspectCardMode(traceActive.value))
 
 /**
  * 时钟只在「本轮仍在跑」或「紧凑卡打开」时走。
  *
  * <p>为什么要带上 running：紧凑卡可能被用户收起，按钮上的耗时仍要随秒增长；
  * 若只按「浮层打开才走表」判断，收起后耗时就停在那一刻。
+ *
+ * <p>这里刻意传 {@link traceActive} 而不是 {@link inspectRunning}：后者可能只由
+ * {@link cardRunning} 撑起，那一拍没有可增长的耗时，也不需要 250ms 一拍；
+ * 若跟着它走表，一张卡在库里卡住的会话会让定时器无限空转。
  */
 watch(
   () =>
     inspectClockNeeded({
       pageActive: pageActive.value !== false,
-      running: inspectRunning.value,
+      running: traceActive.value,
       detailOpen: detailOpen.value,
       compact: inspectMode.value === INSPECT_MODE_COMPACT
     }),
@@ -617,7 +639,7 @@ const inspectStartedAt = computed(() => parseTraceStart(routerTrace.value?.spans
  *   <li>运行中：展示时钟 {@link inspectNow} − trace 起点（现网紧凑卡原本就这么算）；</li>
  *   <li>新一轮刚起、trace 还是上一轮：改用本轮发送时刻兜底，不闪出旧累计；</li>
  *   <li>刚收尾：收尾时刻 {@link roundEndedAt} − trace 起点，冻结成总耗时；</li>
- *   <li>历史会话（挂载时已结束）：trace 自身的结束时刻 − 起点，回放也给出真实耗时。</li>
+ *   <li>历史会话（挂载时已结束）、或刷新后仅卡片信号在跑：trace 自身的结束时刻 − 起点。</li>
  * </ul>
  *
  * <p>没有另起一套秒表：运行期仍然复用 250ms 的 `inspectNow`，结束态只是把同一份
@@ -625,7 +647,12 @@ const inspectStartedAt = computed(() => parseTraceStart(routerTrace.value?.spans
  */
 const inspectElapsedMs = computed<number | null>(() => {
   const startedAt = inspectStartedAt.value
-  if (inspectRunning.value) {
+  /*
+   * 只有本页真的在发 / 在续订时才按「运行中」口径往上算。
+   * 刷新后仅由卡片信号撑起的那一拍没有可增长的本轮耗时（工作流自己的 trace 是
+   * session_id=0，按会话取不到），落到下面按 trace 自身起止给出已落库的耗时。
+   */
+  if (traceActive.value) {
     // 新 trace 还没回来（traceId 仍是发送那一刻的旧值）：用本轮发送时刻兜底，
     // 避免把上一轮的累计耗时当成这一轮，也不让秒数先跳到 0 再跳回去
     const traceId = routerTrace.value?.traceId ?? ''
@@ -649,9 +676,23 @@ const inspectElapsedMs = computed<number | null>(() => {
   return Math.max(0, endedAt - startedAt)
 })
 
-/** 按钮文案：进行中 / 已完成 + 耗时，不必打开浮卡就能读到 */
+/**
+ * 按钮文案：进行中 / 已完成 + 耗时，不必打开浮卡就能读到。
+ *
+ * <p>耗时口径：本页在跑时按运行中往上走，收尾后冻结 / 按 trace 起止给出总耗时。
+ * 仅由 {@link cardRunning} 撑起的「进行中」**不给数字**：那一拍 trace 早已收口，
+ * 拿它的起点相减只会得到一个越涨越大的假耗时（工作流自己的 trace 是
+ * `session_id=0`，按会话取不到）。宁可不写数字，也不撒谎。
+ *
+ * <p>不能在这里把 {@code elapsedMs} 传 null：结束态那句「已完成 · 4.5s」正是靠
+ * {@link inspectElapsedMs} 的 trace 起止算出来的。
+ */
 const inspectButtonText = computed(() =>
-  inspectTriggerLabel(inspectRunning.value, inspectElapsedMs.value)
+  inspectTriggerLabel(
+    inspectRunning.value,
+    inspectElapsedMs.value,
+    cardRunning.value && !traceActive.value
+  )
 )
 
 /** 紧凑卡已耗时：直接复用本轮耗时，不另算一份 */

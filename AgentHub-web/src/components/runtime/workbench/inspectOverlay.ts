@@ -200,12 +200,23 @@ export function formatInspectDuration(elapsedMs: number): string {
  * <p>按钮必须自己说清「进行中还是已完成、花了多久」，不能只留一个含义不明的
  * 「执行明细」。耗时拿不到时退化为纯状态词，不写 0s 冒充已计时。
  *
- * @param running   本轮是否仍在执行
- * @param elapsedMs 耗时；null 表示还没拿到（new 一轮刚起、trace 未到）
+ * <p>{@code runningByCard} 用于「刷新后本页没接管、但工作流卡仍在跑」这一拍：
+ * 那时 chat trace 早已收口，耗时算出来只会越涨越假，因此只写「执行中」不带数字。
+ *
+ * @param running       本轮是否仍在执行
+ * @param elapsedMs     耗时；null 表示还没拿到（new 一轮刚起、trace 未到）
+ * @param runningByCard true 表示「进行中」只由卡片信号撑起，不展示耗时
  * @return 如「执行中 · 12.3s」「已完成 · 12.3s」「执行中」
  */
-export function inspectTriggerLabel(running: boolean, elapsedMs: number | null): string {
+export function inspectTriggerLabel(
+  running: boolean,
+  elapsedMs: number | null,
+  runningByCard = false
+): string {
   const head = running ? '执行中' : '已完成'
+  if (running && runningByCard) {
+    return head
+  }
   const duration = elapsedMs == null ? '' : formatInspectDuration(elapsedMs)
   return duration ? `${head} · ${duration}` : head
 }

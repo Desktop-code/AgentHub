@@ -166,7 +166,7 @@ class WorkflowChoiceLiveSnapshotTest {
                     return Optional.of(resumed());
                 });
 
-        service.chooseStream(SESSION_ID, "python", noopProgress(), noopEnd());
+        service.chooseStream(SESSION_ID, "python", null, noopProgress(), noopEnd());
 
         // 1) 续跑中途读得到快照（本刀修复前这里是空表）
         assertTrue(observed.contains("size=2"), "续跑中途应有身份 + 卡片两帧：" + observed);
@@ -215,7 +215,7 @@ class WorkflowChoiceLiveSnapshotTest {
                     return Optional.of(maResumed());
                 });
 
-        service.chooseStream(SESSION_ID, "python", noopProgress(), noopEnd());
+        service.chooseStream(SESSION_ID, "python", null, noopProgress(), noopEnd());
 
         // 方案点选的第一条落库是「已答复」CHOICE，因此快照从 7 + 1 = 8 起
         assertTrue(observed.contains("participant@8"), "方案点选快照序号应让开 CHOICE 行：" + observed);

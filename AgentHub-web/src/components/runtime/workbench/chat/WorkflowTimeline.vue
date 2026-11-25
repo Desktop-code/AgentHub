@@ -39,6 +39,7 @@
               :peers="peers"
               :depth="depth + 1"
               @choose="emit('choose', $event)"
+              @other="emit('other')"
             />
           </div>
         </div>
@@ -54,6 +55,7 @@
         :choice-enabled="choiceEnabled"
         :workbench="workbench"
         @choose="emit('choose', $event)"
+        @other="emit('other')"
       />
     </template>
   </div>
@@ -99,6 +101,8 @@ const props = withDefaults(
 const emit = defineEmits<{
   /** 用户点了停等选项 */
   choose: [option: ParticipantChoiceOption]
+  /** 用户点了平台追加的「其它 / 自填」行；向上只转交「进入输入」，不提交 */
+  other: []
 }>()
 
 /** 折叠覆盖表的注入键：各层共享同一份，同一个框在哪一层看都是同一个开合状态 */

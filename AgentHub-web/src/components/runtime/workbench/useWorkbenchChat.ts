@@ -67,19 +67,22 @@ import {
   assistantTurn,
   formatRelativeTime,
   hasOpenTurn,
+  lastAssistantCardRunning,
   markLiveTail,
   openTurnStale,
   parseFile,
   parsePlan,
   parseStep,
+  resumeTurnOpen,
+  stoppedClosure,
+  turnProgressing,
   turnsFromEvents,
   upsertPlan,
   upsertStep,
-  workflowReplyProgressing,
-  workflowReplyResuming,
   workflowStillWaitingForReply
 } from '@/components/runtime/trialMessages'
 import { mergeTurnsAfterRun } from '@/components/runtime/trialMerge'
+import { routeWorkbenchAnswer } from '@/components/runtime/workbench/chat/workbenchAnswerText'
 import { forgetTrialSession, recallTrialSession, rememberTrialSession } from '@/components/runtime/trialResume'
 import {
   beginLive,
@@ -295,16 +298,40 @@ export function useWorkbenchChat(pageActive: Ref<boolean>) {
   const waitingReply = computed(() => detectWaitingReply(turns.value))
 
   /**
-   * 这一轮是否还有可中断的执行中对象：本页在途流、真正的等待回复、或刷新后的续订中。
+   * 最后一张执行卡是否看起来还在跑（工作流 / MA / 单 Agent 同一套闸，本页是否接管都能看）。
+   *
+   * <p>为什么要单独一路信号：刷新那一刻本页对上一轮的接管必然归零
+   * （{@code sending} / {@code resuming} 都是假），若续订没命中，右上角会写「已完成」、
+   * 输入区只剩发送，而卡片本身仍在按自己的状态转圈。这一位直接读时间线，
+   * 让按钮与卡片用同一份事实。
+   *
+   * <p>取值在 {@code trialMessages.lastAssistantCardRunning}：带工作流卡走
+   * {@code workflowCardRunning}，MA / 单 Agent 走与卡片动画同源的 {@code turn.status==='streaming'}。
+   *
+   * <p>反向闸：本轮已收口（{@code status==='error'}，含用户停止补的「已中断」）、
+   * 卡片头已是终态、或在等用户回复时它为假；续订另有 {@code RESUME_MAX_MS} 硬顶，
+   * 本信号不参与那条计时。
+   */
+  const cardRunning = computed(() => lastAssistantCardRunning(turns.value))
+
+  /**
+   * 这一轮是否还有可中断的执行中对象：本页在途流、真正的等待回复、刷新后的续订中，
+   * 或「刷新丢了接管但卡片仍在跑」。
    *
    * <p>为什么不复用 {@link waitingReply}：那一条同时承担「下一句算答复」的语义，
-   * 刀 C 之后它只认「确实还在等用户答」；而停止按钮要覆盖「已答复但仍在跑」的续订。
+   * 刀 C 之后它只认「确实还在等用户答」；而停止按钮要覆盖「已答复但仍在跑」的续订，
+   * 以及续订没命中的那一拍。
    *
    * <p>判定收在 {@code sessionProgress.runStoppable}：MA 运行页与这里共用同一条，
    * 不再各写一套「什么时候该显示停止」。
    */
   const runStoppable = computed(() =>
-    runStoppableOf({ sending: sending.value, waitingReply: waitingReply.value, resuming: resuming.value })
+    runStoppableOf({
+      sending: sending.value,
+      waitingReply: waitingReply.value,
+      resuming: resuming.value,
+      cardRunning: cardRunning.value
+    })
   )
 
   /**
@@ -318,7 +345,12 @@ export function useWorkbenchChat(pageActive: Ref<boolean>) {
    */
   const canStopRun = computed(() =>
     canStopRunOf(
-      { sending: sending.value, waitingReply: waitingReply.value, resuming: resuming.value },
+      {
+        sending: sending.value,
+        waitingReply: waitingReply.value,
+        resuming: resuming.value,
+        cardRunning: cardRunning.value
+      },
       halted.value,
       stopping.value,
       !!session.value && !isTempSession(session.value)
@@ -346,6 +378,39 @@ export function useWorkbenchChat(pageActive: Ref<boolean>) {
       return found ? turn : undefined
     }
     return undefined
+  }
+
+  /**
+   * 最后一条助手轮是否还挂着「可以点的单 Agent 选项」。
+   *
+   * <p>与 {@link waitingChoiceTurn} 的分工：那一条只认方案停等（{@code waiting=true}），
+   * 本方法只服务「其它 / 自填」的提交去处——单 Agent 的选项块不标 waiting，
+   * 但用户点「其它」后写下的话同样必须回到这位专家，而不是重新判路由。
+   *
+   * <p>已答复的块（{@code reply} 非空）不再可点，不算；工作流 / 方案等待由
+   * {@code waitingReply} 抢先判定，本方法不必区分。
+   *
+   * @param turns 当前会话时间线
+   * @return true 表示最后一条助手轮有可点的选项块
+   */
+  function lastAssistantChoiceOpen(turns: ChatTurn[]): boolean {
+    for (let i = turns.length - 1; i >= 0; i -= 1) {
+      const turn = turns[i]
+      if (turn?.role !== 'assistant') {
+        continue
+      }
+      const blocks = Array.isArray(turn.blocks) ? turn.blocks : []
+      return blocks.some((block) => {
+        if (block?.kind !== 'choice' || !block.choice) {
+          return false
+        }
+        if (block.choice.reply) {
+          return false
+        }
+        return Array.isArray(block.choice.options) && block.choice.options.length > 0
+      })
+    }
+    return false
   }
 
   /**
@@ -1040,7 +1105,7 @@ export function useWorkbenchChat(pageActive: Ref<boolean>) {
         beginResume(id, events, false, true)
         return
       }
-      if (shouldResume(id, events)) {
+      if (shouldResume(id, events, fetched.live)) {
         beginResume(id, events, !!snapshot, fetched.live)
         return
       }
@@ -1136,16 +1201,23 @@ export function useWorkbenchChat(pageActive: Ref<boolean>) {
   /**
    * 发送一轮。草稿状态先创建会话（不传 agentId / maId），再走工作台 SSE。
    *
+   * <p>用户是点「其它 / 自填」进来的（{@code customAnswer=true}）且最后一条助手轮
+   * 还挂着单 Agent 选项时，这一句是对选项的答复：改走 {@code /choice} 的 {@code text} 通道，
+   * 回到同一位专家，而不是让入口重新判路由。
+   *
    * @param content 用户输入
    * @param images  图片 data URI 数组，可空
    * @param files   非图片文件，可空。与管理端对话共用输入框时一并带上，不另改工作台其它逻辑
    * @param order   图和文件的添加顺序，可空
+   * @param customAnswer true 表示这句是从「其它 / 自填」输入条发出来的答复；
+   *                其余入口不传，行为与改前一致
    */
   async function send(
     content: string,
     images?: string[],
     files?: { name: string; size: number; dataUrl: string }[],
-    order?: Array<'image' | 'file'>
+    order?: Array<'image' | 'file'>,
+    customAnswer?: boolean
   ) {
     if (sending.value || !canSend.value) {
       return
@@ -1162,6 +1234,22 @@ export function useWorkbenchChat(pageActive: Ref<boolean>) {
     const maContinuing = !!waitingTurn && !hasAttachments
     const workflowContinuing = !waitingTurn && waitingReply.value
     const continuingWaiting = maContinuing || workflowContinuing
+    /*
+     * 单 Agent 的「其它 / 自填」：这句是本次选项的答复，不是新问题。
+     * 走 /choice 的 text 通道由同一位专家接着跑；走 /messages 会被入口重新判路由，
+     * 正是本刀要修的现象。工作流 / 方案等待仍优先走普通发送（它们已有成熟的续跑路径）。
+     */
+    const answerRoute = routeWorkbenchAnswer({
+      customAnswer: customAnswer === true,
+      waitingReply: continuingWaiting,
+      agentChoiceOpen: lastAssistantChoiceOpen(turns.value),
+      hasAttachments
+    })
+    if (answerRoute === 'agent-choice') {
+      // 纯文本续作由 continueChoice 自己管单飞、气泡与收尾，这里直接交接
+      await answerChoiceText(content)
+      return
+    }
     if (maContinuing && waitingTurn) {
       // 方案停等：卡内先记下这次回复（选项清空），后续增量接在这一轮
       markWaitingChoiceReplied(waitingTurn, content)
@@ -1394,15 +1482,58 @@ export function useWorkbenchChat(pageActive: Ref<boolean>) {
    * @param label    选项展示文案（单专家续作用作本轮用户气泡；工作流续跑由后端投影写进节点）
    */
   async function chooseOption(optionId: string, label: string) {
-    const current = session.value
     const text = (label || '').trim()
+    if (!(optionId || '').trim() || !text) {
+      return
+    }
+    // 普通点选不带 text：后端仍按 optionId 命中校验，展示文案以服务端登记为准
+    await continueChoice({ optionId: optionId.trim(), label: text })
+  }
+
+  /**
+   * 「其它 / 自填」→ 断点续作：用户自己写下的这句就是本次选项的答复。
+   *
+   * <p>与 {@link chooseOption} 共用同一条续作流程，区别只在载荷：
+   * 平台自填行没有模型 option id，改为把原文放进 {@code text}，由后端放宽选项命中后
+   * 派回同一位专家。绝不能再走普通发送——那会重新判路由，把答复当成新问题。
+   *
+   * <p>前置条件由调用方（{@link send}）先过一遍 canSend / sending；这里只挡空文本与草稿会话。
+   *
+   * @param content 用户在输入条里写下的答复原文
+   */
+  async function answerChoiceText(content: string) {
+    const text = (content || '').trim()
+    if (!text) {
+      return
+    }
+    // text 只在自填时携带；后端据此跳过「必须命中模型 option」的校验
+    await continueChoice({ optionId: '', label: text, text })
+  }
+
+  /**
+   * 断点续作的共用执行体：点选项与自填答复只差请求载荷，其余完全一致。
+   *
+   * <p>为什么要共用：单飞、旧选项处理、用户气泡、直播登记、收尾与错误落点都是同一套纪律；
+   * 各写一份迟早分叉（自填会漏掉某一步，或者气泡口径与点选不一致）。
+   *
+   * <p>普通点选传 {@code optionId + label}；自填传 {@code text} 与同样的用户气泡文案。
+   * 工作流 / 方案停等的回复仍不插用户气泡，由后端投影写进询问节点。
+   *
+   * @param payload.optionId 被点选项的短标识；自填时为空串
+   * @param payload.label    用户气泡文案：点选用选项文案，自填用用户原文
+   * @param payload.text     自填答复原文；普通点选不传（传了会绕过后端的选项命中校验）
+   */
+  async function continueChoice(payload: { optionId: string; label: string; text?: string }) {
+    const current = session.value
+    const text = (payload.label || '').trim()
+    const customAnswer = payload.text != null
     if (
       sending.value ||
       !canSend.value ||
       !current ||
       isTempSession(current) ||
-      !(optionId || '').trim() ||
-      !text
+      !text ||
+      (!customAnswer && !(payload.optionId || '').trim())
     ) {
       return
     }
@@ -1427,7 +1558,7 @@ export function useWorkbenchChat(pageActive: Ref<boolean>) {
     childPending.value = null
     // 手动续作接管展示：停轮询，这一轮改由 SSE 驱动
     stopPolling()
-    // 单专家选项续作仍保留用户气泡；等待中（方案 / 工作流）的回复只体现在对应卡片上
+    // 单专家选项 / 自填续作仍保留用户气泡；等待中（方案 / 工作流）的回复只体现在对应卡片上
     if (!replyToWaiting) {
       turns.value = [
         ...turns.value,
@@ -1457,7 +1588,14 @@ export function useWorkbenchChat(pageActive: Ref<boolean>) {
     beginLive(sessionId, turns.value)
     const stream = createRunHandlers(live, touchSnapshot, sessionId)
     try {
-      await streamWorkbenchChoice(sessionId, optionId.trim(), stream.handlers, controller.signal)
+      // text 只在自填时进请求载荷；普通点选保持改前的 {optionId}
+      await streamWorkbenchChoice(
+        sessionId,
+        (payload.optionId || '').trim(),
+        stream.handlers,
+        controller.signal,
+        payload.text
+      )
       // 与发送同口径：收尾已被新一轮接管就不再回写（避免冲掉新气泡）
       const superseded = runId !== runSeq
       if (superseded) {
@@ -2229,52 +2367,18 @@ export function useWorkbenchChat(pageActive: Ref<boolean>) {
   }
 
   /**
-   * 本轮是否已经留下「用户已停止」的闭环。
+   * 这一轮在库里是否还没收口（续订闸的统一出口）。
    *
-   * <p>为什么不能只看 session.status：工作台会话在多轮期间一直是 RUNNING，
-   * 用户停止后也不会把整条会话改成 CANCELLED（要能接着聊）。停止必须落一条
-   * 「已中断」闭环事件，刷新 / 回放据此判定这一轮已经结束；只看状态会把
-   * 已停止的一轮重新续订成运行中。
-   *
-   * <p>只认最后一条 user 之后的 error：上一轮的停止说明不能挡住下一轮。
-   *
-   * @param events 已落库事件与内存快照的合并结果
-   * @return true 表示这一轮已由用户停止
-   */
-  function stoppedClosure(events: TrialEvent[]): boolean {
-    const ordered = [...events].sort((a, b) => (a.seq ?? 0) - (b.seq ?? 0))
-    let lastUser = -1
-    for (let i = 0; i < ordered.length; i += 1) {
-      if (ordered[i].eventType === 'user') {
-        lastUser = i
-      }
-    }
-    for (let i = lastUser + 1; i < ordered.length; i += 1) {
-      const item = ordered[i]
-      if (item.eventType !== 'error') {
-        continue
-      }
-      const text = `${item.contentText || ''} ${item.summary || ''}`
-      if (/已?中断|已?停止|已?取消/.test(text)) {
-        return true
-      }
-    }
-    return false
-  }
-
-  /**
-   * 这一轮在库里是否还没收口：常规未收尾，或「工作流点选已答复、正在续跑」。
-   *
-   * <p>两条一起判是刀 C 的口径：工作流点选续跑期间不落 USER / 进度事件，
-   * 落库末尾那条「等待你的回复」assistant 会被 {@link hasOpenTurn} 当成已收尾；
-   * 只看它就会停止续订、把页面钉在回放上。MA 与普通轮不受影响（
-   * {@link workflowReplyResuming} 只认工作流卡的证据链）。
+   * <p>口径本身在 {@code trialMessages.resumeTurnOpen}（便于单测钉住）：
+   * 末尾仍开口 → 是；已落「已中断」闭环 → 否；最后一张工作流卡看起来还在跑 → 是；
+   * 合并了内存快照且还有没终态的参与者（MA / 单 Agent）→ 是。
    *
    * @param events 已落库事件（可含内存增量）
+   * @param live   是否合并了内存快照；参与者证据只在这个分支生效
    * @return true 表示还应继续续订
    */
-  function turnStillOpen(events: TrialEvent[]): boolean {
-    return hasOpenTurn(events) || workflowReplyResuming(events)
+  function turnStillOpen(events: TrialEvent[], live = false): boolean {
+    return resumeTurnOpen(events, live)
   }
 
   /**
@@ -2282,21 +2386,31 @@ export function useWorkbenchChat(pageActive: Ref<boolean>) {
    *
    * <p>工作流点选续跑不落 USER 事件，落库末尾是「正在等待你的回复」那条 assistant，
    * {@link hasOpenTurn} 会判成已收口。这类「已答复、正在续跑」由
-   * {@link workflowReplyResuming} 另认（节点已非等待、choice 已清、询问节点带 reply），
-   * 命中时同样要续订，否则页面停在回放上不会自愈。
+   * {@link resumeTurnOpen} 另认（最后一张卡仍在跑：reply 已答复、或卡片头仍是
+   * 未收口的 RUNNING），命中时同样要续订，否则页面停在回放上不会自愈。
+   *
+   * <p>MA / 单 Agent 同理：合并内存快照后，末尾 assistant 增量会让 {@link hasOpenTurn}
+   * 判成收口，但快照里还有没终态的参与者；这一条也要能补上，否则专家卡还在动、
+   * 页面却已进纯回放。
    *
    * <p>静默上限只作用在常规分支：那条等待 assistant 可能是几十分钟前落的，
    * 拿它当「这一轮静默了很久」会把真正在续跑的运行判成僵尸。
-   * 续跑分支的证据来自节点状态与 reply，运行确实在动，另有 {@code RESUME_MAX_MS} 兜底。
+   * 卡片分支的证据来自节点状态，运行确实在动，另有 {@code RESUME_MAX_MS} 兜底；
+   * 但已停止（「已中断」闭环）的一轮必须让卡片证据失效，不能把停止后的卡一直续起来。
+   *
+   * @param id     会话主键
+   * @param events 已落库事件（可含内存增量）
+   * @param live   是否合并了内存快照；参与者证据只在这个分支生效
    */
-  function shouldResume(id: number, events: TrialEvent[]) {
+  function shouldResume(id: number, events: TrialEvent[], live = false) {
     const current = session.value
     const same = !!current && current.id === id
     const open = hasOpenTurn(events)
-    const replyResuming = !open && workflowReplyResuming(events)
+    // 卡片证据只在末尾已收口时补位；resumeTurnOpen 内已含「已中断」反向闸
+    const cardResuming = !open && resumeTurnOpen(events, live)
     return shouldResumeTurn({
       status: progressStatus(id),
-      open: open || replyResuming,
+      open: open || cardResuming,
       stale: open ? openTurnStale(events, RESUME_FRESH_MS) : false,
       hasEvents: events.length > 0,
       pendingMs: PENDING_FIRST_EVENT_MS,
@@ -2370,11 +2484,12 @@ export function useWorkbenchChat(pageActive: Ref<boolean>) {
           return
         }
         /*
-         * 已答复、卡上节点却已全部停下：这条运行其实跑完了，只是终态卡还没落库。
+         * 卡上节点 / 参与者都已停下：这条运行其实跑完了，只是终态还没落库。
          * 继续按 2 秒一拍空转到硬顶没有意义，放慢到下一个更宽的间隔再捞终态。
-         * 仍留在续订里（不 finish），页面保持运行中，直到终态卡把它改成已完成。
+         * 仍留在续订里（不 finish），页面保持运行中，直到终态把它改成已完成。
+         * F2 / F3：不要求 reply 证据；工作流卡与 MA 参与者卡各自判断是否还在推进。
          */
-        if (events.length && workflowReplyResuming(events) && !workflowReplyProgressing(events)) {
+        if (events.length && !turnProgressing(events, live)) {
           scheduleResume(id, token, startTime, RESUME_POLL_SLOW_MS)
           return
         }
@@ -2405,7 +2520,7 @@ export function useWorkbenchChat(pageActive: Ref<boolean>) {
       return
     }
     turns.value = turnsFromEvents(events)
-    if (live || turnStillOpen(events)) {
+    if (live || turnStillOpen(events, live)) {
       turns.value = markLiveTail(turns.value, events)
     }
     bindLiveTurns(id, turns.value)
@@ -2821,7 +2936,7 @@ export function useWorkbenchChat(pageActive: Ref<boolean>) {
         return
       }
       // 已停止的一轮同样不续：内存快照可能还在收尾，但闭环说明已经落下
-      if ((live && !stoppedClosure(events)) || shouldResume(current.id, events)) {
+      if ((live && !stoppedClosure(events)) || shouldResume(current.id, events, live)) {
         // keepCurrent：第一拍不拍平本地气泡
         beginResume(current.id, events, true, live)
         return
@@ -2896,6 +3011,7 @@ export function useWorkbenchChat(pageActive: Ref<boolean>) {
     canSwitchRoute,
     canStopRun,
     waitingReply,
+    cardRunning,
     draftToken,
     init,
     newSession,

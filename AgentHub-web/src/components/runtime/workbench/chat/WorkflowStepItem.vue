@@ -29,6 +29,7 @@
         :options="choice.options || []"
         :disabled="!choiceEnabled"
         @choose="emit('choose', $event)"
+        @other="emit('other')"
       />
       <!--
         节点内分三层，各占各的显示范围：
@@ -167,6 +168,8 @@ const props = withDefaults(
 const emit = defineEmits<{
   /** 用户点了停等选项；回传原始 option */
   choose: [option: ParticipantChoiceOption]
+  /** 用户点了平台追加的「其它 / 自填」行；壳层只聚焦输入，不提交 */
+  other: []
 }>()
 
 /** 正文单行高度（px）：与 `.md.answer` 的 14px × 1.6 一致，改字号时同步改这里 */

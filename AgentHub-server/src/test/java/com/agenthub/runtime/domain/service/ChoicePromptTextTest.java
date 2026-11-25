@@ -46,6 +46,15 @@ class ChoicePromptTextTest {
     }
 
     @Test
+    void choiceNoteBansModelOwnedOtherOption() {
+        // 平台会在模型候选之后固定追加一行「其它，我自己说」；模型再自带同义项就会出现两行，
+        // 其中一行还会被当成答复提交。锁定文案必须点名这条纪律。
+        String note = ChoiceNote.text();
+        assertTrue(note.contains("其它"), "必须点名平台会追加其它 / 自填行：" + note);
+        assertTrue(note.contains("追加"), "必须说明这行由平台追加，不是模型给的候选");
+    }
+
+    @Test
     void structurePromptAsksForTheSameShapeAndAllowsRefusal() {
         String prompt = ChoiceStructurePrompt.text();
         assertTrue(prompt.contains("\"question\""), "必须要求 question 字段");

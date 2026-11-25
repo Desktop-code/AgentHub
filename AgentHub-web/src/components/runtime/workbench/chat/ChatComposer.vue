@@ -56,6 +56,7 @@
       </li>
     </ul>
     <el-input
+      ref="inputRef"
       v-model="text"
       type="textarea"
       :rows="2"
@@ -149,35 +150,68 @@
           输入条不再保留仅注解的「自动匹配专家」徽标。
           正文还在加载时同样不提示「请先新建会话」：那不是用户此刻的状态。
         -->
-        <span class="hint">{{ threadLoading || sessionReady ? '' : blockedHint || '请先新建会话或从左侧选择' }}</span>
+        <span class="hint">{{ hintText }}</span>
       </div>
       <!--
-        停止按钮：管理端运行（非 workbench）有在途流时显示，行为与拆前一致；
-        工作台（含 MA 运行输入条）显式传入 can-stop：运行还在进行就显示停止。
-        can-stop 由壳层按「运行态可停」给（见 sessionProgress.canStopRun），
-        刷新后仍在续跑（含工作流点选续跑这一拍）同样为真，所以停止按钮不会丢。
-        工作流停在「等待用户回复」时这一轮已不在流式中，但用户仍要能停掉挂起的运行，
-        因此 waiting-reply 为真时停止与发送同时出现（发送＝这就是那句回复）。
+        停止 / 发送是一对圆形按钮，并排靠右，不再各占一条长条。
+        显隐沿用拆前同一套判定（见下方 stopShown / sendShown）：
+        - 管理端运行（非 workbench）有在途流时显示停止，行为与拆前一致；
+        - 工作台（含 MA 运行输入条）显式传入 can-stop：运行还在进行就显示停止；
+          can-stop 由壳层按「运行态可停」给（见 sessionProgress.canStopRun），
+          刷新后仍在续跑（含工作流点选续跑这一拍）同样为真，所以停止按钮不会丢；
+        - 工作流停在「等待用户回复」时这一轮已不在流式中，但用户仍要能停掉挂起的运行，
+          因此 waiting-reply 为真时停止与发送同时出现（发送＝这就是那句回复），
+          而且两颗圆钮只是并排，发送不会因为与停止同现而消失。
+        配色不动：停止沿用 danger plain（红），发送沿用 primary（蓝），不学参考图的深灰。
       -->
-      <el-button
-        v-if="stopShown"
-        type="danger"
-        plain
-        :disabled="!stopEnabled"
-        :title="stopEnabled ? undefined : '暂时不能停止，请稍候'"
-        @click="requestStop"
-      >
-        停止
-      </el-button>
-      <el-button
-        v-if="sendShown"
-        type="primary"
-        :loading="sending"
-        :disabled="!sessionReady || sending"
-        @click="submit"
-      >
-        发送
-      </el-button>
+      <div v-if="stopShown || sendShown" class="composer-actions">
+        <!-- 停止：粉底红块（沿用原 danger plain 的红），圆内方块表示「中断」 -->
+        <el-button
+          v-if="stopShown"
+          class="composer-round"
+          type="danger"
+          plain
+          circle
+          :disabled="!stopEnabled"
+          aria-label="停止本轮运行"
+          :title="stopEnabled ? '停止本轮运行' : '暂时不能停止，请稍候'"
+          @click="requestStop"
+        >
+          <span class="composer-round-stop-glyph" aria-hidden="true" />
+        </el-button>
+        <!--
+          发送：主色圆底 + 实心上箭头（头部填实），与参考图同形态；
+          颜色仍是现有蓝，不换深灰。图标内联 SVG，不用 Element 的 ArrowUp 折线尖角。
+        -->
+        <el-button
+          v-if="sendShown"
+          class="composer-round"
+          type="primary"
+          circle
+          :loading="sending"
+          :disabled="!sessionReady || sending"
+          aria-label="发送"
+          title="发送（Enter）"
+          @click="submit"
+        >
+          <!-- 头部三角与箭杆同一条填充路径（只描边会回折线尖角）；描边只做 0.5 收边，避免把箭杆加粗 -->
+          <svg
+            v-if="!sending"
+            class="composer-round-send-glyph"
+            viewBox="0 0 16 16"
+            aria-hidden="true"
+            focusable="false"
+          >
+            <path
+              d="M8 1.7 13.4 7.5H9.6V14.1H6.4V7.5H2.6z"
+              fill="currentColor"
+              stroke="currentColor"
+              stroke-width="0.5"
+              stroke-linejoin="round"
+            />
+          </svg>
+        </el-button>
+      </div>
     </div>
   </div>
 </template>
@@ -216,6 +250,10 @@ import {
   filterWorkbenchAtCandidates,
   stripWorkbenchAtFragment
 } from '@/utils/workbenchAtRoute'
+import {
+  WORKBENCH_ANSWER_MAX_CHARS,
+  validateWorkbenchAnswer
+} from '@/components/runtime/workbench/chat/workbenchAnswerText'
 
 const props = defineProps<{
   /** 是否工作台沉浸皮肤（由壳层折算，组件内不读 skin） */
@@ -255,8 +293,24 @@ const props = defineProps<{
    * 在跑」，输入区才能显示停止、不给发送。由壳层按自己的续订状态传入。
    */
   resuming?: boolean
+  /**
+   * 最后一张工作流卡看起来还在跑（刷新丢了接管但卡片仍在转圈）。
+   *
+   * <p>与 {@code resuming} 并列：那一项表达「本页重新接上了这一轮」，这一项表达
+   * 「卡片自己说还在跑」。刷新后接管没命中时只有后者为真，输入区仍要只给停止、不给发送。
+   * MA / 单 Agent 轮里没有工作流块，壳层恒传 false，行为与改前一致。
+   */
+  cardRunning?: boolean
   /** 工作流停在「等待用户回复」：停止与发送同时出现 */
   waitingReply?: boolean
+  /**
+   * 是否处于「其它 / 自填」答复态。
+   *
+   * <p>点平台追加的「其它，我自己说」后置真：输入条只负责聚焦，不自动提交；
+   * 用户回车 / 点发送时才按答复做浅层校验（非空、2000 字、控制字符），
+   * 通过后仍走同一条 send 事件，由外层决定当答复续跑还是普通一轮。
+   */
+  customAnswer?: boolean
   /** 自动朗读开关状态（播放器单例在壳层，这里只画开关） */
   autoSpeak?: boolean
   /** 喇叭按钮的 Hover 说明，由壳层按「是否有回答正在生成」给出 */
@@ -277,15 +331,18 @@ const emit = defineEmits<{
 }>()
 
 /**
- * 本轮三个运行信号，与壳层共用一个形状（见 {@code sessionProgress.RunActivity}）。
+ * 本轮四个运行信号，与壳层共用一个形状（见 {@code sessionProgress.RunActivity}）。
  *
- * <p>三个都是真实信号，不从 can-stop 反推：can-stop 只回答「现在能不能点停止」，
- * 而「运行还在不在跑」还必须认续订（刷新后续跑这一拍没有在途流）。
+ * <p>四个都是真实信号，不从 can-stop 反推：can-stop 只回答「现在能不能点停止」，
+ * 而「运行还在不在跑」还必须认续订（刷新后续跑这一拍没有在途流），
+ * 以及「刷新丢了接管但执行卡仍在跑」这一拍（{@code cardRunning}：
+ * 工作流卡按节点状态，MA / 单 Agent 按整轮是否仍 streaming）。
  */
 const runActivity = computed(() => ({
   sending: props.sending,
   waitingReply: props.waitingReply === true,
-  resuming: props.resuming === true
+  resuming: props.resuming === true,
+  cardRunning: props.cardRunning === true
 }))
 
 /**
@@ -334,6 +391,8 @@ function requestStop() {
 }
 
 const text = ref('')
+/** 输入框句柄：点「其它 / 自填」后要把焦点交回这里，让用户直接开始写答复 */
+const inputRef = ref<{ focus: () => void } | null>(null)
 /** 原生文件选择器句柄。用 input 而非 el-upload：只需读文件转 base64，不需要上传进度与分片 */
 const filePicker = ref<HTMLInputElement>()
 /** 已选待发图片。发送成功后才清空，失败保留让用户重试 */
@@ -615,11 +674,30 @@ const filteredAtCandidates = computed(() =>
 )
 
 /** 工作台占位：恢复带「@ 指定线路」的原文，@ 的能力与列表逻辑都不改 */
-const composerPlaceholder = computed(() =>
-  props.workbench
+const composerPlaceholder = computed(() => {
+  // 自填态：这是对上一问的答复，不该再引导用户「@ 指定线路」
+  if (props.customAnswer === true) {
+    return '输入你的答复，Enter 发送，Shift+Enter 换行'
+  }
+  return props.workbench
     ? '输入问题，@ 指定线路；Enter 发送，Shift+Enter 换行'
     : '输入问题，Enter 发送，Shift+Enter 换行'
-)
+})
+
+/**
+ * 输入条底部提示。
+ *
+ * <p>自填态优先：它是一句答复，必须让用户知道发送后会接着刚才的询问继续，
+ * 而不是又开一个新问题；其余口径与改前一致（加载中 / 未就绪 / 请先新建）。
+ */
+const hintText = computed(() => {
+  if (props.customAnswer === true) {
+    return `正在填写答复，Enter 发送；最多 ${WORKBENCH_ANSWER_MAX_CHARS} 字`
+  }
+  return props.threadLoading || props.sessionReady
+    ? ''
+    : props.blockedHint || '请先新建会话或从左侧选择'
+})
 
 /**
  * 根据 textarea 内容同步 @ 面板开闭与检索词。
@@ -782,7 +860,20 @@ function sendPrompt(prompt: string) {
 
 /** 发送：只发图、只发文件，或和文字一起发都可以；发出后清空本地输入与草稿槽 */
 function submit() {
-  const content = text.value.trim()
+  let content = text.value.trim()
+  /*
+   * 「其它 / 自填」是唯一按答复口径校验的入口：非空、2000 字、控制字符。
+   * 不静默截断——超长原样留在输入框里并提示，用户删减后再发；
+   * 这里只做浅层输入形态拦截，不是安全边界，平台锁定要求仍由服务端拼在最后。
+   */
+  if (props.customAnswer === true) {
+    const check = validateWorkbenchAnswer(text.value)
+    if (!check.ok) {
+      ElMessage.warning(check.message)
+      return
+    }
+    content = check.text
+  }
   // 未绑定视觉模型时图片不提交：后端会直接拒。文件不走视觉，没有视觉模型也可以发。
   const sendingItems = attachments.value.filter(
     (item) =>
@@ -1113,8 +1204,19 @@ function errorMessage(error: unknown, fallback: string): string {
   return error instanceof Error && error.message ? error.message : fallback
 }
 
-// 空态快捷卡 / 其它外部入口只认这一条：与点「发送」走同一份校验与清空逻辑
-defineExpose({ sendPrompt })
+/**
+ * 把焦点交回输入框。
+ *
+ * <p>点平台追加的「其它，我自己说」时由壳层调用：只进入输入，不在此提交任何文案。
+ * 输入框可能刚被重建（切会话），因此调用方在下一拍再调，避免聚焦到旧节点。
+ */
+function focus() {
+  inputRef.value?.focus()
+}
+
+// 空态快捷卡 / 其它外部入口只认这一条：与点「发送」走同一份校验与清空逻辑；
+// focus 只负责把光标给用户，不触发发送。
+defineExpose({ sendPrompt, focus })
 </script>
 
 <style scoped>
@@ -1162,6 +1264,52 @@ defineExpose({ sendPrompt })
 
 .composer-bar :deep(.el-button) {
   flex: none;
+}
+
+/*
+ * 停止 / 发送是一对圆钮：等宽等高、间距一致，始终靠右并排。
+ * 不写成两条长条按钮，等待回复时两颗圆钮只是并排，不会挤掉发送。
+ */
+.composer-actions {
+  display: flex;
+  flex: none;
+  align-items: center;
+  gap: 8px;
+}
+
+/*
+ * 圆钮尺寸：Element 默认圆钮偏小（32px）且带横向 padding，
+ * 这里统一成 34px、去掉 padding，让里面只有一个图标 / 符号。
+ * 只改尺寸与对齐，颜色仍由 type（danger plain / primary）决定，配色不变。
+ * 用 :deep 是因为样式要落到 el-button 自身（子组件根节点也会带父作用域 id，
+ * 但 is-circle 的尺寸规则由 Element 内部定义，仍需深选择器才压得住）。
+ */
+.composer-actions :deep(.composer-round.el-button.is-circle) {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 34px;
+  height: 34px;
+  padding: 0;
+}
+
+/* 停止：沿用 danger plain 的粉底红，圆内放一颗红色实心方块（常见中断符号） */
+.composer-round-stop-glyph {
+  display: block;
+  width: 10px;
+  height: 10px;
+  border-radius: 2px;
+  background: currentColor;
+}
+
+/*
+ * 发送圆钮里的实心上箭头：17px 视觉尺寸（比上一版 16px 略大一点），
+ * 颜色跟随按钮 currentColor（蓝）。圆钮自身 34px 不变，只调图标大小与形状。
+ */
+.composer-round-send-glyph {
+  width: 17px;
+  height: 17px;
+  display: block;
 }
 
 .composer-left {

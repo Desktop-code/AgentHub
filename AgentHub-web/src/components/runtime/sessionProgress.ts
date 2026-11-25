@@ -38,8 +38,9 @@ export function rowShowsSpinner(status: string | null | undefined, turnRunning: 
 /**
  * 一轮运行当前处于什么状态，供「运行是否还可停止」这一套共用判定取用。
  *
- * <p>三个信号必须都算进来：只看 {@code sending} 会漏掉「等待回复」与「刷新后续订」
- * 这两类没有在途流的运行，正是「运行还在跑、输入区却露出发送按钮」的成因。
+ * <p>四个信号必须都算进来：只看 {@code sending} 会漏掉「等待回复」与「刷新后续订」
+ * 这两类没有在途流的运行，正是「运行还在跑、输入区却露出发送按钮」的成因；
+ * 只看前三个还会漏掉「刷新把接管弄丢、但卡片明显还在动」这一拍（见 {@code cardRunning}）。
  */
 export interface RunActivity {
   /** 本页是否有一条在途 SSE（刚发出、还没收尾） */
@@ -48,19 +49,33 @@ export interface RunActivity {
   waitingReply?: boolean
   /** 是否正在续订直播（刷新后重新接上这一轮，含点选续跑这一拍） */
   resuming?: boolean
+  /**
+   * 最后一张执行卡看起来还在跑（{@code trialMessages.lastAssistantCardRunning}）。
+   *
+   * <p>为什么不能只靠 {@code resuming}：刷新那一刻本页对上一轮的接管必然归零，
+   * 若续订没命中，这个信号为假，而卡片自己还在动——两处各说各话。
+   * 这一位补的就是「卡片自己的判断」，让按钮与卡片对齐。
+   * 工作流卡看卡片/节点状态；MA 与单 Agent 看整轮是否仍在流式（与卡片动画同源）。
+   * 没有执行卡的轮（已结束）恒为 false，等待回复那一拍也恒为 false。
+   */
+  cardRunning?: boolean
 }
 
 /**
  * 这一轮是否还有可中断的执行中对象。所属域：runtime（前端判定）。
  *
- * <p>MA 运行、工作台对话、管理端运行都用这一条：运行还在进行（含刷新后续跑）即为真，
- * 跑完才为假。调用方只负责各自把 {@link RunActivity} 的三个信号算准，不再各写一套。
+ * <p>MA 运行、工作台对话、管理端运行都用这一条：运行还在进行（含刷新后续跑、
+ * 以及刷新后接管丢失但卡片仍在跑）即为真，跑完才为假。
+ * 调用方只负责各自把 {@link RunActivity} 的信号算准，不再各写一套。
  *
- * @param activity 本轮三个运行信号
+ * @param activity 本轮四个运行信号
  * @return true 表示输入区应显示停止，而不是可点的发送
  */
 export function runStoppable(activity: RunActivity): boolean {
-  return activity.sending === true || activity.waitingReply === true || activity.resuming === true
+  return activity.sending === true
+    || activity.waitingReply === true
+    || activity.resuming === true
+    || activity.cardRunning === true
 }
 
 /**
@@ -87,16 +102,28 @@ export function canStopRun(
 /**
  * 这一轮是否「运行还在进行，输入框不能当新问题发送」。所属域：runtime（前端判定）。
  *
- * <p>与 {@link runStoppable} 的唯一差别：**不算 {@code waitingReply}**。
- * 工作流停在「等待用户回复」时，这一轮已不在流式中，输入框那句就是答复，必须能发出去；
- * 而在途流与刷新后的续订都属于「还在跑」，此时露出可点的发送会让用户把下一句当成新问题
- * 发进去——正是要修的现象。
+ * <p>与 {@link runStoppable} 的差别有两处：
+ * <ol>
+ *   <li><b>在途流与续订照样拦</b>：{@code sending} / {@code resuming} 为真时露出发送，
+ *       用户会把下一句当成新问题发进还在跑的那一轮，正是要修的现象；</li>
+ *   <li><b>{@code cardRunning} 让路给 {@code waitingReply}</b>：「等用户答」那句就是答复，
+ *       永远要能发出去。嵌套方案里可能出现「方案在等某位子专家回答、同时另一个子工作流仍在跑」，
+ *       此时若让卡片信号拦发送，用户就答不了了。</li>
+ * </ol>
  *
- * @param activity 本轮三个运行信号
+ * <p>注意不能让整个函数在 {@code waitingReply} 为真时直接返回 false——那样会连
+ * {@code sending} 一起放过（多成员方案里，卡片先出等待节点、整轮仍在流式的那一拍）。
+ *
+ * @param activity 本轮四个运行信号
  * @return true 表示应显示停止、不显示发送
  */
 export function runBlocksSending(activity: RunActivity): boolean {
-  return runStoppable({ ...activity, waitingReply: false })
+  // 在途流 / 续订：这一轮确实还在跑，谁来都不放开
+  if (activity.sending === true || activity.resuming === true) {
+    return true
+  }
+  // 卡片在跑：只在「没有在等用户答」时拦；等待回复时那句就是答复
+  return activity.cardRunning === true && activity.waitingReply !== true
 }
 
 /**
