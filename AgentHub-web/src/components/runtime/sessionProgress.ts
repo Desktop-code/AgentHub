@@ -36,6 +36,90 @@ export function rowShowsSpinner(status: string | null | undefined, turnRunning: 
 }
 
 /**
+ * 一轮运行当前处于什么状态，供「运行是否还可停止」这一套共用判定取用。
+ *
+ * <p>三个信号必须都算进来：只看 {@code sending} 会漏掉「等待回复」与「刷新后续订」
+ * 这两类没有在途流的运行，正是「运行还在跑、输入区却露出发送按钮」的成因。
+ */
+export interface RunActivity {
+  /** 本页是否有一条在途 SSE（刚发出、还没收尾） */
+  sending?: boolean
+  /** 这一轮是否真的还在等用户回复（工作流 / 方案停等；不含「已答复、正在续跑」） */
+  waitingReply?: boolean
+  /** 是否正在续订直播（刷新后重新接上这一轮，含点选续跑这一拍） */
+  resuming?: boolean
+}
+
+/**
+ * 这一轮是否还有可中断的执行中对象。所属域：runtime（前端判定）。
+ *
+ * <p>MA 运行、工作台对话、管理端运行都用这一条：运行还在进行（含刷新后续跑）即为真，
+ * 跑完才为假。调用方只负责各自把 {@link RunActivity} 的三个信号算准，不再各写一套。
+ *
+ * @param activity 本轮三个运行信号
+ * @return true 表示输入区应显示停止，而不是可点的发送
+ */
+export function runStoppable(activity: RunActivity): boolean {
+  return activity.sending === true || activity.waitingReply === true || activity.resuming === true
+}
+
+/**
+ * 停止按钮此刻是否可点（显示与否由 {@link runStoppable} 决定）。所属域：runtime（前端判定）。
+ *
+ * <p>另加三道闸门：用户已点过停止（避免对同一轮重复发取消）、停止请求在途、
+ * 以及还没有真实会话 id（草稿没有可中断的后端对象）。
+ *
+ * @param activity 本轮三个运行信号
+ * @param halted   本轮是否已被用户停止
+ * @param stopping 停止请求是否在途
+ * @param hasSession 当前是否有真实落库会话（草稿为 false）
+ * @return true 表示停止按钮可点
+ */
+export function canStopRun(
+  activity: RunActivity,
+  halted: boolean,
+  stopping: boolean,
+  hasSession: boolean
+): boolean {
+  return runStoppable(activity) && !halted && !stopping && hasSession
+}
+
+/**
+ * 这一轮是否「运行还在进行，输入框不能当新问题发送」。所属域：runtime（前端判定）。
+ *
+ * <p>与 {@link runStoppable} 的唯一差别：**不算 {@code waitingReply}**。
+ * 工作流停在「等待用户回复」时，这一轮已不在流式中，输入框那句就是答复，必须能发出去；
+ * 而在途流与刷新后的续订都属于「还在跑」，此时露出可点的发送会让用户把下一句当成新问题
+ * 发进去——正是要修的现象。
+ *
+ * @param activity 本轮三个运行信号
+ * @return true 表示应显示停止、不显示发送
+ */
+export function runBlocksSending(activity: RunActivity): boolean {
+  return runStoppable({ ...activity, waitingReply: false })
+}
+
+/**
+ * 输入区该显示哪一组按钮。所属域：runtime（前端判定）。
+ *
+ * <p>MA 运行、工作台对话、管理端运行共用这一条，不再各写一套「什么时候显示停止」：
+ * <ul>
+ *   <li>运行还在进行（在途流 / 刷新后续跑）→ 只有停止，没有发送；</li>
+ *   <li>工作流停在等待回复 → 停止与发送同时出现（发送即那句答复）；</li>
+ *   <li>已经跑完 → 只有发送。</li>
+ * </ul>
+ *
+ * @param activity 本轮三个运行信号
+ * @return 两个按钮各自的显隐
+ */
+export function composerButtons(activity: RunActivity): { stop: boolean; send: boolean } {
+  return {
+    stop: runStoppable(activity),
+    send: !runBlocksSending(activity)
+  }
+}
+
+/**
  * 重进时要不要续订这一轮。
  * open / stale / hasEvents 由调用方用既有事件口径算好，本函数只加终态闸门。
  */

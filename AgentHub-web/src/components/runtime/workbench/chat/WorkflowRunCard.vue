@@ -148,6 +148,7 @@ import {
   wfLimitLines
 } from '@/components/runtime/workbench/chat/workflowCardView'
 import { buildWorkflowTimeline } from '@/components/runtime/workbench/chat/workflowLoopFrame'
+import { workflowReplyAnswered } from '@/components/runtime/trialMessages'
 import {
   BOX_MAX_LINES,
   answerClampOf,
@@ -329,12 +330,15 @@ onUpdated(scheduleMeasure)
 onMounted(scheduleMeasure)
 
 /**
- * 时限秒表：只要本卡仍在 RUNNING 且页签在前台就每秒推一次。
+ * 时限秒表：只要本卡仍在跑（RUNNING，或已答复、后续节点正在续跑）且页签在前台就每秒推一次。
  *
  * <p>等待态由 `waitingAt` 冻结，不随这只表变化；全部收口 / 页签失活立即停表。
  */
 watch(
-  () => props.pageActive !== false && (props.card.workflow?.status || '').toUpperCase() === 'RUNNING',
+  () =>
+    props.pageActive !== false &&
+    ((props.card.workflow?.status || '').toUpperCase() === 'RUNNING' ||
+      workflowReplyAnswered(props.card.workflow)),
   (live) => {
     if (live && !timer) {
       now.value = Date.now()

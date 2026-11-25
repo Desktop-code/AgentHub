@@ -172,6 +172,7 @@
           :detached="detached"
           :can-send="canSend"
           :can-stop="canStopRun"
+          :resuming="resuming"
           :waiting-reply="waitingReply"
           :session-ready="canSend"
           :blocked-hint="blockedHint"

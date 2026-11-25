@@ -75,11 +75,13 @@
           :selected-key="selectedMaTurn"
           :sending="sending || resuming"
           :can-send="canRun"
+          :can-stop="canStopRun"
           :session-ready="sessionReady"
           :blocked-hint="blockedHint"
           :detached="detached"
           @select="selectedMaTurn = $event"
           @send="send"
+          @stop="stopRun"
         />
       </section>
 
@@ -236,7 +238,12 @@ import TrialSessionList from '@/components/runtime/trial/TrialSessionList.vue'
 import WorkbenchChat from '@/components/runtime/workbench/WorkbenchChat.vue'
 import type { SessionGroup } from '@/components/runtime/trial/sessionGroup'
 import { groupSessionsByDay, parseSessionTime } from '@/components/runtime/trial/sessionGroup'
-import { rowShowsSpinner, sessionStillRunning, shouldResumeTurn } from '@/components/runtime/sessionProgress'
+import {
+  canStopRun as canStopRunOf,
+  rowShowsSpinner,
+  sessionStillRunning,
+  shouldResumeTurn
+} from '@/components/runtime/sessionProgress'
 import type { ChatTurn, TrialAgent, TrialEvent, TrialPlanView, TrialSession } from '@/types/runtime'
 
 const props = withDefaults(
@@ -282,6 +289,13 @@ const pageError = ref('')
 const sending = ref(false)
 /** 用户已点停止。本轮后续增量不再把状态条拉回「工具执行中」 */
 const userHalted = ref(false)
+/**
+ * 用户在哪一条会话上点的停止。
+ *
+ * <p>`userHalted` 是「当前这一轮已停」的闸门，若跨会话沿用，切到另一条还在跑的会话后
+ * 停止按钮会一进来就置灰、点了也不发取消。这里记下所属会话，切到别的会话即复位。
+ */
+let haltedSessionId: number | undefined
 /** 点停止前的阶段，接口拒绝时还原，避免一律写成工具执行 */
 let haltedPhase = 'tool'
 const historyLoading = ref(false)
@@ -479,6 +493,28 @@ watch(routerSessionId, () => {
 /** 本地草稿，或未取消的落库会话，均可续聊。仅 CANCELLED 禁发。 */
 const sessionReady = computed(
   () => draftReady.value || (!!session.value && session.value.status !== 'CANCELLED')
+)
+
+/**
+ * 本轮是否可停止（MA / 管理端运行页用）。
+ *
+ * <p>判据与工作台共用一条（{@code sessionProgress.canStopRun}）：
+ * 在途流、或刷新后仍在续订（含方案点选续跑这一拍）都算「运行还在进行」，
+ * 输入区必须显示停止而不是可点的发送；跑完、已点过停止或还没有真实会话时不可停。
+ *
+ * <p>这里没有单独的「停止请求在途」信号：点下去立刻置 {@code userHalted}，
+ * 同一拍内按钮就置灰，连点不会重复发取消，所以第三个参数固定传 false。
+ *
+ * <p>MA 也没有独立的「等待回复」信号（等待中的选项不在这条通道里），
+ * 只用 sending / resuming 两个信号，不另造一套按钮判定。
+ */
+const canStopRun = computed(() =>
+  canStopRunOf(
+    { sending: sending.value, resuming: resuming.value },
+    userHalted.value,
+    false,
+    !!session.value && !isTempSession(session.value)
+  )
 )
 
 /**
@@ -1327,6 +1363,14 @@ async function openHistory(id: number, force = false) {
   // 换会话先停旧续订，避免上一个会话的轮询结果写进新的右栏
   stopResume()
   draftReady.value = false
+  /*
+   * 「已点停止」只属于上一次点它的那条会话。带到别的会话会让那一轮的停止按钮
+   * 一进来就置灰、点了也不发取消（运行明明还在跑）。切到别的会话即复位。
+   */
+  if (haltedSessionId !== id) {
+    userHalted.value = false
+    haltedSessionId = undefined
+  }
   const token = ++openToken
   // 会话行先切过去：右栏渲染用的就是 session，先挂上标题/时间，不必等 events 回来。
   // 依次查：服务端列表 → 本地登记表 → 本页仍在消费的流（关面板重开后 knownSessions 已随
@@ -1909,12 +1953,14 @@ async function stopRun() {
     return
   }
   userHalted.value = true
+  haltedSessionId = current.id
   markHaltedTail()
   try {
     await cancelTrialSession(current.id)
   } catch (error) {
     // 接口没接上：撤回本地的「已中断」，让进行中的这一轮继续显示
     userHalted.value = false
+    haltedSessionId = undefined
     undoHaltedTail()
     pageError.value = error instanceof Error ? error.message : '停止失败'
   }
@@ -1957,6 +2003,7 @@ async function send(
   }
   sending.value = true
   userHalted.value = false
+  haltedSessionId = undefined
   pageError.value = ''
   // 本轮业务幂等键：一次点击生成一次。网络重试 / 浏览器重放同一个请求时复用该键，
   // 服务端据此保证「只插一条用户消息、只跑一轮模型、只记一条流水」。

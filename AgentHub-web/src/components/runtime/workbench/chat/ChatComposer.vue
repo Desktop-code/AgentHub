@@ -152,24 +152,25 @@
         <span class="hint">{{ threadLoading || sessionReady ? '' : blockedHint || '请先新建会话或从左侧选择' }}</span>
       </div>
       <!--
-        停止按钮：管理端运行（非 workbench）保持原样；
-        工作台只有在显式传入 can-stop（运行态可停）时才出现，
-        复用同一个 skin 的 MA 运行输入条没有停止处理器，不能露出死按钮。
+        停止按钮：管理端运行（非 workbench）有在途流时显示，行为与拆前一致；
+        工作台（含 MA 运行输入条）显式传入 can-stop：运行还在进行就显示停止。
+        can-stop 由壳层按「运行态可停」给（见 sessionProgress.canStopRun），
+        刷新后仍在续跑（含工作流点选续跑这一拍）同样为真，所以停止按钮不会丢。
         工作流停在「等待用户回复」时这一轮已不在流式中，但用户仍要能停掉挂起的运行，
         因此 waiting-reply 为真时停止与发送同时出现（发送＝这就是那句回复）。
       -->
       <el-button
-        v-if="canSend && ((sending && (!workbench || canStop !== undefined)) || waitingReply)"
+        v-if="stopShown"
         type="danger"
         plain
-        :disabled="sending && canStop === false"
-        :title="sending && canStop === false ? '暂时不能停止，请稍候' : undefined"
+        :disabled="!stopEnabled"
+        :title="stopEnabled ? undefined : '暂时不能停止，请稍候'"
         @click="requestStop"
       >
         停止
       </el-button>
       <el-button
-        v-if="canSend && !(sending && (!workbench || canStop !== undefined))"
+        v-if="sendShown"
         type="primary"
         :loading="sending"
         :disabled="!sessionReady || sending"
@@ -195,6 +196,7 @@
  * - `workbench` 由壳层按 skin 折算后传入，组件内不读 skin。
  */
 import { computed, ref, watch } from 'vue'
+import { composerButtons, runBlocksSending, runStoppable } from '@/components/runtime/sessionProgress'
 import { Close, Headset, Loading, Microphone, Paperclip, Picture } from '@element-plus/icons-vue'
 import { ElMessage } from 'element-plus'
 import { transcribeAudio } from '@/api/voice'
@@ -246,6 +248,13 @@ const props = defineProps<{
   selectedRoute?: WorkbenchRouteOption | null
   /** 运行中是否允许停止；缺省（管理端运行）视为可用 */
   canStop?: boolean
+  /**
+   * 是否正在续订直播（刷新后重新接上这一轮，含点选续跑这一拍）。
+   *
+   * <p>这一拍没有在途流（sending=false），但运行确实还在进行：必须让它也算「还
+   * 在跑」，输入区才能显示停止、不给发送。由壳层按自己的续订状态传入。
+   */
+  resuming?: boolean
   /** 工作流停在「等待用户回复」：停止与发送同时出现 */
   waitingReply?: boolean
   /** 自动朗读开关状态（播放器单例在壳层，这里只画开关） */
@@ -268,11 +277,57 @@ const emit = defineEmits<{
 }>()
 
 /**
- * 通知壳层停掉正在执行的这一轮。连点由外层忽略，这里不把按钮改成不可再点。
+ * 本轮三个运行信号，与壳层共用一个形状（见 {@code sessionProgress.RunActivity}）。
+ *
+ * <p>三个都是真实信号，不从 can-stop 反推：can-stop 只回答「现在能不能点停止」，
+ * 而「运行还在不在跑」还必须认续订（刷新后续跑这一拍没有在途流）。
  */
+const runActivity = computed(() => ({
+  sending: props.sending,
+  waitingReply: props.waitingReply === true,
+  resuming: props.resuming === true
+}))
+
+/**
+ * 这一轮是否还有可中断的运行：在途流、真正的等待回复、或刷新后的续订中。
+ *
+ * <p>与壳层同一条纯函数（{@code sessionProgress.runStoppable}），
+ * 工作台 / MA 运行 / 管理端共用一个口径，不在模板里各写一遍条件。
+ */
+const runActive = computed(() => runStoppable(runActivity.value))
+
+/**
+ * 停止 / 发送两个按钮的显隐，与工作台、MA 运行共用同一条判定
+ * （{@code sessionProgress.composerButtons}）：运行还在进行就只有停止。
+ */
+const buttons = computed(() => composerButtons(runActivity.value))
+
+/**
+ * 是否显示停止按钮：canSend 是总闸，其余交给共用判定。
+ */
+const stopShown = computed(() => props.canSend && buttons.value.stop)
+
+/**
+ * 停止按钮是否可点。
+ *
+ * <p>can-stop 明确为 false 时置灰（会话未就绪 / 本轮已停过），避免对同一轮重复发取消；
+ * 但「等待回复」这一拍即使 can-stop 为 false 也要放行——那是另一条挂起运行，
+ * 停它不是重复操作（与拆前口径一致）。
+ */
+const stopEnabled = computed(() => props.canStop !== false || props.waitingReply === true)
+
+/**
+ * 是否显示发送按钮。运行还在进行（在途流 / 刷新后续跑）时一律不露发送：
+ * 否则用户会把下一句当成新问题发出去，而这一轮其实还在跑。
+ */
+const sendShown = computed(() => props.canSend && buttons.value.send)
+
 function requestStop() {
-  // 等待回复时这一轮不在流式中，但仍有挂起的运行可停：不能再用 sending 当门槛
-  if (!props.sending && !props.waitingReply) {
+  /*
+   * 与露出条件同一口径：runActive 为真说明这一轮确实还在跑（含刷新后续跑），可发停止。
+   * 管理端运行没传 can-stop 时，runActive 只认在途流，行为与拆前一致。
+   */
+  if (!runActive.value) {
     return
   }
   emit('stop')
@@ -718,7 +773,7 @@ const MAX_IMAGE_BYTES = 6 * 1024 * 1024
  */
 function sendPrompt(prompt: string) {
   const content = prompt.trim()
-  if (!content || !props.canSend || !props.sessionReady || props.sending) {
+  if (!content || !props.canSend || !props.sessionReady || runBlocksSending(runActivity.value)) {
     return
   }
   text.value = content
@@ -739,7 +794,16 @@ function submit() {
     .filter((item) => item.kind === 'file')
     .map((item) => ({ name: item.name, size: item.size, dataUrl: item.dataUrl }))
   const order = sendingItems.map((item) => item.kind)
-  if ((!content && images.length === 0 && files.length === 0) || !props.canSend || !props.sessionReady || props.sending) {
+  /*
+   * 闸门与按钮显隐用同一条判定：运行还在进行（在途流 / 刷新后续跑）时，
+   * 回车、快捷卡、外部 sendPrompt 都不能把下一句当新问题发出去。
+   */
+  if (
+    (!content && images.length === 0 && files.length === 0) ||
+    !props.canSend ||
+    !props.sessionReady ||
+    runBlocksSending(runActivity.value)
+  ) {
     return
   }
   emit(

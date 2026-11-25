@@ -5,6 +5,7 @@ import com.agenthub.runtime.domain.model.EventType;
 import com.agenthub.runtime.domain.service.WorkflowCardProjector;
 import com.agenthub.runtime.domain.service.WorkflowRunJson;
 import com.agenthub.workflow.application.WorkflowRunAppService;
+import com.agenthub.workflow.domain.enums.WorkflowNodeRunStatus;
 import com.agenthub.workflow.domain.model.WorkflowNodeRun;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
@@ -33,8 +34,11 @@ import java.util.Set;
  *   <li>节点正文由 {@link WorkflowCardProjector#nodeText} 抽取（与直播同一个方法），
  *       真源是 {@code workflow_node_run.output_json}；</li>
  *   <li>用户回复取 {@code workflow_node_run.reply_text}（续跑时落库）；</li>
+ *   <li><b>状态按库校准</b>：骨架里停在「等待回复 / 未开始」、库里已经往前走的节点，
+ *       改成库里的状态与说明；没有任何节点还在等时清掉卡片级的过期 {@code choice}。
+ *       否则刷新这一拍会出现「答复被藏、选项照画」——用户明明选过语言，页面又让他选一次；</li>
  *   <li>只补「带指针」的骨架（{@code v >= 2} 且有 {@code runId}），旧全量卡原样返回，
- *       不改变历史卡片的展示。</li>
+ *       不改变历史卡片的展示；同一 run 只校准最后一张骨架，历史等待卡保持原样供前端接管；</li>
  * </ul>
  *
  * <p>边界：
@@ -105,16 +109,37 @@ public class WorkflowCardRebuilder {
         }
         // 一次批量取回本次刷新涉及的全部节点行：不按卡片逐张查库
         Map<Long, List<WorkflowNodeRun>> held = workflowRuns.cardNodesOf(runIds);
+        /*
+         * 每条 run 只校准「最后一张」骨架（按事件 seq 判末位）。
+         *
+         * <p>为什么只校准最后一张：同一条运行在时间线里可能留下多张骨架（等待卡 → 续跑卡）。
+         * 前端靠「前一张仍是等待态」认出同一条运行的续跑，并把旧卡收走
+         * （{@code absorbWaitingWorkflowCards}）。若把历史等待卡也按库里最新状态改成已过，
+         * 前端就认不出这是续跑，页面上会同时出现两张卡——反而制造新的重复。
+         * 旧骨架本来就该保持它当时的样子。
+         */
+        Map<Long, Integer> latestIndexByRun = new LinkedHashMap<>();
+        for (Map.Entry<Integer, ObjectNode> entry : skeletons.entrySet()) {
+            long runId = entry.getValue().path("runId").asLong(0L);
+            int index = entry.getKey();
+            Integer previous = latestIndexByRun.get(runId);
+            if (previous == null || seqOf(rows.get(index)) >= seqOf(rows.get(previous))) {
+                latestIndexByRun.put(runId, index);
+            }
+        }
         // 第二遍：按 runId 补正文与回复并回写
         for (Map.Entry<Integer, ObjectNode> entry : skeletons.entrySet()) {
             ObjectNode body = entry.getValue();
-            List<WorkflowNodeRun> nodeRows = held.get(body.path("runId").asLong(0L));
+            long runId = body.path("runId").asLong(0L);
+            List<WorkflowNodeRun> nodeRows = held.get(runId);
             if (nodeRows == null || nodeRows.isEmpty()) {
                 continue;
             }
             EventResp item = rows.get(entry.getKey());
+            // 只有该 run 的最后一张骨架才按库里最新状态校准等待态；更早的卡片保持原样
+            boolean calibrate = Integer.valueOf(entry.getKey()).equals(latestIndexByRun.get(runId));
             try {
-                fill(body, nodeRows);
+                fill(body, nodeRows, calibrate);
                 item.setContentText(json.writeValueAsString(body));
             } catch (Exception ex) {
                 /*
@@ -126,6 +151,16 @@ public class WorkflowCardRebuilder {
             }
         }
         return rows;
+    }
+
+    /**
+     * 事件序号：同一 run 的多张骨架用它判末位。
+     *
+     * @param item 事件；可空
+     * @return 序号；缺失按 0
+     */
+    private static int seqOf(EventResp item) {
+        return item == null || item.getSeq() == null ? 0 : item.getSeq();
     }
 
     /**
@@ -168,16 +203,28 @@ public class WorkflowCardRebuilder {
     }
 
     /**
-     * 按节点行补全一张骨架：正文 + 用户回复。
+     * 按节点行补全一张骨架：状态校准 + 正文 + 用户回复。
      *
      * <p>只给 AGENT 节点补正文：工具 / 条件节点产出常是机器 JSON，倒进节点正文
      * 等于把技术细节当答案（与实时投影同一口径）。过程步（steps）本来就在骨架里，
      * 不再从库里补——库里没有这张表列，也不该为回放再复制一份。
      *
-     * @param body     卡片骨架（原地修改）
-     * @param nodeRows 该 run 的节点运行态
+     * <p><b>状态校准</b>（{@code calibrate=true} 时）：骨架是「落库那一刻」的快照，
+     * 事件要等整条运行收口才批量写库，所以刷新很可能拿到一份仍是
+     * {@code WAITING_REPLY} 的骨架，而库里该节点早已 {@code SUCCESS}；
+     * 后续节点也可能还写 {@code PENDING}，其实已经在跑。
+     * 等待那一条不校准的话，前端会「答复被藏（{@code wfNodeReply} 遇 WAITING_REPLY 返回空串）、
+     * 选项照画（{@code wfNodeChoice} 只认 WAITING_REPLY）」，也就是刷新后又冒出已选过的语言选项。
+     * 因此这里按库里的真实状态改口，并在没有任何节点还在等时清掉卡片级的过期 {@code choice}。
+     *
+     * <p>反过来，库里确实还在等（{@code WAITING_REPLY}）时一律不动：选项、问句
+     * 都保持骨架原样，行为与改前完全一致。
+     *
+     * @param body      卡片骨架（原地修改）
+     * @param nodeRows  该 run 的节点运行态
+     * @param calibrate 是否按库里状态校准等待态（同一 run 只有最后一张骨架传 true）
      */
-    private void fill(ObjectNode body, List<WorkflowNodeRun> nodeRows) {
+    private void fill(ObjectNode body, List<WorkflowNodeRun> nodeRows, boolean calibrate) {
         JsonNode nodes = body.get("nodes");
         if (!(nodes instanceof ArrayNode list)) {
             return;
@@ -201,6 +248,8 @@ public class WorkflowCardRebuilder {
         // 正文预算按 AGENT 节点数均分：节点越多，每个节点给得越少，但不会低于下限
         int cap = agents <= 0 ? NODE_TEXT_MAX
                 : Math.min(NODE_TEXT_MAX, Math.max(NODE_TEXT_MIN, NODE_TEXT_BUDGET / agents));
+        // 校准后是否还有节点在等回复：只要有一条仍在等，卡片级的选项就必须留着
+        boolean stillWaiting = false;
         for (JsonNode item : list) {
             if (!(item instanceof ObjectNode node)) {
                 continue;
@@ -212,6 +261,13 @@ public class WorkflowCardRebuilder {
                     : firstByCode.get(code);
             if (row == null) {
                 continue;
+            }
+            // 状态校准：骨架停在「等待 / 未开始」、库里已经往前走，就按库里改口。
+            // 不改口的话前端会「答复被藏、选项照画」，后续节点也仍显示「等待前置节点」。
+            // 只要这条 run 里还有一个节点确实仍在等，卡片级选项就必须留着。
+            if (calibrate) {
+                boolean rowWaiting = calibrateStaleState(node, row);
+                stillWaiting = stillWaiting || rowWaiting;
             }
             // 用户回复：续跑时落到 reply_text，是「我答了什么」的持久真源
             String reply = row.getReplyText() == null ? "" : row.getReplyText().trim();
@@ -228,6 +284,98 @@ public class WorkflowCardRebuilder {
             }
             node.put("output", clip(text, cap));
         }
+        if (calibrate && !stillWaiting) {
+            /*
+             * 没有任何节点还在等：卡片级选项已经过期，留着就是一组点不动的旧按钮。
+             * 与实时投影同一口径——收口 / 继续跑的那一拍由后端显式不带 choice。
+             */
+            body.remove("choice");
+        }
+    }
+
+    /**
+     * 按库里的真实状态校准一个节点的状态与说明。
+     *
+     * <p>补全的骨架是「落库那一刻」的快照，事件要等整条运行收口才批量写库。
+     * 刷新拿到的骨架因此常常落后于库：询问节点还写 {@code WAITING_REPLY}（用户其实已答），
+     * 后续节点还写 {@code PENDING}（其实已经在跑）。这里一律按库里改口：
+     * <ul>
+     *   <li>状态改成库里的值（{@code SUCCESS} / {@code SKIPPED} / {@code FAILED} / {@code RUNNING} 等）；</li>
+     *   <li>说明同步改成与实时投影同一份文案（{@code noteOf} 口径），
+     *       否则会出现「已完成」配「等待你的回复」这种自相矛盾的卡；</li>
+     *   <li>节点上的 {@code reply} 由调用方按 {@code reply_text} 另写，这里不动它。</li>
+     * </ul>
+     *
+     * <p>库里仍是 {@code WAITING_REPLY} 时不改：那说明用户确实还没答，选项必须保留。
+     *
+     * @param node 骨架上的节点对象（原地修改）
+     * @param row  同一节点的运行态行
+     * @return true 表示库里这个节点仍在等待（调用方据此保留卡片级选项）
+     */
+    private static boolean calibrateStaleState(ObjectNode node, WorkflowNodeRun row) {
+        String rowStatus = row.getStatus() == null ? "" : row.getStatus().trim().toUpperCase();
+        boolean rowWaiting = isWaitingStatus(rowStatus);
+        String cardStatus = node.path("status").asText("").trim().toUpperCase();
+        if (cardStatus.isEmpty() || rowStatus.isEmpty()) {
+            return rowWaiting;
+        }
+        // 库里已是终态 / 运行中而骨架还停在等待或未开始：这一拍必须按库里改口
+        if (!rowWaiting && !cardStatus.equals(rowStatus) && isStaleStatus(cardStatus)) {
+            node.put("status", rowStatus);
+            // 说明句与实时投影同一份口径，避免「已完成」配「等待你的回复」
+            String error = row.getErrorSummary() == null ? "" : row.getErrorSummary().trim();
+            node.put("note", noteOf(rowStatus, error));
+        }
+        return rowWaiting;
+    }
+
+    /**
+     * 骨架状态是否「已经落后于库」——只有这两种才会被库里状态盖掉。
+     *
+     * <p>只认「未开始」与「等待外部输入」：这两态的共同点是**还没产出结果**。
+     * 库里若已 SUCCESS / FAILED / RUNNING，说明这一段其实已经发生，骨架是在落后。
+     *
+     * <p>不覆盖 {@code RUNNING} / {@code FAILED} 等已发生的骨架：它们是落库那一刻的真实态，
+     * 保持原样才能让回放保留「当时在跑 / 当时失败」的过程。
+     *
+     * @param cardStatus 骨架上的状态（大写）
+     * @return true 表示可以被库里状态校准
+     */
+    private static boolean isStaleStatus(String cardStatus) {
+        return "PENDING".equals(cardStatus) || isWaitingStatus(cardStatus);
+    }
+
+    /**
+     * 是否「在等外部输入」的状态（对话回复 / 人工处理）。
+     *
+     * @param status 状态码；可空
+     * @return true 表示仍在等待
+     */
+    private static boolean isWaitingStatus(String status) {
+        String code = status == null ? "" : status.trim().toUpperCase();
+        WorkflowNodeRunStatus parsed = WorkflowNodeRunStatus.parse(code);
+        return parsed != null && parsed.waiting();
+    }
+
+    /**
+     * 节点状态 → 卡片说明句。必须与 {@link WorkflowCardProjector} 的取文案口径一致，
+     * 否则回放会出现「状态已完成、说明还写着等待」。
+     *
+     * @param status 状态码（大写）
+     * @param error  库里已脱敏的失败摘要；可空
+     * @return 非空说明
+     */
+    private static String noteOf(String status, String error) {
+        return switch (status) {
+            case "RUNNING" -> "执行中";
+            case "SUCCESS" -> "已完成";
+            case "FAILED" -> error.isEmpty() ? "执行失败" : clip(error, 120);
+            case "SKIPPED" -> "已跳过";
+            case "WAITING_HUMAN" -> "等待人工处理";
+            case "WAITING_REPLY" -> "等待你的回复";
+            case "CANCELLED" -> "已取消";
+            default -> "等待前置节点";
+        };
     }
 
     /**

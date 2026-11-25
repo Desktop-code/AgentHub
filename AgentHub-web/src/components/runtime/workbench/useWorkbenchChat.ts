@@ -74,7 +74,10 @@ import {
   parseStep,
   turnsFromEvents,
   upsertPlan,
-  upsertStep
+  upsertStep,
+  workflowReplyProgressing,
+  workflowReplyResuming,
+  workflowStillWaitingForReply
 } from '@/components/runtime/trialMessages'
 import { mergeTurnsAfterRun } from '@/components/runtime/trialMerge'
 import { forgetTrialSession, recallTrialSession, rememberTrialSession } from '@/components/runtime/trialResume'
@@ -92,7 +95,13 @@ import {
   saveSnapshot
 } from '@/components/runtime/trialStream'
 import { groupSessionsForWorkbench, parseSessionTime } from '@/components/runtime/trial/sessionGroup'
-import { rowShowsSpinner, sessionStillRunning, shouldResumeTurn } from '@/components/runtime/sessionProgress'
+import {
+  canStopRun as canStopRunOf,
+  rowShowsSpinner,
+  runStoppable as runStoppableOf,
+  sessionStillRunning,
+  shouldResumeTurn
+} from '@/components/runtime/sessionProgress'
 import { friendlyWorkbenchError } from '@/utils/workbenchFriendlyError'
 import { isStreamAbort, shouldResumeAfterReturn } from '@/components/runtime/workbench/workbenchLeave'
 import type { SessionGroup } from '@/components/runtime/trial/sessionGroup'
@@ -107,6 +116,11 @@ const WORKBENCH_OWNER = 1
 const PAGE_SIZE = 50
 /** 续订轮询间隔：后端整轮结束才落库，只能短轮询等收尾。 */
 const RESUME_POLL_MS = 2000
+/**
+ * 已答复、卡上节点已全部停下时的轮询间隔：运行其实跑完了，只在等终态卡落库。
+ * 放慢是为了不让页面在收尾窗口里每 2 秒空转一次请求。
+ */
+const RESUME_POLL_SLOW_MS = 10_000
 /** 续订硬顶：对齐后端 limits.timeout-ms（默认 300s）再留缓冲。 */
 const RESUME_MAX_MS = 330_000
 /**
@@ -232,21 +246,6 @@ export function useWorkbenchChat(pageActive: Ref<boolean>) {
   )
 
   /**
-   * 工作台运行中是否可停止。
-   *
-   * <p>必须已经有真实会话 id（草稿还没创建会话时后端没有可中断的对象）；
-   * 已经成功停止后置灰，避免对同一轮重复发停止请求。
-   */
-  const canStopRun = computed(
-    () =>
-      (sending.value || waitingReply.value) &&
-      !halted.value &&
-      !stopping.value &&
-      !!session.value &&
-      !isTempSession(session.value)
-  )
-
-  /**
    * 本会话当前是否有工作流停在「等待用户回复」。
    *
    * <p>为什么从时间线推、不另调接口：等待状态已经落在最后一条助手轮的工作流卡上
@@ -278,12 +277,13 @@ export function useWorkbenchChat(pageActive: Ref<boolean>) {
         if (block?.kind !== 'workflow') {
           return false
         }
-        if ((block.workflow?.status || '').toUpperCase() === 'WAITING_REPLY') {
-          return true
-        }
-        return (block.workflow?.nodes || []).some(
-          (node) => (node?.status || '').toUpperCase() === 'WAITING_REPLY'
-        )
+        /*
+         * 不能只看卡片头：刀 B 校准后的骨架会保留那一刻的 WAITING_REPLY（历史语义），
+         * 节点却已全部走过询问、choice 也已清掉——这一拍是「已答复、正在续跑」。
+         * 仍按等待处理的话，下一句会被当答复发出去，后端已无等待中的 run，
+         * 可能又开一条新运行。统一用 {@link workflowStillWaitingForReply} 判定。
+         */
+        return workflowStillWaitingForReply(block.workflow)
       })
       // 只看最近一条助手轮：它没有等待就说明这一轮已收口
       return found
@@ -293,6 +293,37 @@ export function useWorkbenchChat(pageActive: Ref<boolean>) {
 
   /** 输入区是否处于「有挂起运行等你回复」：发送即回复，停止可中断这条运行 */
   const waitingReply = computed(() => detectWaitingReply(turns.value))
+
+  /**
+   * 这一轮是否还有可中断的执行中对象：本页在途流、真正的等待回复、或刷新后的续订中。
+   *
+   * <p>为什么不复用 {@link waitingReply}：那一条同时承担「下一句算答复」的语义，
+   * 刀 C 之后它只认「确实还在等用户答」；而停止按钮要覆盖「已答复但仍在跑」的续订。
+   *
+   * <p>判定收在 {@code sessionProgress.runStoppable}：MA 运行页与这里共用同一条，
+   * 不再各写一套「什么时候该显示停止」。
+   */
+  const runStoppable = computed(() =>
+    runStoppableOf({ sending: sending.value, waitingReply: waitingReply.value, resuming: resuming.value })
+  )
+
+  /**
+   * 工作台运行中是否可停止。
+   *
+   * <p>必须已经有真实会话 id（草稿还没创建会话时后端没有可中断的对象）；
+   * 已经成功停止后置灰，避免对同一轮重复发停止请求。
+   *
+   * <p>判据用 {@link runStoppable}：刷新落在工作流续跑中途时，卡片不再算「等待回复」
+   * （已答复），但这一轮确实还在跑，停止按钮必须仍然可用。
+   */
+  const canStopRun = computed(() =>
+    canStopRunOf(
+      { sending: sending.value, waitingReply: waitingReply.value, resuming: resuming.value },
+      halted.value,
+      stopping.value,
+      !!session.value && !isTempSession(session.value)
+    )
+  )
 
   /**
    * 方案停等的那条助手轮：最后一条助手轮里有 waiting 的选项块时返回它。
@@ -1070,8 +1101,11 @@ export function useWorkbenchChat(pageActive: Ref<boolean>) {
    */
   async function stopRun() {
     const current = session.value
-    // 等待回复时没有在途流（sending=false），但挂起的运行仍要能停：两者任一即可
-    if ((!sending.value && !waitingReply.value) || stopping.value || !current || isTempSession(current)) {
+    /*
+     * 等待回复时没有在途流（sending=false），刷新后的续订中也没有：
+     * 三者任一都说明还有可中断的对象，不能只用 sending 当门槛。
+     */
+    if (!runStoppable.value || stopping.value || !current || isTempSession(current)) {
       return
     }
     const id = current.id
@@ -2228,14 +2262,42 @@ export function useWorkbenchChat(pageActive: Ref<boolean>) {
     return false
   }
 
-  /** 是否需要续订：终态不续；其余仍是末尾未收尾且不过旧，或「刚建会话、事件还没落库」。 */
+  /**
+   * 这一轮在库里是否还没收口：常规未收尾，或「工作流点选已答复、正在续跑」。
+   *
+   * <p>两条一起判是刀 C 的口径：工作流点选续跑期间不落 USER / 进度事件，
+   * 落库末尾那条「等待你的回复」assistant 会被 {@link hasOpenTurn} 当成已收尾；
+   * 只看它就会停止续订、把页面钉在回放上。MA 与普通轮不受影响（
+   * {@link workflowReplyResuming} 只认工作流卡的证据链）。
+   *
+   * @param events 已落库事件（可含内存增量）
+   * @return true 表示还应继续续订
+   */
+  function turnStillOpen(events: TrialEvent[]): boolean {
+    return hasOpenTurn(events) || workflowReplyResuming(events)
+  }
+
+  /**
+   * 是否需要续订：终态不续；其余仍是末尾未收尾且不过旧，或「刚建会话、事件还没落库」。
+   *
+   * <p>工作流点选续跑不落 USER 事件，落库末尾是「正在等待你的回复」那条 assistant，
+   * {@link hasOpenTurn} 会判成已收口。这类「已答复、正在续跑」由
+   * {@link workflowReplyResuming} 另认（节点已非等待、choice 已清、询问节点带 reply），
+   * 命中时同样要续订，否则页面停在回放上不会自愈。
+   *
+   * <p>静默上限只作用在常规分支：那条等待 assistant 可能是几十分钟前落的，
+   * 拿它当「这一轮静默了很久」会把真正在续跑的运行判成僵尸。
+   * 续跑分支的证据来自节点状态与 reply，运行确实在动，另有 {@code RESUME_MAX_MS} 兜底。
+   */
   function shouldResume(id: number, events: TrialEvent[]) {
     const current = session.value
     const same = !!current && current.id === id
+    const open = hasOpenTurn(events)
+    const replyResuming = !open && workflowReplyResuming(events)
     return shouldResumeTurn({
       status: progressStatus(id),
-      open: hasOpenTurn(events),
-      stale: openTurnStale(events, RESUME_FRESH_MS),
+      open: open || replyResuming,
+      stale: open ? openTurnStale(events, RESUME_FRESH_MS) : false,
       hasEvents: events.length > 0,
       pendingMs: PENDING_FIRST_EVENT_MS,
       sessionStamp: same ? parseSessionTime(current?.startTime || current?.updateTime) : 0,
@@ -2264,8 +2326,12 @@ export function useWorkbenchChat(pageActive: Ref<boolean>) {
     scheduleResume(id, token, startTime)
   }
 
-  /** 排下一次续订轮询；令牌失配或页签已失活直接退出，不再挂表。 */
-  function scheduleResume(id: number, token: number, startTime: number) {
+  /**
+   * 排下一次续订轮询；令牌失配或页签已失活直接退出，不再挂表。
+   *
+   * @param delayMs 下一拍的间隔；缺省用常规节奏（见 {@code RESUME_POLL_MS}）
+   */
+  function scheduleResume(id: number, token: number, startTime: number, delayMs = RESUME_POLL_MS) {
     if (!pageActive.value) {
       return
     }
@@ -2296,11 +2362,20 @@ export function useWorkbenchChat(pageActive: Ref<boolean>) {
           finishResume()
           return
         }
-        if (events.length && !hasOpenTurn(events)) {
+        if (events.length && !turnStillOpen(events)) {
           clearSnapshot(id)
           dropLive(id)
           finishResume()
           await refreshHistoryHead()
+          return
+        }
+        /*
+         * 已答复、卡上节点却已全部停下：这条运行其实跑完了，只是终态卡还没落库。
+         * 继续按 2 秒一拍空转到硬顶没有意义，放慢到下一个更宽的间隔再捞终态。
+         * 仍留在续订里（不 finish），页面保持运行中，直到终态卡把它改成已完成。
+         */
+        if (events.length && workflowReplyResuming(events) && !workflowReplyProgressing(events)) {
+          scheduleResume(id, token, startTime, RESUME_POLL_SLOW_MS)
           return
         }
         scheduleResume(id, token, startTime)
@@ -2330,7 +2405,7 @@ export function useWorkbenchChat(pageActive: Ref<boolean>) {
       return
     }
     turns.value = turnsFromEvents(events)
-    if (live || hasOpenTurn(events)) {
+    if (live || turnStillOpen(events)) {
       turns.value = markLiveTail(turns.value, events)
     }
     bindLiveTurns(id, turns.value)

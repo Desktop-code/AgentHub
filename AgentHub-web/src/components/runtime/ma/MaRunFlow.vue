@@ -83,6 +83,7 @@
       :turns="[]"
       :sending="sending"
       :can-send="canSend"
+      :can-stop="canStop"
       :session-ready="sessionReady"
       :blocked-hint="blockedHint"
       :detached="detached"
@@ -90,6 +91,7 @@
       :asr-enabled="false"
       :tts-enabled="false"
       @send="onSend"
+      @stop="emit('stop')"
     />
   </div>
 </template>
@@ -126,6 +128,11 @@ const props = defineProps<{
   sending: boolean
   /** 是否有运行权限 */
   canSend: boolean
+  /**
+   * 本轮是否可停止。与工作台共用一条判定（{@code sessionProgress.canStopRun}），
+   * 刷新后仍在续跑也为真；为真时输入区显示停止而不是发送。
+   */
+  canStop?: boolean
   /** 当前会话是否可继续发送 */
   sessionReady: boolean
   /** 不能发送时的说明 */
@@ -139,6 +146,8 @@ const emit = defineEmits<{
   select: [key: string]
   /** 发送用户输入；附件与首页同一协议 */
   send: [content: string, images?: string[], files?: OutgoingFile[], order?: Array<'image' | 'file'>]
+  /** 运行中点停止；处理仍由父组件（会话取消接口）负责 */
+  stop: []
 }>()
 
 const scroller = ref<HTMLElement>()
