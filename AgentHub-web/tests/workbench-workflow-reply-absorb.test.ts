@@ -16,9 +16,9 @@ import { readFileSync } from 'node:fs'
 import type { ChatTurn } from '../src/types/runtime.ts'
 import { turnsFromEvents } from '../src/components/runtime/trialMessages.ts'
 
-/** 读取真实事件夹具：只读，不改仓库里的数据 */
+/** 读取已跟踪的测试夹具：只读，不改仓库里的数据 */
 function fixture(): any[] {
-  return JSON.parse(readFileSync(new URL('../temp/events659.json', import.meta.url), 'utf8'))
+  return JSON.parse(readFileSync(new URL('./fixtures/events659.json', import.meta.url), 'utf8'))
 }
 
 /** 取助手轮里的工作流块 */
