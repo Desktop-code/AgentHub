@@ -575,16 +575,42 @@ public class TrialRunAppService {
                                             TrialProgress progress) {
         Long sessionId = session.getId();
         List<RunEvent> written = new ArrayList<>();
-        Optional<WorkflowReplyResumer.Resumed> resumed =
-                workflowReplies.resumeWithLabel(sessionId, run, userText, session.getUserId(), progress);
-        if (resumed.isEmpty()) {
-            // 并发已收口：没有可续运行，也没有用户消息可留；按失败说明收口
-            MessageResp failed = fail(session, written, "这条运行刚刚被取消或被别人继续，请重新提问", userText);
-            return failed;
+        /*
+         * 直播快照与同文件其它续跑路径对齐（方案点选、输入框续跑、普通一轮都有这一段）。
+         *
+         * <p>为什么起点取「下一条待写序号」而不是 +1：工作流点选续跑不落 USER 事件，
+         * 落库第一条就是身份 begin，与方案点选「先把已答复 CHOICE 写在 userSeq」不同，
+         * 因此快照第一条必须与 begin 同序号，合并时才不会与已落库的等待卡抢位、
+         * 也不会凭空多出一条用户气泡。
+         *
+         * <p>为什么必须有：续跑期间事件要等整条运行收口才批量落库，缺了这份镜像
+         * {@code /live-events} 一直是空的，中途刷新只能读到骨架里的 WAITING_REPLY
+         * 与选项，回放就会把已经答过的询问卡重新画成待选。
+         */
+        TrialProgress sink = progress;
+        boolean liveStarted = false;
+        if (progress != null) {
+            live.beginAt(sessionId, events.nextSeq(sessionId));
+            sink = TrialLiveBuffer.tee(progress, live.recorder(sessionId));
+            liveStarted = true;
         }
-        written.addAll(resumed.get().events());
-        MessageResp resp = succeed(session, resumed.get().turn(), written, userText);
-        return resp;
+        try {
+            Optional<WorkflowReplyResumer.Resumed> resumed =
+                    workflowReplies.resumeWithLabel(sessionId, run, userText, session.getUserId(), sink);
+            if (resumed.isEmpty()) {
+                // 并发已收口：没有可续运行，也没有用户消息可留；按失败说明收口
+                MessageResp failed = fail(session, written, "这条运行刚刚被取消或被别人继续，请重新提问", userText);
+                return failed;
+            }
+            written.addAll(resumed.get().events());
+            MessageResp resp = succeed(session, resumed.get().turn(), written, userText);
+            return resp;
+        } finally {
+            // 续跑同步结束：权威数据已是刚落库的事件，快照使命完成（与方案点选同一收尾）
+            if (liveStarted) {
+                live.clear(sessionId);
+            }
+        }
     }
 
     /**

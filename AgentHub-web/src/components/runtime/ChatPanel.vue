@@ -466,6 +466,7 @@
       :route-candidates="routeCandidates"
       :selected-route="selectedRoute"
       :can-stop="canStop"
+      :resuming="resuming"
       :waiting-reply="waitingReply"
       :auto-speak="autoSpeak"
       :speaker-hint="speakerHint"
@@ -654,6 +655,13 @@ const props = defineProps<{
    * 工作台会话尚未创建完成时由外层传 false，按钮置灰而不是假装已停。
    */
   canStop?: boolean
+  /**
+   * 是否正在续订直播（刷新后重新接上这一轮，含工作流点选续跑这一拍）。
+   *
+   * <p>这一拍没有在途流，但运行还在进行；输入条据此显示停止而不是发送。
+   * 缺省 false：管理端运行不传，行为与拆前一致。
+   */
+  resuming?: boolean
   /** 是否有模型配置权限：无权限时不渲染「去绑定模型」深链 */
   canConfigModel?: boolean
   /** 是否有对话路由配置权限：无权限时不渲染「去配置对话路由」深链 */

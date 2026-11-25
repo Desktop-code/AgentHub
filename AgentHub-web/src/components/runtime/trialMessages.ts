@@ -470,6 +470,147 @@ export function hasOpenTurn(events: TrialEvent[]): boolean {
 }
 
 /**
+ * 这张工作流卡此刻是否**真的**还在等用户回复（判定口径，不是历史识别口径）。所属域：runtime（前端）。
+ *
+ * <p>为什么不能只看卡片头：刷新回放补全（{@code WorkflowCardRebuilder.fill}）会按库里
+ * 真实状态校准节点，但**卡片头保留骨架里那一刻的 {@code WAITING_REPLY}**——
+ * 它当时确实在等，改它会让「同一条运行的续跑」认不出来。于是刷新落在续跑中途时，
+ * 卡片头说「等待输入」，节点却已经全部走过询问、选项也已被清掉：
+ * <ul>
+ *   <li>任一节点仍是 {@code WAITING_REPLY}：用户确实还没答，必须按「等回复」处理；</li>
+ *   <li>卡片头不是 {@code WAITING_REPLY}：本来就不在等；</li>
+ *   <li>卡片头写等待、没有任何节点表（历史事件被截断的残缺卡）：没有反证，仍按等待处理；</li>
+ *   <li>其余（节点都已非等待、选项已清）：这一拍是「已答复、正在续跑」，不算在等。</li>
+ * </ul>
+ *
+ * <p>与 {@link workflowWaitsReply} 的区别：那一条要认「这是一张等待卡」（历史卡接管用），
+ * 所以保留卡片头口径；这一条只回答「现在还要不要用户回答」，
+ * 供续订判定与输入框「下一句是答复还是新问题」使用。
+ *
+ * @param view 工作流卡片视图；可空
+ * @return true 表示仍需用户回复
+ */
+export function workflowStillWaitingForReply(view: TrialWorkflowView | undefined): boolean {
+  if (!view) {
+    return false
+  }
+  const nodes = Array.isArray(view.nodes) ? view.nodes : []
+  // 任一节点在等待：不论卡片头写什么，都必须按「等回复」处理
+  if (nodes.some((node) => (node?.status || '').toUpperCase() === 'WAITING_REPLY')) {
+    return true
+  }
+  if ((view.status || '').toUpperCase() !== 'WAITING_REPLY') {
+    return false
+  }
+  // 卡片头写等待但没有节点表：拿不到反证，按仍在等处理（不把残缺卡当成已答复）
+  if (!nodes.length) {
+    return true
+  }
+  // 卡片头停在等待、节点都不在等：只要选项还在，就说明用户还没答
+  return !!view.choice
+}
+
+/**
+ * 这张卡是否处于「询问已被答复、后续正在续跑」这一拍。所属域：runtime（前端判定）。
+ *
+ * <p>证据链（缺一不可，全部来自刀 B 校准后的骨架）：
+ * <ol>
+ *   <li>卡片头仍是骨架里的 {@code WAITING_REPLY}（历史语义，刀 B 有意不改它）；</li>
+ *   <li>卡片不再带 {@code choice}、也没有任何节点在 {@code WAITING_REPLY}——询问已被答复；</li>
+ *   <li>至少有节点表，且其中至少一个节点记着 {@code reply}（「我答了什么」的持久真源）。</li>
+ * </ol>
+ *
+ * <p>为什么不要求「还有节点在跑」：运行刚收口、终态卡还没落库的那一拍，
+ * 节点可能已经全部结束，但库里仍是这张等待骨架。若此时提前停轮询，页面就会
+ * 停在「等待输入」上不再自愈。真正跑完的那张卡由后端写成 {@code SUCCESS} / {@code FAILED}，
+ * 卡片头不再是 {@code WAITING_REPLY}，本条判据自然失效；轮询另有 330 秒硬顶兜底。
+ *
+ * @param view 工作流卡片视图；可空
+ * @return true 表示询问已答复、这一轮还没落终态
+ */
+export function workflowReplyAnswered(view: TrialWorkflowView | undefined): boolean {
+  if (!view || (view.status || '').toUpperCase() !== 'WAITING_REPLY' || view.choice) {
+    return false
+  }
+  const nodes = Array.isArray(view.nodes) ? view.nodes : []
+  if (!nodes.length) {
+    return false
+  }
+  if (nodes.some((node) => (node?.status || '').toUpperCase() === 'WAITING_REPLY')) {
+    return false
+  }
+  return nodes.some((node) => (node?.reply || '').trim().length > 0)
+}
+
+/**
+ * 最后一条用户消息之后、最后一张工作流卡的视图。
+ *
+ * <p>按「最后一条 user」切段是这套判定的共同前提：更早轮次的卡不能把新一轮当成续跑。
+ *
+ * @param events 同一会话已落库事件（可含内存增量），顺序不限
+ * @return 卡片视图；没有工作流卡时为 undefined
+ */
+function lastWorkflowCardOf(events: TrialEvent[]): TrialWorkflowView | undefined {
+  const ordered = [...events].sort((a, b) => (a.seq ?? 0) - (b.seq ?? 0))
+  let lastUser = -1
+  for (let i = 0; i < ordered.length; i += 1) {
+    if (ordered[i].eventType === 'user') {
+      lastUser = i
+    }
+  }
+  let card: TrialWorkflowView | undefined
+  for (let i = lastUser + 1; i < ordered.length; i += 1) {
+    const item = ordered[i]
+    if (item.eventType !== 'workflow') {
+      continue
+    }
+    // 同一条运行可能留下多张骨架：取最后一张，即刀 B 校准过的那张
+    const view = parseWorkflowEvent(item.contentText, item.sessionId)
+    if (view) {
+      card = view
+    }
+  }
+  return card
+}
+
+/**
+ * 落库事件末尾是否处于「工作流点选已答复、运行仍在续跑」。所属域：runtime（前端续订判定）。
+ *
+ * <p>为什么需要它：{@link hasOpenTurn} 只认 assistant / error 收口。工作流点选的续跑
+ * **不落 USER 事件**，续跑期间也不落任何事件，于是落库末尾正是那条
+ * 「工作流正在等待你的回复」的 assistant —— 刷新后会被判成「这一轮已写完」，
+ * 不续订 {@code /live-events}，页面停在回放上不会自愈。
+ *
+ * <p>只看工作流卡：MA 的方案 / 子专家停等不会命中，收口口径保持原样。
+ *
+ * @param events 同一会话已落库事件（可含内存增量），顺序不限
+ * @return true 表示应当继续续订这一轮的后续进度
+ */
+export function workflowReplyResuming(events: TrialEvent[]): boolean {
+  return workflowReplyAnswered(lastWorkflowCardOf(events))
+}
+
+/**
+ * 已答复的续跑卡上是否还有节点在跑（PENDING / RUNNING）。
+ *
+ * <p>用途只有一个：轮询侧据此区分「运行确实在推进」与「运行刚结束、终态卡还没落库」。
+ * 后者不该把整段 {@code RESUME_MAX_MS} 全耗在短轮询上。
+ *
+ * @param events 同一会话已落库事件
+ * @return true 表示卡上还有未结束的节点
+ */
+export function workflowReplyProgressing(events: TrialEvent[]): boolean {
+  const card = lastWorkflowCardOf(events)
+  if (!workflowReplyAnswered(card)) {
+    return false
+  }
+  return (card?.nodes || []).some((node) => {
+    const status = (node?.status || '').toUpperCase()
+    return status === 'PENDING' || status === 'RUNNING'
+  })
+}
+
+/**
  * 把重进取回的时间线标成「进行中」：末尾是用户气泡就补一张进行中的助手卡，
  * 否则把最后一张助手卡改成 streaming。阶段按末尾事件类型推断，不新造协议。
  * @param turns   {@link turnsFromEvents} 回放结果

@@ -15,6 +15,7 @@ import type {
   TrialWorkflowView
 } from '@/types/runtime'
 import type { ParticipantCard } from '@/components/runtime/workbench/workbenchParticipantFeed'
+import { workflowReplyAnswered } from '@/components/runtime/trialMessages'
 import { workflowOutputState } from '@/components/runtime/workbench/workflowOutputView'
 import {
   aggregateWorkflowToolPills,
@@ -66,6 +67,15 @@ export function wfStatusText(workflow: TrialWorkflowView, closed?: string): stri
     return '⏹ 已取消'
   }
   const status = (workflow.status || '').toUpperCase()
+  /*
+   * 已答复、正在续跑：卡片头仍是骨架里那一刻的 WAITING_REPLY（历史语义，见
+   * {@link workflowReplyAnswered}），节点却已全部走过询问、选项也已清掉。
+   * 不改口的话，页面会一直写「等待输入」，看起来像还在等用户点选。
+   * 与续订判定用同一个谓词，避免「显示运行中却没人轮询」。
+   */
+  if (workflowReplyAnswered(workflow)) {
+    return '运行中'
+  }
   if (status === 'SUCCESS') {
     return '✅ 已完成'
   }
@@ -107,6 +117,10 @@ export function wfStatusClass(workflow: TrialWorkflowView, closed?: string): str
     return 'is-cancelled'
   }
   const status = (workflow.status || '').toUpperCase()
+  // 与 {@link wfStatusText} 同口径：已答复且仍在续跑的卡按运行中着色并转圈
+  if (workflowReplyAnswered(workflow)) {
+    return 'is-running'
+  }
   if (status === 'SUCCESS') {
     return 'is-success'
   }
@@ -153,6 +167,13 @@ export function wfFormatMs(ms: number): string {
  * @return epoch 毫秒
  */
 function wfLimitNow(workflow: TrialWorkflowView, now: number): number {
+  /*
+   * 已答复、正在续跑的卡仍带着骨架里的 waitingAt（那是当时停等的一刻）；
+   * 沿用它会把这之后的真实运行时间从剩余里抹掉，所以这一类按「现在」算。
+   */
+  if (workflowReplyAnswered(workflow)) {
+    return now
+  }
   const waitingAt = workflow.limits?.waitingAt
   return typeof waitingAt === 'number' && waitingAt > 0 ? waitingAt : now
 }
@@ -179,8 +200,9 @@ export function wfLimitLines(
   }
   const lines: Array<{ kind: string; text: string }> = []
   const status = (workflow.status || '').toUpperCase()
-  const live = !closed && status === 'RUNNING'
-  const suspended = !closed && (status === 'WAITING_REPLY' || status === 'PAUSED_HUMAN')
+  // 已答复、正在续跑的卡按运行中算剩余：它已经不在等输入
+  const live = !closed && (status === 'RUNNING' || workflowReplyAnswered(workflow))
+  const suspended = !closed && !live && (status === 'WAITING_REPLY' || status === 'PAUSED_HUMAN')
   if (limits.runLimitMs && limits.runLimitMs > 0) {
     let text = `整段上限 ${wfFormatMs(limits.runLimitMs)}`
     if (live || suspended) {
