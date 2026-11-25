@@ -1,0 +1,81 @@
+# AgentHub 单元测试 CI（轻量）。
+# 职责：在推送 main 与 PR 到 main 时，跑前端 / 后端的现有单元测试与前端类型检查。
+# 所属域：仓库工程化配置（非业务代码）。
+# 约束：只做单元测试；不含 Docker、联调、镜像构建与发布；不读取 secrets、.env、证书与密钥文件。
+name: unit-tests
+
+on:
+  # 合并到 main 后兜底再跑一遍，防止直推绕过 PR 检查
+  push:
+    branches:
+      - main
+  # PR 目标为 main 时做准入校验
+  pull_request:
+    branches:
+      - main
+
+# 仓库内容只读：工作流不需要写权限，也不接触任何密钥
+permissions:
+  contents: read
+
+# 同一分支连续推送时取消上一轮，避免排队占用 runner
+concurrency:
+  group: unit-tests-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  # 前端：AgentHub-web 下现有 npm test + vue-tsc 类型检查（不产出构建物）
+  web:
+    name: 前端单元测试
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: AgentHub-web
+    steps:
+      - name: 检出代码
+        uses: actions/checkout@v4
+
+      # Node 22：npm test 内部用 node --experimental-strip-types 直跑 .ts 用例，要求 >= 22.6
+      - name: 安装 Node 22
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          # 用官方 npm 缓存加速，不改产品构建配置
+          cache: npm
+          cache-dependency-path: AgentHub-web/package-lock.json
+
+      # 仓库已有 package-lock.json，用 npm ci 严格按锁文件安装
+      - name: 安装依赖
+        run: npm ci
+
+      - name: 单元测试
+        run: npm test
+
+      # 类型检查：与 npm run build 里 vue-tsc --noEmit 同口径，仅校验不产出产物
+      - name: 类型检查
+        run: npx vue-tsc --noEmit
+
+  # 后端：AgentHub-server 单模块下 JDK 17 跑现有单元测试（测试均为纯 JUnit + Mockito，不依赖 DB/Redis）
+  server:
+    name: 后端单元测试
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: AgentHub-server
+    steps:
+      - name: 检出代码
+        uses: actions/checkout@v4
+
+      # JDK 17 与 pom.xml 的 java.version 一致；使用 Actions 自带 Maven，不写本机 Maven 路径
+      - name: 安装 JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+          # 用官方 Maven 缓存加速，不改 pom.xml
+          cache: maven
+          cache-dependency-path: AgentHub-server/pom.xml
+
+      # -B 批处理模式：日志更精简，且不会出现交互式确认卡住 runner
+      - name: 运行单元测试
+        run: mvn -B test
