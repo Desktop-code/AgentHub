@@ -306,7 +306,8 @@ public class WorkflowRunAppService {
         try {
             WorkflowGraph graph = codec.parse(run.getGraphJson());
             WorkflowRuntimeGraph runtime = WorkflowRuntimeGraph.of(graph);
-            listener.runStarted(runtime.nodes(), nodeRuns.listByRunId(run.getId()));
+            listener.runStarted(runtime.nodes(), nodeRuns.listByRunId(run.getId()),
+                    runtime.outgoingIndex());
         } catch (RuntimeException ex) {
             log.warn("复用工作流 run 时读取节点状态失败 runId={} type={}",
                     run.getId(), ex.getClass().getSimpleName());

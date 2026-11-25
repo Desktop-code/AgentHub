@@ -69,6 +69,8 @@ class WorkflowGraphValidatorTest {
         WorkflowValidationResult result = validate(json, WorkflowBindingSnapshot.empty(), true);
 
         assertThat(codes(result.getErrors())).contains("CYCLE");
+        assertThat(result.getErrors())
+                .anyMatch(issue -> issue.getMessage() != null && issue.getMessage().contains("未声明"));
     }
 
     @Test
@@ -353,6 +355,68 @@ class WorkflowGraphValidatorTest {
         assertThat(codes(result.getErrors())).contains("GRAPH_TOO_LARGE");
         assertThat(result.getErrors())
                 .anyMatch(issue -> issue.getMessage().contains("max-nodes-per-graph"));
+    }
+
+    @Test
+    @DisplayName("声明了回边的循环可以保存：次数、出路和三条边都齐")
+    void declaredLoopPasses() {
+        String json = graph(
+                node("n1", "start", "START", "{}") + ","
+                        + node("n2", "revise", "LOOP",
+                        "{\"maxIterations\":3,\"onExceeded\":\"DOWNSTREAM\",\"feedbackPath\":\"$.outputs.check\"}") + ","
+                        + node("n3", "check", "AGENT", "{\"agentId\":1}") + ","
+                        + node("n4", "end", "END", "{}"),
+                edge("e1", "n1", "n2", "NORMAL") + ","
+                        + edge("e2", "n2", "n3", "LOOP_BODY") + ","
+                        + edge("e3", "n3", "n2", "LOOP_BACK") + ","
+                        + edge("e4", "n2", "n4", "LOOP_EXIT"));
+
+        WorkflowValidationResult result = validate(json, WorkflowBindingSnapshot.empty(), false);
+
+        assertThat(result.getErrors()).isEmpty();
+    }
+
+    @Test
+    @DisplayName("次数超过平台硬顶、次数为空、没有超限出路，都不能保存")
+    void loopConfigRejected() {
+        String overCap = graph(
+                node("n1", "start", "START", "{}") + ","
+                        + node("n2", "revise", "LOOP", "{\"maxIterations\":21,\"onExceeded\":\"DOWNSTREAM\"}") + ","
+                        + node("n3", "check", "AGENT", "{\"agentId\":1}") + ","
+                        + node("n4", "end", "END", "{}"),
+                edge("e1", "n1", "n2", "NORMAL") + ","
+                        + edge("e2", "n2", "n3", "LOOP_BODY") + ","
+                        + edge("e3", "n3", "n2", "LOOP_BACK") + ","
+                        + edge("e4", "n2", "n4", "LOOP_EXIT"));
+        String missingMax = overCap.replace("\"maxIterations\":21,", "");
+        String missingExit = overCap.replace(",\"onExceeded\":\"DOWNSTREAM\"", "");
+
+        assertThat(codes(validate(overCap, WorkflowBindingSnapshot.empty(), false).getErrors()))
+                .contains("LOOP_MAX_OVER_CAP");
+        assertThat(codes(validate(missingMax, WorkflowBindingSnapshot.empty(), false).getErrors()))
+                .contains("LOOP_MAX_MISSING");
+        assertThat(codes(validate(missingExit, WorkflowBindingSnapshot.empty(), false).getErrors()))
+                .contains("LOOP_ON_EXCEEDED_MISSING");
+    }
+
+    @Test
+    @DisplayName("失败出路不能再画离开边；转人工的离开边必须接到人工节点")
+    void loopExitMatchesOutcome() {
+        String failWithExit = graph(
+                node("n1", "start", "START", "{}") + ","
+                        + node("n2", "revise", "LOOP", "{\"maxIterations\":2,\"onExceeded\":\"FAIL\"}") + ","
+                        + node("n3", "check", "AGENT", "{\"agentId\":1}") + ","
+                        + node("n4", "end", "END", "{}"),
+                edge("e1", "n1", "n2", "NORMAL") + ","
+                        + edge("e2", "n2", "n3", "LOOP_BODY") + ","
+                        + edge("e3", "n3", "n2", "LOOP_BACK") + ","
+                        + edge("e4", "n2", "n4", "LOOP_EXIT"));
+        String humanToEnd = failWithExit.replace("\"onExceeded\":\"FAIL\"", "\"onExceeded\":\"HUMAN\"");
+
+        assertThat(codes(validate(failWithExit, WorkflowBindingSnapshot.empty(), false).getErrors()))
+                .contains("LOOP_EXIT_UNEXPECTED");
+        assertThat(codes(validate(humanToEnd, WorkflowBindingSnapshot.empty(), false).getErrors()))
+                .contains("LOOP_EXIT_HUMAN");
     }
 
     private WorkflowValidationResult validate(String json,

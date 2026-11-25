@@ -19,6 +19,7 @@ import com.agenthub.workflow.domain.repository.WorkflowRunRepository;
 import com.agenthub.workflow.domain.service.JsonLogicEvaluator;
 import com.agenthub.workflow.domain.service.WorkflowAgentInvoker;
 import com.agenthub.workflow.domain.service.WorkflowAssigneeRule;
+import com.agenthub.workflow.domain.service.WorkflowLoopPolicy;
 import com.agenthub.workflow.domain.service.WorkflowNodeConfig;
 import com.agenthub.workflow.domain.service.WorkflowNodeInputs;
 import com.agenthub.workflow.domain.service.WorkflowOutcomeTexts;
@@ -47,7 +48,8 @@ import java.util.Map;
  * <p>边界：只做调度；AGENT / TOOL 的实际出站通过 {@link WorkflowAgentInvoker} /
  * {@link WorkflowToolInvoker} 复用现网入口，引擎内不出现模型 / MCP 细节。
  * 无外部出站的控制类节点（START / END / CONDITION / FORK / JOIN）的「算」在
- * {@link WorkflowNodeExecutors}，本类负责分派、落库、发布与失败收口。
+ * {@link WorkflowNodeExecutors}，循环的计数、回边和超限出路在 {@link WorkflowLoopScheduler}，
+ * 本类只负责分派、落库、发布与失败收口。
  * <p>线程模型：一次调用在请求线程内同步跑完（或停在 HUMAN），
  * FORK 分支按图顺序**顺序**执行而非真并发，语义上等待 JOIN 等齐。
  * <p>取消：协作式——每执行一个节点前重读 run 状态，发现 CANCELLED 立即退出。
@@ -79,6 +81,9 @@ public class WorkflowEngine {
     private final WorkflowCardPublisher publisher;
     /** 控制类节点执行器：START / END / CONDITION / FORK / JOIN 只算不写库 */
     private final WorkflowNodeExecutors executors;
+
+    /** 循环：计数、打回反馈、超限出路。引擎只在进入节点和成功之后调用 */
+    private final WorkflowLoopScheduler loops;
 
     /**
      * @param runs         run 仓储
@@ -113,6 +118,7 @@ public class WorkflowEngine {
         this.clockKeeper = new WorkflowRunClockKeeper(runs, properties);
         this.publisher = new WorkflowCardPublisher(clockKeeper);
         this.executors = new WorkflowNodeExecutors(json, context, properties);
+        this.loops = new WorkflowLoopScheduler(json, context, nodeRuns, properties);
     }
 
     /**
@@ -194,6 +200,7 @@ public class WorkflowEngine {
         WorkflowRuntimeGraph runtime = WorkflowRuntimeGraph.of(graph);
         ObjectNode input = context.readObject(run.getInputJson());
         List<WorkflowNodeRun> rows = ensureNodeRuns(run, runtime);
+        // 同一节点可能有多轮：调度只看最新一轮，历史行留给回放
         Map<String, WorkflowNodeRun> rowByNode = new LinkedHashMap<>();
         for (WorkflowNodeRun row : rows) {
             rowByNode.put(row.getNodeId(), row);
@@ -210,9 +217,10 @@ public class WorkflowEngine {
         publisher.started(runtime, rows);
         ObjectNode outputs = context.collectOutputs(runtime, rows);
         ObjectNode ctx = JsonLogicEvaluator.context(input, outputs, json.createObjectNode());
+        loops.restore(runtime, rows, ctx);
 
-        // 无进展守卫：正常 DAG 每节点最多推进 2 拍（执行 + 跳过判定），这里留足冗余
-        int maxSteps = Math.max(runtime.nodes().size() * 2 + 8, 16);
+        // 无循环时仍是「每节点大约两拍」；有声明循环时按次数放宽，次数本身不靠这个守卫
+        int maxSteps = loops.stepBudget(runtime);
         int steps = 0;
 
         // 埋点：首次运行在这里建根 trace，HUMAN 恢复后按 run.trace_id 续用同一条
@@ -353,10 +361,33 @@ public class WorkflowEngine {
         }
     }
 
+    /**
+     * 入边是否都已判定。
+     *
+     * <p>循环节点的「次数用尽」出口在循环还没退出前不能当已判定，否则下游会被提前跳过。
+     * 但如果下游同时还有别的入边已经被选中（例如条件的「通过」直接到点评），
+     * 这条已选中的边本身就已经决定了要跑，不能再被尚未定下来的出口一直挡住——
+     * 否则点评永远停在 PENDING，整次运行会以「未到达结束节点」失败。
+     * 因此 BLOCK 只在「没有任何入边被选中」时生效。
+     *
+     * @param incoming  该节点的入边
+     * @param rowByNode 节点 → 最新运行态
+     * @return true 表示入边都已判定，可以决定跑还是跳过
+     */
     private boolean allDecided(List<WorkflowEdge> incoming, Map<String, WorkflowNodeRun> rowByNode) {
+        boolean blockByOpenExit = false;
         for (WorkflowEdge edge : incoming) {
             WorkflowNodeRun source = rowByNode.get(edge.getSource());
             if (source == null) {
+                continue;
+            }
+            // 声明回边不挡住循环的第一次进入；超限出口在循环还没离开前也不能把下游提前跳过
+            WorkflowLoopPolicy.IncomingGate gate = WorkflowLoopPolicy.incomingGate(edge, source);
+            if (gate == WorkflowLoopPolicy.IncomingGate.IGNORE) {
+                continue;
+            }
+            if (gate == WorkflowLoopPolicy.IncomingGate.BLOCK) {
+                blockByOpenExit = true;
                 continue;
             }
             WorkflowNodeRunStatus status = WorkflowNodeRunStatus.parse(source.getStatus());
@@ -364,7 +395,11 @@ public class WorkflowEngine {
                 return false;
             }
         }
-        return true;
+        if (!blockByOpenExit) {
+            return true;
+        }
+        // 出口还没定，但有别的入边已经选中：按「已经该跑」处理，不再等循环退出
+        return anySelected(incoming, rowByNode);
     }
 
     private boolean anySelected(List<WorkflowEdge> incoming, Map<String, WorkflowNodeRun> rowByNode) {
@@ -431,15 +466,20 @@ public class WorkflowEngine {
                     }
                     row.setInputJson(outcome.inputJson());
                     row.setOutputJson(outcome.outputJson());
-                    succeed(row, node, outputs, outcome.selectedEdges(), ctx);
+                    succeed(row, node, outputs, outcome.selectedEdges(), ctx, runtime, rowByNode);
+                }
+                case LOOP -> {
+                    if (!executeLoop(run, runtime, node, row, rowByNode, ctx, outputs, operatorId)) {
+                        return false;
+                    }
                 }
                 case AGENT -> {
-                    if (!invokeAgent(run, runtime, node, row, ctx, outputs, operatorId)) {
+                    if (!invokeAgent(run, runtime, node, row, ctx, outputs, operatorId, rowByNode)) {
                         return false;
                     }
                 }
                 case TOOL -> {
-                    if (!invokeTool(run, runtime, node, row, ctx, outputs, operatorId)) {
+                    if (!invokeTool(run, runtime, node, row, ctx, outputs, operatorId, rowByNode)) {
                         return false;
                     }
                 }
@@ -469,7 +509,8 @@ public class WorkflowEngine {
     }
 
     private boolean invokeAgent(WorkflowRun run, WorkflowRuntimeGraph runtime, WorkflowNode node,
-                                WorkflowNodeRun row, ObjectNode ctx, ObjectNode outputs, long operatorId) {
+                                WorkflowNodeRun row, ObjectNode ctx, ObjectNode outputs, long operatorId,
+                                Map<String, WorkflowNodeRun> rowByNode) {
         Long agentId = WorkflowNodeConfig.longValue(node.getConfig(), "agentId");
         if (agentId == null) {
             return handleFailure(run, runtime, node, row, "Agent 节点未绑定 Agent", null, operatorId);
@@ -519,7 +560,7 @@ public class WorkflowEngine {
         if (awaitReply && !replyProvided(ctx)) {
             return enterReplyWait(run, node, row, shaped, reply.choiceJson(), operatorId);
         }
-        succeed(row, node, outputs, context.defaultEdges(runtime, node), ctx);
+        succeed(row, node, outputs, context.defaultEdges(runtime, node), ctx, runtime, rowByNode);
         return true;
     }
 
@@ -596,7 +637,8 @@ public class WorkflowEngine {
     }
 
     private boolean invokeTool(WorkflowRun run, WorkflowRuntimeGraph runtime, WorkflowNode node,
-                               WorkflowNodeRun row, ObjectNode ctx, ObjectNode outputs, long operatorId) {
+                               WorkflowNodeRun row, ObjectNode ctx, ObjectNode outputs, long operatorId,
+                               Map<String, WorkflowNodeRun> rowByNode) {
         Long toolId = WorkflowNodeConfig.longValue(node.getConfig(), "toolId");
         if (toolId == null) {
             return handleFailure(run, runtime, node, row, "工具节点未绑定工具项", null, operatorId);
@@ -618,7 +660,40 @@ public class WorkflowEngine {
         ObjectNode shaped = WorkflowNodeInputs.shapeOutput(raw,
                 WorkflowNodeConfig.objectValue(node.getConfig(), "outputMapping"));
         row.setOutputJson(shaped.toString());
-        succeed(row, node, outputs, context.defaultEdges(runtime, node), ctx);
+        succeed(row, node, outputs, context.defaultEdges(runtime, node), ctx, runtime, rowByNode);
+        return true;
+    }
+
+    /**
+     * 执行循环节点。次数未到就进入循环体；到了按配置离开。
+     * 配置成失败时直接结束本次运行，不把超限当成节点异常去跟 ERROR 边。
+     *
+     * @return true 表示可以继续调度
+     */
+    private boolean executeLoop(WorkflowRun run, WorkflowRuntimeGraph runtime, WorkflowNode node,
+                                WorkflowNodeRun row, Map<String, WorkflowNodeRun> rowByNode,
+                                ObjectNode ctx, ObjectNode outputs, long operatorId) {
+        WorkflowLoopScheduler.Decision decision = loops.enter(runtime, node, row, rowByNode, ctx);
+        if (decision.stopRun()) {
+            if (decision.inputJson() != null) {
+                row.setInputJson(decision.inputJson());
+            }
+            if (decision.outputJson() != null) {
+                row.setOutputJson(decision.outputJson());
+            }
+            row.setStatus(WorkflowStateMachine.requireNode(
+                    WorkflowNodeRunStatus.parse(row.getStatus()), WorkflowNodeRunStatus.FAILED).name());
+            row.setErrorSummary(context.truncate(decision.failure()));
+            row.setEndTime(LocalDateTime.now());
+            row.setSelectedEdges("");
+            nodeRuns.update(row);
+            publisher.node(node, row);
+            failRun(run, decision.failure(), operatorId);
+            return false;
+        }
+        row.setInputJson(decision.inputJson());
+        row.setOutputJson(decision.outputJson());
+        succeed(row, node, outputs, decision.selectedEdges(), ctx, runtime, rowByNode);
         return true;
     }
 
@@ -694,26 +769,26 @@ public class WorkflowEngine {
 
     /**
      * 普通节点成功收口：写状态、输出、选中边，并把产出放进 ctx.outputs.&lt;code&gt;。
+     *
+     * <p>同一节点再次进入时，上下文只保留最新一轮产出，上一轮仍在自己的 node_run 行里。
+     * 节点编码在一张图里是唯一的，所以这里的再次写入就是循环的下一轮，不是两条并行分支撞名。
      */
     private void succeed(WorkflowNodeRun row, WorkflowNode node, ObjectNode outputs,
-                         List<WorkflowEdge> selected, ObjectNode ctx) {
+                         List<WorkflowEdge> selected, ObjectNode ctx,
+                         WorkflowRuntimeGraph runtime, Map<String, WorkflowNodeRun> rowByNode) {
         String code = node.getCode();
         JsonNode produced = context.parse(row.getOutputJson());
-        // 并行分支写同名 key：先判冲突再落 SUCCESS，避免「行成功但 run 失败」的半截状态
-        if (code != null && !code.isBlank() && produced != null
-                && outputs.has(code) && !outputs.get(code).equals(produced)) {
-            throw new WorkflowNodeFailure("节点编码「" + code + "」重复写入 outputs，请检查是否有同名节点");
-        }
         row.setStatus(WorkflowStateMachine.requireNode(
                 WorkflowNodeRunStatus.parse(row.getStatus()), WorkflowNodeRunStatus.SUCCESS).name());
         row.setEndTime(LocalDateTime.now());
         row.setSelectedEdges(context.joinIds(selected));
         nodeRuns.update(row);
         publisher.node(node, row);
-        if (code == null || code.isBlank() || produced == null) {
-            return;
+        if (code != null && !code.isBlank() && produced != null) {
+            outputs.set(code, produced);
         }
-        outputs.set(code, produced);
+        // 回边反馈和下一轮行在落库之后处理，失败 / 取消不会进到这里
+        loops.afterNodeSuccess(runtime, node, row, rowByNode, ctx);
     }
 
     /**
@@ -855,10 +930,11 @@ public class WorkflowEngine {
     }
 
     /**
-     * 取回 / 自愈节点运行态：建 run 时已批量预建；缺行（历史数据或人工补录）按图补 PENDING。
+     * 取回 / 自愈节点运行态：建 run 时已批量预建；缺行按图补 attempt=1 的 PENDING。
+     * 返回含历史轮次的全部行（id 升序），调用方用同一 nodeId 的最后一行作为最新一轮。
      */
     private List<WorkflowNodeRun> ensureNodeRuns(WorkflowRun run, WorkflowRuntimeGraph runtime) {
-        List<WorkflowNodeRun> rows = nodeRuns.listByRunId(run.getId());
+        List<WorkflowNodeRun> rows = new ArrayList<>(nodeRuns.listByRunId(run.getId()));
         Map<String, WorkflowNodeRun> byNode = new LinkedHashMap<>();
         for (WorkflowNodeRun row : rows) {
             byNode.put(row.getNodeId(), row);
@@ -879,19 +955,9 @@ public class WorkflowEngine {
         }
         if (!missing.isEmpty()) {
             nodeRuns.insertBatch(missing);
-            for (WorkflowNodeRun row : missing) {
-                byNode.put(row.getNodeId(), row);
-            }
+            rows.addAll(missing);
         }
-        // 按图顺序返回，画布高亮与排障都依赖这个顺序
-        List<WorkflowNodeRun> ordered = new ArrayList<>();
-        for (WorkflowNode node : runtime.nodes()) {
-            WorkflowNodeRun row = byNode.get(node.getId());
-            if (row != null) {
-                ordered.add(row);
-            }
-        }
-        return ordered;
+        return rows;
     }
 
     /**

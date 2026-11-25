@@ -5,6 +5,7 @@ import com.agenthub.workflow.domain.enums.WorkflowNodeType;
 import com.agenthub.workflow.domain.model.WorkflowEdge;
 import com.agenthub.workflow.domain.model.WorkflowNode;
 import com.agenthub.workflow.domain.service.JsonLogicEvaluator;
+import com.agenthub.workflow.domain.service.WorkflowLoopPolicy;
 import com.agenthub.workflow.domain.service.WorkflowNodeConfig;
 import com.agenthub.workflow.domain.service.WorkflowNodeInputs;
 import com.agenthub.workflow.infra.WorkflowProperties;
@@ -160,8 +161,11 @@ public class WorkflowNodeExecutors {
         WorkflowEdge fallback = null;
         for (WorkflowEdge edge : runtime.outgoing(node.getId())) {
             WorkflowEdgeType type = WorkflowEdgeType.parseOrDefault(edge.getType());
-            if (type == WorkflowEdgeType.DEFAULT) {
-                fallback = edge;
+            if (type == WorkflowEdgeType.DEFAULT || WorkflowLoopPolicy.isFallbackEdge(type)) {
+                // DEFAULT 与声明回边都是「条件不成立」的那一条；校验保证一个条件节点只有一条
+                if (fallback == null) {
+                    fallback = edge;
+                }
                 continue;
             }
             if (type != WorkflowEdgeType.COND) {

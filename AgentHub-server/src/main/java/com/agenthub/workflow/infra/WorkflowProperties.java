@@ -13,7 +13,8 @@ import org.springframework.boot.context.properties.ConfigurationProperties;
  *   <li>{@code agenthub.workflow.max-parallel-branches}：单个 FORK 允许的分支数，
  *       超出按「该 FORK 失败」处理（错误边可接管，否则整 run FAILED）；</li>
  *   <li>{@code agenthub.workflow.max-nodes-per-graph}：校验 / 发布时的节点硬顶；</li>
- *   <li>{@code agenthub.workflow.max-node-runs-per-run}：一次 run 最多预建多少条 node_run。</li>
+   *   <li>{@code agenthub.workflow.max-node-runs-per-run}：一次 run 最多多少条 node_run（含循环再次进入）。</li>
+ *   <li>{@code agenthub.workflow.max-loop-iterations}：单个循环最多进入循环体几次，图上填写不得超过它。</li>
  * </ul>
  * <p>所有值都会被夹紧到安全区间，YAML 写错不会把系统配成「不可执行」或「无上限」。
  */
@@ -41,6 +42,9 @@ public class WorkflowProperties {
     /** 单 run 的 node_run 绝对硬顶（含 YAML 覆盖） */
     public static final int MAX_NODE_RUNS_CAP = 5_000;
 
+    /** 循环次数的绝对硬顶：图上填写和 YAML 都不能超过它 */
+    public static final int MAX_LOOP_ITERATIONS_CAP = 20;
+
     /** 默认墙钟：10 分钟，足以跑完代码生成类工作流；HUMAN / 等待回复不计入 */
     public static final long DEFAULT_WALL_MS = 600_000L;
 
@@ -52,6 +56,9 @@ public class WorkflowProperties {
 
     /** 默认单 run 的 node_run 上限 */
     public static final int DEFAULT_MAX_NODE_RUNS_PER_RUN = 500;
+
+    /** 默认循环次数硬顶，与绝对上限相同；YAML 只能把它调低 */
+    public static final int DEFAULT_MAX_LOOP_ITERATIONS = MAX_LOOP_ITERATIONS_CAP;
 
     /** 当前租户；一期 sys_user 无 tenant_id，先用配置收口，默认 1 */
     private long currentTenantId = 1L;
@@ -71,8 +78,11 @@ public class WorkflowProperties {
     /** 校验 / 发布允许的节点数 */
     private int maxNodesPerGraph = DEFAULT_MAX_NODES_PER_GRAPH;
 
-    /** 单次 run 允许预建的 node_run 条数 */
+    /** 单次 run 允许的 node_run 条数（含循环再次进入插入的行） */
     private int maxNodeRunsPerRun = DEFAULT_MAX_NODE_RUNS_PER_RUN;
+
+    /** 单个循环进入循环体的次数硬顶；大于 {@link #MAX_LOOP_ITERATIONS_CAP} 会被夹回 */
+    private int maxLoopIterations = DEFAULT_MAX_LOOP_ITERATIONS;
 
     /**
      * @return 当前租户
@@ -145,6 +155,16 @@ public class WorkflowProperties {
         return Math.min(Math.max(value, 1), MAX_NODE_RUNS_CAP);
     }
 
+    /**
+     * 循环次数的平台硬顶。图上的 maxIterations 不能超过它；运行时也取两者较小值。
+     *
+     * @return 夹到 [1, {@link #MAX_LOOP_ITERATIONS_CAP}] 的次数
+     */
+    public int effectiveMaxLoopIterations() {
+        int value = maxLoopIterations <= 0 ? DEFAULT_MAX_LOOP_ITERATIONS : maxLoopIterations;
+        return Math.min(Math.max(value, 1), MAX_LOOP_ITERATIONS_CAP);
+    }
+
     public long getWallMs() {
         return wallMs;
     }
@@ -191,5 +211,19 @@ public class WorkflowProperties {
 
     public void setMaxNodeRunsPerRun(int maxNodeRunsPerRun) {
         this.maxNodeRunsPerRun = maxNodeRunsPerRun;
+    }
+
+    /**
+     * @return YAML 中的循环次数硬顶原值（未夹紧）
+     */
+    public int getMaxLoopIterations() {
+        return maxLoopIterations;
+    }
+
+    /**
+     * @param maxLoopIterations 循环次数硬顶；生效值见 {@link #effectiveMaxLoopIterations()}
+     */
+    public void setMaxLoopIterations(int maxLoopIterations) {
+        this.maxLoopIterations = maxLoopIterations;
     }
 }

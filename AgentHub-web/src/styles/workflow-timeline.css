@@ -1,0 +1,34 @@
+/*
+ * 工作流时间线的容器样式。所属域：runtime（前端展示）。
+ *
+ * 只管「一层时间线怎么排」：竖向间距与根层那条连接线。步骤卡自己的样式在
+ * workflow-step.css，循环框在 workflow-loop.css；三者由 WorkflowTimeline /
+ * WorkflowStepItem 分别引入，直播与回放共用同一份。
+ */
+
+/* 垂直线：连接线在左，节点圆点压在线上面；一行一项 */
+.wf-timeline {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+  padding: 18px;
+}
+
+/* 根层才画那条贯穿全卡的竖线；框内各层从框里重新开始，不重复画 */
+.wf-timeline:not(.is-nested)::before {
+  position: absolute;
+  top: 28px;
+  bottom: 28px;
+  left: 28px;
+  width: 2px;
+  background: #e2e8f0;
+  content: '';
+  z-index: 0;
+}
+
+/* 框内一层：内边距收小，让内层节点贴着循环框排 */
+.wf-timeline.is-nested {
+  padding: 12px 12px 12px 6px;
+  gap: 12px;
+}

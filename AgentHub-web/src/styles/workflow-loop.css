@@ -1,0 +1,150 @@
+﻿/*
+ * 工作流循环框样式：套在体节点外面的一层分组，不占步骤位。所属域：runtime（前端展示）。
+ *
+ * 由 WorkflowTimeline 引入，直播与回放共用同一份。框标题写轮次与状态，
+ * 开合只影响显示范围；体节点自身样式在 workflow-step.css。
+ */
+.wf-loop {
+  position: relative;
+  z-index: 1;
+  border: 1px dashed #c7d2fe;
+  border-radius: 10px;
+  background: #f8faff;
+  transition: border-color 0.2s ease, background 0.2s ease;
+}
+
+/* 进行中：紫色虚线 + 淡底，和「已完成」的绿框区分开 */
+.wf-loop.is-running {
+  border-color: #c7d2fe;
+  background: #f8faff;
+}
+
+/*
+ * 预露（还没进循环体）：边框更淡、底更浅，读起来是「这只框先摆好，还在等」，
+ * 不与真正跑起来的进行中抢注意力。标题仍是「循环 · 等待中」。
+ */
+.wf-loop.is-waiting {
+  border-color: #e0e7ff;
+  background: #fcfdff;
+}
+
+/* 判断后没进这个循环：灰边实线，与「已完成 / 已中断」同一档，不再像还在等 */
+.wf-loop.is-skipped {
+  border-color: #e2e8f0;
+  border-style: solid;
+  background: #fafafa;
+}
+
+/* 已完成 / 次数用尽：实线灰边，底更淡，读起来是「这一段已收口」 */
+.wf-loop.is-done,
+.wf-loop.is-exhausted {
+  border-color: #e2e8f0;
+  border-style: solid;
+  background: #fbfcfe;
+}
+
+.wf-loop.is-failed {
+  border-color: #fecaca;
+  background: #fef7f7;
+}
+
+.wf-loop.is-cancelled {
+  border-color: #e2e8f0;
+  border-style: solid;
+  background: #fafafa;
+}
+
+/* 框标题：整行可点，开合只影响显示范围 */
+.wf-loop-head {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  width: 100%;
+  margin: 0;
+  padding: 8px 12px;
+  border: 0;
+  border-bottom: 1px dashed #e0e7ff;
+  background: transparent;
+  color: #4338ca;
+  font: inherit;
+  font-size: 12px;
+  font-weight: 600;
+  text-align: left;
+  cursor: pointer;
+  user-select: none;
+}
+
+.wf-loop-head:hover {
+  color: #3730a3;
+}
+
+.wf-loop.is-done .wf-loop-head,
+.wf-loop.is-exhausted .wf-loop-head,
+.wf-loop.is-cancelled .wf-loop-head,
+.wf-loop.is-skipped .wf-loop-head {
+  color: #64748b;
+  border-bottom-color: transparent;
+}
+
+.wf-loop.is-failed .wf-loop-head {
+  color: #b91c1c;
+  border-bottom-color: #fee2e2;
+}
+
+.wf-loop-chevron {
+  flex: none;
+  width: 0;
+  height: 0;
+  border-top: 4px solid transparent;
+  border-bottom: 4px solid transparent;
+  border-left: 5px solid currentColor;
+  transition: transform 0.2s ease;
+}
+
+.wf-loop-chevron.open {
+  transform: rotate(90deg);
+}
+
+.wf-loop-title {
+  flex: none;
+  font-variant-numeric: tabular-nums;
+}
+
+/* 框编码只作附注：和标题同一行，弱化处理 */
+.wf-loop-code {
+  color: #94a3b8;
+  font-family: ui-monospace, Consolas, monospace;
+  font-size: 11px;
+  font-weight: 400;
+}
+
+/*
+ * 开合动画走「grid 行高 1fr ↔ 0fr」而不是 display 瞬切：
+ * 与思考折叠同一套写法，收起时内容不会先弹一下再消失。
+ */
+.wf-loop-fold {
+  display: grid;
+  grid-template-rows: 1fr;
+  transition: grid-template-rows 0.24s ease;
+}
+
+.wf-loop-fold.is-collapsed {
+  grid-template-rows: 0fr;
+}
+
+.wf-loop-fold-body {
+  min-height: 0;
+  overflow: hidden;
+}
+
+/* 生成中的沙漏：与卡片头同一份动画（scoped 会让 keyframes 各自改名，不会互相覆盖） */
+.wf-spin {
+  display: inline-block;
+  animation: wf-loop-spin 1s linear infinite;
+}
+
+@keyframes wf-loop-spin {
+  to {
+    transform: rotate(360deg);
+  }
+}

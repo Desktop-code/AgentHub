@@ -124,6 +124,26 @@ public final class WorkflowRunJson {
             if (!node.reply().isBlank()) {
                 one.put("reply", node.reply());
             }
+            // 第 1 轮不写这个键，旧卡片和单轮运行的体积不变；再进入才标出来供回放对上对应行
+            if (node.attempt() > 1) {
+                one.put("attempt", node.attempt());
+            }
+            /*
+             * 循环展示字段：只在真的有值时写，旧卡片与无循环的图体积不变。
+             * group 挂在循环体节点头上（前端据此圈框）；轮次三个字段只挂在循环节点自己身上。
+             */
+            if (!node.group().isBlank()) {
+                one.put("group", node.group());
+            }
+            if (node.loopRound() > 0) {
+                one.put("loopRound", node.loopRound());
+            }
+            if (node.loopTotal() > 0) {
+                one.put("loopTotal", node.loopTotal());
+            }
+            if (!node.loopDecision().isBlank()) {
+                one.put("loopDecision", node.loopDecision());
+            }
             nodes.add(one);
         }
         body.put("nodes", nodes);

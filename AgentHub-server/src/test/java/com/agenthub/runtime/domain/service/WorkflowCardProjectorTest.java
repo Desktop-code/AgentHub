@@ -1,12 +1,14 @@
 package com.agenthub.runtime.domain.service;
 
 import com.agenthub.runtime.domain.model.WorkflowRunView;
+import com.agenthub.workflow.domain.model.WorkflowEdge;
 import com.agenthub.workflow.domain.model.WorkflowNode;
 import com.agenthub.workflow.domain.model.WorkflowNodeRun;
 import com.agenthub.workflow.domain.model.WorkflowRun;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import org.junit.jupiter.api.Test;
 
+import java.time.LocalDateTime;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
@@ -260,6 +262,125 @@ class WorkflowCardProjectorTest {
                         + "{\"id\":\"python\",\"label\":\"Python\"}]}}")));
 
         assertEquals("", progress.last().nodes().get(0).reply());
+    }
+
+    /** 同一节点的两轮都留在卡片上，正文两段都在，不互相覆盖。 */
+    @Test
+    void sameNodeKeepsBothAttempts() {
+        RecordingProgress progress = new RecordingProgress();
+        WorkflowCardProjector projector = new WorkflowCardProjector("改写", "revise", progress, JSON);
+        WorkflowNode agent = node("n2", "rewrite", "改写", "AGENT");
+        WorkflowNodeRun first = row("n2", "SUCCESS", "{\"text\":\"第一轮正文\"}");
+        first.setNodeCode("rewrite");
+        first.setAttempt(1);
+        WorkflowNodeRun second = row("n2", "SUCCESS", "{\"text\":\"第二轮正文\"}");
+        second.setNodeCode("rewrite");
+        second.setAttempt(2);
+
+        projector.nodeChanged(agent, first);
+        projector.nodeChanged(agent, second);
+
+        WorkflowRunView view = progress.last();
+        assertEquals(2, view.nodes().size());
+        assertEquals(1, view.nodes().get(0).attempt());
+        assertEquals(2, view.nodes().get(1).attempt());
+        assertTrue(view.nodes().get(0).output().contains("第一轮正文"));
+        assertTrue(view.nodes().get(1).output().contains("第二轮正文"));
+        assertTrue(view.answer().contains("第一轮正文"), view.answer());
+        assertTrue(view.answer().contains("第二轮正文"), view.answer());
+    }
+
+    /**
+     * 循环：体节点带所属循环编码，循环节点带自己的轮次 / 总次数 / 最近判定。
+     *
+     * <p>这几项只用于前端把体节点圈进一个框、并写清「第 N/M 轮」，不参与调度。
+     */
+    @Test
+    void loopNodesCarryGroupAndRoundForCard() {
+        RecordingProgress progress = new RecordingProgress();
+        WorkflowCardProjector projector = new WorkflowCardProjector("小游戏研发", "mini_game_dev",
+                progress, JSON);
+        WorkflowNode impl = node("n2", "impl", "实现", "AGENT");
+        WorkflowNode loop = node("n1", "loop", "循环", "LOOP");
+        WorkflowNode review = node("n3", "review", "点评", "AGENT");
+        Map<String, List<WorkflowEdge>> outgoing = Map.of(
+                "n1", List.of(edge("e1", "n1", "n2", "LOOP_BODY"), edge("e4", "n1", "n3", "LOOP_EXIT")),
+                "n2", List.of(edge("e3", "n2", "n1", "LOOP_BACK")));
+
+        projector.runStarted(List.of(loop, impl, review), List.of(pending("n1"), pending("n2")), outgoing);
+        WorkflowNodeRun loopRow = row("n1", "SUCCESS",
+                "{\"iteration\":2,\"maxIterations\":3,\"decision\":\"BODY\"}");
+        loopRow.setNodeCode("loop");
+        projector.nodeChanged(loop, loopRow);
+        WorkflowNodeRun implRow = row("n2", "RUNNING", null);
+        implRow.setNodeCode("impl");
+        implRow.setAttempt(2);
+        projector.nodeChanged(impl, implRow);
+
+        WorkflowRunView view = progress.last();
+        WorkflowRunView.Node loopNode = view.nodes().stream()
+                .filter(node -> "loop".equals(node.code())).findFirst().orElseThrow();
+        assertEquals(2, loopNode.loopRound());
+        assertEquals(3, loopNode.loopTotal());
+        assertEquals("BODY", loopNode.loopDecision());
+        assertEquals("", loopNode.group(), "循环节点自己不在自己的循环体里");
+
+        WorkflowRunView.Node implNode = view.nodes().stream()
+                .filter(node -> "impl".equals(node.code())).findFirst().orElseThrow();
+        assertEquals("loop", implNode.group(), "体节点应带上所属循环编码");
+        assertEquals(2, implNode.attempt());
+
+        WorkflowRunView.Node reviewNode = view.nodes().stream()
+                .filter(node -> "review".equals(node.code())).findFirst().orElseThrow();
+        assertEquals("", reviewNode.group(), "循环外的下游节点不属于任何循环体");
+    }
+
+    /**
+     * 多轮按真实开始时刻排列：第 2 轮落在第 1 轮之后，不会被下游节点挤到前面。
+     */
+    @Test
+    void loopAttemptsAreOrderedByStartTime() {
+        RecordingProgress progress = new RecordingProgress();
+        WorkflowCardProjector projector = new WorkflowCardProjector("小游戏研发", "mini_game_dev",
+                progress, JSON);
+        WorkflowNode impl = node("n2", "impl", "实现", "AGENT");
+        WorkflowNode review = node("n3", "review", "点评", "AGENT");
+        Map<String, List<WorkflowEdge>> outgoing = Map.of(
+                "n1", List.of(edge("e1", "n1", "n2", "LOOP_BODY"), edge("e4", "n1", "n3", "LOOP_EXIT")),
+                "n2", List.of(edge("e3", "n2", "n1", "LOOP_BACK")));
+        WorkflowNode loop = node("n1", "loop", "循环", "LOOP");
+        projector.runStarted(List.of(loop, impl, review), List.of(pending("n1"), pending("n2")), outgoing);
+
+        WorkflowNodeRun first = row("n2", "SUCCESS", null);
+        first.setNodeCode("impl");
+        first.setAttempt(1);
+        first.setStartTime(LocalDateTime.of(2026, 11, 25, 10, 0, 0));
+        projector.nodeChanged(impl, first);
+        WorkflowNodeRun reviewRow = row("n3", "SUCCESS", null);
+        reviewRow.setNodeCode("review");
+        reviewRow.setStartTime(LocalDateTime.of(2026, 11, 25, 10, 5, 0));
+        projector.nodeChanged(review, reviewRow);
+        // 第 2 轮在点评之后才开始：库里是后插入的行，展示上仍要排在第 1 轮之后
+        WorkflowNodeRun second = row("n2", "RUNNING", null);
+        second.setNodeCode("impl");
+        second.setAttempt(2);
+        second.setStartTime(LocalDateTime.of(2026, 11, 25, 10, 9, 0));
+        projector.nodeChanged(impl, second);
+
+        List<String> order = progress.last().nodes().stream()
+                .filter(node -> "AGENT".equals(node.type()))
+                .map(node -> node.code() + "#" + node.attempt()).toList();
+        assertEquals(List.of("impl#1", "review#1", "impl#2"), order,
+                "第 2 轮应排在第 1 轮与下游之后，而不是被下游挤到最前");
+    }
+
+    private static WorkflowEdge edge(String id, String source, String target, String type) {
+        WorkflowEdge edge = new WorkflowEdge();
+        edge.setId(id);
+        edge.setSource(source);
+        edge.setTarget(target);
+        edge.setType(type);
+        return edge;
     }
 
     private static WorkflowNode node(String id, String code, String name, String type) {

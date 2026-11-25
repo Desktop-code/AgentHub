@@ -583,3 +583,5 @@ export function wfResultTitle(card: ParticipantCard): string {
   const done = card.workflow ? wfCompleted(card.workflow, card.closed) : false
   return done ? '流程执行完毕，结果如下：' : '执行结果'
 }
+
+export { wfNodeKey, wfNodeRoundLabel } from './workflowNodeRound'

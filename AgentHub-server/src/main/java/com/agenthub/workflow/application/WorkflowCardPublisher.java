@@ -74,7 +74,7 @@ public class WorkflowCardPublisher {
             return;
         }
         try {
-            listener.runStarted(runtime.nodes(), rows);
+            listener.runStarted(runtime.nodes(), rows, runtime.outgoingIndex());
         } catch (RuntimeException ex) {
             // 观察是旁路：画不出卡片不能把一次正常的 run 变成失败
             log.warn("工作流节点观察失败 action=runStarted type={}", ex.getClass().getSimpleName(), ex);

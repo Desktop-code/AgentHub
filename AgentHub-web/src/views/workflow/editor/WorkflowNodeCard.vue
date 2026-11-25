@@ -41,6 +41,7 @@ const TYPE_LABEL: Record<string, string> = {
   PARALLEL_FORK: '并行分叉',
   PARALLEL_JOIN: '并行汇合',
   HUMAN: '人工审批',
+  LOOP: '循环',
   KB_RETRIEVE: '知识检索',
   SKILL_INJECT: 'Skill 注入',
   SUBGRAPH: '子图',
@@ -59,7 +60,8 @@ const TYPE_TONE: Record<string, string> = {
   CONDITION: 'cond',
   PARALLEL_FORK: 'fork',
   PARALLEL_JOIN: 'join',
-  HUMAN: 'human'
+  HUMAN: 'human',
+  LOOP: 'loop'
 }
 
 const nodeType = computed(() => String(props.data?.nodeType || 'UNKNOWN'))
@@ -113,6 +115,12 @@ const summary = computed(() => {
     // 条件节点直接给出规则摘要（如 `type = refund`），而不是「已配置」这种空信息
     const rule = summarizeJsonLogic(config.condition)
     return rule || '未配置条件表达式'
+  }
+  if (nodeType.value === 'LOOP') {
+    const times = config.maxIterations
+    const outcome =
+      config.onExceeded === 'HUMAN' ? '转人工' : config.onExceeded === 'FAIL' ? '失败' : '下游继续'
+    return times ? `最多 ${times} 次，用尽后${outcome}` : '未配置次数'
   }
   return ''
 })
@@ -245,6 +253,14 @@ const runClass = computed(() => {
 
 .wf-node.is-cond .wf-node__type {
   color: #7e22ce;
+}
+
+.wf-node.is-loop {
+  border-left-color: #635bff;
+}
+
+.wf-node.is-loop .wf-node__type {
+  color: #635bff;
 }
 
 .wf-node.is-fork,

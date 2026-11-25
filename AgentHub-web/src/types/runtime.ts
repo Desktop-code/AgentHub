@@ -270,6 +270,23 @@ export interface TrialWorkflowNodeView {
    * 这里记下这次选择（如「HTML/CSS/JavaScript 单页」）。它不落成新的用户消息。
    */
   reply?: string
+  /**
+   * 同一节点的第几轮。缺省按第 1 轮；循环再次进入时每一轮各占一条。
+   */
+  attempt?: number
+  /**
+   * 所属循环节点的编码；不在任何循环体里为空串。
+   *
+   * <p>只用于把循环体的节点圈进同一个框，不参与调度。循环节点自己嵌套在别的循环里时，
+   * 这一项指向<b>外层</b>循环编码。
+   */
+  group?: string
+  /** 循环节点已经进入的第几轮；非循环节点为 0 */
+  loopRound?: number
+  /** 循环节点配置的总次数；非循环节点为 0 */
+  loopTotal?: number
+  /** 循环节点最近一次判定：BODY / EXIT / PASS / FAIL；非循环节点为空串 */
+  loopDecision?: string
 }
 
 /**

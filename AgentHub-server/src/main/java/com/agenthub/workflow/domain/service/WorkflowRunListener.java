@@ -1,9 +1,11 @@
 package com.agenthub.workflow.domain.service;
 
+import com.agenthub.workflow.domain.model.WorkflowEdge;
 import com.agenthub.workflow.domain.model.WorkflowNode;
 import com.agenthub.workflow.domain.model.WorkflowNodeRun;
 
 import java.util.List;
+import java.util.Map;
 
 /**
  * 工作流节点状态迁移的观察口。所属域：workflow 的 domain。
@@ -34,6 +36,22 @@ public interface WorkflowRunListener {
      * @param rows  与 {@code nodes} 对应的运行态行，顺序一致
      */
     void runStarted(List<WorkflowNode> nodes, List<WorkflowNodeRun> rows);
+
+    /**
+     * 调度开始（带图结构）：在「全部节点与当前行」之外，再给出节点 id → 出边。
+     *
+     * <p>为什么需要：工作台把循环体圈成一个框，框的范围由图上 {@code LOOP_BODY} /
+     * {@code LOOP_BACK} 边决定，只靠节点列表算不出来。这里只多给一份只读索引，
+     * <b>不改调度、不加事件</b>；默认实现退回不带图结构的那条，旧实现无需改动。
+     *
+     * @param nodes     图内节点，按图的顺序
+     * @param rows      与 {@code nodes} 对应的运行态行（含历史轮次），顺序一致
+     * @param outgoing  节点 id → 出边（保持图内顺序）；只读
+     */
+    default void runStarted(List<WorkflowNode> nodes, List<WorkflowNodeRun> rows,
+                            Map<String, List<WorkflowEdge>> outgoing) {
+        runStarted(nodes, rows);
+    }
 
     /**
      * 某个节点状态发生变化（已落库）。
