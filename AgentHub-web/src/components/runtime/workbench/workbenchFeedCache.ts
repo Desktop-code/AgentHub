@@ -109,8 +109,15 @@ function workflowNodeProcessSignature(nodes: TrialWorkflowNodeView[]): string {
       stepSignature += `${step.type}:${(step.content || '').length}:${step.state || ''},`
     }
     const files = Array.isArray(node.files) ? node.files.length : 0
+    /*
+     * 循环字段必须一起进签名：框的标题（第几轮 / 总共几次 / 进行中还是次数用尽）与
+     * 「哪个体节点在哪个框里」都由它们决定，节点状态和正文长度却可能都没变。
+     * 漏掉就会命中缓存，框停在旧轮次。
+     */
+    const loop = `${node.group || ''}:${node.loopRound || 0}:${node.loopTotal || 0}:${node.loopDecision || ''}`
     parts.push(
-      `${node.code || node.name}:${steps.length}:${stepSignature}:${(node.output || '').length}:${files}`
+      `${node.code || node.name}#${node.attempt && node.attempt > 0 ? node.attempt : 1}`
+        + `:${steps.length}:${stepSignature}:${(node.output || '').length}:${files}:${loop}`
     )
   }
   return parts.join('|')

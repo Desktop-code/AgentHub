@@ -182,13 +182,18 @@ public class WorkflowCardRebuilder {
         if (!(nodes instanceof ArrayNode list)) {
             return;
         }
-        Map<String, WorkflowNodeRun> byCode = new HashMap<>();
+        Map<String, WorkflowNodeRun> byAttempt = new HashMap<>();
+        Map<String, WorkflowNodeRun> firstByCode = new HashMap<>();
         int agents = 0;
         for (WorkflowNodeRun row : nodeRows) {
             if (row == null || row.getNodeCode() == null || row.getNodeCode().isBlank()) {
                 continue;
             }
-            byCode.putIfAbsent(row.getNodeCode().trim(), row);
+            String code = row.getNodeCode().trim();
+            int attempt = row.getAttempt() == null || row.getAttempt() < 1 ? 1 : row.getAttempt();
+            // 同一编码的每一轮分开补，避免回放只剩最后一次或第一次的正文
+            byAttempt.putIfAbsent(code + "#" + attempt, row);
+            firstByCode.putIfAbsent(code, row);
             if ("AGENT".equalsIgnoreCase(row.getNodeType())) {
                 agents += 1;
             }
@@ -200,7 +205,11 @@ public class WorkflowCardRebuilder {
             if (!(item instanceof ObjectNode node)) {
                 continue;
             }
-            WorkflowNodeRun row = byCode.get(node.path("code").asText("").trim());
+            int attempt = node.path("attempt").asInt(0);
+            String code = node.path("code").asText("").trim();
+            WorkflowNodeRun row = attempt > 0
+                    ? byAttempt.get(code + "#" + attempt)
+                    : firstByCode.get(code);
             if (row == null) {
                 continue;
             }

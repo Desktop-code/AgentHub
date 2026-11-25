@@ -109,6 +109,18 @@ public final class WorkflowRuntimeGraph {
     }
 
     /**
+     * 全部节点的出边索引（节点 id → 出边，保持图内顺序）。
+     *
+     * <p>给投影算「循环体范围」用：{@code WorkflowLoopBodies} 只读这份索引，
+     * 不在运行期额外扫描图。返回的是内部只读视图，调用方不得修改。
+     *
+     * @return 节点 id → 出边；每个节点都有键（没有出边时为空表）
+     */
+    public Map<String, List<WorkflowEdge>> outgoingIndex() {
+        return outgoing;
+    }
+
+    /**
      * @param id 节点 id
      * @return 入边（保持图内顺序）
      */

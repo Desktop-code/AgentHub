@@ -1,0 +1,267 @@
+﻿/*
+ * 工作流步骤卡样式（单个节点：名称 / 状态 / 询问表单 / 思考 / 工具胶囊 / 四行正文 / 文件）。
+ * 所属域：runtime（前端展示）。
+ *
+ * 由 WorkflowStepItem 引入，直播与回放共用同一份。时间线容器在 workflow-timeline.css，
+ * 循环框在 workflow-loop.css——三者同一把尺子，但各管各的选择器。
+ */
+
+.wf-step-item {
+  position: relative;
+  display: flex;
+  align-items: flex-start;
+  gap: 16px;
+  color: #94a3b8;
+  font-size: 14px;
+  z-index: 1;
+  transition: color 0.3s;
+}
+
+.wf-step-item.is-done {
+  color: #1e293b;
+  font-weight: 500;
+}
+
+.wf-step-item.is-active {
+  color: #2563eb;
+  font-weight: 500;
+}
+
+.wf-step-item.is-failed {
+  color: #b91c1c;
+  font-weight: 500;
+}
+
+/* 等待人工 / 等待回复：停在原地，不转圈也不画完成勾 */
+.wf-step-item.is-waiting {
+  color: #b45309;
+  font-weight: 500;
+}
+
+.wf-step-icon {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex: none;
+  width: 22px;
+  height: 22px;
+  margin-top: 1px;
+  border: 2px solid #fff;
+  border-radius: 50%;
+  background: #f1f5f9;
+  color: #cbd5e1;
+  font-size: 12px;
+  transition: all 0.3s;
+}
+
+.wf-step-icon.is-done {
+  background: #10b981;
+  color: #fff;
+}
+
+.wf-step-icon.is-active {
+  background: #3b82f6;
+  color: #fff;
+  box-shadow: 0 0 0 4px #dbeafe;
+}
+
+.wf-step-icon.is-failed {
+  background: #ef4444;
+  color: #fff;
+}
+
+.wf-step-icon.is-waiting {
+  background: #f59e0b;
+  color: #fff;
+}
+
+/* 节点内部要放思考 / 工具 / 四行正文：占满时间轴剩余宽度，正文不被挤成窄条 */
+.wf-step-main {
+  flex: 1;
+  min-width: 0;
+}
+
+.wf-step-name {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+}
+
+.wf-step-code {
+  color: #9ca3af;
+  font-family: ui-monospace, Consolas, monospace;
+  font-size: 12px;
+  font-weight: 400;
+}
+
+.wf-step-note {
+  margin-top: 2px;
+  color: #64748b;
+  font-size: 12px;
+  font-weight: 400;
+}
+
+.wf-step-tools {
+  /* 折叠外紧跟在思考下面；胶囊与方案参与者卡同一份，底部留出与结果框的间距 */
+  margin: 8px 0 10px;
+}
+
+/* 没有详情可开的胶囊（TOOL 节点快照没有入参出参）保持静态，不像可点 */
+.wf-step-tools :deep(span.wb-tool-pill) {
+  cursor: default;
+}
+
+/* ===== 节点内聚：过程折叠成一行，正文单独进四行窗口 ===== */
+.wf-node-body {
+  margin-top: 8px;
+}
+
+/*
+ * 展开后的过程内容：固定四行，超出在这四行里面滚动，不把整段思考铺满卡片。
+ * 字号 / 行高与单 Agent 思考区同一把尺子（13px × 1.6）；
+ * 这一层自带 12px 下内边距，height 按 border-box 算，所以四行之外再加回 12px。
+ */
+.wf-node-thought-body {
+  padding: 0 12px 12px;
+  max-height: calc(4 * 1.6em + 12px);
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  scrollbar-gutter: stable;
+  font-size: 13px;
+  line-height: 1.6;
+}
+
+/* 折叠里只剩一段思考正文：工具已挪到折叠外的胶囊，不再有工具行与相邻间距 */
+.wf-node-think {
+  color: #64748b;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+/*
+ * 节点正文框：与卡级结果框同一形态——外框承担描边 / 圆角 / 内边距，
+ * 正文、复制按钮、展开全文都收在框内，展开条不再落到框外。
+ */
+.wf-node-result {
+  padding: 10px 12px;
+  border: 1px solid var(--ah-border-soft, #eef2f7);
+  border-radius: 6px;
+  background: #f9fafb;
+}
+
+/* 复制按钮与卡级同一枚：绝对定位到框内右上角，移入框才出现 */
+.wf-node-result :deep(.wb-copy) {
+  top: 6px;
+  right: 6px;
+}
+
+/*
+ * 四行正文窗口：与卡级正文同一行高口径（14px × 1.6）。
+ * 运行中在框内跟到最新一行；结束后默认仍停在这个高度，点「展开全文」才放开。
+ */
+.wf-node-clamp {
+  max-height: calc(4 * 1.6em);
+  overflow-x: hidden;
+  overflow-y: auto;
+  color: #475569;
+  /* 与卡级正文同一字号 / 行高：四行高度才是同一把尺子 */
+  font-size: 14px;
+  line-height: 1.6;
+  scrollbar-gutter: stable;
+}
+
+.wf-node-clamp.is-expanded {
+  max-height: none;
+  overflow-y: visible;
+}
+
+/*
+ * 展开后的表：只在展开态允许横向滚动，不挤压卡片宽度。
+ * 收起态一律保持四行——含表的节点也必须先折起来。
+ */
+.wf-node-clamp.is-expanded .wf-node-text {
+  overflow-x: auto;
+}
+
+/* 节点正文走 Markdown，但去掉结果框的内边距 / 边框，避免灰框里再套一层框 */
+.wf-node-text {
+  padding: 0;
+  border: 0;
+  background: transparent;
+  font-size: inherit;
+  line-height: 1.6;
+}
+
+/* 询问节点里的表单：结构沿用工作台 chips，只把外框换成节点内可读的浅色块 */
+.chat.is-workbench .wb-choice.wf-node-choice {
+  margin-top: 8px;
+  padding: 10px 12px;
+  border: 1px solid #fde68a;
+  border-radius: 8px;
+  background: #fffbeb;
+}
+
+.chat.is-workbench .wf-node-choice .wb-choice-question {
+  color: #92400e;
+  font-weight: 600;
+}
+
+/* 询问节点里的用户回复：选项清掉后留在这条节点内，不进四行窗口 */
+.wf-node-reply {
+  margin-top: 8px;
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  font-size: 13px;
+  line-height: 1.6;
+}
+
+.wf-node-reply-label {
+  flex: none;
+  color: #64748b;
+}
+
+.wf-node-reply-text {
+  color: #334155;
+  font-weight: 500;
+  word-break: break-word;
+}
+
+/* 节点文件的单独一行：不进四行窗口，节点折叠后仍在 */
+.wf-node-files {
+  margin-top: 8px;
+}
+
+/* 生成中的沙漏：节点仍在跑时的图标动画 */
+.wf-spin {
+  display: inline-block;
+  animation: wf-step-spin 1s linear infinite;
+}
+
+@keyframes wf-step-spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+/* 生成中的思考标题：只在文字上跑一道浅浅的高光，与单专家思考区同一口径 */
+.chat.is-workbench .wf-thought-head .section-label.is-streaming {
+  background: linear-gradient(90deg, #9ca3af 0%, #635bff 45%, #9ca3af 90%);
+  background-size: 220% 100%;
+  background-clip: text;
+  -webkit-background-clip: text;
+  color: transparent;
+  animation: wf-step-shimmer 1.8s linear infinite;
+}
+
+@keyframes wf-step-shimmer {
+  0% {
+    background-position: 120% 0;
+  }
+
+  100% {
+    background-position: -120% 0;
+  }
+}
+

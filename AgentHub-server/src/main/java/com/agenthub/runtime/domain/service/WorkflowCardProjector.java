@@ -2,6 +2,7 @@ package com.agenthub.runtime.domain.service;
 
 import com.agenthub.runtime.domain.model.WorkflowRunView;
 import com.agenthub.runtime.domain.service.TrialProgress;
+import com.agenthub.workflow.domain.model.WorkflowEdge;
 import com.agenthub.workflow.domain.model.WorkflowNode;
 import com.agenthub.workflow.domain.model.WorkflowNodeRun;
 import com.agenthub.workflow.domain.model.WorkflowRun;
@@ -68,6 +69,24 @@ public final class WorkflowCardProjector implements WorkflowRunListener, Workflo
     private final Map<String, StringBuilder> liveOutput = new LinkedHashMap<>();
     /** 节点编码 → 该节点写出的文件（按文件名去重，保留第一次的体积） */
     private final Map<String, List<WorkflowRunView.NodeFile>> nodeFiles = new LinkedHashMap<>();
+    /**
+     * 节点 id → 所属循环体的循环节点编码。
+     *
+     * <p>只用于展示分组：把同一循环体的体节点圈进一个框。由图上 {@code LOOP_BODY} /
+     * {@code LOOP_BACK} 边算出（{@code WorkflowLoopBodies}），不参与调度、不落库。
+     * 没有循环图时为空，节点照旧平铺，展示与改动前一致。
+     */
+    private final Map<String, String> loopGroupByNode = new LinkedHashMap<>();
+    /** 节点 id → 图内位置：开始时刻相同时按图顺序排，未开始的节点排在最后 */
+    private final Map<String, Integer> nodeIndexById = new LinkedHashMap<>();
+    /**
+     * 节点视图键（{@code nodeId#attempt}）→ 该轮开始时刻（epoch 毫秒）。
+     *
+     * <p>多轮行是后插进库的，直接按插入顺序铺会把第 2 轮排到循环外的下游节点之后，
+     * 时间线就成了「点评先出现、循环框接在最后」。出快照时按真实开始时刻重排，
+     * 每一轮就落回它真正发生的位置。这条顺序只影响展示，调度仍只看最新行。
+     */
+    private final Map<String, Long> nodeStartMs = new LinkedHashMap<>();
     /** 上一次节点过程快照的推送时间：思考 / 正文增量按此降频 */
     private long lastLiveEmitAt;
     /**
@@ -169,6 +188,22 @@ public final class WorkflowCardProjector implements WorkflowRunListener, Workflo
 
     @Override
     public void runStarted(List<WorkflowNode> graphNodes, List<WorkflowNodeRun> rows) {
+        runStarted(graphNodes, rows, null);
+    }
+
+    /**
+     * 调度开始：铺出全部节点，并按图上的循环边算出「体节点归属哪个循环」。
+     *
+     * <p>循环分组只用于展示（把同一循环体的多轮圈进一个框），不参与调度、不落库。
+     * 没有出边索引（旧调用点 / 测试替身）时分组为空，节点照旧平铺。
+     *
+     * @param graphNodes 图内节点，按图顺序
+     * @param rows       运行态行（含历史轮次）
+     * @param outgoing   节点 id → 出边；可空
+     */
+    @Override
+    public void runStarted(List<WorkflowNode> graphNodes, List<WorkflowNodeRun> rows,
+                           Map<String, List<WorkflowEdge>> outgoing) {
         nodes.clear();
         // 新一轮：上一轮的片段必须清掉，否则复用的快照会把旧正文带进这一轮
         streamed.clear();
@@ -177,6 +212,7 @@ public final class WorkflowCardProjector implements WorkflowRunListener, Workflo
         liveSteps.clear();
         liveOutput.clear();
         nodeFiles.clear();
+        nodeStartMs.clear();
         lastLiveEmitAt = 0L;
         // 续跑轮：上一轮已经点过的选项不再展示（用户已经选完了）
         choice = null;
@@ -184,33 +220,65 @@ public final class WorkflowCardProjector implements WorkflowRunListener, Workflo
         if (resume && !seedAnswer.isEmpty()) {
             streamed.add(seedAnswer);
         }
-        Map<String, WorkflowNodeRun> rowByNode = new LinkedHashMap<>();
+        Map<String, WorkflowNode> byId = new LinkedHashMap<>();
+        for (WorkflowNode node : graphNodes == null ? List.<WorkflowNode>of() : graphNodes) {
+            if (node != null && node.getId() != null) {
+                byId.put(node.getId(), node);
+            }
+        }
+        // 循环分组：体节点 → 循环编码。只算一次，后面每个视图都读这份
+        loopGroupByNode.clear();
+        loopGroupByNode.putAll(WorkflowLoopCards.groupByNode(graphNodes,
+                WorkflowLoopCards.bodiesOf(graphNodes, outgoing)));
+        // 图内位置：多轮行是后插进库的，出快照时按「开始时刻 + 图顺序」重排，轮次才不会散
+        nodeIndexById.clear();
+        List<WorkflowNode> ordered = graphNodes == null ? List.of() : graphNodes;
+        for (int index = 0; index < ordered.size(); index += 1) {
+            WorkflowNode node = ordered.get(index);
+            if (node != null && node.getId() != null) {
+                nodeIndexById.put(node.getId(), index);
+            }
+        }
+        java.util.Set<String> seen = new java.util.HashSet<>();
         for (WorkflowNodeRun row : rows == null ? List.<WorkflowNodeRun>of() : rows) {
-            if (row != null && row.getNodeId() != null) {
-                rowByNode.put(row.getNodeId(), row);
-                // 运行主键从首条运行态行取：同一 run 的所有节点行主键一致，取一次即可
-                if (runId == null && row.getRunId() != null) {
-                    runId = row.getRunId();
+            if (row == null || row.getNodeId() == null) {
+                continue;
+            }
+            if (runId == null && row.getRunId() != null) {
+                runId = row.getRunId();
+            }
+            WorkflowNode node = byId.get(row.getNodeId());
+            if (node == null || isBoundary(node)) {
+                continue;
+            }
+            int attempt = attemptOf(row);
+            String status = row.getStatus() == null ? "" : row.getStatus().trim().toUpperCase();
+            /*
+             * 下一轮预建的空行不铺：循环会提前为体节点插入 attempt+1 的 PENDING 行，
+             * 若照常铺出来，框里会先出现一张「第 2 轮 · 等待前置节点」的空卡。
+             * 那一轮真开始（nodeChanged）时自然会进来。
+             */
+            if (attempt > 1 && "PENDING".equals(status)) {
+                seen.add(row.getNodeId());
+                continue;
+            }
+            // 同一节点的每一轮各占一条，后一轮不覆盖前一轮
+            String viewKey = row.getNodeId() + "#" + attempt;
+            nodes.put(viewKey, toView(node, row));
+            // 真实开始时刻：出快照时按它重排，让每一轮落回它发生的位置
+            nodeStartMs.put(viewKey, startMsOf(row, attempt));
+            seen.add(row.getNodeId());
+            if (resume) {
+                if ("SUCCESS".equals(status)) {
+                    streamedNodes.add(row.getNodeId() + "#" + attempt);
                 }
             }
         }
         for (WorkflowNode node : graphNodes == null ? List.<WorkflowNode>of() : graphNodes) {
-            if (node == null || isBoundary(node)) {
+            if (node == null || isBoundary(node) || seen.contains(node.getId())) {
                 continue;
             }
-            WorkflowNodeRun row = rowByNode.get(node.getId());
-            nodes.put(node.getId(), toView(node, row));
-            if (resume && row != null) {
-                /*
-                 * 续跑：开跑前库里已经收口的节点属于上一轮已经发出去的内容，
-                 * 登记成已流出，避免本次又把同一段问句 / 正文重复写一遍。
-                 * 等待回复的那个节点此刻已经是 SUCCESS（续跑入口刚收口），同样在此登记。
-                 */
-                String status = row.getStatus() == null ? "" : row.getStatus().trim().toUpperCase();
-                if ("SUCCESS".equals(status)) {
-                    streamedNodes.add(node.getId());
-                }
-            }
+            nodes.put(node.getId() + "#1", toView(node, null));
         }
         emitRunning();
     }
@@ -224,7 +292,16 @@ public final class WorkflowCardProjector implements WorkflowRunListener, Workflo
         if (runId == null && row != null) {
             runId = row.getRunId();
         }
-        nodes.put(node.getId(), toView(node, row));
+        int attempt = row == null ? 1 : attemptOf(row);
+        String nodeKey = (node.getId() == null ? node.getCode() : node.getId()) + "#" + attempt;
+        nodes.put(nodeKey, toView(node, row));
+        /*
+         * 这一拍的开始时刻：多轮排序靠它落回原位。
+         * 只有真的拿到开始时间才覆盖——补帧 / 旧快照没有 startTime 时不能把已知时刻抹掉。
+         */
+        if (row != null && row.getStartTime() != null) {
+            nodeStartMs.put(nodeKey, startMsOf(row, attempt));
+        }
         // 先收正文再出快照：这一拍就能看到刚完成那一步的文字，而不是下一拍才补
         appendNodeText(node, row);
         // 选项跟着问句一起出：等待这一拍就带 chips，其余状态拍一律不带
@@ -244,7 +321,7 @@ public final class WorkflowCardProjector implements WorkflowRunListener, Workflo
             return;
         }
         synchronized (this) {
-            List<WorkflowRunView.Step> steps = stepList(nodeCode);
+            List<WorkflowRunView.Step> steps = stepList(liveKey(nodeCode));
             int last = steps.size() - 1;
             if (last >= 0 && "REASONING".equals(steps.get(last).type())) {
                 WorkflowRunView.Step previous = steps.get(last);
@@ -269,7 +346,7 @@ public final class WorkflowCardProjector implements WorkflowRunListener, Workflo
             return;
         }
         synchronized (this) {
-            stepList(nodeCode).add(new WorkflowRunView.Step("TOOL", name, "", "RUNNING"));
+            stepList(liveKey(nodeCode)).add(new WorkflowRunView.Step("TOOL", name, "", "RUNNING"));
         }
         emitRunning();
     }
@@ -288,7 +365,7 @@ public final class WorkflowCardProjector implements WorkflowRunListener, Workflo
             return;
         }
         synchronized (this) {
-            List<WorkflowRunView.Step> steps = stepList(nodeCode);
+            List<WorkflowRunView.Step> steps = stepList(liveKey(nodeCode));
             String state = success ? "DONE" : "ERROR";
             String body = clip(result, STEP_MAX);
             for (int index = steps.size() - 1; index >= 0; index--) {
@@ -317,7 +394,7 @@ public final class WorkflowCardProjector implements WorkflowRunListener, Workflo
             return;
         }
         synchronized (this) {
-            StringBuilder buffer = liveOutput.computeIfAbsent(nodeCode, ignored -> new StringBuilder());
+            StringBuilder buffer = liveOutput.computeIfAbsent(liveKey(nodeCode), ignored -> new StringBuilder());
             buffer.append(delta);
             if (buffer.length() > ANSWER_MAX) {
                 buffer.setLength(ANSWER_MAX);
@@ -340,7 +417,7 @@ public final class WorkflowCardProjector implements WorkflowRunListener, Workflo
         }
         synchronized (this) {
             List<WorkflowRunView.NodeFile> files = nodeFiles.computeIfAbsent(
-                    nodeCode, ignored -> new ArrayList<>());
+                    liveKey(nodeCode), ignored -> new ArrayList<>());
             String name = fileName.trim();
             for (WorkflowRunView.NodeFile existing : files) {
                 // 同名覆盖体积：重复投递（实时回调 + 收口补一次）不能刷出一排空行
@@ -393,11 +470,13 @@ public final class WorkflowCardProjector implements WorkflowRunListener, Workflo
         if ("RUNNING".equals(nodeStatus) || "WAITING_HUMAN".equals(nodeStatus)
                 || "WAITING_REPLY".equals(nodeStatus)) {
             return new WorkflowRunView.Node(node.code(), node.name(), node.type(), "CANCELLED", "已中断",
-                    node.output(), node.steps(), node.files(), node.reply());
+                    node.output(), node.steps(), node.files(), node.reply(), node.attempt(),
+                    node.group(), node.loopRound(), node.loopTotal(), node.loopDecision());
         }
         if ("PENDING".equals(nodeStatus)) {
             return new WorkflowRunView.Node(node.code(), node.name(), node.type(), "SKIPPED", "已跳过",
-                    node.output(), node.steps(), node.files(), node.reply());
+                    node.output(), node.steps(), node.files(), node.reply(), node.attempt(),
+                    node.group(), node.loopRound(), node.loopTotal(), node.loopDecision());
         }
         return node;
     }
@@ -590,7 +669,7 @@ public final class WorkflowCardProjector implements WorkflowRunListener, Workflo
         if (!"AGENT".equals(type)) {
             return;
         }
-        String key = node.getId() != null ? node.getId() : node.getCode();
+        String key = (node.getId() != null ? node.getId() : node.getCode()) + "#" + attemptOf(row);
         if (key == null) {
             return;
         }
@@ -712,12 +791,54 @@ public final class WorkflowCardProjector implements WorkflowRunListener, Workflo
      */
     private List<WorkflowRunView.Node> nodeViews() {
         List<WorkflowRunView.Node> list = new ArrayList<>(nodes.size());
+        /*
+         * 整段都在锁里：withLive 会去读 liveSteps / liveOutput / nodeFiles，
+         * 那些表是思考流式增量在别的线程上持续增长的；拆开锁会让排序跑在
+         * 正在被追加的集合上，出现并发修改或读到半截。
+         */
         synchronized (this) {
-            for (WorkflowRunView.Node node : nodes.values()) {
-                list.add(withLive(node));
+            List<Map.Entry<String, WorkflowRunView.Node>> entries = new ArrayList<>(nodes.entrySet());
+            // 按开始时刻排，时刻相同按图顺序：循环体第 2 轮才会落在上一轮之后、下游节点之前
+            entries.sort((left, right) -> {
+                String leftId = left.getKey().substring(0, Math.max(0, left.getKey().lastIndexOf('#')));
+                String rightId = right.getKey().substring(0, Math.max(0, right.getKey().lastIndexOf('#')));
+                long leftAt = nodeStartMs.getOrDefault(left.getKey(), 0L);
+                long rightAt = nodeStartMs.getOrDefault(right.getKey(), 0L);
+                if (leftAt != rightAt) {
+                    return Long.compare(leftAt, rightAt);
+                }
+                int leftIndex = nodeIndexById.getOrDefault(leftId, Integer.MAX_VALUE);
+                int rightIndex = nodeIndexById.getOrDefault(rightId, Integer.MAX_VALUE);
+                if (leftIndex != rightIndex) {
+                    return Integer.compare(leftIndex, rightIndex);
+                }
+                // 同一节点的多轮：按轮次升序，保证第 1 轮在上、第 2 轮在下
+                return Integer.compare(left.getValue().attempt(), right.getValue().attempt());
+            });
+            for (Map.Entry<String, WorkflowRunView.Node> entry : entries) {
+                list.add(withLive(entry.getValue()));
             }
         }
         return List.copyOf(list);
+    }
+
+    /**
+     * 一轮的开始时刻（epoch 毫秒）。没开始过（PENDING）按最大，排在已发生的轮次之后。
+     *
+     * @param row     运行态；可空
+     * @param attempt 轮次（同一时刻时用它兜底排序）
+     * @return 排序用的毫秒数
+     */
+    private static long startMsOf(WorkflowNodeRun row, int attempt) {
+        if (row == null) {
+            return Long.MAX_VALUE;
+        }
+        LocalDateTime start = row.getStartTime();
+        if (start != null) {
+            return start.atZone(ZoneId.systemDefault()).toInstant().toEpochMilli();
+        }
+        // 还没开始：一律排到最后，再由图顺序与轮次排定，未跑的节点不会挤进已发生的轮次中间
+        return Long.MAX_VALUE;
     }
 
     /**
@@ -730,7 +851,7 @@ public final class WorkflowCardProjector implements WorkflowRunListener, Workflo
      * @return 带实时过程 / 正文 / 文件的节点视图
      */
     private WorkflowRunView.Node withLive(WorkflowRunView.Node node) {
-        String key = node.code();
+        String key = node.code() + "#" + Math.max(1, node.attempt());
         List<WorkflowRunView.Step> steps = liveSteps.get(key);
         List<WorkflowRunView.NodeFile> files = nodeFiles.get(key);
         StringBuilder buffer = liveOutput.get(key);
@@ -746,13 +867,55 @@ public final class WorkflowCardProjector implements WorkflowRunListener, Workflo
                 output,
                 steps == null ? List.of() : List.copyOf(steps),
                 files == null ? List.of() : List.copyOf(files),
-                node.reply());
+                node.reply(), node.attempt(), node.group(), node.loopRound(), node.loopTotal(),
+                node.loopDecision());
     }
 
-    /** 取（或建）一个节点的过程步列表；调用方必须持有本对象锁。 */
-    private List<WorkflowRunView.Step> stepList(String nodeCode) {
-        return liveSteps.computeIfAbsent(nodeCode.trim(), ignored -> new ArrayList<>());
+    /** 取（或建）一个节点某一轮的过程步列表；调用方必须持有本对象锁。 */
+    private List<WorkflowRunView.Step> stepList(String key) {
+        return liveSteps.computeIfAbsent(key, ignored -> new ArrayList<>());
     }
+
+    /**
+     * 思考 / 工具回调只有节点编码。挂到当前正在跑的那一轮；没有运行中的就挂到该编码最新一轮。
+     *
+     * @param nodeCode 节点编码
+     * @return {@code 编码#轮次}
+     */
+    private String liveKey(String nodeCode) {
+        if (nodeCode == null || nodeCode.isBlank()) {
+            return "#1";
+        }
+        String code = nodeCode.trim();
+        String fallback = code + "#1";
+        int best = 0;
+        for (WorkflowRunView.Node node : nodes.values()) {
+            if (!code.equals(node.code())) {
+                continue;
+            }
+            int attempt = Math.max(1, node.attempt());
+            if ("RUNNING".equals(node.status())) {
+                return code + "#" + attempt;
+            }
+            if (attempt >= best) {
+                best = attempt;
+                fallback = code + "#" + attempt;
+            }
+        }
+        return fallback;
+    }
+
+    /**
+     * @param row 运行态；空或未填按第 1 轮
+     * @return 至少为 1 的轮次
+     */
+    private static int attemptOf(WorkflowNodeRun row) {
+        if (row == null || row.getAttempt() == null || row.getAttempt() < 1) {
+            return 1;
+        }
+        return row.getAttempt();
+    }
+
     /** 展示名：优先配置名，其次编码；都没有时留空由前端兜底。 */
     private String nameOf() {
         return name == null || name.isBlank() ? codeOf() : name.trim();
@@ -771,6 +934,9 @@ public final class WorkflowCardProjector implements WorkflowRunListener, Workflo
     /**
      * 一行运行态 → 卡片步骤。
      *
+     * <p>循环相关的三个展示字段（轮次 / 总次数 / 最近判定）读循环节点自己的产出 JSON，
+     * 与调度写进去的是同一份事实；非循环节点一律留空，前端按「没有循环」处理。
+     *
      * @param node 节点定义
      * @param row  运行态；缺行按「未开始」
      * @return 步骤视图
@@ -782,8 +948,66 @@ public final class WorkflowCardProjector implements WorkflowRunListener, Workflo
         String status = row == null || row.getStatus() == null ? "PENDING" : row.getStatus().trim().toUpperCase();
         String error = row == null || row.getErrorSummary() == null ? "" : row.getErrorSummary().trim();
         String output = outputOf(code, type, status, row);
-        return new WorkflowRunView.Node(code, name, type, status, noteOf(status, error),
-                output, List.of(), List.of(), replyOf(row));
+        WorkflowRunView.Node view = new WorkflowRunView.Node(code, name, type, status,
+                noteOf(status, error), output, List.of(), List.of(), replyOf(row),
+                row == null ? 1 : attemptOf(row));
+        return withLoop(view, node, row);
+    }
+
+    /**
+     * 给节点视图补上循环展示字段：所属循环（体节点）或自己的轮次（循环节点）。
+     *
+     * <p>「体节点」只带 {@code group}（哪个循环的框），轮次由它自己的 {@code attempt} 表达；
+     * 「循环节点」带 {@code group}（嵌套时归外层）、{@code loopRound} / {@code loopTotal} /
+     * {@code loopDecision}，前端据此写「循环 · 第 1/3 轮 · 进行中」并决定框是否收口。
+     *
+     * @param view 已建好的节点视图
+     * @param node 节点定义
+     * @param row  运行态；可空
+     * @return 补好循环字段的视图；不在循环里的节点原样返回
+     */
+    private WorkflowRunView.Node withLoop(WorkflowRunView.Node view, WorkflowNode node,
+                                          WorkflowNodeRun row) {
+        String nodeId = node.getId();
+        String group = nodeId == null ? "" : loopGroupByNode.getOrDefault(nodeId, "");
+        boolean isLoop = "LOOP".equals(view.type());
+        if (!isLoop && group.isEmpty()) {
+            return view;
+        }
+        int round = 0;
+        int total = 0;
+        String decision = "";
+        if (isLoop) {
+            JsonNode output = parseOutput(row);
+            if (output != null) {
+                round = output.path("iteration").asInt(0);
+                total = output.path("maxIterations").asInt(0);
+                decision = output.path("decision").asText("");
+            }
+        }
+        return new WorkflowRunView.Node(view.code(), view.name(), view.type(), view.status(),
+                view.note(), view.output(), view.steps(), view.files(), view.reply(),
+                view.attempt(), group, round, total, decision);
+    }
+
+    /**
+     * 解析运行态里的产出 JSON。
+     *
+     * <p>展示旁路：解析失败当作「这一拍没有产出」，不让脏数据把整张卡打挂。
+     *
+     * @param row 运行态；可空
+     * @return 产出对象；没有 / 不是对象 / 解析失败时为 null
+     */
+    private JsonNode parseOutput(WorkflowNodeRun row) {
+        if (row == null || row.getOutputJson() == null || row.getOutputJson().isBlank()) {
+            return null;
+        }
+        try {
+            JsonNode parsed = json.readTree(row.getOutputJson());
+            return parsed != null && parsed.isObject() ? parsed : null;
+        } catch (Exception ex) {
+            return null;
+        }
     }
 
     /**
@@ -833,7 +1057,7 @@ public final class WorkflowCardProjector implements WorkflowRunListener, Workflo
         }
         if (output == null || output.isBlank()) {
             synchronized (this) {
-                StringBuilder buffer = liveOutput.get(code);
+                StringBuilder buffer = liveOutput.get(code + "#" + (row == null ? 1 : attemptOf(row)));
                 output = buffer == null ? "" : buffer.toString();
             }
         }

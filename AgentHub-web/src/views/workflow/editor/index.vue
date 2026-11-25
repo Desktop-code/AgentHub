@@ -373,7 +373,7 @@
                   @update:model-value="setCondition"
                 />
               </el-form-item>
-              <div class="wf-tip">条件节点必须恰好有 1 条 DEFAULT 出边，否则发布被拒。</div>
+              <div class="wf-tip">条件节点必须恰好有 1 条兜底出边（DEFAULT，或指向循环节点的 LOOP_BACK）。</div>
             </template>
 
             <!-- HUMAN：超时策略必填 -->
@@ -435,6 +435,19 @@
                 未配置处理人：任何具备 workflow:human:act 的用户都能处理。建议配置角色或用户，避免误批。
               </div>
               <div v-else class="wf-tip">仅命中该规则且具备 workflow:human:act 的用户可处理；无超级管理员绕过。</div>
+            </template>
+
+            <template v-else-if="selectedNode.data.nodeType === 'LOOP'">
+              <WorkflowLoopFields
+                :max-iterations="loopMaxIterations"
+                :on-exceeded="String(selectedNode.data.config.onExceeded || '')"
+                :feedback-path="String(selectedNode.data.config.feedbackPath || '')"
+                :cap="platformMaxLoopIterations"
+                :disabled="!canEdit"
+                @update:max-iterations="setLoopField('maxIterations', $event)"
+                @update:on-exceeded="setLoopField('onExceeded', $event)"
+                @update:feedback-path="setLoopField('feedbackPath', $event)"
+              />
             </template>
 
             <!-- FORK / JOIN：同组才能成对 -->
@@ -508,6 +521,15 @@
             </el-form-item>
             <div v-if="selectedEdge.data.edgeType === 'DEFAULT'" class="wf-tip">
               DEFAULT 是条件节点兜底出口，每个条件节点只允许 1 条。
+            </div>
+            <div v-else-if="selectedEdge.data.edgeType === 'LOOP_BODY'" class="wf-tip">
+              进入循环体：只能从循环节点拉出，指向要重复执行的第一步。
+            </div>
+            <div v-else-if="selectedEdge.data.edgeType === 'LOOP_BACK'" class="wf-tip">
+              回到循环：必须指向循环节点。没有这条声明的回边，保存会被拒绝。
+            </div>
+            <div v-else-if="selectedEdge.data.edgeType === 'LOOP_EXIT'" class="wf-tip">
+              次数用尽后离开循环。失败出路不要这条边。
             </div>
             <el-button v-if="canEdit" type="danger" plain class="wf-delete" @click="deleteSelected">
               删除连线
@@ -597,6 +619,7 @@ import { useWorkflowFocus } from '@/composables/workflowFocus'
 import InputMappingEditor from './InputMappingEditor.vue'
 import MappingEditor from './MappingEditor.vue'
 import JsonLogicEditor from './JsonLogicEditor.vue'
+import WorkflowLoopFields from './WorkflowLoopFields.vue'
 import WorkflowNodeCard from './WorkflowNodeCard.vue'
 import WorkflowTrialDrawer from './WorkflowTrialDrawer.vue'
 import { pageAgents, getAgent } from '@/api/agent'
@@ -643,6 +666,7 @@ const PALETTE: WorkflowPaletteItem[] = [
   { type: 'PARALLEL_FORK', label: '并行分叉', hint: '按 forkGroupId 成对', p0: true },
   { type: 'PARALLEL_JOIN', label: '并行汇合', hint: '按 forkGroupId 成对', p0: true },
   { type: 'HUMAN', label: '人工审批', hint: '必须配超时策略', p0: true },
+  { type: 'LOOP', label: '循环', hint: '显式声明次数和超限出路', p0: true },
   { type: 'SUBGRAPH', label: '子图', hint: 'P1；跨租户永久禁止', p0: false },
   { type: 'KB_RETRIEVE', label: '知识检索', hint: 'P1', p0: false },
   { type: 'SKILL_INJECT', label: 'Skill 注入', hint: 'P1', p0: false },
@@ -659,7 +683,8 @@ const NODE_NAME: Record<string, string> = {
   CONDITION: '条件',
   PARALLEL_FORK: '并行分叉',
   PARALLEL_JOIN: '并行汇合',
-  HUMAN: '人工审批'
+  HUMAN: '人工审批',
+  LOOP: '循环'
 }
 
 /** code 生成前缀 */
@@ -671,7 +696,8 @@ const CODE_PREFIX: Record<string, string> = {
   CONDITION: 'cond',
   PARALLEL_FORK: 'fork',
   PARALLEL_JOIN: 'join',
-  HUMAN: 'human'
+  HUMAN: 'human',
+  LOOP: 'loop'
 }
 
 /** 类型中文名（属性面板标题用） */
@@ -683,7 +709,8 @@ const NODE_TYPE_LABEL: Record<string, string> = {
   CONDITION: '条件',
   PARALLEL_FORK: '并行分叉',
   PARALLEL_JOIN: '并行汇合',
-  HUMAN: '人工审批'
+  HUMAN: '人工审批',
+  LOOP: '循环'
 }
 
 /** 边类型下拉；CANCEL 本刀不产出 */
@@ -691,14 +718,20 @@ const EDGE_TYPES: Array<{ label: string; value: WorkflowEdgeType }> = [
   { label: '普通', value: 'NORMAL' },
   { label: '条件', value: 'COND' },
   { label: '默认（兜底）', value: 'DEFAULT' },
-  { label: '异常', value: 'ERROR' }
+  { label: '异常', value: 'ERROR' },
+  { label: '进入循环体', value: 'LOOP_BODY' },
+  { label: '回到循环', value: 'LOOP_BACK' },
+  { label: '次数用尽', value: 'LOOP_EXIT' }
 ]
 
 const EDGE_TYPE_LABEL: Record<string, string> = {
   NORMAL: '普通',
   COND: '条件',
   DEFAULT: '默认',
-  ERROR: '异常'
+  ERROR: '异常',
+  LOOP_BODY: '进入循环体',
+  LOOP_BACK: '回到循环',
+  LOOP_EXIT: '次数用尽'
 }
 
 /** 人工卡点超时策略，与后端枚举一致 */
@@ -791,6 +824,8 @@ const runMinutesText = ref('')
 const nodeMinutesText = ref('')
 /** 平台硬顶（分钟）：由草稿接口下发，页面只显示分钟，不显示 yml 键名与毫秒 */
 const platformMaxMinutes = ref(60)
+/** 循环次数平台硬顶：画布输入不能超过它 */
+const platformMaxLoopIterations = ref(20)
 
 /** 解析一个「分钟」文本框：空 → null；非正整数 → NaN */
 function parseMinutesText(raw: string): number | null {
@@ -1317,7 +1352,14 @@ function toFlowEdge(item: WorkflowGraphEdge): Edge<WorkflowFlowEdgeData> {
 /** 未知边类型回落 NORMAL（后端仍会报 EDGE_TYPE_UNKNOWN 兜底） */
 function normalizeEdgeType(raw: string | undefined): WorkflowEdgeType {
   const text = String(raw || '').toUpperCase()
-  if (text === 'COND' || text === 'DEFAULT' || text === 'ERROR') {
+  if (
+    text === 'COND' ||
+    text === 'DEFAULT' ||
+    text === 'ERROR' ||
+    text === 'LOOP_BODY' ||
+    text === 'LOOP_BACK' ||
+    text === 'LOOP_EXIT'
+  ) {
     return text
   }
   return 'NORMAL'
@@ -1336,6 +1378,15 @@ function labelText(edgeType: string, label: string | null): string {
   }
   if (edgeType === 'ERROR') {
     return '异常'
+  }
+  if (edgeType === 'LOOP_BODY') {
+    return '进入循环体'
+  }
+  if (edgeType === 'LOOP_BACK') {
+    return '回到循环'
+  }
+  if (edgeType === 'LOOP_EXIT') {
+    return '次数用尽'
   }
   return ''
 }
@@ -1511,6 +1562,7 @@ async function loadAll() {
     runMinutesText.value = graph.limits?.runMinutes ? String(graph.limits.runMinutes) : ''
     nodeMinutesText.value = graph.limits?.nodeMinutes ? String(graph.limits.nodeMinutes) : ''
     platformMaxMinutes.value = draftResp.data.data.platformMaxMinutes || 60
+    platformMaxLoopIterations.value = draftResp.data.data.platformMaxLoopIterations || 20
     // Agent / 工具选项可能已先加载完成：铺完节点立刻补一次名称，避免首屏闪「Agent #30」
     syncAgentLabels()
     syncToolLabels()
@@ -1782,7 +1834,7 @@ function addNode(type: WorkflowNodeType, position: { x: number; y: number }) {
       code: nextNodeCode(type),
       name: NODE_NAME[type] || type,
       nodeType: type,
-      config: {}
+      config: type === 'LOOP' ? { maxIterations: 3, onExceeded: 'DOWNSTREAM' } : {}
     }
   }
   addNodes(node)
@@ -2087,6 +2139,26 @@ function setMapping(field: 'inputMapping' | 'outputMapping', value: Record<strin
   }
   node.data = { ...node.data, config: { ...node.data.config, [field]: value } }
 }
+
+/**
+ * 写回循环节点的次数、出路或反馈路径。空次数写成 null，保存时由后端拒绝。
+ *
+ * @param field 配置键
+ * @param value 新值
+ */
+function setLoopField(field: 'maxIterations' | 'onExceeded' | 'feedbackPath', value: number | string | null) {
+  const node = selectedNode.value
+  if (!node) {
+    return
+  }
+  node.data = { ...node.data, config: { ...node.data.config, [field]: value } }
+}
+
+/** 循环次数：没填时输入框显示空，不把缺省显示成 0。 */
+const loopMaxIterations = computed(() => {
+  const raw = selectedNode.value?.data.config.maxIterations
+  return typeof raw === 'number' && raw > 0 ? raw : null
+})
 
 /** 改连线类型：同步 data.edgeType 与画布标签 */
 function setEdgeType(value: WorkflowEdgeType) {

@@ -184,11 +184,19 @@ public record WorkflowRunView(String name, String code, String status, String an
      * @param steps  该节点自己的思考与工具，按发生顺序；没有为空表
      * @param files  该节点写出的工作区文件（只放文件名与体积，下载地址由前端按会话现拼）
      * @param reply  用户对这一节点询问的回复（只挂在被答复的询问节点上）；没有为空串
+     * @param attempt 同一节点的第几轮；缺省按 1。循环再次进入时每一轮各占一条，不互相覆盖
+     * @param group  所属循环节点编码（展示分组用）；不在任何循环体里为空串。<b>只用于把体节点
+     *               圈进同一个循环框</b>，不参与调度；嵌套时取包含它的最内层循环
+     * @param loopRound 循环节点自己已经进入的第几轮（读它产出里的 iteration）；非循环节点为 0
+     * @param loopTotal 循环节点配置的总次数（读产出里的 maxIterations）；非循环节点为 0
+     * @param loopDecision 循环节点最近一次判定：BODY（进入循环体）/ EXIT（次数用尽离开）/
+     *                     FAIL（按配置结束为失败）；非循环节点或还没判定为空串
      */
     public record Node(String code, String name, String type, String status, String note,
-                       String output, List<Step> steps, List<NodeFile> files, String reply) {
+                       String output, List<Step> steps, List<NodeFile> files, String reply,
+                       int attempt, String group, int loopRound, int loopTotal, String loopDecision) {
 
-        /** 防御性归一：状态缺省按「未开始」，文案缺省为空串，列表缺省为空表。 */
+        /** 防御性归一：状态缺省按「未开始」，文案缺省为空串，列表缺省为空表，轮次至少为 1。 */
         public Node {
             code = code == null ? "" : code.trim();
             name = name == null ? "" : name.trim();
@@ -199,6 +207,30 @@ public record WorkflowRunView(String name, String code, String status, String an
             steps = steps == null ? List.of() : List.copyOf(steps);
             files = files == null ? List.of() : List.copyOf(files);
             reply = reply == null ? "" : reply.trim();
+            if (attempt < 1) {
+                attempt = 1;
+            }
+            group = group == null ? "" : group.trim();
+            loopRound = Math.max(0, loopRound);
+            loopTotal = Math.max(0, loopTotal);
+            loopDecision = loopDecision == null ? "" : loopDecision.trim().toUpperCase();
+        }
+
+        /**
+         * 兼容构造：不带循环展示字段的调用点按「不在循环体里、没有轮次」处理。
+         */
+        public Node(String code, String name, String type, String status, String note,
+                    String output, List<Step> steps, List<NodeFile> files, String reply,
+                    int attempt) {
+            this(code, name, type, status, note, output, steps, files, reply, attempt, "", 0, 0, "");
+        }
+
+        /**
+         * 兼容构造：还没有轮次的调用点按第 1 轮。
+         */
+        public Node(String code, String name, String type, String status, String note,
+                    String output, List<Step> steps, List<NodeFile> files, String reply) {
+            this(code, name, type, status, note, output, steps, files, reply, 1);
         }
 
         /**

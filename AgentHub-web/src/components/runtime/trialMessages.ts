@@ -1398,12 +1398,20 @@ export function appendWorkflow(
     /*
      * 节点内过程同样只增不减：收尾期的旧快照 / 重连重放可能不带 steps/output/files，
      * 若整份覆盖，用户正在看的思考会闪空。只在旧节点确实有该字段时补齐。
+     *
+     * <p>对位必须带上轮次：同一节点在循环里会出现多行，只按编码对位会让第 2 轮
+     * 拿到第 1 轮的正文，回放看起来就是「上一轮被覆盖了」。
      */
     const previousNodes = new Map(
-      (existing.workflow?.nodes || []).map((node) => [(node.code || node.name || '').trim(), node])
+      (existing.workflow?.nodes || []).map((node) => [
+        `${(node.code || node.name || '').trim()}#${node.attempt && node.attempt > 0 ? node.attempt : 1}`,
+        node
+      ])
     )
     for (const node of workflow.nodes) {
-      const previous = previousNodes.get((node.code || node.name || '').trim())
+      const previous = previousNodes.get(
+        `${(node.code || node.name || '').trim()}#${node.attempt && node.attempt > 0 ? node.attempt : 1}`
+      )
       if (!previous) {
         continue
       }
@@ -1485,6 +1493,16 @@ export interface WorkflowSnapshotInput {
   files?: unknown
   /** 用户对询问节点的回复（续跑后才有） */
   reply?: unknown
+  /** 同一节点的第几轮（循环再次进入时每一轮各占一条） */
+  attempt?: unknown
+  /** 所属循环节点编码；不在循环体里为空串 */
+  group?: unknown
+  /** 循环节点已进入的第几轮 */
+  loopRound?: unknown
+  /** 循环节点配置的总次数 */
+  loopTotal?: unknown
+  /** 循环节点最近一次判定：BODY / EXIT / FAIL */
+  loopDecision?: unknown
   /** 运行时限（整段 / 当前节点上限与各自截止，绝对时刻） */
   limits?: unknown
 }
@@ -1524,7 +1542,16 @@ export function normalizeWorkflow(
         steps: normalizeWorkflowSteps(one.steps),
         files: normalizeWorkflowNodeFiles(one.files, sessionId),
         // 续跑后询问节点上的用户回复；首次发起 / 非询问节点没有该字段
-        reply: typeof one.reply === 'string' ? one.reply.trim() : ''
+        reply: typeof one.reply === 'string' ? one.reply.trim() : '',
+        /*
+         * 循环展示字段：轮次与所属循环只用于把同一循环的多轮圈进一个框。
+         * 缺省按「第 1 轮 / 不在循环里」，旧快照因此仍按原来那样平铺。
+         */
+        attempt: typeof one.attempt === 'number' && one.attempt > 0 ? Math.floor(one.attempt) : undefined,
+        group: typeof one.group === 'string' ? one.group.trim() : '',
+        loopRound: typeof one.loopRound === 'number' && one.loopRound > 0 ? Math.floor(one.loopRound) : 0,
+        loopTotal: typeof one.loopTotal === 'number' && one.loopTotal > 0 ? Math.floor(one.loopTotal) : 0,
+        loopDecision: typeof one.loopDecision === 'string' ? one.loopDecision.trim().toUpperCase() : ''
       }
     })
   return {

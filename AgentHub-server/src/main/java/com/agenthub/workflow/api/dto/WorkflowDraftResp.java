@@ -23,4 +23,9 @@ public class WorkflowDraftResp {
      * <p>只给分钟：页面上不暴露 yml 键名与毫秒。
      */
     private Integer platformMaxMinutes;
+
+    /**
+     * 单个循环最多进入循环体的次数（平台硬顶）。画布上的次数不能超过它。
+     */
+    private Integer platformMaxLoopIterations;
 }

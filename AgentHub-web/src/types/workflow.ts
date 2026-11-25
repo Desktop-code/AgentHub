@@ -14,6 +14,7 @@ export type WorkflowNodeType =
   | 'PARALLEL_FORK'
   | 'PARALLEL_JOIN'
   | 'HUMAN'
+  | 'LOOP'
   | 'KB_RETRIEVE'
   | 'SKILL_INJECT'
   | 'SUBGRAPH'
@@ -22,8 +23,15 @@ export type WorkflowNodeType =
   | 'TIMER'
   | 'COMPENSATE'
 
-/** 边类型；CANCEL 本刀不产出 */
-export type WorkflowEdgeType = 'NORMAL' | 'COND' | 'DEFAULT' | 'ERROR'
+/** 边类型；CANCEL 本刀不产出。循环三条边必须显式声明，不能靠普通回边冒充 */
+export type WorkflowEdgeType =
+  | 'NORMAL'
+  | 'COND'
+  | 'DEFAULT'
+  | 'ERROR'
+  | 'LOOP_BODY'
+  | 'LOOP_BACK'
+  | 'LOOP_EXIT'
 
 /** 人工卡点超时策略，与后端 HumanTimeoutPolicy 一致 */
 export type HumanTimeoutPolicy = 'AUTO_REJECT' | 'AUTO_APPROVE' | 'ESCALATE'
@@ -51,6 +59,12 @@ export interface WorkflowNodeConfig {
   inputMapping?: Record<string, string>
   /** 出参映射 */
   outputMapping?: Record<string, string>
+  /** 循环最多进入循环体的次数；不得超过平台硬顶 */
+  maxIterations?: number | null
+  /** 次数用尽后的出路：DOWNSTREAM / HUMAN / FAIL */
+  onExceeded?: 'DOWNSTREAM' | 'HUMAN' | 'FAIL' | string
+  /** 打回反馈从上下文取的路径，如 $.outputs.check */
+  feedbackPath?: string
   [key: string]: unknown
 }
 
@@ -164,6 +178,10 @@ export interface WorkflowDraftResp {
    * 页面只用它做「不得大于平台上限」的校验与说明，不显示键名或毫秒。
    */
   platformMaxMinutes?: number
+  /**
+   * 单个循环最多进入循环体的次数。画布上的次数不能超过它。
+   */
+  platformMaxLoopIterations?: number
 }
 
 /** 单条校验问题 */

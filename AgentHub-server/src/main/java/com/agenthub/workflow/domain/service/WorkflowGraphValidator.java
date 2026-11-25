@@ -59,7 +59,7 @@ public final class WorkflowGraphValidator {
     public static WorkflowValidationResult validate(WorkflowGraph graph,
                                                     WorkflowBindingSnapshot bindings,
                                                     boolean publishMode) {
-        return validate(graph, bindings, publishMode, MAX_NODES);
+        return validate(graph, bindings, publishMode, MAX_NODES, WorkflowLoopPolicy.PLATFORM_CAP);
     }
 
     /**
@@ -75,6 +75,24 @@ public final class WorkflowGraphValidator {
                                                     WorkflowBindingSnapshot bindings,
                                                     boolean publishMode,
                                                     int maxNodesPerGraph) {
+        return validate(graph, bindings, publishMode, maxNodesPerGraph, WorkflowLoopPolicy.PLATFORM_CAP);
+    }
+
+    /**
+     * 执行图校验（可覆盖节点硬顶与循环次数硬顶）。
+     *
+     * @param graph            图；null 按空图处理
+     * @param bindings         绑定快照；null 按全部不存在处理
+     * @param publishMode      true=发布前置检查；false=草稿检查
+     * @param maxNodesPerGraph 生效的节点上限；<=0 时回落到 {@link #MAX_NODES}
+     * @param maxLoopIterations 平台生效的循环次数硬顶；图上填写不得超过它
+     * @return errors / warns；errors 为空才允许发布
+     */
+    public static WorkflowValidationResult validate(WorkflowGraph graph,
+                                                    WorkflowBindingSnapshot bindings,
+                                                    boolean publishMode,
+                                                    int maxNodesPerGraph,
+                                                    int maxLoopIterations) {
         WorkflowBindingSnapshot safeBindings =
                 bindings == null ? WorkflowBindingSnapshot.empty() : bindings;
         WorkflowValidationResult result = new WorkflowValidationResult();
@@ -118,11 +136,12 @@ public final class WorkflowGraphValidator {
         Set<String> edgeIds = new HashSet<>();
         checkEdges(edges, result, nodeById, edgeIds, outgoing, incoming);
 
-        checkCycle(result, nodeById, outgoing);
+        checkCycle(result, nodeById, nodeTypes, outgoing);
         checkConditions(result, nodeById, nodeTypes, outgoing);
         checkForkJoin(result, nodeById, nodeTypes);
         checkHuman(result, nodeById, nodeTypes);
         checkBindings(result, nodeById, nodeTypes, safeBindings, publishMode);
+        WorkflowLoopGraphRules.check(result, nodeById, nodeTypes, outgoing, incoming, maxLoopIterations);
         checkWarns(result, nodeById, nodeTypes, startNodes, endNodes, outgoing, incoming);
         return result;
     }
@@ -216,19 +235,34 @@ public final class WorkflowGraphValidator {
     }
 
     /**
-     * 有向无环检测（DFS 三色）。发现环时把环上节点串进中文提示。
+     * 有向环检测（DFS 三色）。指向循环节点的 LOOP_BACK 是已声明回边，不参与这次检测。
+     * 剩下的环都是未声明的，保存直接拒绝。
      */
     private static void checkCycle(WorkflowValidationResult result,
                                    Map<String, WorkflowNode> nodeById,
+                                   Map<String, WorkflowNodeType> nodeTypes,
                                    Map<String, List<WorkflowEdge>> outgoing) {
+        Map<String, List<WorkflowEdge>> acyclic = new HashMap<>();
+        for (Map.Entry<String, List<WorkflowEdge>> entry : outgoing.entrySet()) {
+            List<WorkflowEdge> kept = new ArrayList<>();
+            for (WorkflowEdge edge : entry.getValue()) {
+                if (WorkflowLoopPolicy.isDeclaredBackEdge(edge, nodeTypes)) {
+                    continue;
+                }
+                kept.add(edge);
+            }
+            acyclic.put(entry.getKey(), kept);
+        }
         Map<String, Integer> state = new HashMap<>();
         Deque<String> path = new ArrayDeque<>();
         for (String nodeId : nodeById.keySet()) {
-            List<String> cycle = dfsCycle(nodeId, outgoing, state, path);
+            List<String> cycle = dfsCycle(nodeId, acyclic, state, path);
             if (cycle != null) {
                 WorkflowNode first = nodeById.get(cycle.get(0));
                 addError(result, "CYCLE",
-                        "图存在有向环：" + String.join(" → ", cycle) + "；P0 禁止回边", first);
+                        "图存在未声明的环：" + String.join(" → ", cycle)
+                                + "。循环必须用循环节点显式声明回边（LOOP_BACK），未声明的环不能保存",
+                        first);
                 return;
             }
         }
@@ -288,14 +322,14 @@ public final class WorkflowGraphValidator {
             }
             List<WorkflowEdge> out = outgoing.getOrDefault(node.getId(), List.of());
             long defaults = out.stream()
-                    .filter(edge -> WorkflowEdgeType.parse(edge.getType()) == WorkflowEdgeType.DEFAULT)
+                    .filter(edge -> WorkflowLoopPolicy.isFallbackEdge(WorkflowEdgeType.parse(edge.getType())))
                     .count();
             long conditions = out.stream()
                     .filter(edge -> WorkflowEdgeType.parse(edge.getType()) == WorkflowEdgeType.COND)
                     .count();
             if (defaults == 0) {
                 addError(result, "CONDITION_DEFAULT_MISSING",
-                        "条件节点「" + label(node) + "」缺少 DEFAULT 出口；所有条件都不成立时无兜底",
+                        "条件节点「" + label(node) + "」缺少兜底出口（DEFAULT，或指向循环节点的 LOOP_BACK）",
                         node);
             } else if (defaults > 1) {
                 addError(result, "CONDITION_DEFAULT_MULTIPLE",

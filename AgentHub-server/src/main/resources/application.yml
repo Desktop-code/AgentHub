@@ -142,8 +142,10 @@ agenthub:
     max-parallel-branches: 3
     # 校验 / 发布允许的单图节点数。
     max-nodes-per-graph: 500
-    # 单次 run 允许预建的 node_run 条数。
+    # 单次 run 允许的 node_run 条数（含循环再次进入插入的新行）。
     max-node-runs-per-run: 500
+    # 单个循环进入循环体的次数硬顶。图上填写不得超过生效值；写得比 20 大也会被夹回 20。
+    max-loop-iterations: ${AGENTHUB_WORKFLOW_MAX_LOOP_ITERATIONS:20}
   runtime:
     # browserUse 无头 Chrome。一次工具调用结束不关浏览器，同一试跑会话里的同一位专家接着操作。
     # 空闲超过 browser-session-idle，或专家调用 close，才销毁。单次启动/导航/点选共用 browser-timeout。

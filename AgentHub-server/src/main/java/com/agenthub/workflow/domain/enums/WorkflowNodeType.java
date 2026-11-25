@@ -2,7 +2,7 @@ package com.agenthub.workflow.domain.enums;
 
 /**
  * 工作流节点类型。所属域：workflow 的 domain。
- * <p>P0 只落地 START/END/AGENT/TOOL/CONDITION/PARALLEL_FORK/PARALLEL_JOIN/HUMAN；
+ * <p>P0 落地 START/END/AGENT/TOOL/CONDITION/PARALLEL_FORK/PARALLEL_JOIN/HUMAN/LOOP；
  * 其余类型在画布面板灰显并标注 P1，手改入库由校验器拒绝。
  */
 public enum WorkflowNodeType {
@@ -23,6 +23,11 @@ public enum WorkflowNodeType {
     PARALLEL_JOIN,
     /** 人工卡点；必须配置超时策略 */
     HUMAN,
+    /**
+     * 显式循环。次数与超限出路写在节点上，进入体 / 回边 / 离开边用专门的边类型。
+     * 未声明成这种节点的环仍然不能保存。
+     */
+    LOOP,
     /** 知识检索；P1 */
     KB_RETRIEVE,
     /** 技能注入；P1 */
@@ -62,7 +67,7 @@ public enum WorkflowNodeType {
      */
     public boolean p0Supported() {
         return switch (this) {
-            case START, END, AGENT, TOOL, CONDITION, PARALLEL_FORK, PARALLEL_JOIN, HUMAN -> true;
+            case START, END, AGENT, TOOL, CONDITION, PARALLEL_FORK, PARALLEL_JOIN, HUMAN, LOOP -> true;
             default -> false;
         };
     }

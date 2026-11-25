@@ -266,7 +266,7 @@ public class WorkflowDefAppService {
         WorkflowGraph graph = codec.parse(draft.getGraphJson());
         WorkflowBindingSnapshot bindings = bindingResolver.resolve(graph);
         WorkflowValidationResult result = WorkflowGraphValidator.validate(graph, bindings, true,
-                properties.effectiveMaxNodesPerGraph());
+                properties.effectiveMaxNodesPerGraph(), properties.effectiveMaxLoopIterations());
         appendLimitIssues(graph, result);
         return toValidateResp(result);
     }
@@ -286,7 +286,7 @@ public class WorkflowDefAppService {
         WorkflowGraph graph = codec.parse(draft.getGraphJson());
         WorkflowBindingSnapshot bindings = bindingResolver.resolve(graph);
         WorkflowValidationResult result = WorkflowGraphValidator.validate(graph, bindings, true,
-                properties.effectiveMaxNodesPerGraph());
+                properties.effectiveMaxNodesPerGraph(), properties.effectiveMaxLoopIterations());
         appendLimitIssues(graph, result);
         if (!result.passed()) {
             throw new BizException(ErrorCode.BAD_REQUEST, publishFailureMessage(result));
@@ -368,6 +368,7 @@ public class WorkflowDefAppService {
         resp.setUpdateTime(draft.getUpdateTime());
         // 平台硬顶折算成分钟给配置页：页面上只出现分钟，不出现 yml 键名或毫秒
         resp.setPlatformMaxMinutes(properties.effectiveWallMinutes());
+        resp.setPlatformMaxLoopIterations(properties.effectiveMaxLoopIterations());
         return resp;
     }
 
