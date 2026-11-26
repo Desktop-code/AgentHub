@@ -1,7 +1,7 @@
 <template>
   <div class="page">
     <!-- 页头只保留标题与说明；接入配置语义较弱，收进「更多」下拉避免误点 -->
-    <PageHeader title="工作流" description="可视化编排 DAG：建图、存草稿、发布不可变版本；试跑与人工待办在编辑页与「编排 → 人工待办」处理。">
+    <PageHeader title="工作流" description="可视化编排 DAG：建图、存草稿、发布不可变版本；调试与人工待办在编辑页与「编排 → 人工待办」处理。">
       <template #extra>
         <!-- 应用触发 / 应用授权不是高频动作，统一收进下拉；无任一权限时不占位 -->
         <el-dropdown v-if="showMoreMenu" trigger="click" @command="onHeaderCommand">
@@ -108,40 +108,31 @@
         </el-table-column>
         <el-table-column label="版本" width="100" align="center">
           <template #default="{ row }">
-            <!-- 版本号可点：复用右栏「版本」抽屉，避免只读数字不可操作 -->
-            <el-button v-if="row.defaultVersion" link type="primary" @click="openReleases(row)">
-              v{{ row.defaultVersion }}
-            </el-button>
+            <!-- 版本号只展示当前发布版本；切换入口在画布顶栏，列表不再提供 -->
+            <span v-if="row.defaultVersion">v{{ row.defaultVersion }}</span>
             <span v-else class="muted">—</span>
           </template>
         </el-table-column>
         <el-table-column prop="updateTime" label="更新时间" width="170" align="center">
           <template #default="{ row }">{{ formatTime(row.updateTime) }}</template>
         </el-table-column>
-        <el-table-column label="操作" width="300" align="center" fixed="right">
+        <el-table-column label="操作" width="200" align="center" fixed="right">
           <template #default="{ row }">
             <el-button link type="primary" @click="openEditor(row)">
               {{ canEdit ? '编辑' : '查看' }}
             </el-button>
-            <el-button link type="primary" @click="openReleases(row)">版本</el-button>
-            <!-- 试跑与运行记录都依赖 run:trial（与后端 @SaCheckPermission 同码） -->
-            <el-button v-if="canRunTrial" link type="primary" @click="openTrial(row)">试跑</el-button>
-            <el-button v-if="canRunTrial" link type="primary" @click="openRunRecords(row)">运行记录</el-button>
-            <!-- 破坏性 / 低频动作收进 ...，避免与常用按钮并排误触 -->
-            <el-dropdown v-if="canEdit" trigger="click" @command="onRowCommand($event, row)">
-              <el-button link type="primary" class="btn-more" aria-label="更多操作" :disabled="removingId === row.id">
-                <el-icon><MoreFilled /></el-icon>
+            <!-- 复制 / 删除改为并排常驻：不再收进「...」下拉，避免多一次点击 -->
+            <template v-if="canEdit">
+              <el-button link type="primary" @click="openCopy(row)">复制</el-button>
+              <el-button
+                link
+                type="danger"
+                :loading="removingId === row.id"
+                @click="removeRow(row)"
+              >
+                删除
               </el-button>
-              <template #dropdown>
-                <el-dropdown-menu>
-                  <el-dropdown-item command="copy">复制</el-dropdown-item>
-                  <el-dropdown-item command="remove" divided>
-                    <!-- 下拉菜单被 teleport 到 body，scoped 样式不生效，故用行内色值 -->
-                    <span style="color: var(--el-color-danger)">删除</span>
-                  </el-dropdown-item>
-                </el-dropdown-menu>
-              </template>
-            </el-dropdown>
+            </template>
           </template>
         </el-table-column>
       </el-table>
@@ -223,43 +214,7 @@ X-App-Secret: ********
       </template>
     </el-dialog>
 
-    <!-- 版本：只读快照列表，发布后不可改 -->
-    <el-drawer v-model="releaseOpen" :title="`发布版本 · ${releaseTarget?.name || ''}`" size="520px">
-      <div v-loading="releaseLoading" class="release-body">
-        <el-alert
-          v-if="releaseError"
-          :title="releaseError"
-          type="error"
-          show-icon
-          :closable="false"
-          class="block-alert"
-        >
-          <div class="block-alert__body">
-            <span>{{ releaseErrorReason }}</span>
-            <el-button link type="danger" size="small" @click="retryReleases">重试</el-button>
-          </div>
-        </el-alert>
-        <el-empty v-else-if="!releaseLoading && !releases.length" description="还没有发布版本" />
-        <div v-for="item in releases" :key="item.id" class="release-item">
-          <div class="release-item__head">
-            <el-tag size="small" type="primary" effect="plain">v{{ item.version }}</el-tag>
-            <span class="release-item__time">{{ formatTime(item.publishTime) }}</span>
-          </div>
-          <div class="release-item__note">{{ item.publishNote || '无发布说明' }}</div>
-          <div class="release-item__fp" :title="item.fingerprint">指纹 {{ item.fingerprint.slice(0, 12) }}…</div>
-        </div>
-      </div>
-    </el-drawer>
-
-    <!-- 试跑抽屉：复用编辑页同一个组件，列表页不再自造运行面板 -->
-    <WorkflowTrialDrawer
-      v-if="trialTarget"
-      v-model="trialOpen"
-      :workflow-id="trialTarget.id"
-      :default-release-id="trialTarget.defaultReleaseId ?? null"
-      :can-act="canHumanAct"
-      :page-active="pageActive"
-    />
+    <!-- 调试 / 版本切换 / 运行历史入口统一收进画布定义页，列表不再自留一份 -->
   </div>
 </template>
 
@@ -268,38 +223,34 @@ X-App-Secret: ********
 defineOptions({ name: 'WorkflowList' })
 /**
  * 工作流列表页。所属域：workflow。
- * <p>职责：分页检索、新建（后端自动建最小草稿）、复制、删除、进入画布编辑、
- * 查看历史发布版本、发起试跑、跳转调用追踪查看运行记录。
- * <p>边界：本页不自建执行引擎；试跑复用编辑页抽屉，运行详情仍在后端 run 表。
+ * <p>职责：分页检索、新建（后端自动建最小草稿）、复制、删除、进入画布编辑。
+ * <p>边界：调试、版本切换、运行历史入口都在画布定义页；本页只保留列表与定义管理，
+ * 不自建执行引擎，也不代调运行接口。
  */
-import { computed, onActivated, onDeactivated, onMounted, reactive, ref } from 'vue'
+import { computed, onActivated, onMounted, reactive, ref } from 'vue'
 import { useRouter } from 'vue-router'
-import { ArrowDown, MoreFilled, Plus, RefreshRight, Search } from '@element-plus/icons-vue'
+import { ArrowDown, Plus, RefreshRight, Search } from '@element-plus/icons-vue'
 import { ElMessage, ElMessageBox, type FormInstance, type FormRules } from 'element-plus'
 import PageHeader from '@/components/PageHeader.vue'
 import LoadError from '@/components/common/LoadError.vue'
 import TablePager from '@/components/TablePager.vue'
 import { useListIndexColumn } from '@/composables/listIndex'
 import { requestErrorText } from '@/utils/requestError'
-import WorkflowTrialDrawer from '@/views/workflow/editor/WorkflowTrialDrawer.vue'
 import {
   createWorkflowDef,
   getWorkflowDraft,
-  listWorkflowReleases,
   pageWorkflowDefs,
   removeWorkflowDef,
   saveWorkflowDraft
 } from '@/api/workflow'
 import { useUserStore } from '@/stores/user'
-import type { WorkflowDefRow, WorkflowReleaseRow } from '@/types/workflow'
+import type { WorkflowDefRow } from '@/types/workflow'
 
 const user = useUserStore()
 const router = useRouter()
 
 /** 按钮权限与后端注解同码；模板与脚本共用，避免两处判断漂移 */
 const canEdit = computed(() => user.hasPerm('workflow:def:edit'))
-const canRunTrial = computed(() => user.hasPerm('workflow:run:trial'))
-const canHumanAct = computed(() => user.hasPerm('workflow:human:act'))
 /** 页头「更多」只要有一个入口可用就显示，避免空下拉占位 */
 const showMoreMenu = computed(
   () => user.hasPerm('workflow:run:invoke') || user.hasPerm('system:app:list')
@@ -353,26 +304,8 @@ const copying = ref(false)
 const copyFormRef = ref<FormInstance | null>(null)
 const copySource = ref<WorkflowDefRow | null>(null)
 const copyForm = reactive({ code: '', name: '', description: '' })
-/** 正在删除的行 id：只禁用当前行下拉，不阻塞整表 */
+/** 正在删除的行 id：只让当前行的删除按钮转圈，不阻塞整表 */
 const removingId = ref<number | null>(null)
-
-/** 试跑抽屉目标；为空时不渲染抽屉，防止旧 target 串行 */
-const trialOpen = ref(false)
-const trialTarget = ref<WorkflowDefRow | null>(null)
-
-/**
- * 本页是否在前台。KeepAlive 缓存根切走 / 切回时翻转，
- * 透传给试跑抽屉，让它停 / 起轮询与秒表（抽屉是子组件，收不到 deactivated）。
- */
-const pageActive = ref(true)
-
-const releaseOpen = ref(false)
-const releaseLoading = ref(false)
-const releaseError = ref('')
-/** 版本列表失败的可读原因（抽屉错误条第二行） */
-const releaseErrorReason = ref('')
-const releaseTarget = ref<WorkflowDefRow | null>(null)
-const releases = ref<WorkflowReleaseRow[]>([])
 
 /** 生命周期 → 中文；停用为后端预留态，保留兜底文案 */
 function statusLabel(status: string): string {
@@ -481,66 +414,6 @@ function openEditor(row: WorkflowDefRow) {
   void router.push(`/orchestration/workflow/${row.id}`)
 }
 
-/** 打开历史版本抽屉 */
-async function openReleases(row: WorkflowDefRow) {
-  releaseTarget.value = row
-  releaseOpen.value = true
-  // 换成另一行时先清旧版本，避免短暂显示上一条工作流的版本
-  releases.value = []
-  await loadReleases(row)
-}
-
-/**
- * 拉取指定工作流的发布版本。
- * 失败保留旧版本行（抽屉重试时不清空），只把错误条置起。
- *
- * @param row 目标工作流定义
- */
-async function loadReleases(row: WorkflowDefRow) {
-  releaseLoading.value = true
-  releaseError.value = ''
-  releaseErrorReason.value = ''
-  try {
-    const { data } = await listWorkflowReleases(row.id)
-    releases.value = data.data || []
-  } catch (e) {
-    releaseError.value = '版本列表加载失败'
-    releaseErrorReason.value = requestErrorText(e)
-  } finally {
-    releaseLoading.value = false
-  }
-}
-
-/** 版本抽屉错误条的重试：按当前目标重拉，不关闭抽屉 */
-function retryReleases() {
-  if (releaseTarget.value) {
-    void loadReleases(releaseTarget.value)
-  }
-}
-
-/**
- * 打开试跑抽屉。仅传已发布定义；没有版本时由抽屉自身提示先发布。
- *
- * @param row 当前定义行
- */
-function openTrial(row: WorkflowDefRow) {
-  trialTarget.value = row
-  trialOpen.value = true
-}
-
-/**
- * 跳到调用追踪页，并把入口类型与工作流 id 作为查询条件带上。
- * <p>type=workflow 让追踪页直接进「工作流」类型；workflowId 供后端反查该定义的 run。
- *
- * @param row 当前定义行
- */
-function openRunRecords(row: WorkflowDefRow) {
-  void router.push({
-    path: '/ops/traces',
-    query: { type: 'workflow', workflowId: String(row.id), workflowName: row.name }
-  })
-}
-
 /**
  * 打开复制弹窗，预填「编码_copy / 名称 副本」；编码仍允许手改。
  *
@@ -602,20 +475,6 @@ async function submitCopy() {
     // 接口错误由 request 拦截器统一提示，这里只负责收口 loading
   } finally {
     copying.value = false
-  }
-}
-
-/**
- * 行内「...」菜单分发：复制 / 删除。
- *
- * @param command 下拉命令
- * @param row     当前定义行
- */
-function onRowCommand(command: string, row: WorkflowDefRow) {
-  if (command === 'copy') {
-    openCopy(row)
-  } else if (command === 'remove') {
-    void removeRow(row)
   }
 }
 
@@ -685,21 +544,11 @@ onMounted(loadRows)
  */
 let activatedOnce = false
 onActivated(() => {
-  pageActive.value = true
   if (!activatedOnce) {
     activatedOnce = true
     return
   }
   void loadRows()
-})
-
-/**
- * 本页是 KeepAlive 缓存根（meta.cacheName=WorkflowList），切走菜单不会卸载。
- * <p>试跑抽屉是子组件、收不到 deactivated，因此把失活状态传给它，
- * 由抽屉自己停掉 `GET workflow/run` 轮询与 1Hz 秒表。
- */
-onDeactivated(() => {
-  pageActive.value = false
 })
 </script>
 
@@ -738,56 +587,13 @@ onDeactivated(() => {
   white-space: nowrap;
 }
 
-/* 操作列 link 按钮间距收紧，五个动作仍能在一行内排开 */
+/* 操作列：编辑 / 复制 / 删除并排，按钮间距保持紧凑 */
 .wf-table .el-button + .el-button {
-  margin-left: 8px;
-}
-
-.btn-more {
   margin-left: 8px;
 }
 
 .muted {
   color: var(--ah-text-muted, #9ca3af);
-}
-
-.release-body {
-  min-height: 120px;
-}
-
-.release-item {
-  padding: 12px;
-  margin-bottom: 10px;
-  border: 1px solid var(--ah-border, #ebeef5);
-  border-radius: 8px;
-  background: var(--ah-surface);
-}
-
-.release-item__head {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 8px;
-}
-
-.release-item__time {
-  color: var(--ah-text-muted, #9ca3af);
-  font-size: 12px;
-}
-
-.release-item__note {
-  margin-top: 6px;
-  color: var(--ah-text-secondary, #6b7280);
-  font-size: 13px;
-  line-height: 1.5;
-  word-break: break-all;
-}
-
-.release-item__fp {
-  margin-top: 4px;
-  color: var(--ah-text-muted);
-  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
-  font-size: 12px;
 }
 
 /* 应用触发说明：偏文档排版，代码块保持可读但不喧宾夺主 */

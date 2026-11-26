@@ -35,6 +35,12 @@ public class WorkflowRunDetailResp {
     private LocalDateTime createTime;
     private List<WorkflowNodeRunResp> nodeRuns = new ArrayList<>();
     private List<WorkflowHumanTaskResp> humanTasks = new ArrayList<>();
+    /**
+     * 与首页工作流卡片同一份载荷（{@code WorkflowRunJson.payload}）。
+     * 调试抽屉直接交给现成卡片组件，不再用节点状态自行拼时间轴。
+     * 图不可读时为空。
+     */
+    private Object card;
 
     /**
      * 聚合模型 → 响应。
@@ -60,18 +66,10 @@ public class WorkflowRunDetailResp {
         resp.setEndTime(run.getEndTime());
         resp.setCreateTime(run.getCreateTime());
         for (WorkflowNodeRun nodeRun : detail.getNodeRuns()) {
-            WorkflowNodeRunResp item = new WorkflowNodeRunResp();
-            item.setId(nodeRun.getId());
-            item.setNodeId(nodeRun.getNodeId());
-            item.setNodeCode(nodeRun.getNodeCode());
-            item.setNodeType(nodeRun.getNodeType());
-            item.setAttempt(nodeRun.getAttempt());
-            item.setStatus(nodeRun.getStatus());
-            item.setErrorSummary(nodeRun.getErrorSummary());
-            item.setSelectedEdges(nodeRun.getSelectedEdges());
-            item.setStartTime(nodeRun.getStartTime());
-            item.setEndTime(nodeRun.getEndTime());
-            resp.getNodeRuns().add(item);
+            WorkflowNodeRunResp item = WorkflowNodeRunResp.of(nodeRun);
+            if (item != null) {
+                resp.getNodeRuns().add(item);
+            }
         }
         for (WorkflowHumanTask task : detail.getOpenHumanTasks()) {
             WorkflowHumanTaskResp item = new WorkflowHumanTaskResp();

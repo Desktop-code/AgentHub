@@ -6,6 +6,7 @@ import com.agenthub.common.error.ErrorCode;
 import com.agenthub.common.web.OperatorContext;
 import com.agenthub.common.text.UserFacingText;
 import com.agenthub.workflow.api.dto.WorkflowRunDetailResp;
+import com.agenthub.workflow.api.dto.WorkflowRunSummaryResp;
 import com.agenthub.workflow.api.dto.WorkflowRunTrialReq;
 import com.agenthub.workflow.domain.enums.WorkflowEdgeType;
 import com.agenthub.workflow.domain.enums.WorkflowNodeRunStatus;
@@ -13,6 +14,7 @@ import com.agenthub.workflow.domain.enums.WorkflowRunStatus;
 import com.agenthub.workflow.domain.enums.WorkflowTriggerType;
 import com.agenthub.workflow.domain.model.WorkflowEdge;
 import com.agenthub.workflow.domain.model.WorkflowDef;
+import com.agenthub.workflow.domain.model.WorkflowDraft;
 import com.agenthub.workflow.domain.model.WorkflowGraph;
 import com.agenthub.workflow.domain.model.WorkflowHumanTask;
 import com.agenthub.workflow.domain.model.WorkflowNode;
@@ -22,10 +24,12 @@ import com.agenthub.workflow.domain.model.WorkflowRun;
 import com.agenthub.workflow.domain.model.WorkflowRunDetail;
 import com.agenthub.workflow.domain.model.WorkflowWorkbenchOutcome;
 import com.agenthub.workflow.domain.repository.WorkflowDefRepository;
+import com.agenthub.workflow.domain.repository.WorkflowDraftRepository;
 import com.agenthub.workflow.domain.repository.WorkflowHumanTaskRepository;
 import com.agenthub.workflow.domain.repository.WorkflowNodeRunRepository;
 import com.agenthub.workflow.domain.repository.WorkflowReleaseRepository;
 import com.agenthub.workflow.domain.repository.WorkflowRunRepository;
+import com.agenthub.workflow.domain.service.WorkflowFingerprint;
 import com.agenthub.workflow.domain.service.WorkflowRunListener;
 import com.agenthub.workflow.domain.service.WorkflowStateMachine;
 import com.agenthub.workflow.domain.service.WorkflowTenantProvider;
@@ -50,8 +54,9 @@ import java.util.Optional;
 
 /**
  * 工作流试跑 / 运行详情 / 取消 用例。所属域：workflow 的 application。
- * <p>边界：只跑**已发布 release** 快照（禁可变草稿）；AGENT / TOOL 出站交给引擎端口；
- * 控制台入口只产 TRIAL；应用入站（{@code trigger_type=APP}）走
+ * <p>边界：调试可以按当前已保存草稿跑（{@code useDraft}），不写 release、不改默认指针；
+ * 显式 releaseId 或默认指针的入口仍只跑已发布快照。工作台「运行」只认默认发布指针。
+ * AGENT / TOOL 出站交给引擎端口；控制台入口只产 TRIAL；应用入站（{@code trigger_type=APP}）走
  * {@code WorkflowAppInvokeAppService}，同样绑 release 且共用本引擎。
  * <p>为什么 createTrial 不是事务：引擎内会调模型 / 工具（秒级到分钟级），
  * 长事务会占连接并放大锁；改为「建 run + 预建节点行」短事务后同步调度，
@@ -81,6 +86,12 @@ public class WorkflowRunAppService {
     private final ObjectMapper json;
     /** 埋点端口：取消这类不经过引擎的终态迁移，需要自己收口根 trace */
     private final WorkflowTraceWriter traces;
+    /** 试跑落库后的后台调度；工作台路径不经过它 */
+    private final WorkflowTrialDispatcher trialDispatcher;
+    /** 当前草稿；只在 useDraft 调试时读取，不在这里发布 */
+    private final WorkflowDraftRepository drafts;
+    /** 与发布同一套图检查；草稿调试在建 run 前拦住未通过的图 */
+    private final WorkflowPublishCheck publishCheck;
 
     /**
      * @param runs             run 仓储
@@ -98,6 +109,9 @@ public class WorkflowRunAppService {
      * @param properties       硬顶配置（max-node-runs-per-run）
      * @param json             全站 ObjectMapper
      * @param traces           工作流埋点（取消时收口根 trace）
+     * @param trialDispatcher 试跑后台调度（只给 {@link #trial} 用）
+     * @param drafts          草稿仓储（按当前草稿调试时读取）
+     * @param publishCheck    发布口径检查（草稿调试开跑前）
      */
     public WorkflowRunAppService(WorkflowRunRepository runs,
                                  WorkflowNodeRunRepository nodeRuns,
@@ -113,7 +127,10 @@ public class WorkflowRunAppService {
                                  OperLogWriter operLogWriter,
                                  WorkflowProperties properties,
                                  ObjectMapper json,
-                                 WorkflowTraceWriter traces) {
+                                 WorkflowTraceWriter traces,
+                                 WorkflowTrialDispatcher trialDispatcher,
+                                 WorkflowDraftRepository drafts,
+                                 WorkflowPublishCheck publishCheck) {
         this.runs = runs;
         this.nodeRuns = nodeRuns;
         this.humanTasks = humanTasks;
@@ -129,17 +146,26 @@ public class WorkflowRunAppService {
         this.properties = properties;
         this.json = json;
         this.traces = traces;
+        this.trialDispatcher = trialDispatcher;
+        this.drafts = drafts;
+        this.publishCheck = publishCheck;
     }
 
     /**
-     * 发起一次试跑。绑定 release 快照后同步推进到终态或人工卡点。
+     * 发起一次试跑。run 与节点行落库后立即返回，引擎在后台继续。
      *
-     * @param req releaseId 或 workflowId+默认发布指针，以及输入样例
-     * @return 最新 run 详情
-     * @throws BizException 未发布 / 版本不存在 / 输入不是对象 / 图不可执行
+     * <p>返回时状态通常还是 CREATED（调度线程尚未把条件更新写成 RUNNING）。
+     * 调用方用 runId 轮询详情。触发类型仍是 TRIAL，不写工作台会话。
+     *
+     * @param req useDraft，或 releaseId / workflowId+默认发布指针，以及输入样例
+     * @return 刚落库的 run 详情（含进行中的节点行）
+     * @throws BizException 未发布 / 版本不存在 / 草稿校验未通过 / 输入不是对象 / 图不可执行
      */
     public WorkflowRunDetail trial(WorkflowRunTrialReq req) {
         long tenantId = tenantProvider.currentTenantId();
+        if (req != null && Boolean.TRUE.equals(req.getUseDraft())) {
+            return trialCurrentDraft(req, tenantId);
+        }
         WorkflowRelease release = resolveRelease(req, tenantId);
         WorkflowDef def = requireDef(release.getWorkflowId(), tenantId);
 
@@ -183,7 +209,70 @@ public class WorkflowRunAppService {
 
         operLogWriter.write("workflow", "run_trial", "workflow_run", String.valueOf(runId),
                 "试跑工作流 code=" + def.getCode() + " release=" + release.getId());
-        engine.execute(run, operatorId);
+        // 先返回 runId：引擎改到后台，租户和操作人在提交时捕获
+        trialDispatcher.submit(runId, operatorId, tenantId);
+        return detail(runId, tenantId);
+    }
+
+    /**
+     * 按当前已保存草稿发起一次调试。
+     * <p>调用方应先把画布写入草稿。这里只拷贝那份图到 run，不插入 workflow_release，
+     * 也不改 default_release_id。release_id / release_version 留空，记录里标「未发布」。
+     * 图未通过发布口径检查时直接拒绝，不留下半截 run。
+     *
+     * @param req      必须带 workflowId；input 须是 JSON 对象
+     * @param tenantId 当前租户
+     * @return 刚落库的 run 详情
+     * @throws BizException 定义不存在、草稿缺失、校验未通过或图不可执行
+     */
+    private WorkflowRunDetail trialCurrentDraft(WorkflowRunTrialReq req, long tenantId) {
+        if (req.getWorkflowId() == null) {
+            throw new BizException(ErrorCode.BAD_REQUEST, "按当前草稿调试需要 workflowId");
+        }
+        WorkflowDef def = requireDef(req.getWorkflowId(), tenantId);
+        WorkflowDraft draft = drafts.findByWorkflowId(def.getId())
+                .orElseThrow(() -> new BizException(ErrorCode.NOT_FOUND, "工作流草稿不存在"));
+        JsonNode input = req.getInput();
+        if (input == null || input.isNull()) {
+            input = json.createObjectNode();
+        }
+        if (!input.isObject()) {
+            throw new BizException(ErrorCode.BAD_REQUEST, "试跑输入必须是 JSON 对象，例如 {\"query\":\"...\"}");
+        }
+        WorkflowGraph graph = codec.parse(draft.getGraphJson());
+        // 与发布同一套检查：没通过就不建 run，避免用坏图开跑
+        publishCheck.requirePublishable(graph);
+        WorkflowRuntimeGraph runtime = WorkflowRuntimeGraph.of(graph);
+        int nodeRunsCap = properties.effectiveMaxNodeRunsPerRun();
+        if (runtime.nodes().size() > nodeRunsCap) {
+            throw new BizException(ErrorCode.BAD_REQUEST,
+                    "该图有 " + runtime.nodes().size() + " 个节点，超过单次运行上限 " + nodeRunsCap
+                            + "（agenthub.workflow.max-node-runs-per-run）；请拆分工作流");
+        }
+        Long operatorId = operatorContext.requireUserId();
+        WorkflowRun run = new WorkflowRun();
+        run.setTenantId(tenantId);
+        run.setWorkflowId(def.getId());
+        // 显式空：没有发布行可指，不能造一条假 release 去填外键
+        run.setReleaseId(null);
+        run.setReleaseVersion(null);
+        // 另外记下「这次调试当时的默认发布版本」：记录列表要显示 vN + 未发布，
+        // 又不能用此刻的 default_release_id 反推（之后发布新版会让旧记录跟着变）
+        run.setDraftBaseReleaseVersion(defaultReleaseVersion(def));
+        run.setFingerprint(WorkflowFingerprint.of(graph));
+        run.setStatus(WorkflowRunStatus.CREATED.name());
+        run.setTriggerType(WorkflowTriggerType.TRIAL.name());
+        run.setTriggeredBy(operatorId);
+        run.setInputJson(input.toString());
+        run.setGraphJson(draft.getGraphJson());
+        run.setStartTime(LocalDateTime.now());
+        run.setCreatedBy(operatorId);
+        Long runId = runs.insert(run);
+        run.setId(runId);
+        nodeRuns.insertBatch(pendingRows(runId, runtime));
+        operLogWriter.write("workflow", "run_trial", "workflow_run", String.valueOf(runId),
+                "调试工作流 code=" + def.getCode() + " 按当前草稿");
+        trialDispatcher.submit(runId, operatorId, tenantId);
         return detail(runId, tenantId);
     }
 
@@ -364,6 +453,24 @@ public class WorkflowRunAppService {
     }
 
     /**
+     * 定义的默认发布版本号；从未发布或发布行缺失时为空。
+     *
+     * <p>只用于在建 run 时给草稿调试留一份「当时默认版本」快照；
+     * 调用方不得拿它反推当前默认版本。
+     *
+     * @param def 已校验归属的定义
+     * @return 默认发布版本号；没有默认发布指针或记录缺失时 null
+     */
+    private Integer defaultReleaseVersion(WorkflowDef def) {
+        if (def == null || def.getDefaultReleaseId() == null) {
+            return null;
+        }
+        return releases.findById(def.getDefaultReleaseId())
+                .map(WorkflowRelease::getVersion)
+                .orElse(null);
+    }
+
+    /**
      * 读取 run 详情；若停在人工卡点且有到期待办，按策略自动结算后再返回。
      *
      * @param id run 主键
@@ -440,6 +547,13 @@ public class WorkflowRunAppService {
             log.warn("取消后收口 trace 失败 runId={} type={}", id, ex.getClass().getSimpleName());
         }
         operLogWriter.write("workflow", "run_cancel", "workflow_run", String.valueOf(id), "取消运行");
+        /*
+         * 取消不经过引擎线程，直播快照的 finally 收口可能还要等当前出站调用返回。
+         * 这里立刻按库里的终态结算一次，让调试框的卡片与按钮马上收口；没有直播时安全空跑。
+         */
+        if (trialDispatcher != null) {
+            trialDispatcher.settle(id);
+        }
         return detail(id, tenantId);
     }
 
@@ -652,10 +766,57 @@ public class WorkflowRunAppService {
      * @param reply      用户在输入框发出的下一句（已去空白，非空）
      * @param userId     平台用户（会话归属人）
      * @param listener   节点状态观察者；可空
-     * @return 续跑后的 run 详情
+     * @return 续跑后的 run 详情（同步路径：返回时已跑到下一个等待点或终态）
      * @throws BizException run 不在等待回复 / 没有等待节点 / 状态已被并发改写
      */
     public WorkflowRunDetail resumeWithReply(Long runId, String reply, long userId, WorkflowRunListener listener) {
+        WorkflowRun run = prepareReply(runId, reply, userId);
+        // 4) 同一套引擎继续调度；终态 / 再次等待都由引擎自己落库
+        executeSafely(run, userId, listener);
+        WorkflowRun fresh = runs.findById(runId).orElse(run);
+        return assembler.detail(fresh);
+    }
+
+    /**
+     * 调试续跑：回复与状态迁移落库后立即返回，引擎交给后台线程继续。
+     *
+     * <p>与 {@link #resumeWithReply} 的差别只在最后一步：这里不占请求线程跑引擎，
+     * 而是交给 {@link WorkflowTrialDispatcher}，与「开始调试」同一条后台通道。
+     * 仍在同一条 run 上继续，不新建实例、不写工作台会话。
+     *
+     * <p>为什么必须异步：引擎一次续跑可能跑几十秒。若在请求线程里同步等，
+     * 调试框的续跑请求会一直不返回，前端只能把「停止」按钮按请求在飞锁住，
+     * 用户就没法在运行中点停止。
+     *
+     * @param runId  等待中的 run 主键
+     * @param reply  用户下一句 / 选项文案（非空）
+     * @param userId 平台用户（试跑归属人）
+     * @return 续跑请求返回时的详情；状态已回到 RUNNING，引擎在后台继续
+     * @throws BizException run 不在等待回复 / 没有等待节点 / 状态已被并发改写
+     */
+    public WorkflowRunDetail resumeWithReplyInBackground(Long runId, String reply, long userId) {
+        WorkflowRun run = prepareReply(runId, reply, userId);
+        /*
+         * 租户与操作人在这里（请求线程）捕获后交给后台：后台线程不再读当前请求身份，
+         * 避免池线程上取到别人的租户。回复正文一并带过去，直播投影要把它挂在询问节点上。
+         */
+        trialDispatcher.submit(runId, userId, run.getTenantId(), reply.trim());
+        return detail(runId, run.getTenantId());
+    }
+
+    /**
+     * 续跑的第一段（仍在请求线程）：回复落库、等待节点收成 SUCCESS、run 回到 RUNNING。
+     *
+     * <p>只做短事务内的状态迁移，不跑引擎；同步续跑与后台续跑共用这一段，
+     * 保证两条路径写库口径完全一致。
+     *
+     * @param runId  等待中的 run 主键
+     * @param reply  用户下一句 / 选项文案（非空）
+     * @param userId 平台用户
+     * @return 已回到 RUNNING 的运行实例（内存对象，状态已同步）
+     * @throws BizException run 不在等待回复 / 没有等待节点 / 状态已被并发改写
+     */
+    private WorkflowRun prepareReply(Long runId, String reply, long userId) {
         if (reply == null || reply.isBlank()) {
             throw new BizException(ErrorCode.BAD_REQUEST, "回复内容不能为空");
         }
@@ -711,11 +872,7 @@ public class WorkflowRunAppService {
         run.setErrorSummary(null);
         operLogWriter.write("workflow", "run_reply", "workflow_run", String.valueOf(runId),
                 "对话回复续跑 run=" + runId);
-
-        // 4) 同一套引擎继续调度；终态 / 再次等待都由引擎自己落库
-        executeSafely(run, userId, listener);
-        WorkflowRun fresh = runs.findById(runId).orElse(run);
-        return assembler.detail(fresh);
+        return run;
     }
 
     /**
@@ -843,7 +1000,7 @@ public class WorkflowRunAppService {
         WorkflowDef def = requireDef(req.getWorkflowId(), tenantId);
         if (def.getDefaultReleaseId() == null) {
             throw new BizException(ErrorCode.BAD_REQUEST,
-                    "该工作流尚未发布，试跑只能绑定已发布版本；请先点「发布」");
+                    "该工作流尚未发布，调试只能使用已发布版本；请先发布");
         }
         return releases.findById(def.getDefaultReleaseId())
                 .orElseThrow(() -> new BizException(ErrorCode.NOT_FOUND, "默认发布版本记录缺失，请重新发布"));
@@ -890,5 +1047,38 @@ public class WorkflowRunAppService {
      */
     public WorkflowRunDetailResp toResp(WorkflowRunDetail detail) {
         return WorkflowRunDetailResp.of(detail, json);
+    }
+
+    /**
+     * 历史记录一行：run 头 + 这次调试开始时的用户问题。
+     *
+     * <p>问题直接取落库的 {@code input_json.query}，续跑回复只追加 {@code reply}、不改 query，
+     * 所以回看旧记录时拿到的仍是第一句。没有 input 或 query 的旧记录给空串，不补猜。
+     *
+     * @param run run 头
+     * @return 摘要 DTO
+     */
+    public WorkflowRunSummaryResp toSummary(WorkflowRun run) {
+        return WorkflowRunSummaryResp.of(run, queryOf(run.getInputJson()));
+    }
+
+    /**
+     * 从 run 的输入快照里取 {@code query}。
+     *
+     * @param inputJson 落库的输入 JSON；可空
+     * @return 用户问题；解析失败或没有 query 时为空串
+     */
+    private String queryOf(String inputJson) {
+        if (inputJson == null || inputJson.isBlank()) {
+            return "";
+        }
+        try {
+            JsonNode root = json.readTree(inputJson);
+            JsonNode query = root == null ? null : root.get("query");
+            return query != null && query.isTextual() ? query.asText() : "";
+        } catch (Exception ex) {
+            // 脏输入按「没有记下问题」处理：列表留空，不影响其它列
+            return "";
+        }
     }
 }

@@ -432,6 +432,150 @@ public final class WorkflowCardProjector implements WorkflowRunListener, Workflo
     }
 
     /**
+     * 只凭已落库的 run 与节点行现算一张卡片，不依赖会话事件，也不推 SSE。
+     *
+     * <p>调试抽屉轮询详情时没有 {@code agent_run_event} 骨架。这里复用直播同一套
+     * {@link #runStarted} / {@link #toView} / {@link #nodeText} / 循环分组，
+     * 把库里的状态、问句、选项、节点正文和回复填进 {@link WorkflowRunView}。
+     * 思考与工具的逐字过程只存在于直播回调，库里没有就不编造。
+     *
+     * <p>不改 {@link #nodeChanged} 与回放补全：那些路径仍按原来的内存增量走。
+     *
+     * @param run        运行实例；可空时按失败卡片
+     * @param graphNodes 图内节点（含 START / END，展示时会剔掉）
+     * @param outgoing   节点 id → 出边；可空则循环框不分组
+     * @param rows       该 run 的节点行（含历史轮次与 output_json / reply_text）
+     * @param tail       收口说明（成功终答 / 失败原因 / 等待提示）；可空
+     * @return 与直播收口同一形状的视图
+     */
+    public WorkflowRunView persisted(WorkflowRun run, List<WorkflowNode> graphNodes,
+                                     Map<String, List<WorkflowEdge>> outgoing,
+                                     List<WorkflowNodeRun> rows, String tail) {
+        runId = run == null ? null : run.getId();
+        // 先按图铺节点：产出、循环框、状态都走直播的 toView，不另写一套映射
+        runStarted(graphNodes, rows, outgoing);
+        Map<String, WorkflowNode> byId = new LinkedHashMap<>();
+        for (WorkflowNode node : graphNodes == null ? List.<WorkflowNode>of() : graphNodes) {
+            if (node != null && node.getId() != null) {
+                byId.put(node.getId(), node);
+            }
+        }
+        choice = null;
+        for (WorkflowNodeRun row : orderedByStart(rows)) {
+            WorkflowNode node = row == null ? null : byId.get(row.getNodeId());
+            if (node != null) {
+                appendNodeText(node, row);
+            }
+            WorkflowRunView.Choice one = choiceOf(row);
+            if (one != null) {
+                choice = one;
+            }
+        }
+        // 回复的持久真源是 reply_text；直播续跑靠构造参数，这里不能改那条路径
+        applyStoredReplies(rows);
+        String status = run == null || run.getStatus() == null ? "FAILED" : run.getStatus();
+        List<WorkflowRunView.Node> viewNodes = nodeViews();
+        if ("CANCELLED".equalsIgnoreCase(status)) {
+            viewNodes = viewNodes.stream().map(WorkflowCardProjector::settleCancelledNode).toList();
+            choice = null;
+        }
+        boolean live = "CREATED".equalsIgnoreCase(status) || "RUNNING".equalsIgnoreCase(status);
+        WorkflowRunView.Choice shown = "WAITING_REPLY".equalsIgnoreCase(status) ? choice : null;
+        WorkflowRunView.Limits limits = live ? pollLimits(run, rows, byId) : finishLimits(run);
+        return new WorkflowRunView(nameOf(), codeOf(), status, settleAnswer(run, tail),
+                viewNodes, shown, limits, runId);
+    }
+
+    /**
+     * 按开始时刻排序，未开始的排在后面。只影响正文拼接顺序，不改库。
+     *
+     * @param rows 节点行；可空
+     * @return 新列表
+     */
+    private static List<WorkflowNodeRun> orderedByStart(List<WorkflowNodeRun> rows) {
+        List<WorkflowNodeRun> ordered = new ArrayList<>(rows == null ? List.of() : rows);
+        ordered.sort((left, right) -> {
+            if (left == null || left.getStartTime() == null) {
+                return right == null || right.getStartTime() == null ? 0 : 1;
+            }
+            if (right == null || right.getStartTime() == null) {
+                return -1;
+            }
+            return left.getStartTime().compareTo(right.getStartTime());
+        });
+        return ordered;
+    }
+
+    /**
+     * 把 {@code reply_text} 挂回对应节点。直播续跑不走这里。
+     *
+     * @param rows 节点行；可空
+     */
+    private void applyStoredReplies(List<WorkflowNodeRun> rows) {
+        if (rows == null) {
+            return;
+        }
+        for (WorkflowNodeRun row : rows) {
+            if (row == null || row.getNodeId() == null) {
+                continue;
+            }
+            String replyText = row.getReplyText() == null ? "" : row.getReplyText().trim();
+            if (replyText.isEmpty()) {
+                continue;
+            }
+            String key = row.getNodeId() + "#" + attemptOf(row);
+            WorkflowRunView.Node current = nodes.get(key);
+            if (current == null || replyText.equals(current.reply())) {
+                continue;
+            }
+            nodes.put(key, new WorkflowRunView.Node(current.code(), current.name(), current.type(),
+                    current.status(), current.note(), current.output(), current.steps(), current.files(),
+                    replyText, current.attempt(), current.group(), current.loopRound(), current.loopTotal(),
+                    current.loopDecision()));
+        }
+    }
+
+    /**
+     * 轮询时的时限：只使用 run 上已经落库的截止，不发明当前节点的剩余。
+     *
+     * @param run   运行实例；可空
+     * @param rows  节点行
+     * @param byId  节点 id → 定义
+     * @return 时限；没有整段截止时为空
+     */
+    private WorkflowRunView.Limits pollLimits(WorkflowRun run, List<WorkflowNodeRun> rows,
+                                              Map<String, WorkflowNode> byId) {
+        if (run == null || run.getRunDeadline() == null) {
+            return null;
+        }
+        WorkflowNodeRun active = null;
+        if (rows != null) {
+            for (WorkflowNodeRun row : rows) {
+                if (row != null && "RUNNING".equalsIgnoreCase(row.getStatus())) {
+                    active = row;
+                }
+            }
+        }
+        String nodeCode = null;
+        String nodeName = null;
+        if (active != null) {
+            nodeCode = active.getNodeCode();
+            WorkflowNode node = byId.get(active.getNodeId());
+            nodeName = node == null || node.getName() == null || node.getName().isBlank()
+                    ? nodeCode : node.getName();
+        }
+        Long nodeLimit = run.getNodeLimitMs();
+        return new WorkflowRunView.Limits(
+                run.getRunLimitMs() == null ? 0L : run.getRunLimitMs(),
+                epochOf(run.getRunDeadline()),
+                epochOf(run.getWaitingSince()),
+                nodeCode,
+                nodeName,
+                nodeLimit != null && nodeLimit > 0 ? nodeLimit : null,
+                null);
+    }
+
+    /**
      * 收口：用 run 的最终状态与终答文本生成最后一份卡片。
      *
      * @param run    数据库读回的 run

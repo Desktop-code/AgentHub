@@ -2,11 +2,15 @@ package com.agenthub.runtime.application;
 
 import com.agenthub.runtime.api.dto.EventResp;
 import com.agenthub.runtime.domain.model.EventType;
+import com.agenthub.runtime.domain.model.WorkflowRunView;
 import com.agenthub.runtime.domain.service.WorkflowCardProjector;
 import com.agenthub.runtime.domain.service.WorkflowRunJson;
 import com.agenthub.workflow.application.WorkflowRunAppService;
 import com.agenthub.workflow.domain.enums.WorkflowNodeRunStatus;
+import com.agenthub.workflow.domain.model.WorkflowEdge;
+import com.agenthub.workflow.domain.model.WorkflowNode;
 import com.agenthub.workflow.domain.model.WorkflowNodeRun;
+import com.agenthub.workflow.domain.model.WorkflowRun;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ArrayNode;
@@ -151,6 +155,28 @@ public class WorkflowCardRebuilder {
             }
         }
         return rows;
+    }
+
+    /**
+     * 没有会话事件时，只凭 run 与节点行现算一张与直播同形的卡片。
+     *
+     * <p>调试详情走这条。{@link #enrich} 仍只补「带骨架的会话事件」，行为不变。
+     *
+     * @param name       工作流展示名；可空
+     * @param code       工作流编码；可空
+     * @param run        运行实例
+     * @param graphNodes 图内节点
+     * @param outgoing   出边索引；可空
+     * @param rows       节点行
+     * @param tail       收口说明；可空
+     * @return 卡片视图
+     */
+    public WorkflowRunView viewOf(String name, String code, WorkflowRun run,
+                                  List<WorkflowNode> graphNodes,
+                                  Map<String, List<WorkflowEdge>> outgoing,
+                                  List<WorkflowNodeRun> rows, String tail) {
+        WorkflowCardProjector projector = new WorkflowCardProjector(name, code, null, json);
+        return projector.persisted(run, graphNodes, outgoing, rows, tail);
     }
 
     /**

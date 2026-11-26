@@ -57,7 +57,12 @@ class DefRepositoryAdapter implements WorkflowDefRepository {
 
     @Override
     public void markPublished(Long id, long tenantId, Long releaseId, Long operatorId) {
-        throw new UnsupportedOperationException("单测不覆盖发布指针");
+        store.findDef(id).ifPresent(def -> {
+            if (def.getTenantId() != null && def.getTenantId() == tenantId) {
+                def.setStatus("HAS_RELEASE");
+                def.setDefaultReleaseId(releaseId);
+            }
+        });
     }
 
     @Override

@@ -98,6 +98,32 @@ class WorkflowOutcomeTextsTest {
         assertThat(WorkflowOutcomeTexts.extractAnswer(null, JSON)).isNull();
     }
 
+    @Test
+    @DisplayName("续跑种子：只删平台等待提示段，用户看过的问句保留")
+    void withoutWaitingHintKeepsQuestion() {
+        String waiting = "你想用哪种语言实现？\n\n"
+                + "工作流「小游戏研发」正在等待你的回复；请直接在本会话下方输入框接着说，"
+                + "这句话会送回同一条运行继续往下走。";
+
+        assertThat(WorkflowOutcomeTexts.withoutWaitingHint(waiting))
+                .isEqualTo("你想用哪种语言实现？");
+    }
+
+    @Test
+    @DisplayName("续跑种子：人工等待提示也不跟到下一段")
+    void withoutWaitingHintDropsHumanHint() {
+        String waiting = "已生成报销草稿。\n\n"
+                + "工作流「报销审批」已运行到人工处理节点，正在等待人工处理。"
+                + "请前往「编排 → 人工待办」处理；处理完成后结果会自动追加到本会话。";
+
+        assertThat(WorkflowOutcomeTexts.withoutWaitingHint(waiting))
+                .isEqualTo("已生成报销草稿。");
+        // 只有提示时种子为空，续跑从新内容开始
+        assertThat(WorkflowOutcomeTexts.withoutWaitingHint(
+                "工作流「报销审批」正在等待你的回复；请直接在本会话下方输入框接着说。")).isEmpty();
+        assertThat(WorkflowOutcomeTexts.withoutWaitingHint(null)).isEmpty();
+    }
+
     private static WorkflowDef def() {
         WorkflowDef def = new WorkflowDef();
         def.setId(88L);

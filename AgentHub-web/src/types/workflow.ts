@@ -212,6 +212,22 @@ export interface WorkflowReleaseRow {
   publishTime?: string
 }
 
+/**
+ * 切换默认发布后的结果。
+ * 带上该版的图，画布据此恢复；列表接口仍然不下发图。
+ */
+export interface WorkflowReleaseActivateResult {
+  id: number
+  workflowId: number
+  version: number
+  fingerprint: string
+  publishNote?: string | null
+  publishedBy: number
+  publishTime?: string
+  graph: WorkflowGraph
+  draftUpdateTime?: string
+}
+
 /** 节点面板条目 */
 export interface WorkflowPaletteItem {
   type: WorkflowNodeType
@@ -297,8 +313,10 @@ export interface WorkflowHumanTaskItem {
 export interface WorkflowRunDetail {
   id: number
   workflowId: number
-  releaseId: number
-  releaseVersion: number
+  /** 按当前草稿调试时为空 */
+  releaseId?: number | null
+  /** 按当前草稿调试时为空 */
+  releaseVersion?: number | null
   status: WorkflowRunStatus | string
   triggerType: string
   /** 应用触发时的 sys_app.id；试跑为空 */
@@ -312,6 +330,29 @@ export interface WorkflowRunDetail {
   nodeRuns: WorkflowNodeRunRow[]
   /** 只含 OPEN 待办 */
   humanTasks: WorkflowHumanTaskRow[]
+  /**
+   * 与首页工作流卡片同一份载荷。
+   * 调试过程只渲染它，不用 nodeRuns 再拼一张时间轴。
+   */
+  card?: unknown
+}
+
+/**
+ * 调试试跑的直播卡片快照（GET /api/workflow/runs/{id}/live-card）。
+ *
+ * <p>卡片字段与详情接口同一份口径，前端直接交给同一张 `WorkflowRunCard`；
+ * {@code live=false} 表示这次没有按 run 的直播（未接入 / 已过期 / 不属于当前租户），
+ * 调用方应退回详情接口现算的已落库卡片。
+ */
+export interface WorkflowRunLiveCard {
+  live: boolean
+  /** run 当前状态；直播第一帧还没出来时可空 */
+  status?: WorkflowRunStatus | string | null
+  /** 与详情同一份卡片载荷；第一帧之前可空 */
+  card?: unknown
+  /** 节点运行态，供画布高亮与跟随 */
+  nodeRuns?: WorkflowNodeRunRow[]
+  errorSummary?: string | null
 }
 
 /** run 摘要（历史列表） */
@@ -321,8 +362,17 @@ export interface WorkflowRunSummary {
   triggerType: string
   /** 应用触发时的 sys_app.id；试跑为空 */
   appId?: number | null
-  releaseId: number
-  releaseVersion: number
+  /** 按当前草稿调试时为空 */
+  releaseId?: number | null
+  /** 按当前草稿调试时为空 */
+  releaseVersion?: number | null
+  /**
+   * 草稿调试开始那一刻的默认发布版本号快照。
+   * <p>为空表示当时从未发布过；之后又发布了新版也不改写这条记录。
+   */
+  draftBaseReleaseVersion?: number | null
+  /** 这次调试开始时的用户问题（input.query）；旧记录或没有 query 时为空串 */
+  query?: string | null
   errorSummary?: string | null
   startTime?: string | null
   endTime?: string | null

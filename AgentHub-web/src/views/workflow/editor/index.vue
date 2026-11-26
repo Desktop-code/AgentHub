@@ -1,20 +1,28 @@
 <template>
   <!-- is-focus：专注模式，画布吃掉页签条与主区留白后的全部高度 -->
   <div class="wf-page" :class="{ 'is-focus': focusMode }">
-    <!-- 顶栏：保存 / 校验 / 发布；试跑入口已移到画布底部悬浮工具栏 -->
+    <!-- 顶栏：标题侧返回列表（图标按钮）；右上为版本切换 / 校验 / 发布；编辑类按钮叠在画布顶部居中，调试入口在画布底部悬浮工具栏 -->
     <PageHeader :title="def?.name || '工作流编辑'" :description="headerDesc">
+      <!-- 返回列表：只留箭头图标，名字与落点靠悬停说明；与标题垂直居中 -->
+      <template #title-leading>
+        <el-tooltip content="返回列表" placement="bottom">
+          <el-button circle class="wf-back" aria-label="返回列表" @click="goList">
+            <el-icon><ArrowLeft /></el-icon>
+          </el-button>
+        </el-tooltip>
+      </template>
       <template #extra>
-        <el-button @click="goList">返回列表</el-button>
-        <el-button v-if="canEdit" link type="primary" @click="reloadDraft">重新加载</el-button>
-        <el-button v-if="canEdit" :loading="saving" :disabled="!dirty" @click="onSaveDraft()">
-          保存草稿
-        </el-button>
+        <!-- 发布组：版本切换靠左，校验紧挨发布之前，发布固定在最右；运行历史已收进调试框「记录」页 -->
+        <WorkflowReleaseSwitcher
+          v-if="canPublish"
+          :workflow-id="workflowId"
+          :current-release-id="def?.defaultReleaseId"
+          :canvas-dirty="dirty"
+          @activated="onReleaseActivated"
+        />
+
+        <span class="wf-header-divider" aria-hidden="true" />
         <el-button :loading="validating" @click="onValidate">校验</el-button>
-        <!-- 专注模式：收起左右面板 + 隐藏全局侧导航；ESC 或再次点击退出 -->
-        <el-button :type="focusMode ? 'primary' : 'default'" @click="toggleFocusMode">
-          <el-icon class="btn-icon"><FullScreen /></el-icon>
-          {{ focusMode ? '退出专注' : '专注模式' }}
-        </el-button>
         <el-button
           v-if="canPublish"
           type="primary"
@@ -29,102 +37,8 @@
 
     <el-alert v-if="loadError" :title="loadError" type="error" show-icon :closable="false" class="block-alert" />
 
-    <!-- 校验结果：点击条目定位节点；图改过之后提示重新校验 -->
-    <div v-if="issues.length || issuesStale" class="wf-issues">
-      <span class="wf-issues__title">
-        <el-tag size="small" type="danger" effect="plain">{{ errorCount }} 错误</el-tag>
-        <el-tag size="small" type="warning" effect="plain">{{ warnCount }} 提示</el-tag>
-        <span v-if="issuesStale" class="wf-issues__stale">图已修改，建议重新校验</span>
-      </span>
-      <div class="wf-issues__list">
-        <button
-          v-for="issue in issues"
-          :key="issue.key"
-          type="button"
-          class="wf-issue"
-          :class="issue.level === 'error' ? 'is-error' : 'is-warn'"
-          :title="issue.nodeCode ? `定位到 ${issue.nodeCode}` : '无关联节点'"
-          @click="focusIssue(issue)"
-        >
-          <span class="wf-issue__code">{{ issue.code }}</span>
-          <span class="wf-issue__msg">{{ issue.message }}</span>
-        </button>
-      </div>
-    </div>
-
     <div v-loading="loading" class="wf-body">
-      <!-- 专注模式：贴边 hover 临时唤出面板，移开自动收起；非专注模式不启用，避免误触 -->
-      <template v-if="focusMode">
-        <div
-          v-if="paletteHidden"
-          class="wf-edge-hot is-left"
-          @mouseenter="peekPanel('left')"
-          @mouseleave="scheduleUnpeek('left')"
-        />
-        <div
-          v-if="propsHidden"
-          class="wf-edge-hot is-right"
-          @mouseenter="peekPanel('right')"
-          @mouseleave="scheduleUnpeek('right')"
-        />
-      </template>
-
-      <!-- 左：节点面板可折叠；折叠后画布吃满剩余宽度 -->
-      <aside
-        class="wf-palette wf-panel"
-        :class="{ 'is-collapsed': paletteHidden }"
-        @mouseenter="peekPanel('left')"
-        @mouseleave="scheduleUnpeek('left')"
-      >
-        <!-- 内层定宽：宽度动画期间文字不重排 -->
-        <div class="wf-panel__inner">
-          <div class="wf-panel__head">
-            <h3 class="wf-panel__title">节点</h3>
-            <el-tooltip content="收起节点库" placement="right">
-              <button
-                type="button"
-                class="wf-panel__fold"
-                aria-label="收起节点库"
-                @click="collapsePanel('left')"
-              >
-                <el-icon><ArrowLeft /></el-icon>
-              </button>
-            </el-tooltip>
-          </div>
-          <div class="wf-palette__list">
-            <div
-              v-for="item in PALETTE"
-              :key="item.type"
-              class="wf-palette__item"
-              :class="{ 'is-p1': !item.p0 }"
-              :draggable="item.p0"
-              :title="item.p0 ? `拖到画布添加「${item.label}」` : 'P1：本刀不实现'"
-              @dragstart="onDragStart(item, $event)"
-              @dragend="onPaletteDragEnd"
-            >
-              <span class="wf-palette__label">{{ item.label }}</span>
-              <span v-if="!item.p0" class="wf-palette__p1">P1</span>
-              <span class="wf-palette__hint">{{ item.hint }}</span>
-            </div>
-          </div>
-        </div>
-      </aside>
-
-      <!-- 折叠后左边缘的唤醒页签：hover 展开并浮出文字，避免用户找不到面板去哪了 -->
-      <Transition name="wf-wake">
-        <button
-          v-if="paletteHidden"
-          type="button"
-          class="wf-edge-wake is-left"
-          aria-label="展开节点库"
-          @click="expandPanel('left')"
-        >
-          <el-icon class="wf-edge-wake__icon"><ArrowRight /></el-icon>
-          <span class="wf-edge-wake__label">展开节点库</span>
-        </button>
-      </Transition>
-
-      <!-- 中：VueFlow 画布 -->
+      <!-- 中：VueFlow 画布铺满整块；左右面板改为叠在画布上的悬浮框，不再各占一列 -->
       <div ref="canvasHost" class="wf-canvas" @dragover.prevent @drop.prevent="onDrop">
         <el-alert
           v-if="canvasError"
@@ -134,6 +48,57 @@
           :closable="false"
           class="canvas-alert"
         />
+
+        <!--
+          画布顶部居中：编辑类悬浮按钮组（保存草稿 / 重新加载 / 专注）。
+          只留图标，名字靠悬停 tooltip；普通编辑与专注模式共用这一处摆放。
+          左右悬浮框各自贴边，这组在中间，三者不互相遮挡；底部缩放与调试仍单独在胶囊里。
+        -->
+        <div
+          class="wf-canvas-actions"
+          :class="{ 'is-alerted': !!canvasError }"
+          @pointerdown.stop
+          @keydown.space.prevent
+        >
+          <el-tooltip v-if="canEdit" content="保存草稿" placement="bottom">
+            <!-- 外套 span：按钮 disabled 时 tooltip 仍能触发，名字照样可见 -->
+            <span class="wf-canvas-actions__slot">
+              <el-button
+                circle
+                :loading="saving"
+                :disabled="!dirty"
+                aria-label="保存草稿"
+                @click="onSaveDraft()"
+              >
+                <el-icon v-if="!saving"><DocumentChecked /></el-icon>
+              </el-button>
+            </span>
+          </el-tooltip>
+          <el-tooltip v-if="canEdit" content="重新加载" placement="bottom">
+            <span class="wf-canvas-actions__slot">
+              <el-button circle aria-label="重新加载" @click="reloadDraft">
+                <el-icon><RefreshRight /></el-icon>
+              </el-button>
+            </span>
+          </el-tooltip>
+          <!-- 专注模式：进入用 FullScreen、退出用 ScaleToOriginal，两个图标一眼能分开；ESC 同样可退 -->
+          <el-tooltip :content="focusMode ? '退出专注' : '专注模式'" placement="bottom">
+            <span class="wf-canvas-actions__slot">
+              <el-button
+                circle
+                :class="{ 'is-focus-on': focusMode }"
+                :aria-label="focusMode ? '退出专注' : '专注模式'"
+                :aria-pressed="focusMode"
+                @click="toggleFocusMode"
+              >
+                <el-icon>
+                  <ScaleToOriginal v-if="focusMode" />
+                  <FullScreen v-else />
+                </el-icon>
+              </el-button>
+            </span>
+          </el-tooltip>
+        </div>
         <VueFlow
           :node-types="nodeTypes"
           :edge-types="edgeTypes"
@@ -160,7 +125,7 @@
           <Background :gap="16" color="#ebeef5" />
         </VueFlow>
 
-        <!-- 底部悬浮胶囊：缩放 / 自适应 / 试跑；空白处穿透，不挡画布拖拽 -->
+        <!-- 底部悬浮胶囊：缩放 / 自适应 / 调试；空白处穿透，不挡画布拖拽 -->
         <!-- keydown.space.prevent：避免焦点停在按钮上时按空格误触发按钮，把空格让给画布平移 -->
         <div class="wf-dock" @pointerdown.stop @keydown.space.prevent>
           <el-tooltip content="缩小" placement="top">
@@ -182,29 +147,106 @@
               aria-label="自适应画布"
               @click="fitCanvas"
             >
-              <el-icon><FullScreen /></el-icon>
+              <!-- 用准心（居中适配）而不是满屏框：满屏框留给上方专注模式，避免两个图标混淆 -->
+              <el-icon><Aim /></el-icon>
             </button>
           </el-tooltip>
+          <!-- 调试跟随的状态入口：只在有当前目标时出现；暂停后点一下立刻对准并恢复 -->
+          <template v-if="followHasTarget">
+            <span class="wf-dock__divider" aria-hidden="true" />
+            <el-tooltip
+              :content="followPaused ? '继续跟随当前执行节点' : '跟随中：点此重新对准当前节点'"
+              placement="top"
+            >
+              <button
+                type="button"
+                class="wf-dock__follow"
+                :class="{ 'is-paused': followPaused }"
+                :aria-label="followPaused ? '继续跟随当前执行节点' : '重新对准当前执行节点'"
+                @click="resumeFollow()"
+              >
+                {{ followPaused ? '已暂停' : '跟随' }}
+              </button>
+            </el-tooltip>
+          </template>
           <button
             v-if="canRunTrial"
             type="button"
             class="wf-dock__run"
-            :disabled="!workflowId"
-            @click="trialVisible = true"
+            :disabled="!workflowId || validating"
+            @click="onDebug"
           >
-            试跑
+            调试
           </button>
         </div>
       </div>
 
-      <!-- 右：属性面板可折叠；标题随选中态切换，折叠按钮固定在标题行右侧 -->
-      <aside
-        class="wf-props wf-panel"
-        :class="{ 'is-collapsed': propsHidden }"
-        @mouseenter="peekPanel('right')"
-        @mouseleave="scheduleUnpeek('right')"
-      >
-        <div class="wf-panel__inner">
+      <!--
+        右：调试悬浮框（比属性框 / 校验框更宽的独立框）。叠在画布上，不占一列；
+        上、下留出空隙，露出画布顶部按钮组与底部缩放 / 调试入口；只点框右上角 X 才关。
+      -->
+      <WorkflowTrialDrawer
+        v-model="trialVisible"
+        :workflow-id="workflowId"
+        :workflow-name="def?.name || ''"
+        :can-act="canHumanAct"
+        :page-active="pageActive"
+        :prepare-start="prepareDebugStart"
+        @run-change="onRunChange"
+      />
+
+      <!-- 左：节点库悬浮框。只点框上的关闭才收起，点画布 / 拖动画布都不收；调试框开着时整体让位 -->
+      <Transition name="wf-wake">
+        <aside v-if="paletteOpen && !trialVisible" class="wf-palette wf-panel" aria-label="节点库">
+          <div class="wf-panel__head">
+            <h3 class="wf-panel__title">节点</h3>
+            <el-tooltip content="关闭节点库" placement="right">
+              <button
+                type="button"
+                class="wf-panel__close"
+                aria-label="关闭节点库"
+                @click="paletteOpen = false"
+              >
+                <el-icon><Close /></el-icon>
+              </button>
+            </el-tooltip>
+          </div>
+          <div class="wf-panel__inner">
+            <div class="wf-palette__list">
+              <div
+                v-for="item in PALETTE"
+                :key="item.type"
+                class="wf-palette__item"
+                :class="{ 'is-p1': !item.p0 }"
+                :draggable="item.p0"
+                :title="item.p0 ? `拖到画布添加「${item.label}」` : 'P1：本刀不实现'"
+                @dragstart="onDragStart(item, $event)"
+              >
+                <span class="wf-palette__label">{{ item.label }}</span>
+                <span v-if="!item.p0" class="wf-palette__p1">P1</span>
+                <span class="wf-palette__hint">{{ item.hint }}</span>
+              </div>
+            </div>
+          </div>
+        </aside>
+      </Transition>
+      <!-- 左侧关闭后的常驻小入口：点开重新显示节点库，保证还能往画布加节点；调试期间一并收起，避免再拉开节点栏 -->
+      <Transition name="wf-wake">
+        <button
+          v-if="!paletteOpen && !trialVisible"
+          type="button"
+          class="wf-float-entry"
+          aria-label="打开节点库"
+          @click="paletteOpen = true"
+        >
+          <el-icon class="wf-float-entry__icon"><ArrowRight /></el-icon>
+          <span class="wf-float-entry__label">节点</span>
+        </button>
+      </Transition>
+
+      <!-- 右：属性悬浮框。选中节点 / 连线时浮出；只点关闭才收起，再次选中会重新打开。校验结果框打开时让位给校验框；调试框开着时整体让位 -->
+      <Transition name="wf-wake">
+        <aside v-if="propsOpen && !validationOpen && !trialVisible" class="wf-props wf-panel" aria-label="属性面板">
           <div class="wf-panel__head">
             <h3 class="wf-panel__title">
               <template v-if="selectedNode">
@@ -217,17 +259,18 @@
               </template>
               <template v-else>属性</template>
             </h3>
-            <el-tooltip content="收起属性面板" placement="left">
+            <el-tooltip content="关闭属性面板" placement="left">
               <button
                 type="button"
-                class="wf-panel__fold"
-                aria-label="收起属性面板"
-                @click="collapsePanel('right')"
+                class="wf-panel__close"
+                aria-label="关闭属性面板"
+                @click="propsOpen = false"
               >
-                <el-icon><ArrowRight /></el-icon>
+                <el-icon><Close /></el-icon>
               </button>
             </el-tooltip>
           </div>
+          <div class="wf-panel__inner">
         <!-- 工作流级运行时限：不随选中态隐藏，不选中任何元素也能改；单位分钟，不露内部键名 -->
         <el-form label-position="top" class="wf-form wf-limits" @submit.prevent>
           <div class="wf-limits__head">
@@ -541,22 +584,51 @@
           <p>在画布上选中节点或连线以编辑属性。</p>
           <p class="wf-props__empty-hint">从左侧拖入节点，从节点两侧锚点拉线连线。</p>
         </div>
-        <!-- /.wf-panel__inner：折叠动画靠它保持定宽，内容不重排 -->
-        </div>
-      </aside>
+          </div>
+        </aside>
+      </Transition>
 
-      <!-- 折叠后右边缘的唤醒页签：与左侧对称 -->
+      <!--
+        右：校验结果悬浮框。与属性框同样贴右、同宽同上下留白，但独立存在、不共用同一个框。
+        只由框上的关闭（X）收起；点画布 / 拖动画布都不关。打开时属性框暂时让位，关掉后按原开合状态恢复。
+      -->
       <Transition name="wf-wake">
-        <button
-          v-if="propsHidden"
-          type="button"
-          class="wf-edge-wake is-right"
-          aria-label="展开属性面板"
-          @click="expandPanel('right')"
-        >
-          <span class="wf-edge-wake__label">展开属性面板</span>
-          <el-icon class="wf-edge-wake__icon"><ArrowLeft /></el-icon>
-        </button>
+        <aside v-if="validationOpen" class="wf-validate wf-panel" aria-label="校验结果">
+          <div class="wf-panel__head">
+            <!-- 不设标题，顶部只放错误 / 提示计数 -->
+            <div class="wf-validate__counts">
+              <el-tag size="small" type="danger" effect="plain">{{ errorCount }} 错误</el-tag>
+              <el-tag size="small" type="warning" effect="plain">{{ warnCount }} 提示</el-tag>
+            </div>
+            <el-tooltip content="关闭校验结果" placement="left">
+              <button
+                type="button"
+                class="wf-panel__close"
+                aria-label="关闭校验结果"
+                @click="validationOpen = false"
+              >
+                <el-icon><Close /></el-icon>
+              </button>
+            </el-tooltip>
+          </div>
+          <div class="wf-panel__inner wf-validate__inner">
+            <!-- 图改过之后的结果会过期；提示只放在框内，不另外弹窗打扰编辑 -->
+            <p v-if="issuesStale" class="wf-validate__stale">图已修改，建议重新校验</p>
+            <p v-if="!issues.length" class="wf-validate__empty">校验通过，没有错误或提示。</p>
+            <button
+              v-for="issue in issues"
+              :key="issue.key"
+              type="button"
+              class="wf-issue"
+              :class="issue.level === 'error' ? 'is-error' : 'is-warn'"
+              :title="issue.nodeCode ? `定位到 ${issue.nodeCode}` : '无关联节点'"
+              @click="focusIssue(issue)"
+            >
+              <span class="wf-issue__code">{{ issue.code }}</span>
+              <span class="wf-issue__msg">{{ issue.message }}</span>
+            </button>
+          </div>
+        </aside>
       </Transition>
     </div>
 
@@ -572,16 +644,6 @@
         <span v-if="dirty" class="wf-footer__dirty">· 草稿有未保存修改</span>
       </span>
     </div>
-
-    <!-- 试跑抽屉：选已发布版本、输入样例、处理人工待办；节点状态回填画布 -->
-    <WorkflowTrialDrawer
-      v-model="trialVisible"
-      :workflow-id="workflowId"
-      :default-release-id="def?.defaultReleaseId ?? null"
-      :can-act="canHumanAct"
-      :page-active="pageActive"
-      @run-change="onRunChange"
-    />
   </div>
 </template>
 
@@ -591,7 +653,8 @@ defineOptions({ name: 'WorkflowEditor' })
 /**
  * 工作流画布编辑页。所属域：workflow。
  * <p>职责：VueFlow 建图（W1）、存草稿（updateTime 乐观锁）、图校验、发布不可变快照，
- * 以及挂「试跑」抽屉（W2：选发布版本 → 建 run → 回填节点状态高亮 / 处理人工待办）。
+ * 以及挂「调试」悬浮框（先静默校验当前画布，再按草稿调试）。版本切换入口在顶栏「发布」旁，
+ * 调试框「记录」页签只放调试记录与调用追踪外链。
  * <p>边界：引擎在后端；本页不发模型/工具出站，也不参与 run 状态计算。
  * <p>单一真源：画布状态在 VueFlow store；节点/边的修改都走 store API，
  * 保存时从 store 读，避免「画布显示的」和「保存出去的」不一致。
@@ -610,7 +673,7 @@ import {
 } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { ElMessage, ElMessageBox } from 'element-plus'
-import { ArrowLeft, ArrowRight, FullScreen, Minus, Plus } from '@element-plus/icons-vue'
+import { Aim, ArrowLeft, ArrowRight, Close, DocumentChecked, FullScreen, Minus, Plus, RefreshRight, ScaleToOriginal } from '@element-plus/icons-vue'
 import { MarkerType, VueFlow, useVueFlow } from '@vue-flow/core'
 import type {
   Connection,
@@ -637,6 +700,8 @@ import WorkflowToolBindPicker from './WorkflowToolBindPicker.vue'
 import WorkflowEdge from './WorkflowEdge.vue'
 import { WORKFLOW_EDGE_INTERACTION } from './workflowEdgeInteraction'
 import WorkflowTrialDrawer from './WorkflowTrialDrawer.vue'
+import WorkflowReleaseSwitcher from './WorkflowReleaseSwitcher.vue'
+import { useWorkflowRunFollow } from './useWorkflowRunFollow'
 import { pageAgents, getAgent } from '@/api/agent'
 import { listAllItems } from '@/api/tool'
 import {
@@ -644,7 +709,8 @@ import {
   getWorkflowDraft,
   publishWorkflow,
   saveWorkflowDraft,
-  validateWorkflow
+  validateWorkflow,
+  validateWorkflowGraph
 } from '@/api/workflow'
 import { useUserStore } from '@/stores/user'
 import { parseAssigneeRule } from '@/utils/workflowAssignee'
@@ -670,6 +736,7 @@ import type {
   WorkflowNodeConfig,
   WorkflowNodeType,
   WorkflowPaletteItem,
+  WorkflowReleaseActivateResult,
   WorkflowRunDetail,
   WorkflowValidateResp
 } from '@/types/workflow'
@@ -792,6 +859,7 @@ const {
   getViewport,
   fitView,
   setCenter,
+  setViewport,
   zoomIn,
   zoomOut,
   viewport
@@ -902,163 +970,71 @@ const toolLoadError = ref('')
 
 const canEdit = computed(() => user.hasPerm('workflow:def:edit'))
 const canPublish = computed(() => user.hasPerm('workflow:def:publish'))
-/** 试跑入口：只认已发布版本，按钮在无权限时隐藏 */
+/** 调试入口：点开后先静默校验，通过才浮出调试框；无权限时隐藏 */
 const canRunTrial = computed(() => user.hasPerm('workflow:run:trial'))
-/** 人工待办处理权限；无此码时抽屉内只读 */
+/** 人工待办处理权限；无此码时调试框内只读 */
 const canHumanAct = computed(() => user.hasPerm('workflow:human:act'))
 
 const trialVisible = ref(false)
 
 /**
  * 本页是否在前台。KeepAlive 缓存根切走 / 切回时翻转，
- * 透传给试跑抽屉，让它停 / 起轮询与秒表（抽屉是子组件，收不到 deactivated）。
+ * 透传给调试框，让它停 / 起轮询与秒表（调试框是子组件，收不到 deactivated）。
  */
 const pageActive = ref(true)
 
-/* ===== 模块一 / 二：布局折叠与悬浮工具栏（纯 UI 状态，不参与 graph_json） ===== */
-/** 左「节点库」是否折叠（用户意图，不含 hover 临时展开） */
-const paletteCollapsed = ref(false)
-/** 右「节点属性」是否折叠（用户意图，不含 hover 临时展开） */
-const propsCollapsed = ref(false)
-/** 专注模式：同时收起左右面板，并通知壳层隐藏全局侧导航 */
+/* ===== 悬浮面板与画布工具栏（纯 UI 状态，不参与 graph_json） ===== */
+/** 左「节点库」悬浮框是否打开；只由框上的关闭改成 false，左边缘入口再改回 true */
+const paletteOpen = ref(true)
+/**
+ * 右「属性」悬浮框是否打开。
+ * <p>选中节点 / 连线时置 true；只由框上的关闭改成 false。
+ * <p>点画布清空选中不关它，避免「点一下空白，面板就没了」。
+ */
+const propsOpen = ref(false)
+/**
+ * 右「校验结果」悬浮框是否打开。
+ * <p>与属性框独立：点顶栏「校验」或有错误 / 提示时浮出；只由框上的关闭改成 false。
+ * <p>打开期间属性框让位（不销毁 propsOpen 状态），关掉校验框后按原状态恢复。
+ */
+const validationOpen = ref(false)
+/** 专注模式：只通知壳层隐藏全局侧导航，左右面板仍是同一套悬浮框 */
 const focusMode = ref(false)
-/** 进入专注前的面板状态快照，退出时原样恢复 */
-const panelStateBeforeFocus = ref<{ palette: boolean; props: boolean } | null>(null)
 /** 当前缩放百分比，供悬浮工具栏展示 */
 const zoomPercent = computed(() => Math.round((viewport.value?.zoom ?? 1) * 100))
 
-/** 侧边面板标识 */
-type PanelSide = 'left' | 'right'
-/** 贴边 hover 临时展开的侧别；非空时该侧即使「已折叠」也显示 */
-const peekSide = ref<PanelSide | null>(null)
 /**
- * 选中节点 / 连线时临时唤出右侧属性面板。
- * <p>为什么独立于 peekSide：hover 唤出会随鼠标移开被 240ms 定时器收回，
- * 而「正在配参数」必须保持可见；这个标记只由选中态驱动，取消选中才清。
- * <p>只在专注模式用：普通模式下折叠面板被选中直接常驻展开（见 onNodeClick）。
- */
-const propsPeekForSelection = ref(false)
-/** 收起临时面板的延时句柄，供鼠标跨越缝隙时取消 */
-let unpeekTimer: number | undefined
-/** 左面板当前是否不可见：折叠意图 + hover 临时展开共同决定 */
-const paletteHidden = computed(() => paletteCollapsed.value && peekSide.value !== 'left')
-/** 右面板当前是否不可见：折叠意图 + hover 临时展开 + 选中节点临时唤出共同决定 */
-const propsHidden = computed(
-  () => propsCollapsed.value && peekSide.value !== 'right' && !propsPeekForSelection.value
-)
-/** 正在从节点库拖拽：拖拽期间不自动收起，否则拖到一半面板消失 */
-const paletteDragActive = ref(false)
-
-/** 取消待执行的收起动作 */
-function cancelUnpeek() {
-  if (unpeekTimer !== undefined) {
-    window.clearTimeout(unpeekTimer)
-    unpeekTimer = undefined
-  }
-}
-
-/**
- * 贴边 / 面板 hover：临时唤出该侧面板（仅专注模式启用，避免日常编辑误触）。
- *
- * @param side 侧别
- */
-function peekPanel(side: PanelSide) {
-  if (!focusMode.value) {
-    return
-  }
-  cancelUnpeek()
-  peekSide.value = side
-}
-
-/**
- * 延迟收起 hover 唤出的面板。
- * <p>留 240ms 缓冲，让鼠标从贴边热区跨进面板本体时不被判成「已移开」。
- *
- * @param side 侧别
- */
-function scheduleUnpeek(side: PanelSide) {
-  if (!focusMode.value || paletteDragActive.value) {
-    return
-  }
-  cancelUnpeek()
-  unpeekTimer = window.setTimeout(() => {
-    unpeekTimer = undefined
-    if (peekSide.value === side) {
-      peekSide.value = null
-    }
-  }, 240)
-}
-
-/**
- * 点击唤醒页签：把「用户意图」改成展开。
- * <p>不用直接改 peekSide：点了就是明确要常驻，动效交给面板自身的宽度过渡。
- *
- * @param side 侧别
- */
-function expandPanel(side: PanelSide) {
-  cancelUnpeek()
-  peekSide.value = null
-  if (side === 'left') {
-    paletteCollapsed.value = false
-  } else {
-    propsCollapsed.value = false
-    // 常驻展开后不再需要「选中临时唤出」，避免两个标记互相覆盖
-    propsPeekForSelection.value = false
-  }
-}
-
-/**
- * 收起某一侧面板（用户点折叠按钮）。
- * <p>右侧要同时清掉「选中临时唤出」：显式收起优先级最高，
- * 否则选中节点期间点折叠按钮看起来没反应。
- *
- * @param side 侧别
- */
-function collapsePanel(side: PanelSide) {
-  cancelUnpeek()
-  if (side === 'left') {
-    paletteCollapsed.value = true
-    return
-  }
-  propsCollapsed.value = true
-  propsPeekForSelection.value = false
-}
-
-/**
- * 复位左右面板为「默认全展开」。
- * <p>本页被 KeepAlive 缓存，折叠是纯 UI 状态、不该跨路由残留：
- * 首次挂载与每次页签切回都重置，保证「刚进入页面」就是完整初始视野。
+ * 复位悬浮面板为「刚进入页面」的默认视野：节点库打开，属性框 / 校验结果框等选中或校验再浮出。
+ * <p>本页被 KeepAlive 缓存，面板开合是纯 UI 状态、不该跨路由残留。
  */
 function resetPanelLayout() {
-  cancelUnpeek()
-  peekSide.value = null
-  propsPeekForSelection.value = false
-  paletteCollapsed.value = false
-  propsCollapsed.value = false
+  paletteOpen.value = true
+  propsOpen.value = false
+  validationOpen.value = false
 }
 
 /**
- * 选中节点 / 连线后确保属性面板可见。
- * <p>普通模式：折叠意图直接改为展开（用户接下来必然要配参数，常驻更稳）；
- * 专注模式：只临时唤出，取消选中即收回画布空间（专注模式的核心承诺是全画布）。
+ * 进入调试时收起编辑侧两个悬浮框。
+ * <p>收起只是这次调试期间的临时布局：调试框关掉后，左侧小入口与「选中即浮出属性框」
+ * 都按原规则恢复（模板与 revealPropsForSelection 都按 trialVisible 判断，不另存开关）。
+ */
+function enterDebugLayout() {
+  paletteOpen.value = false
+  propsOpen.value = false
+}
+
+/**
+ * 选中节点 / 连线后浮出属性框；取消选中不主动关（只点框上的关闭才关）。
+ *
+ * <p>调试框开着期间不浮出：右侧让给调试框，不能因为点了个节点就把属性框叠回来。
  *
  * @param hasSelection 当前是否选中了节点或连线
  */
 function revealPropsForSelection(hasSelection: boolean) {
-  if (!hasSelection) {
-    propsPeekForSelection.value = false
+  if (!hasSelection || trialVisible.value) {
     return
   }
-  if (focusMode.value) {
-    // 清掉 hover 状态，改由选中标记驱动，避免鼠标移开被定时器收回
-    cancelUnpeek()
-    peekSide.value = null
-    propsPeekForSelection.value = true
-    return
-  }
-  if (propsCollapsed.value) {
-    expandPanel('right')
-  }
+  propsOpen.value = true
 }
 
 /*
@@ -1083,7 +1059,7 @@ const issuesStale = computed(
 const headerDesc = computed(() => {
   const base = def.value ? `编码 ${def.value.code}` : ''
   const version = def.value?.defaultVersion ? ` · 当前发布 v${def.value.defaultVersion}` : ' · 尚未发布'
-  return `${base}${version} · 画布建图 / 草稿 / 校验 / 发布 / 试跑`
+  return `${base}${version} · 画布建图 / 草稿 / 校验 / 发布 / 调试`
 })
 
 const draftHint = computed(() => {
@@ -1091,8 +1067,8 @@ const draftHint = computed(() => {
     return ''
   }
   return def.value.status === 'HAS_RELEASE'
-    ? '当前草稿与已发布版本独立；试跑只跑已发布快照，发布后生成新的不可变快照。'
-    : '尚未发布：发布成功后才能试跑。'
+    ? '调试按当前画布跑，不会发布，也不会改线上默认。工作台「运行」用当前发布版本。'
+    : '尚未发布。调试仍按当前画布跑；工作台「运行」要等有默认发布版本后才能用。'
 })
 
 const selectedNode = computed<GraphNode<WorkflowFlowNodeData> | null>(() => {
@@ -1601,43 +1577,27 @@ function edgeTypeLabel(type: string): string {
 
 /**
  * 切换专注模式。
- * <p>进入：先记下左右面板当前状态，再统一收起并通知壳层隐藏全局导航；
- * 退出：按快照恢复面板，避免用户进专注前专门展开的面板被永久收掉。
+ * <p>专注只改变壳层（隐藏全局侧导航、画布吃满高度），左右面板仍是悬浮框，
+ * 进入前后保持用户当前的开合状态，不强制收起。
  */
 function toggleFocusMode() {
   if (focusMode.value) {
     exitFocusMode()
     return
   }
-  panelStateBeforeFocus.value = { palette: paletteCollapsed.value, props: propsCollapsed.value }
-  paletteCollapsed.value = true
-  propsCollapsed.value = true
-  // 进专注先给全画布；属性面板由「再次选中节点」按需临时唤出，避免一进来就被面板吃掉宽度
-  propsPeekForSelection.value = false
   focusMode.value = true
   setWorkflowFocus(true)
 }
 
-/** 退出专注模式：恢复进入前的面板状态，并解除壳层隐藏 */
+/** 退出专注模式：解除壳层隐藏；悬浮面板状态原样保留 */
 function exitFocusMode() {
   focusMode.value = false
   setWorkflowFocus(false)
-  // hover 临时展开不属于持久状态，一并清掉，避免退出后残留半开面板
-  cancelUnpeek()
-  peekSide.value = null
-  // 选中临时唤出同样不是持久状态：退出专注后按快照恢复折叠意图
-  propsPeekForSelection.value = false
-  const before = panelStateBeforeFocus.value
-  if (before) {
-    paletteCollapsed.value = before.palette
-    propsCollapsed.value = before.props
-    panelStateBeforeFocus.value = null
-  }
 }
 
 /**
  * 全局 ESC：专注模式下退出。
- * <p>弹窗 / 抽屉打开时不抢占 ESC，避免一次按键同时关弹窗和退专注。
+ * <p>弹窗 / 浮层打开时不抢占 ESC，避免一次按键同时关弹窗和退专注。
  */
 function onFocusKeydown(event: KeyboardEvent) {
   if (event.key !== 'Escape' || !focusMode.value) {
@@ -1649,23 +1609,71 @@ function onFocusKeydown(event: KeyboardEvent) {
   exitFocusMode()
 }
 
-/** 悬浮工具栏放大；以画布中心为锚点 */
+/** 悬浮工具栏放大；以画布中心为锚点。用户主动改视野，同时暂停调试跟随 */
 function zoomInCanvas() {
+  pauseFollow()
   void zoomIn()
 }
 
-/** 悬浮工具栏缩小；以画布中心为锚点 */
+/** 悬浮工具栏缩小；以画布中心为锚点。用户主动改视野，同时暂停调试跟随 */
 function zoomOutCanvas() {
+  pauseFollow()
   void zoomOut()
 }
 
-/** 悬浮工具栏自适应：与首屏载入使用同一套 padding / maxZoom */
+/** 悬浮工具栏自适应：与首屏载入使用同一套 padding / maxZoom。同样视为用户改过视野 */
 function fitCanvas() {
+  pauseFollow()
   void fitView({ padding: 0.2, maxZoom: 1.1, duration: 250 }).catch(() => false)
 }
 
 /** 画布容器。高度落到真实布局后再适配，避免按 0 高把节点钉在顶部 */
 const canvasHost = ref<HTMLElement | null>(null)
+
+/**
+ * 右侧调试框的实际遮挡矩形。所属域：workflow 的前端画布层。
+ *
+ * <p>不写死 680px 也不写死左右留白：调试框宽度、贴边距离都由它自己的样式决定，
+ * 这里只取真实 DOM 矩形，宽度变化后跟随自动跟着变。
+ *
+ * @return 遮挡矩形（相对窗口）；框没打开时为空数组
+ */
+function debugPanelRects() {
+  const panel = document.querySelector('.wf-debug-panel')
+  if (!panel) {
+    return []
+  }
+  const rect = panel.getBoundingClientRect()
+  return [{ left: rect.left, top: rect.top, right: rect.right, bottom: rect.bottom }]
+}
+
+/**
+ * 调试跟随：接到运行详情后，把当前执行节点对到左侧可见区中心。
+ *
+ * <p>只平移、不改缩放，写的是 VueFlow 视口而不是节点坐标；视口不参与草稿签名，不会置脏。
+ */
+const {
+  paused: followPaused,
+  hasTarget: followHasTarget,
+  following: followFollowing,
+  onDetail: onFollowDetail,
+  pause: pauseFollow,
+  resume: resumeFollow,
+  reposition: repositionFollow,
+  stop: stopFollow
+} = useWorkflowRunFollow({
+  isOpen: () => trialVisible.value,
+  getCanvasHost: () => canvasHost.value,
+  getObstructionRects: debugPanelRects,
+  // 与高亮同一份画布节点：按业务 code 找，不依赖 VueFlow 内部 id
+  findNodeByCode: (code) =>
+    vf.nodes.value.find(
+      (node) => String((node.data as WorkflowFlowNodeData | undefined)?.code ?? '') === code
+    ),
+  getViewport: () => getViewport(),
+  setViewport: (transform, followOptions) => setViewport(transform, followOptions)
+})
+
 /** 正在程序化适配视口，这次 move-end 不算用户拖拽 */
 let centering = false
 /** 已经在等高度并适配，避免 nodes-initialized 和载入各打一次叠在一起 */
@@ -1674,18 +1682,25 @@ let placeQueued = false
 let userMovedCanvas = false
 
 /**
- * 用户拖动画布或改了缩放。自动居中只服务默认视野。
+ * 用户拖动画布或改了缩放。自动居中只服务默认视野；
+ * 调试跟随也在此暂停，本次调试内不再自动移动，等用户点「继续跟随」。
  */
 function onCanvasMoveEnd() {
   if (!centering) {
     userMovedCanvas = true
+    pauseFollow()
   }
 }
 
 /**
  * 节点量完尺寸后补一次居中。载入时若先适配过，这里用真实节点盒再放一次。
+ * <p>调试跟随中让位：按当前目标重新对准，不能被载入期的 fitView 抢走缩放。
  */
 function onNodesInitialized() {
+  if (followFollowing.value) {
+    repositionFollow()
+    return
+  }
   if (userMovedCanvas) {
     return
   }
@@ -1720,8 +1735,16 @@ async function placeNodesInView() {
   }
 }
 
-/** 专注模式改变画布高度。用户还没拖过时，按新高度把节点重新放到中部 */
+/**
+ * 专注模式改变画布高度。
+ * <p>跟随进行中：按当前目标重新对准（保持用户缩放），不走 fitView；
+ * 未跟随时保持原来的默认视野行为，用户还没拖过才重新放到中部。
+ */
 watch(focusMode, () => {
+  if (followFollowing.value) {
+    repositionFollow()
+    return
+  }
   if (userMovedCanvas) {
     return
   }
@@ -1748,22 +1771,9 @@ async function loadAll() {
     const [defResp, draftResp] = await Promise.all([getWorkflowDef(id), getWorkflowDraft(id)])
     def.value = defResp.data.data
     const graph = draftResp.data.data.graph || { nodes: [], edges: [] }
-    vf.setNodes((graph.nodes || []).map(toFlowNode))
-    vf.setEdges((graph.edges || []).map(toFlowEdge))
-    // 运行时限：空表示跟平台走；平台上限由后端折算成分钟下发，页面不出现毫秒与键名
-    runMinutesText.value = graph.limits?.runMinutes ? String(graph.limits.runMinutes) : ''
-    nodeMinutesText.value = graph.limits?.nodeMinutes ? String(graph.limits.nodeMinutes) : ''
     platformMaxMinutes.value = draftResp.data.data.platformMaxMinutes || 60
     platformMaxLoopIterations.value = draftResp.data.data.platformMaxLoopIterations || 20
-    // Agent / 工具选项可能已先加载完成：铺完节点立刻补一次名称，避免首屏闪「Agent #30」
-    syncAgentLabels()
-    syncToolLabels()
-    draftUpdateTime.value = draftResp.data.data.updateTime || ''
-    selected.value = null
-    issues.value = []
-    lastResult.value = null
-    validatedSignature.value = ''
-    baseline.value = graphSignature(buildGraph())
+    paintGraph(graph, draftResp.data.data.updateTime || '')
     await nextTick()
     // 不回放旧 viewport：按当前画布高度把节点放到可视区域中部
     await placeNodesInView()
@@ -1791,7 +1801,21 @@ function onRunChange(detail: WorkflowRunDetail | null) {
     const next = statusByCode.get(String(data.code ?? ''))
     node.data = { ...data, runStatus: next }
   })
+  // 高亮与跟随吃同一份 nodeRuns；跟随只平移视口，不改节点坐标
+  onFollowDetail(detail)
 }
+
+/**
+ * 调试框关掉后，把这次 / 这条记录画在节点上的运行态从画布抹掉，回到普通编辑的样子。
+ * <p>不另存一份运行态：再次打开调试框、再点记录时由调试框按 run 详情重新回填。
+ */
+watch(trialVisible, (open) => {
+  if (!open) {
+    onRunChange(null)
+    // 关调试只停跟随、清键与暂停态；视口停在用户最后的位置，不再跳回打开前
+    stopFollow()
+  }
+})
 
 /** 只刷新定义元数据（发布后状态/默认版本） */
 async function loadDef() {
@@ -1863,7 +1887,7 @@ async function onSaveDraft(silent = false): Promise<boolean> {
     // 拦截器已弹出后端中文文案；409 表示他人先改过，明确引导重新加载
     const status = (err as { response?: { status?: number } })?.response?.status
     if (status === 409) {
-      canvasError.value = '草稿已被他人修改（409）：请先保留你的改动，再点顶栏「重新加载」拿最新草稿'
+      canvasError.value = '草稿已被他人修改（409）：请先保留你的改动，再点画布顶部「重新加载」拿最新草稿'
     }
     return false
   } finally {
@@ -1871,38 +1895,195 @@ async function onSaveDraft(silent = false): Promise<boolean> {
   }
 }
 
-/** 校验：以库里的草稿为准，因此先保存（有编辑权限且脏时） */
-async function onValidate() {
+/**
+ * 把一份图铺到画布，并把它当成新的已保存基线。
+ * 载入草稿和切换历史版本都走这里，避免两套铺图。
+ *
+ * @param graph 要显示的图
+ * @param updateTime 草稿更新时间；切换后用来做下次保存的乐观锁
+ */
+function paintGraph(graph: WorkflowGraph, updateTime: string) {
+  vf.setNodes((graph.nodes || []).map(toFlowNode))
+  vf.setEdges((graph.edges || []).map(toFlowEdge))
+  // 运行时限：空表示跟平台走；平台上限由后端折算成分钟下发，页面不出现毫秒与键名
+  runMinutesText.value = graph.limits?.runMinutes ? String(graph.limits.runMinutes) : ''
+  nodeMinutesText.value = graph.limits?.nodeMinutes ? String(graph.limits.nodeMinutes) : ''
+  // Agent / 工具选项可能已先加载完成：铺完节点立刻补一次名称，避免首屏闪「Agent #30」
+  syncAgentLabels()
+  syncToolLabels()
+  draftUpdateTime.value = updateTime
+  selected.value = null
+  issues.value = []
+  lastResult.value = null
+  validatedSignature.value = ''
+  // 换了一份图（载入草稿 / 切换版本 / 重新加载）后旧校验结果不再对应，收起结果框
+  validationOpen.value = false
+  baseline.value = graphSignature(buildGraph())
+}
+
+/**
+ * 点调试：先静默跑一遍与手动「校验」相同的校验。
+ * <p>不通过就拦住，只打开右侧校验结果框（完整列表），不打开调试框；
+ * 通过才收起编辑侧两个悬浮框并浮出调试框。
+ */
+async function onDebug() {
+  const passed = await validateBeforeAction()
+  if (!passed) {
+    // 不通过：调试框保持关闭，结果框已由预检打开，界面停在看问题
+    return
+  }
+  // 预检通过：收起上次留下的校验框，避免它盖住即将浮出的调试框
+  validationOpen.value = false
+  enterDebugLayout()
+  trialVisible.value = true
+}
+
+/**
+ * 调试 / 发布前的静默校验：与手动点「校验」走同一路径（必要时先落草稿，再校验草稿）。
+ * <p>不通过时一定打开右侧校验结果框，让用户看到完整问题列表；通过时不额外打扰。
+ *
+ * @return 校验通过时为 true
+ */
+async function validateBeforeAction(): Promise<boolean> {
+  const result = await runDraftValidation()
+  if (!result) {
+    return false
+  }
+  applyValidation(result, { openPanel: !result.passed })
+  if (!result.passed) {
+    // 兜底：不通过时结果框必须真的浮出来，不能只在后台更新计数或靠一闪而过的提示
+    validationOpen.value = true
+  }
+  return result.passed
+}
+
+/**
+ * 按库里的草稿跑一次校验。画布有未保存修改且可编辑时，先静默落草稿。
+ * <p>手动校验与调试 / 发布前的静默校验都走这里，保证判定口径完全一致。
+ *
+ * @return 后端校验结果；没保存成功或请求失败时为 null
+ */
+async function runDraftValidation(): Promise<WorkflowValidateResp | null> {
   const id = workflowId.value
   if (!id) {
-    return
+    return null
   }
   if (canEdit.value && dirty.value) {
     const saved = await onSaveDraft(true)
     if (!saved) {
-      return
+      return null
     }
   }
   validating.value = true
   try {
     const { data } = await validateWorkflow(id)
-    applyValidation(data.data)
-    if (data.data.passed) {
-      ElMessage.success(`校验通过，${data.data.warns.length} 条提示`)
-    } else {
-      ElMessage.error(`校验未通过：${data.data.errors.length} 个错误`)
-    }
+    return data.data
   } catch {
-    // 拦截器已提示
+    return null
   } finally {
     validating.value = false
   }
 }
 
-/** 发布：先存草稿 → 生成不可变版本 */
+/**
+ * 校验画布此刻的图，不先保存。
+ *
+ * <p>默认「通过就不浮出结果框」：调试开跑前的预检是静默的，只有不通过才把完整问题列表浮出来。
+ * 只有手点「校验」那种需要用户立刻看结果的场景才传 {@code openPanel: true}。
+ *
+ * @param options.openPanel true 强制浮出结果框；不传按校验结果决定（不通过才浮）
+ * @return 没有 error 时为 true
+ */
+async function validateCurrentCanvas(options: { openPanel?: boolean } = {}): Promise<boolean> {
+  const id = workflowId.value
+  if (!id) {
+    return false
+  }
+  validating.value = true
+  try {
+    const { data } = await validateWorkflowGraph(id, buildGraph())
+    const result = data.data
+    // 有提示但没错误也算通过：这是预检，不能因为 warn 就把结果框盖到调试框上
+    applyValidation(result, { openPanel: options.openPanel ?? !result.passed })
+    if (!result.passed) {
+      ElMessage.error(`校验未通过：${result.errors.length} 个错误`)
+      return false
+    }
+    return true
+  } catch {
+    return false
+  } finally {
+    validating.value = false
+  }
+}
+
+/**
+ * 发送第一句之前：画布若又改过，再校一次；通过后只把图落到草稿。
+ *
+ * <p>这次是静默预检：通过时（含只有提示、没有错误）不浮出校验结果框，
+ * 免得它盖在已经打开的调试框上；只有不通过才把问题列表浮出来。
+ *
+ * @return 可以按这份草稿开跑时为 true
+ */
+async function prepareDebugStart(): Promise<boolean> {
+  const passed = await validateCurrentCanvas()
+  if (!passed) {
+    return false
+  }
+  // 静默预检通过：收起可能还开着的校验结果框，别让它盖住正在跑的调试框
+  validationOpen.value = false
+  if (!dirty.value) {
+    return true
+  }
+  if (!canEdit.value) {
+    ElMessage.warning('没有编辑权限，无法把当前画布存成草稿')
+    return false
+  }
+  return onSaveDraft(true)
+}
+
+/**
+ * 切换成功：画布恢复成该版本，默认发布指针也已在服务端指回去。
+ *
+ * @param result 切换接口返回的版本和图
+ */
+function onReleaseActivated(result: WorkflowReleaseActivateResult) {
+  userMovedCanvas = false
+  paintGraph(result.graph || { nodes: [], edges: [] }, result.draftUpdateTime || '')
+  if (def.value) {
+    def.value = {
+      ...def.value,
+      status: 'HAS_RELEASE',
+      defaultReleaseId: result.id,
+      defaultVersion: result.version
+    }
+  }
+  void placeNodesInView()
+}
+
+/** 手点「校验」：只出右侧校验结果框，不连带打开调试或进入发布 */
+async function onValidate() {
+  const result = await runDraftValidation()
+  if (!result) {
+    return
+  }
+  applyValidation(result, { openPanel: true })
+  if (result.passed) {
+    ElMessage.success(`校验通过，${result.warns.length} 条提示`)
+  } else {
+    ElMessage.error(`校验未通过：${result.errors.length} 个错误`)
+  }
+}
+
+/** 发布：先静默校验 → 存草稿 → 生成不可变版本 */
 async function onPublish() {
   const id = workflowId.value
   if (!id || !canPublish.value) {
+    return
+  }
+  // 与手动「校验」同一条路径：不通过就不进发布，把问题留在右侧校验框
+  const passed = await validateBeforeAction()
+  if (!passed) {
     return
   }
   let note = ''
@@ -1935,6 +2116,8 @@ async function onPublish() {
     issues.value = []
     lastResult.value = null
     validatedSignature.value = ''
+    // 发布成功后旧草稿的校验结果不再有展示意义，一并收起
+    validationOpen.value = false
     await loadDef()
   } catch {
     // 发布校验未通过时后端已返回中文原因
@@ -1943,8 +2126,14 @@ async function onPublish() {
   }
 }
 
-/** 校验结果 → 顶栏问题条 */
-function applyValidation(result: WorkflowValidateResp) {
+/**
+ * 校验结果 → 右侧校验结果悬浮框。
+ *
+ * @param result 后端校验返回
+ * @param options.openPanel true 强制浮出（手点「校验」）；false 不自动浮出（调试 / 发布前的静默预检）；
+ *   不传时沿用旧口径「有问题就浮出」，当前调试与校验入口都显式传值
+ */
+function applyValidation(result: WorkflowValidateResp, options: { openPanel?: boolean } = {}) {
   const list: IssueItem[] = []
   result.errors.forEach((issue, index) => {
     list.push({ ...issue, level: 'error', key: `e-${index}-${issue.code}` })
@@ -1955,9 +2144,14 @@ function applyValidation(result: WorkflowValidateResp) {
   issues.value = list
   lastResult.value = { errors: result.errors.length, warns: result.warns.length }
   validatedSignature.value = currentSignature.value
+  // 属性框已开时不清 propsOpen：只是临时让位，关掉校验框后原属性框自动回来
+  const shouldOpen = options.openPanel === undefined ? list.length > 0 : options.openPanel
+  if (shouldOpen) {
+    validationOpen.value = true
+  }
 }
 
-/** 点击问题条：选中并居中到节点 */
+/** 点击校验结果条目：选中并居中到节点；不关结果框，只有 X 才关 */
 function focusIssue(issue: IssueItem) {
   const nodeId = issue.nodeId
   if (!nodeId) {
@@ -1970,18 +2164,18 @@ function focusIssue(issue: IssueItem) {
   }
   const width = Number(node.dimensions?.width ?? 160)
   const height = Number(node.dimensions?.height ?? 60)
+  // 用户主动定位，等于自己改过视野：暂停调试跟随，避免和自动对准抢
+  pauseFollow()
   void setCenter(node.position.x + width / 2, node.position.y + height / 2, { zoom: 1, duration: 300 })
 }
 
-/** 拖出面板：把节点类型写进 DataTransfer */
+/** 拖出悬浮节点库：把节点类型写进 DataTransfer，落点仍由画布 drop 接管 */
 function onDragStart(item: WorkflowPaletteItem, event: Event) {
   const dragEvent = event as DragEvent
   if (!item.p0 || !canEdit.value) {
     dragEvent.preventDefault()
     return
   }
-  // 拖拽期间锁定面板：hover 收起逻辑要跳过，否则拖到一半节点库自己缩回去
-  paletteDragActive.value = true
   dragEvent.dataTransfer?.setData(DRAG_MIME, item.type)
   dragEvent.dataTransfer?.setData('text/plain', item.type)
   if (dragEvent.dataTransfer) {
@@ -1989,19 +2183,9 @@ function onDragStart(item: WorkflowPaletteItem, event: Event) {
   }
 }
 
-/**
- * 拖拽结束（含中途取消）：解锁 hover 收起。
- * <p>必须挂在 dragend 上：用户把节点拖到画布外松手时不会触发 drop，只会有 dragend。
- */
-function onPaletteDragEnd() {
-  paletteDragActive.value = false
-}
-
 /** 落到画布：屏幕坐标转流坐标后新增节点 */
 function onDrop(event: Event) {
   const dragEvent = event as DragEvent
-  // 不论后面是否成功新增，落点即代表本次拖拽结束，先解锁面板的 hover 收起
-  paletteDragActive.value = false
   if (!canEdit.value) {
     ElMessage.warning('没有编辑权限')
     return
@@ -2031,6 +2215,8 @@ function addNode(type: WorkflowNodeType, position: { x: number; y: number }) {
   }
   addNodes(node)
   selected.value = { kind: 'node', id: node.id }
+  // 新增即选中：属性框按「选中浮出」的规则打开，方便立刻配名称与参数
+  revealPropsForSelection(true)
 }
 
 /** 生成未占用的 n1、n2… */
@@ -2099,25 +2285,21 @@ function onConnect(connection: Connection) {
   })
 }
 
-/** 选中节点 */
+/** 选中节点：浮出属性悬浮框；已关闭时再次选中会重新打开 */
 function onNodeClick({ node }: NodeMouseEvent) {
   selected.value = { kind: 'node', id: node.id }
-  // 选中即要配参数：折叠状态下强制把右侧属性面板拉出来（专注模式为临时唤出）
   revealPropsForSelection(true)
 }
 
-/** 选中连线 */
+/** 选中连线：属性同样在右侧悬浮框编辑，联动规则与节点一致 */
 function onEdgeClick({ edge }: EdgeMouseEvent) {
   selected.value = { kind: 'edge', id: edge.id }
-  // 连线属性同样在右侧面板编辑，联动规则与节点一致
   revealPropsForSelection(true)
 }
 
-/** 点空白清空选中 */
+/** 点空白清空选中；不关属性框，只点框上的关闭才关 */
 function onPaneClick() {
   selected.value = null
-  // 专注模式下取消选中就收回临时唤出的属性面板，恢复全画布视野
-  revealPropsForSelection(false)
 }
 
 /**
@@ -2143,8 +2325,6 @@ watch(
         : vf.edges.value.some((edge) => edge.id === sel.id)
     if (!exists) {
       selected.value = null
-      // 关联元素被删掉后，选中临时唤出的面板不应继续挂着
-      revealPropsForSelection(false)
     }
   }
 )
@@ -2475,7 +2655,7 @@ watch(workflowId, (next, prev) => {
 
 onMounted(async () => {
   window.addEventListener('keydown', onFocusKeydown)
-  // 首次进入：左右面板默认全展开，给完整初始视野（不记忆上次的折叠意图）
+  // 首次进入：节点库打开，属性框等选中再浮出，不记忆上次的开合
   resetPanelLayout()
   await Promise.all([loadAll(), loadAgentOptions(), loadToolOptions()])
 })
@@ -2483,13 +2663,12 @@ onMounted(async () => {
 /** 组件真正销毁（关页签）时摘掉全局监听并复位壳层，防止侧栏永久隐藏 */
 onBeforeUnmount(() => {
   window.removeEventListener('keydown', onFocusKeydown)
-  cancelUnpeek()
   exitFocusMode()
 })
 
 /** KeepAlive 切走时退出专注：壳层布局是全局的，不能跟着缓存页一起走 */
 onDeactivated(() => {
-  // 试跑抽屉是子组件、收不到 deactivated：由本页把失活状态传下去，抽屉据此停轮询与秒表
+  // 调试框是子组件、收不到 deactivated：由本页把失活状态传下去，调试框据此停轮询与秒表
   pageActive.value = false
   if (focusMode.value) {
     exitFocusMode()
@@ -2508,7 +2687,7 @@ onActivated(() => {
     activatedOnce = true
     return
   }
-  // 页签切回等同「重新进入页面」：折叠是纯 UI 状态，复位为默认全展开
+  // 页签切回等同「重新进入页面」：悬浮面板开合是纯 UI 状态，复位为默认视野
   resetPanelLayout()
   if (workflowId.value && !dirty.value) {
     void loadAll()
@@ -2523,58 +2702,107 @@ onActivated(() => {
   /* 页签 40px + 主区上下留白（--ah-main-pad-y）。旧的 100vh-200px 会在底栏下空出一截 */
   height: calc(100vh - 40px - var(--ah-main-pad-y, 36px));
   min-height: 0;
+  /*
+   * 调试悬浮框按整个窗口定位的上下边距：
+   * 上 = 页签条 40px + 8px 空隙，正好贴在页签条下沿；
+   * 下 = 距窗口底 12px，只留一点空隙，让框基本吃满整屏高度。
+   * 子组件用 var() 读取，本页只负责给出与壳层一致的数值。
+   */
+  --wf-debug-top: 48px;
+  --wf-debug-bottom: 12px;
 }
 
 /* 专注模式：页签条已隐藏，只扣主区留白 */
 .wf-page.is-focus {
   height: calc(100vh - var(--ah-main-pad-y, 18px));
   min-height: 0;
+  /* 专注模式没有页签条，上边距同步收到 12px */
+  --wf-debug-top: 12px;
+  --wf-debug-bottom: 12px;
 }
 
 .block-alert {
   margin-bottom: 10px;
 }
 
-/* 校验问题条：横向滚动，不挤占画布高度 */
-.wf-issues {
-  flex: none;
-  margin-bottom: 10px;
-  padding: 8px 10px;
-  border: 1px solid var(--ah-border, #ebeef5);
-  border-radius: 8px;
-  background: var(--ah-surface);
+/* 顶栏分组竖线：版本切换与「校验 + 发布」分开，发布始终在最右 */
+.wf-header-divider {
+  width: 1px;
+  height: 18px;
+  margin: 0 2px;
+  background: var(--ah-border, #ebeef5);
 }
 
-.wf-issues__title {
+/* 返回列表：与画布顶部按钮组同一套弱对比圆形图标，hover 才提亮，不抢标题视觉 */
+.wf-back.el-button.is-circle {
+  width: 28px;
+  height: 28px;
+  border-color: transparent;
+  background: transparent;
+  color: var(--ah-text-regular);
+}
+
+.wf-back.el-button.is-circle:hover {
+  border-color: transparent;
+  background: var(--ah-neutral-tint);
+  color: var(--ah-primary);
+}
+
+/*
+ * 右侧校验结果悬浮框：复用 .wf-panel 的贴边尺寸（同属性框：右侧 12px、上下 12px、宽 320px），
+ * 但它是独立框，不与属性框共用组件或 DOM。只占画布浮层，不把画布挤窄。
+ * z-index 必须高于调试框（8）：调试框开着时校验失败，结果框要浮在它上面让人看到。
+ * 用双类名提高优先级：后面 .wf-panel { z-index: 7 } 同优先级会把它压回调试框下面。
+ */
+.wf-panel.wf-validate {
+  right: 12px;
+  z-index: 9;
+  width: 320px;
+}
+
+/* 顶部只放计数，不放标题 */
+.wf-validate__counts {
   display: flex;
+  flex: 1;
+  flex-wrap: wrap;
   align-items: center;
-  gap: 8px;
+  gap: 6px;
+  min-width: 0;
+}
+
+.wf-validate__inner {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+/* 结果已过期只在本框内提示，不另起横条或弹窗 */
+.wf-validate__stale {
+  margin: 0 0 2px;
+  color: var(--ah-warning);
   font-size: 12px;
 }
 
-.wf-issues__stale {
-  color: var(--ah-warning);
+/* 0 错误 0 提示时的空态：明确告诉用户校验已通过 */
+.wf-validate__empty {
+  margin: 0;
+  color: var(--ah-text-faint);
+  font-size: 12px;
 }
 
-.wf-issues__list {
-  display: flex;
-  gap: 8px;
-  margin-top: 6px;
-  padding-bottom: 2px;
-  overflow-x: auto;
-}
-
+/* 一条一行：按纵向列表排列，完整文案折行显示，不截断、不横向滚动 */
 .wf-issue {
-  display: inline-flex;
+  display: flex;
   flex: none;
-  align-items: center;
+  align-items: flex-start;
   gap: 6px;
-  max-width: 420px;
-  padding: 4px 8px;
+  width: 100%;
+  padding: 6px 8px;
   border: 1px solid var(--ah-border);
   border-radius: 8px;
   background: var(--ah-surface);
   font-size: 12px;
+  text-align: left;
   cursor: pointer;
 }
 
@@ -2591,6 +2819,7 @@ onActivated(() => {
 }
 
 .wf-issue__code {
+  flex: none;
   color: inherit;
   font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
   font-size: 12px;
@@ -2598,66 +2827,64 @@ onActivated(() => {
 }
 
 .wf-issue__msg {
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
+  flex: 1;
+  min-width: 0;
+  line-height: 1.5;
+  white-space: normal;
+  overflow-wrap: anywhere;
 }
 
 .wf-body {
   position: relative;
   display: flex;
   flex: 1;
-  gap: 12px;
   min-height: 0;
 }
 
-/* ===== 模块一：左右面板折叠（宽度过渡 + 内层定宽防重排） ===== */
+/*
+ * 左右悬浮框：叠在画布上，不再各占一列把画布挤窄。
+ * 上下留白一致（12px）：上方避开画布顶部居中的编辑按钮组，下方不再为底部胶囊额外留大空档。
+ */
 .wf-panel {
-  position: relative;
-  min-width: 0;
+  position: absolute;
+  top: 12px;
+  bottom: 12px;
+  z-index: 7;
+  display: flex;
+  flex-direction: column;
   overflow: hidden;
-  border: 1px solid var(--ah-border, #ebeef5);
-  border-radius: 8px;
+  border: 1px solid rgb(15 23 42 / 8%);
+  border-radius: 10px;
   background: var(--ah-surface);
-  transition: flex-basis 0.22s ease, width 0.22s ease, margin 0.22s ease, border-color 0.22s ease;
+  box-shadow: 0 10px 28px rgba(15, 23, 42, 0.12);
 }
 
 .wf-palette {
-  flex: 0 0 200px;
-  width: 200px;
+  left: 12px;
+  width: 210px;
 }
 
-/* 折叠后宽度归零；负 margin 抵消 wf-body 的 12px gap，画布真正贴边 */
-.wf-palette.is-collapsed {
-  flex-basis: 0;
-  width: 0;
-  margin-right: -12px;
-  border-color: transparent;
-}
-
-.wf-panel__inner {
-  box-sizing: border-box;
-  height: 100%;
-  padding: 12px;
-  overflow-y: auto;
-  transition: opacity 0.15s ease;
-}
-
-.wf-palette .wf-panel__inner {
-  width: 200px;
-}
-
-.wf-panel.is-collapsed .wf-panel__inner {
-  opacity: 0;
-  pointer-events: none;
+.wf-props {
+  right: 12px;
+  width: 320px;
 }
 
 .wf-panel__head {
   display: flex;
+  flex: none;
   align-items: center;
   justify-content: space-between;
   gap: 8px;
-  margin-bottom: 10px;
+  padding: 10px 12px;
+  border-bottom: 1px solid var(--ah-border, #ebeef5);
+}
+
+.wf-panel__inner {
+  box-sizing: border-box;
+  flex: 1;
+  min-height: 0;
+  padding: 10px 12px;
+  overflow-y: auto;
 }
 
 .wf-panel__title {
@@ -2671,8 +2898,8 @@ onActivated(() => {
   font-weight: 600;
 }
 
-/* 标题右侧的折叠按钮：低干扰，hover 才显形 */
-.wf-panel__fold {
+/* 面板唯一关闭入口：低干扰，hover 才显形 */
+.wf-panel__close {
   display: inline-flex;
   flex: none;
   align-items: center;
@@ -2688,31 +2915,33 @@ onActivated(() => {
   transition: background 0.15s ease, color 0.15s ease;
 }
 
-.wf-panel__fold:hover {
+.wf-panel__close:hover {
   background: var(--ah-neutral-tint);
   color: var(--ah-text-regular);
 }
 
 /*
- * 折叠后贴在画布左右边缘的唤醒页签。
- * 常态只露一条窄边（22px），hover 平滑横向展开并浮出文字，
- * 让用户在专注模式下也能一眼看出「面板收去哪了、点哪里能回来」。
+ * 节点库关闭后贴在左边缘的小入口。
+ * 常态只露窄条（26px），hover 横向展开浮出文字；点它重新打开悬浮框。
  */
-.wf-edge-wake {
+.wf-float-entry {
   position: absolute;
   top: 50%;
+  left: 0;
   z-index: 7;
   display: inline-flex;
   align-items: center;
-  justify-content: center;
+  justify-content: flex-start;
   gap: 4px;
-  width: 22px;
-  height: 64px;
-  padding: 0;
+  width: 26px;
+  height: 72px;
+  padding: 0 0 0 4px;
   overflow: hidden;
   border: 1px solid rgb(15 23 42 / 8%);
+  border-left: 0;
+  border-radius: 0 8px 8px 0;
   /* 半透明浅灰底 + 轻阴影：比纯白描边更显眼，又不喧宾夺主 */
-  background: rgb(243 244 246 / 92%);
+  background: rgb(243 244 246 / 94%);
   color: var(--ah-text-regular);
   box-shadow: 0 4px 12px rgba(0, 0, 0, 0.08);
   cursor: pointer;
@@ -2721,26 +2950,26 @@ onActivated(() => {
   transition: width 0.22s ease, background 0.18s ease, color 0.18s ease, box-shadow 0.18s ease;
 }
 
-.wf-edge-wake:hover,
-.wf-edge-wake:focus-visible {
-  width: 104px;
+.wf-float-entry:hover,
+.wf-float-entry:focus-visible {
+  width: 86px;
   background: var(--ah-surface);
   color: var(--ah-primary);
   box-shadow: 0 6px 18px rgb(99 91 255 / 22%);
 }
 
-.wf-edge-wake:focus-visible {
+.wf-float-entry:focus-visible {
   outline: 2px solid rgb(99 91 255 / 45%);
   outline-offset: 1px;
 }
 
-.wf-edge-wake__icon {
+.wf-float-entry__icon {
   flex: none;
   font-size: 13px;
 }
 
 /* 文字默认收起，hover 时随宽度一起浮现 */
-.wf-edge-wake__label {
+.wf-float-entry__label {
   flex: none;
   font-size: 12px;
   font-weight: 600;
@@ -2748,47 +2977,10 @@ onActivated(() => {
   transition: opacity 0.16s ease;
 }
 
-.wf-edge-wake:hover .wf-edge-wake__label,
-.wf-edge-wake:focus-visible .wf-edge-wake__label {
+.wf-float-entry:hover .wf-float-entry__label,
+.wf-float-entry:focus-visible .wf-float-entry__label {
   opacity: 1;
   transition-delay: 0.06s;
-}
-
-.wf-edge-wake.is-left {
-  left: 0;
-  border-left: 0;
-  border-radius: 0 8px 8px 0;
-  /* 图标贴边不居中：展开时箭头位置不动，只有文字浮现，观感更稳 */
-  justify-content: flex-start;
-  padding-left: 3px;
-}
-
-.wf-edge-wake.is-right {
-  right: 0;
-  border-right: 0;
-  border-radius: 8px 0 0 8px;
-  justify-content: flex-end;
-  padding-right: 3px;
-}
-
-/*
- * 专注模式的贴边热区：鼠标贴到画布最左 / 最右 8px 时临时唤出面板。
- * 透明 + 无事件阻挡以外的副作用；面板展开后本元素会被 v-if 移除，不叠加遮挡。
- */
-.wf-edge-hot {
-  position: absolute;
-  top: 0;
-  bottom: 0;
-  z-index: 6;
-  width: 8px;
-}
-
-.wf-edge-hot.is-left {
-  left: 0;
-}
-
-.wf-edge-hot.is-right {
-  right: 0;
 }
 
 .wf-wake-enter-active,
@@ -2877,6 +3069,78 @@ onActivated(() => {
   z-index: 5;
 }
 
+/* ===== 画布顶部居中悬浮按钮组：保存草稿 / 重新加载 / 专注 ===== */
+/*
+ * 只留图标、名字走 tooltip；普通编辑与专注模式都摆这一处。
+ * 居中叠在画布顶部，避开左右贴边的悬浮框，也不碰底部缩放 / 调试胶囊。
+ */
+.wf-canvas-actions {
+  position: absolute;
+  top: 12px;
+  left: 50%;
+  z-index: 6;
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  padding: 4px 6px;
+  border: 1px solid rgb(15 23 42 / 8%);
+  border-radius: 999px;
+  background: var(--ah-surface);
+  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.08);
+  transform: translateX(-50%);
+  /* 只接按钮自身的事件，胶囊留白仍可拖画布 */
+  pointer-events: none;
+  user-select: none;
+}
+
+/* 画布错误条（如 409 冲突）占着最上面时整组下移，避免把提示压住 */
+.wf-canvas-actions.is-alerted {
+  top: 56px;
+}
+
+.wf-canvas-actions > * {
+  pointer-events: auto;
+}
+
+.wf-canvas-actions__slot {
+  display: inline-flex;
+}
+
+/* 组内统一 28px 圆形弱对比按钮，与底部缩放胶囊同一观感；hover 才提亮 */
+.wf-canvas-actions :deep(.el-button.is-circle) {
+  width: 28px;
+  height: 28px;
+  margin: 0;
+  border-color: transparent;
+  background: transparent;
+  color: var(--ah-text-regular);
+}
+
+.wf-canvas-actions :deep(.el-button.is-circle:hover) {
+  border-color: transparent;
+  background: var(--ah-neutral-tint);
+  color: var(--ah-primary);
+}
+
+/* 专注中沿用主色浅底强调；退出仍靠 ScaleToOriginal 图标区分 */
+.wf-canvas-actions :deep(.el-button.is-circle.is-focus-on) {
+  background: var(--ah-primary-tint);
+  color: var(--ah-primary);
+}
+
+/* 专注态 hover 也只加深主色浅底，不退回中性灰，避免看不出当前在专注里 */
+.wf-canvas-actions :deep(.el-button.is-circle.is-focus-on:hover) {
+  background: var(--el-color-primary-light-8);
+  color: var(--ah-primary);
+}
+
+/* 不可点（如草稿无改动时的保存）仍要一眼看出禁用：压暗图标、不清空位置 */
+.wf-canvas-actions :deep(.el-button.is-circle.is-disabled) {
+  background: transparent;
+  color: var(--ah-text-faint);
+  cursor: not-allowed;
+}
+
 /* ===== 模块二：底部居中悬浮胶囊工具栏 ===== */
 .wf-dock {
   position: absolute;
@@ -2937,7 +3201,40 @@ onActivated(() => {
   background: var(--ah-border);
 }
 
-/* 试跑是工具栏唯一主色按钮，视觉权重高于缩放 */
+/*
+ * 调试跟随状态：只在有当前执行节点时出现，比调试主按钮轻。
+ * 跟随中用主色浅底；被用户拖开后转中性灰并显示「已暂停」，点一下立刻对准并恢复。
+ */
+.wf-dock__follow {
+  height: 24px;
+  padding: 0 10px;
+  border: 1px solid transparent;
+  border-radius: 999px;
+  background: var(--ah-primary-tint, rgb(99 91 255 / 12%));
+  color: var(--ah-primary, #635bff);
+  font-size: 12px;
+  font-weight: 600;
+  line-height: 1;
+  white-space: nowrap;
+  cursor: pointer;
+  transition: background 0.15s ease, color 0.15s ease;
+}
+
+.wf-dock__follow:hover {
+  background: var(--el-color-primary-light-8, rgb(99 91 255 / 20%));
+}
+
+.wf-dock__follow.is-paused {
+  background: var(--ah-neutral-tint, #f3f4f6);
+  color: var(--ah-text-secondary, #6b7280);
+}
+
+.wf-dock__follow.is-paused:hover {
+  background: var(--ah-border, #ebeef5);
+  color: var(--ah-text-regular, #4b5563);
+}
+
+/* 调试是工具栏唯一主色按钮，视觉权重高于缩放 */
 .wf-dock__run {
   height: 28px;
   margin-left: 4px;
@@ -2959,22 +3256,6 @@ onActivated(() => {
 .wf-dock__run:disabled {
   background: var(--el-color-primary-light-5);
   cursor: not-allowed;
-}
-
-.wf-props {
-  flex: 0 0 300px;
-  width: 300px;
-}
-
-.wf-props.is-collapsed {
-  flex-basis: 0;
-  width: 0;
-  margin-left: -12px;
-  border-color: transparent;
-}
-
-.wf-props .wf-panel__inner {
-  width: 300px;
 }
 
 .wf-form :deep(.el-form-item) {

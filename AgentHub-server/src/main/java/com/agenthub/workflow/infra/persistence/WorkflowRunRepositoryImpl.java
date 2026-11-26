@@ -38,6 +38,7 @@ public class WorkflowRunRepositoryImpl implements WorkflowRunRepository {
         entity.setWorkflowId(run.getWorkflowId());
         entity.setReleaseId(run.getReleaseId());
         entity.setReleaseVersion(run.getReleaseVersion());
+        entity.setDraftBaseReleaseVersion(run.getDraftBaseReleaseVersion());
         entity.setFingerprint(run.getFingerprint());
         entity.setTraceId(run.getTraceId());
         entity.setStatus(run.getStatus());
@@ -254,6 +255,7 @@ public class WorkflowRunRepositoryImpl implements WorkflowRunRepository {
         run.setWorkflowId(entity.getWorkflowId());
         run.setReleaseId(entity.getReleaseId());
         run.setReleaseVersion(entity.getReleaseVersion());
+        run.setDraftBaseReleaseVersion(entity.getDraftBaseReleaseVersion());
         run.setFingerprint(entity.getFingerprint());
         run.setTraceId(entity.getTraceId());
         run.setStatus(entity.getStatus());

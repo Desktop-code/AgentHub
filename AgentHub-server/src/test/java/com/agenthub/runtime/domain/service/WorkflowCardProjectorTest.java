@@ -374,6 +374,55 @@ class WorkflowCardProjectorTest {
                 "第 2 轮应排在第 1 轮与下游之后，而不是被下游挤到最前");
     }
 
+    /**
+     * 没有会话事件时，按库里的节点行现算：问句、选项、回复、循环框与直播同一形状。
+     */
+    @Test
+    void persistedViewUsesStoredOutputChoiceReplyAndLoop() {
+        WorkflowCardProjector projector = new WorkflowCardProjector("小游戏研发", "mini_game_dev", null, JSON);
+        WorkflowNode loop = node("n1", "loop", "循环", "LOOP");
+        WorkflowNode ask = node("n2", "ask", "询问", "AGENT");
+        WorkflowNode review = node("n3", "review", "点评", "AGENT");
+        Map<String, List<WorkflowEdge>> outgoing = Map.of(
+                "n1", List.of(edge("e1", "n1", "n2", "LOOP_BODY"), edge("e4", "n1", "n3", "LOOP_EXIT")),
+                "n2", List.of(edge("e3", "n2", "n1", "LOOP_BACK")));
+        WorkflowNodeRun loopRow = row("n1", "SUCCESS",
+                "{\"iteration\":1,\"maxIterations\":3,\"decision\":\"BODY\"}");
+        loopRow.setNodeCode("loop");
+        WorkflowNodeRun askRow = row("n2", "WAITING_REPLY",
+                "{\"text\":\"请选择实现语言\",\"question\":\"你想用哪种语言？\","
+                        + "\"choice\":{\"question\":\"你想用哪种语言？\","
+                        + "\"options\":[{\"id\":\"java\",\"label\":\"Java\"},"
+                        + "{\"id\":\"python\",\"label\":\"Python\"}]}}");
+        askRow.setNodeCode("ask");
+        askRow.setReplyText("Python");
+        WorkflowRun run = new WorkflowRun();
+        run.setId(9L);
+        run.setStatus("WAITING_REPLY");
+
+        WorkflowRunView view = projector.persisted(run, List.of(loop, ask, review), outgoing,
+                List.of(loopRow, askRow), "请在下方接着说");
+
+        assertEquals("WAITING_REPLY", view.status());
+        assertEquals(9L, view.runId());
+        assertNotNull(view.choice());
+        assertEquals(2, view.choice().options().size());
+        assertTrue(view.answer().contains("请选择实现语言") || view.answer().contains("哪种语言"), view.answer());
+        WorkflowRunView.Node askNode = view.nodes().stream()
+                .filter(node -> "ask".equals(node.code())).findFirst().orElseThrow();
+        assertEquals("WAITING_REPLY", askNode.status());
+        assertTrue(askNode.output().contains("哪种语言") || askNode.output().contains("请选择实现语言"),
+                askNode.output());
+        assertEquals("Python", askNode.reply());
+        assertEquals("loop", askNode.group());
+        WorkflowRunView.Node loopNode = view.nodes().stream()
+                .filter(node -> "loop".equals(node.code())).findFirst().orElseThrow();
+        assertEquals(1, loopNode.loopRound());
+        assertEquals(3, loopNode.loopTotal());
+        assertEquals("", view.nodes().stream().filter(node -> "review".equals(node.code()))
+                .findFirst().orElseThrow().group());
+    }
+
     private static WorkflowEdge edge(String id, String source, String target, String type) {
         WorkflowEdge edge = new WorkflowEdge();
         edge.setId(id);
