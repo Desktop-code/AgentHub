@@ -126,6 +126,8 @@ export interface WorkflowFlowNodeData {
   toolTitle?: string
   /** TOOL 节点绑定后的工具技术名（MCP 原始 name）：仅画布展示，不进 graph_json */
   toolName?: string
+  /** TOOL 节点必填入参还没配来源的提示：仅画布展示，不进 graph_json */
+  missingInputHint?: string
 }
 
 /** 画布边 data */
@@ -146,9 +148,9 @@ export interface WorkflowMappingSource {
   id: string
   /** 节点编码：拼 $.outputs.<code> 路径用 */
   code: string
-  /** 节点显示名 */
+  /** 节点显示名（人话标签，如「审稿 Agent」） */
   name: string
-  /** 下拉展示文案：类型 · 名称（编码） */
+  /** 下拉展示文案：默认就是节点名；不要再拼「类型 · 名字（code）」 */
   label: string
   /** 该节点 outputMapping 的键；有值时才是真实可取的输出字段，空则只有 text */
   outputKeys: string[]

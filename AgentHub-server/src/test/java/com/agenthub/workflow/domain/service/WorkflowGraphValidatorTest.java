@@ -419,6 +419,54 @@ class WorkflowGraphValidatorTest {
                 .contains("LOOP_EXIT_HUMAN");
     }
 
+    @Test
+    @DisplayName("TOOL 必填参数未配来源：报一条中文错误，点名节点与参数")
+    void toolRequiredInputMissingFails() {
+        String json = graph(
+                node("n1", "start", "START", "{}") + ","
+                        + node("n2", "weather", "TOOL", "{\"toolId\":9}") + ","
+                        + node("n3", "end", "END", "{}"),
+                edge("e1", "n1", "n2", "NORMAL") + "," + edge("e2", "n2", "n3", "NORMAL"));
+        WorkflowBindingSnapshot bindings = new WorkflowBindingSnapshot(Map.of(),
+                Map.of(9L, new WorkflowToolBinding(9L, "queryWeather", 1, List.of("city", "days"))));
+
+        WorkflowValidationResult result = validate(json, bindings, true);
+
+        assertThat(codes(result.getErrors())).contains("TOOL_INPUT_REQUIRED_MISSING");
+        assertThat(result.getErrors())
+                .filteredOn(issue -> "TOOL_INPUT_REQUIRED_MISSING".equals(issue.getCode()))
+                .singleElement()
+                .satisfies(issue -> {
+                    assertThat(issue.getMessage()).contains("weather", "city", "days");
+                    assertThat(issue.getNodeCode()).isEqualTo("weather");
+                });
+    }
+
+    @Test
+    @DisplayName("TOOL 必填参数配了来源（空串不算）才放行")
+    void toolRequiredInputConfiguredPasses() {
+        String base = graph(
+                node("n1", "start", "START", "{}") + ","
+                        + node("n2", "weather", "TOOL", "{\"toolId\":9,\"inputMapping\":%s}") + ","
+                        + node("n3", "end", "END", "{}"),
+                edge("e1", "n1", "n2", "NORMAL") + "," + edge("e2", "n2", "n3", "NORMAL"));
+        WorkflowBindingSnapshot bindings = new WorkflowBindingSnapshot(Map.of(),
+                Map.of(9L, new WorkflowToolBinding(9L, "queryWeather", 1, List.of("city"))));
+
+        String configured = String.format(base, "{\"city\":\"$.input.query\",\"note\":\"固定值\"}");
+        assertThat(validate(configured, bindings, true).getErrors()).isEmpty();
+
+        // 空串等同没配：运行时会被解析成 null，不再走 input 兜底
+        String blank = String.format(base, "{\"city\":\"  \"}");
+        assertThat(codes(validate(blank, bindings, true).getErrors()))
+                .contains("TOOL_INPUT_REQUIRED_MISSING");
+
+        // 没有 schema 定义的工具不产生必填约束
+        WorkflowBindingSnapshot noSchema = new WorkflowBindingSnapshot(Map.of(),
+                Map.of(9L, new WorkflowToolBinding(9L, "queryWeather", 1)));
+        assertThat(validate(String.format(base, "{}"), noSchema, true).getErrors()).isEmpty();
+    }
+
     private WorkflowValidationResult validate(String json,
                                              WorkflowBindingSnapshot bindings,
                                              boolean publishMode) {

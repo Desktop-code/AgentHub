@@ -136,6 +136,7 @@
         />
         <VueFlow
           :node-types="nodeTypes"
+          :edge-types="edgeTypes"
           :snap-to-grid="true"
           :snap-grid="[10, 10]"
           :min-zoom="0.2"
@@ -330,7 +331,7 @@
               </div>
             </template>
 
-            <!-- TOOL：直接绑定工具项 -->
+            <!-- TOOL：直接绑定工具项（固定宽度单选浮层，对齐可选资源左栏排版） -->
             <template v-else-if="selectedNode.data.nodeType === 'TOOL'">
               <el-form-item label="绑定工具" required>
                 <el-alert
@@ -341,23 +342,15 @@
                   :closable="false"
                   class="block-alert"
                 />
-                <el-select
+                <WorkflowToolBindPicker
                   v-else
-                  :model-value="selectedNode.data.config.toolId"
                   class="wf-field"
-                  clearable
-                  filterable
-                  placeholder="选择工具项"
+                  :model-value="selectedNode.data.config.toolId"
+                  :tools="toolOptions"
                   :disabled="!canEdit"
+                  :fallback-label="selectedNode.data.toolTitle || selectedNode.data.toolName || ''"
                   @update:model-value="setNodeTool"
-                >
-                  <el-option
-                    v-for="item in toolOptions"
-                    :key="item.id"
-                    :label="toolLabel(item)"
-                    :value="item.id"
-                  />
-                </el-select>
+                />
               </el-form-item>
               <!-- 画布节点标题会优先显示工具显示名；这里说明回退规则 -->
               <div class="wf-tip">
@@ -439,9 +432,11 @@
 
             <template v-else-if="selectedNode.data.nodeType === 'LOOP'">
               <WorkflowLoopFields
+                :key="selectedNode.id"
                 :max-iterations="loopMaxIterations"
                 :on-exceeded="String(selectedNode.data.config.onExceeded || '')"
                 :feedback-path="String(selectedNode.data.config.feedbackPath || '')"
+                :feedback-sources="loopBackSources"
                 :cap="platformMaxLoopIterations"
                 :disabled="!canEdit"
                 @update:max-iterations="setLoopField('maxIterations', $event)"
@@ -470,17 +465,22 @@
             <!-- 入参映射：可视化「来源节点 → 输出字段」，落库仍是 $.input / $.outputs / $.vars 路径 -->
             <template v-if="showMapping">
               <el-form-item label="入参映射">
+                <!-- 按节点重建编辑器：切换节点时不清空槽位状态，避免残留上一个节点的行 -->
                 <InputMappingEditor
+                  :key="selectedNode.id"
                   :model-value="selectedNode.data.config.inputMapping"
                   :sources="mappingSources"
                   :start-codes="startCodes"
+                  :node-type="String(selectedNode.data.nodeType || '')"
+                  :tool-schema-json="selectedToolSchema"
                   :disabled="!canEdit"
                   @update:model-value="setInputMapping"
                 />
               </el-form-item>
               <el-form-item label="出参映射">
-                <MappingEditor
+                <OutputMappingEditor
                   :model-value="selectedNode.data.config.outputMapping"
+                  :disabled="!canEdit"
                   @update:model-value="setOutputMapping"
                 />
               </el-form-item>
@@ -596,7 +596,18 @@ defineOptions({ name: 'WorkflowEditor' })
  * <p>单一真源：画布状态在 VueFlow store；节点/边的修改都走 store API，
  * 保存时从 store 读，避免「画布显示的」和「保存出去的」不一致。
  */
-import { computed, markRaw, nextTick, onActivated, onBeforeUnmount, onDeactivated, onMounted, ref, watch } from 'vue'
+import {
+  computed,
+  markRaw,
+  nextTick,
+  onActivated,
+  onBeforeUnmount,
+  onDeactivated,
+  onMounted,
+  provide,
+  ref,
+  watch
+} from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { ArrowLeft, ArrowRight, FullScreen, Minus, Plus } from '@element-plus/icons-vue'
@@ -605,6 +616,7 @@ import type {
   Connection,
   Edge,
   EdgeMouseEvent,
+  EdgeTypesObject,
   GraphEdge,
   GraphNode,
   Node,
@@ -617,10 +629,13 @@ import '@vue-flow/core/dist/theme-default.css'
 import PageHeader from '@/components/PageHeader.vue'
 import { useWorkflowFocus } from '@/composables/workflowFocus'
 import InputMappingEditor from './InputMappingEditor.vue'
-import MappingEditor from './MappingEditor.vue'
+import OutputMappingEditor from './OutputMappingEditor.vue'
 import JsonLogicEditor from './JsonLogicEditor.vue'
 import WorkflowLoopFields from './WorkflowLoopFields.vue'
 import WorkflowNodeCard from './WorkflowNodeCard.vue'
+import WorkflowToolBindPicker from './WorkflowToolBindPicker.vue'
+import WorkflowEdge from './WorkflowEdge.vue'
+import { WORKFLOW_EDGE_INTERACTION } from './workflowEdgeInteraction'
 import WorkflowTrialDrawer from './WorkflowTrialDrawer.vue'
 import { pageAgents, getAgent } from '@/api/agent'
 import { listAllItems } from '@/api/tool'
@@ -633,6 +648,12 @@ import {
 } from '@/api/workflow'
 import { useUserStore } from '@/stores/user'
 import { parseAssigneeRule } from '@/utils/workflowAssignee'
+import { sameMapping, singleBackSourcePrefill } from '@/utils/workflowMapping'
+import {
+  dropEmptyInputMapping,
+  missingRequiredSlotKeys,
+  parseToolInputSlots
+} from '@/utils/workflowInputSlots'
 import type { AgentCard } from '@/types/agent'
 import type { ToolItemRow } from '@/types/tool'
 import type {
@@ -754,6 +775,11 @@ const router = useRouter()
 
 /** 组件名固定，按 data.nodeType 上色，避免注册 15 个节点类型 */
 const nodeTypes = { workflow: markRaw(WorkflowNodeCard) } as NodeTypesObject
+/**
+ * 自定义边注册：只接管走线渲染与拐点拖拽，
+ * 边的业务类型（NORMAL / COND / LOOP_* 等）仍读 data.edgeType，不受影响。
+ */
+const edgeTypes = { workflow: markRaw(WorkflowEdge) } as EdgeTypesObject
 
 const vf = useVueFlow()
 const {
@@ -1035,6 +1061,18 @@ function revealPropsForSelection(hasSelection: boolean) {
   }
 }
 
+/*
+ * 自定义边走线拖拽会拦住 pointerdown，VueFlow 自带的 edge-click 不一定还能触发；
+ * 这里把「选中这条边」的入口注入给边组件，保证右侧属性面板与删除按钮照常工作。
+ * 只同步选中态，不参与走线计算，也不写 graph_json。
+ */
+provide(WORKFLOW_EDGE_INTERACTION, {
+  selectEdge(edgeId: string) {
+    selected.value = { kind: 'edge', id: edgeId }
+    revealPropsForSelection(true)
+  }
+})
+
 const errorCount = computed(() => issues.value.filter((item) => item.level === 'error').length)
 const warnCount = computed(() => issues.value.filter((item) => item.level === 'warn').length)
 /** 图改过但还没重新校验：提示用户结果已过期 */
@@ -1091,6 +1129,29 @@ const startCodes = computed(() =>
 )
 
 /**
+ * 画布节点 → 映射来源项。
+ * <p>下拉主标签只写节点名（人话入口），节点类型与编码放到次要说明里；
+ * 不再把「类型 · 名字（code）」当默认展示。
+ *
+ * @param node 画布节点
+ * @return 映射来源项
+ */
+function toMappingSource(node: Node<WorkflowFlowNodeData>): WorkflowMappingSource {
+  const data = (node.data || {}) as WorkflowFlowNodeData
+  const code = String(data.code ?? '')
+  const name = String(data.name ?? '')
+  const outputMapping = (data.config?.outputMapping ?? {}) as Record<string, string>
+  return {
+    id: node.id,
+    code,
+    name: name || code,
+    label: name || code,
+    // 有出参映射时，真实产出键就是这些；没有映射时后端只保留 {text}
+    outputKeys: Object.keys(outputMapping)
+  }
+}
+
+/**
  * 入参映射的「来源节点」候选：当前节点的所有前置节点（多跳祖先）。
  * <p>START 已排除：它的输出等价于运行入参，在编辑器里由固定的「运行入参（$.input）」选项表示，
  * 避免同一份取值出现两个来源选项。
@@ -1102,22 +1163,138 @@ const mappingSources = computed<WorkflowMappingSource[]>(() => {
   }
   return collectAncestors(node.id)
     .filter((item) => String(item.data?.nodeType) !== 'START')
-    .map((item) => {
-      const data = (item.data || {}) as WorkflowFlowNodeData
-      const code = String(data.code ?? '')
-      const name = String(data.name ?? '')
-      const outputMapping = (data.config?.outputMapping ?? {}) as Record<string, string>
-      return {
-        id: item.id,
-        code,
-        name,
-        label: `${nodeTypeLabel(String(data.nodeType))} · ${name || code}（${code}）`,
-        // 有出参映射时，真实产出键就是这些；没有映射时后端只保留 {text}
-        outputKeys: Object.keys(outputMapping)
-      }
-    })
+    .map(toMappingSource)
     .filter((item) => item.code)
 })
+
+/**
+ * 当前 TOOL 节点所绑工具的 inputSchemaJson。
+ * <p>工具下拉直接复用列表接口已返回的 inputSchemaJson（ToolItemRow 自带），
+ * 不另开接口；未绑定或列表还没到位时为空串，编辑器保持自由添加。
+ */
+const selectedToolSchema = computed(() => {
+  const toolId = Number(selectedNode.value?.data?.config?.toolId)
+  if (!toolId) {
+    return ''
+  }
+  const tool = toolOptions.value.find((item) => item.id === toolId)
+  return tool?.inputSchemaJson ?? ''
+})
+
+/**
+ * TOOL 节点必填入参未配来源的提示文案（画布节点卡片用）。
+ * <p>只读工具列表里已有的 schema；空 schema / 没绑定工具时返回空串。
+ *
+ * @param tool    工具项（可空）
+ * @param mapping 当前入参映射
+ * @return 提示文案；没有缺失返回空串
+ */
+function toolInputHint(
+  tool: ToolItemRow | undefined,
+  mapping?: Record<string, string> | null
+): string {
+  const missing = missingRequiredSlotKeys(parseToolInputSlots(tool?.inputSchemaJson), mapping)
+  return missing.length ? `必填入参未配：${missing.join('、')}` : ''
+}
+
+/**
+ * 循环打回来源：指向当前循环节点的 LOOP_BACK 边起点。
+ * <p>同一来源有多条回边时只保留一项；边被删除 / 改类型后候选自然减少，
+ * 不按节点类型猜来源。
+ */
+const loopBackSources = computed<WorkflowMappingSource[]>(() => {
+  const node = selectedNode.value
+  if (!node || String(node.data?.nodeType) !== 'LOOP') {
+    return []
+  }
+  const seen = new Set<string>()
+  const result: WorkflowMappingSource[] = []
+  vf.edges.value.forEach((edge) => {
+    const data = (edge.data || {}) as WorkflowFlowEdgeData
+    if (String(data.edgeType) !== 'LOOP_BACK' || String(edge.target ?? '') !== node.id) {
+      return
+    }
+    const sourceId = String(edge.source ?? '')
+    if (!sourceId || seen.has(sourceId)) {
+      return
+    }
+    const sourceNode = vf.nodes.value.find((item) => item.id === sourceId)
+    if (!sourceNode) {
+      return
+    }
+    const source = toMappingSource(sourceNode)
+    if (!source.code) {
+      return
+    }
+    seen.add(sourceId)
+    result.push(source)
+  })
+  return result
+})
+
+/** 已自动预填的循环节点：nodeId → 预填路径；用户改过或来源变多时失效 */
+const loopAutoPrefill = new Map<string, string>()
+
+/**
+ * 打回边只有一条时预填来源节点；多条留空，交给下拉高亮让用户拍板。
+ * <p>只填空值，用户已配置 / 手动改过的值一律不覆盖。
+ * <p>自动预填后再加一条回边：若当前值仍是自动预填的那条，撤回到空，避免保留“猜”的来源；
+ * 用户自己改过的值不撤。
+ * <p>监听节点切换与回边集合变化：先连边再选节点、或反过来，都能触发。
+ */
+watch(
+  [
+    () => selectedNode.value?.id,
+    () => String(selectedNode.value?.data?.nodeType ?? ''),
+    () => loopBackSources.value.map((item) => item.code).join('|')
+  ],
+  () => {
+    const node = selectedNode.value
+    if (!node || String(node.data?.nodeType) !== 'LOOP') {
+      return
+    }
+    const id = String(node.id)
+    const current = String(node.data.config?.feedbackPath ?? '').trim()
+    const auto = loopAutoPrefill.get(id)
+    const sources = loopBackSources.value
+
+    // 用户改过自动预填值：交还控制权，后续不再自动撤 / 自动改
+    if (auto !== undefined && current !== auto) {
+      loopAutoPrefill.delete(id)
+    }
+
+    // 来源变多且当前仍是自动预填值：撤回到空，让用户自己选意见来源
+    if (auto !== undefined && current === auto && sources.length > 1) {
+      loopAutoPrefill.delete(id)
+      setLoopField('feedbackPath', '')
+      return
+    }
+
+    // 自动预填值跟随唯一来源更新（旧回边被换掉时不留一条指向已删节点的路径）
+    if (auto !== undefined && current === auto && sources.length === 1) {
+      const next = singleBackSourcePrefill('', sources)
+      if (next && next !== current) {
+        loopAutoPrefill.set(id, next)
+        setLoopField('feedbackPath', next)
+      }
+      return
+    }
+
+    // 已有配置（含用户手选）不覆盖
+    if (current) {
+      return
+    }
+
+    // 只有一条回边才预填；多条 / 没有时留空，不猜
+    const prefill = singleBackSourcePrefill('', sources)
+    if (!prefill) {
+      return
+    }
+    loopAutoPrefill.set(id, prefill)
+    setLoopField('feedbackPath', prefill)
+  },
+  { immediate: true }
+)
 
 /**
  * 反向广度优先收集前置节点（多跳祖先）。
@@ -1245,6 +1422,26 @@ const currentSignature = computed(() => graphSignature(buildGraph()))
 const dirty = computed(() => currentSignature.value !== baseline.value)
 
 /**
+ * 落库前的 config 兜底：入参映射不写空键。
+ * <p>空值等价于「没配」，但 AGENT 一旦存了空串键，运行时会拿到空文本而不再走
+ * input.message → query → text → content 的兜底，因此保存前统一剔掉。
+ *
+ * @param config 画布节点 config
+ * @return 需要清洗时返回新对象，否则原样返回（避免无意义 diff）
+ */
+function sanitizeNodeConfig(config: WorkflowNodeConfig): WorkflowNodeConfig {
+  const mapping = config.inputMapping
+  if (!mapping || typeof mapping !== 'object') {
+    return config
+  }
+  const cleaned = dropEmptyInputMapping(mapping)
+  if (sameMapping(cleaned, mapping)) {
+    return config
+  }
+  return { ...config, inputMapping: cleaned }
+}
+
+/**
  * 图 → 落库结构。
  *
  * @return 当前画布对应的 graph_json（含 viewport）
@@ -1258,7 +1455,7 @@ function buildGraph(): WorkflowGraph {
       code: String(data.code ?? ''),
       type: String(data.nodeType ?? ''),
       name: String(data.name ?? ''),
-      config: (data.config ?? {}) as WorkflowNodeConfig,
+      config: sanitizeNodeConfig((data.config ?? {}) as WorkflowNodeConfig),
       ui: {
         x: Math.round(node.position?.x ?? 0),
         y: Math.round(node.position?.y ?? 0)
@@ -1337,7 +1534,8 @@ function toFlowEdge(item: WorkflowGraphEdge): Edge<WorkflowFlowEdgeData> {
     id: String(item.id),
     source: String(item.source),
     target: String(item.target),
-    type: 'default',
+    // 走线用自定义边渲染；落库的边类型仍取 data.edgeType，两者互不影响
+    type: 'workflow',
     label: labelText(edgeType, label),
     markerEnd: MarkerType.ArrowClosed,
     data: {
@@ -1529,12 +1727,6 @@ watch(focusMode, () => {
   }
   void placeNodesInView()
 })
-
-/** 工具下拉文案：停用也展示，避免用户以为工具消失 */
-function toolLabel(item: ToolItemRow): string {
-  const name = item.title ? `${item.title}（${item.name}）` : item.name
-  return item.status === 1 ? name : `${name} · 已停用`
-}
 
 /**
  * 读取定义与草稿并铺到画布。
@@ -1900,7 +2092,8 @@ function onConnect(connection: Connection) {
     id: nextEdgeId(),
     source,
     target,
-    type: 'default',
+    // 新边同样走自定义边走线；边类型仍由 data.edgeType 决定
+    type: 'workflow',
     markerEnd: MarkerType.ArrowClosed,
     data: { edgeType: 'NORMAL', label: null, config: {} }
   })
@@ -1974,7 +2167,9 @@ function setNodeTool(value: number | string | undefined) {
     ...node.data,
     config: { ...node.data.config, toolId },
     toolTitle: tool?.title ?? '',
-    toolName: tool?.name ?? ''
+    toolName: tool?.name ?? '',
+    // 换绑后必填提示要跟着新工具的定义走；旧映射里同名的键仍然算已配
+    missingInputHint: toolInputHint(tool, node.data.config.inputMapping)
   }
 }
 
@@ -2000,6 +2195,7 @@ function setAwaitReply(value: boolean | string | number) {
  * 把 toolId 对应的工具名称回填到所有 TOOL 节点。
  * <p>工具下拉与草稿并行加载，草稿先到时名称还解析不出来；
  * 这里在两边任一就绪后统一补齐，同值短路避免无意义重渲染。
+ * <p>同时按工具 schema 算一次「必填入参未配」提示，画布上直接标出来。
  */
 function syncToolLabels() {
   const byId = new Map(toolOptions.value.map((item) => [item.id, item]))
@@ -2011,10 +2207,15 @@ function syncToolLabels() {
     const tool = byId.get(Number(data.config?.toolId))
     const toolTitle = tool?.title ?? ''
     const toolName = tool?.name ?? ''
-    if (data.toolTitle === toolTitle && data.toolName === toolName) {
+    const missingInputHint = toolInputHint(tool, data.config?.inputMapping)
+    if (
+      data.toolTitle === toolTitle &&
+      data.toolName === toolName &&
+      (data.missingInputHint ?? '') === missingInputHint
+    ) {
       return
     }
-    node.data = { ...data, toolTitle, toolName }
+    node.data = { ...data, toolTitle, toolName, missingInputHint }
   })
 }
 
@@ -2137,7 +2338,13 @@ function setMapping(field: 'inputMapping' | 'outputMapping', value: Record<strin
   if (!node) {
     return
   }
-  node.data = { ...node.data, config: { ...node.data.config, [field]: value } }
+  const config = { ...node.data.config, [field]: value }
+  node.data = { ...node.data, config }
+  // TOOL 的必填提示跟着入参映射走：只重算当前节点，避免每次输入都全图扫工具列表
+  if (field === 'inputMapping' && String(node.data.nodeType) === 'TOOL') {
+    const tool = toolOptions.value.find((item) => item.id === Number(config.toolId))
+    node.data = { ...node.data, missingInputHint: toolInputHint(tool, value) }
+  }
 }
 
 /**

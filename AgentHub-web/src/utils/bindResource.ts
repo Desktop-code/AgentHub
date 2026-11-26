@@ -36,6 +36,31 @@ export function toToolOption(row: ToolItemRow): ResourceOption {
 }
 
 /**
+ * 按关键字筛选资源分组。
+ * <p>
+ * 匹配字段：展示名、代码、说明、来源附注、标签；大小写不敏感的包含匹配。
+ * 空关键字原样返回；组内无命中时整组丢弃，避免界面出现「0 条」分组头。
+ * ResourceSelector 与工作流单选浮层共用，禁止各写一份算法。
+ *
+ * @param groups  原始分组
+ * @param keyword 搜索词；空白视为不过滤
+ * @return 过滤后的分组（顺序与组内顺序保持原样）
+ */
+export function filterResourceGroups(groups: ResourceGroup[], keyword: string): ResourceGroup[] {
+  const word = keyword.trim().toLowerCase()
+  if (!word) {
+    return groups
+  }
+  const hit = (item: ResourceOption) =>
+    [item.name, item.code, item.description, item.extra, ...(item.tags || [])]
+      .filter((text): text is string => !!text)
+      .some((text) => text.toLowerCase().includes(word))
+  return groups
+    .map((group) => ({ groupName: group.groupName, items: group.items.filter(hit) }))
+    .filter((group) => group.items.length > 0)
+}
+
+/**
  * 工具项全量 → 分组数据源。
  * <p>
  * 分组固定为内置 / MCP 两段，空段整体丢弃（不渲染 0 条的标题）；

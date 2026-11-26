@@ -8,6 +8,10 @@
     </div>
     <div class="wf-node__name" :title="displayName">{{ displayName }}</div>
     <div v-if="summary" class="wf-node__summary" :title="summary">{{ summary }}</div>
+    <!-- 必填入参没配来源：画布上直接标出来；不阻断保存，发布时由校验拦截 -->
+    <div v-if="missingInputHint" class="wf-node__missing" :title="missingInputHint">
+      {{ missingInputHint }}
+    </div>
     <div v-if="runLabel" class="wf-node__run">{{ runLabel }}</div>
     <Handle v-if="nodeType !== 'END'" type="source" :position="Position.Right" />
   </div>
@@ -125,6 +129,13 @@ const summary = computed(() => {
   return ''
 })
 
+/**
+ * 必填入参未配来源的提示。
+ * <p>由编辑页按工具 schema 算好放进 data，本组件只做展示；
+ * 空串表示没有缺失，不占画布高度。
+ */
+const missingInputHint = computed(() => String(props.data?.missingInputHint ?? ''))
+
 /** 节点运行状态中文名；空状态不显示徽标 */
 const RUN_LABEL: Record<string, string> = {
   PENDING: '待运行',
@@ -213,6 +224,16 @@ const runClass = computed(() => {
   margin-top: 2px;
   overflow: hidden;
   color: var(--ah-text-secondary);
+  font-size: 12px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* 必填入参未配：用警告色单独一行，不改变节点原有类型配色 */
+.wf-node__missing {
+  margin-top: 2px;
+  overflow: hidden;
+  color: var(--ah-warning);
   font-size: 12px;
   text-overflow: ellipsis;
   white-space: nowrap;

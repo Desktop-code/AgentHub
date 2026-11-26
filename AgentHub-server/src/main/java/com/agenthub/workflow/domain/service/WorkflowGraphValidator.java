@@ -498,7 +498,9 @@ public final class WorkflowGraphValidator {
     }
 
     /**
-     * TOOL 绑定：存在且启用。
+     * TOOL 绑定：存在且启用，且工具定义的顶层必填参数都要配到来源。
+     * <p>必填未配是 error（草稿保存不校验，发布 / 校验接口才拦），
+     * 不会因为工具停用就跳过：停用和参数缺失是两类问题，要一起暴露。
      */
     private static void checkTool(WorkflowValidationResult result,
                                   WorkflowNode node,
@@ -523,6 +525,55 @@ public final class WorkflowGraphValidator {
                             + safeName(binding.getName(), toolId) + "」已停用",
                     node);
         }
+        checkToolRequiredInputs(result, node, binding);
+    }
+
+    /**
+     * 工具定义的必填参数是否都配了来源。
+     * <p>「配了」= inputMapping 里有该键且值不是空白：空串在运行时会解析成 null，
+     * 不会再走 input.message → query → text → content 的兜底，因此等同没配。
+     * <p>每个节点只记一条错误，把所有缺失参数列在文案里，避免刷屏。
+     *
+     * @param result  校验结果
+     * @param node    TOOL 节点
+     * @param binding 工具绑定（含顶层必填参数）
+     */
+    private static void checkToolRequiredInputs(WorkflowValidationResult result,
+                                                WorkflowNode node,
+                                                WorkflowToolBinding binding) {
+        List<String> required = binding.getRequiredInputs();
+        if (required == null || required.isEmpty()) {
+            return;
+        }
+        JsonNode mapping = WorkflowNodeConfig.objectValue(node.getConfig(), "inputMapping");
+        List<String> missing = new ArrayList<>();
+        for (String key : required) {
+            if (!mappingConfigured(mapping, key)) {
+                missing.add(key);
+            }
+        }
+        if (missing.isEmpty()) {
+            return;
+        }
+        addError(result, "TOOL_INPUT_REQUIRED_MISSING",
+                "TOOL 节点「" + label(node) + "」绑定的工具「"
+                        + safeName(binding.getName(), binding.getId())
+                        + "」必填参数未配来源：" + String.join("、", missing), node);
+    }
+
+    /**
+     * 入参映射里某个键是否真的配了来源。
+     *
+     * @param mapping inputMapping 对象，可空
+     * @param key     目标字段
+     * @return true 表示存在且值非空白
+     */
+    private static boolean mappingConfigured(JsonNode mapping, String key) {
+        if (mapping == null || !mapping.isObject()) {
+            return false;
+        }
+        JsonNode value = mapping.get(key);
+        return value != null && value.isTextual() && !value.asText().isBlank();
     }
 
     /**
