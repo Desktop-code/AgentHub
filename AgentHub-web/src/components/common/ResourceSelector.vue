@@ -147,6 +147,7 @@
 import { computed, ref, watch } from 'vue'
 import { Search } from '@element-plus/icons-vue'
 import type { ResourceGroup, ResourceOption } from '@/types/resource'
+import { filterResourceGroups } from '@/utils/bindResource'
 
 const props = withDefaults(
   defineProps<{
@@ -230,21 +231,11 @@ const totalCount = computed(() =>
 
 /**
  * 搜索后的分组：命中为空的分组整体隐藏；分组顺序与组内顺序保持数据源原样。
- * 搜索范围覆盖名称、代码、说明与标签，避免只记得英文名时搜不到。
+ * 具体匹配规则见 {@link filterResourceGroups}，与工作流单选浮层共用。
  */
-const filteredGroups = computed<ResourceGroup[]>(() => {
-  const word = keyword.value.trim().toLowerCase()
-  if (!word) {
-    return props.dataSource
-  }
-  const hit = (item: ResourceOption) =>
-    [item.name, item.code, item.description, item.extra, ...(item.tags || [])]
-      .filter((text): text is string => !!text)
-      .some((text) => text.toLowerCase().includes(word))
-  return props.dataSource
-    .map((group) => ({ groupName: group.groupName, items: group.items.filter(hit) }))
-    .filter((group) => group.items.length > 0)
-})
+const filteredGroups = computed<ResourceGroup[]>(() =>
+  filterResourceGroups(props.dataSource, keyword.value)
+)
 
 /**
  * 右侧已选列表：按勾选先后顺序回填完整对象。

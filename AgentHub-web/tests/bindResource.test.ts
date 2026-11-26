@@ -17,9 +17,11 @@ import {
   TOOL_GROUP_MCP,
   buildSkillGroups,
   buildToolGroups,
+  filterResourceGroups,
   toSkillOption,
   toToolOption
 } from '../src/utils/bindResource.ts'
+import type { ResourceGroup } from '../src/types/resource.ts'
 import type { SkillCard } from '../src/types/skill.ts'
 import type { ToolItemRow } from '../src/types/tool.ts'
 
@@ -146,4 +148,86 @@ test('技能分组：已绑定剔除，停用项保留并置灰，全绑完返�
   assert.equal(groups[0].items[0].id, 10)
   assert.equal(groups[0].items[0].disabled, true)
   assert.deepEqual(buildSkillGroups([skill({ id: 10 })], [10]), [])
+})
+
+/* ============ 四、分组筛选（可选资源 / 工作流浮层共用） ============ */
+
+/**
+ * 造一份双组候选，覆盖中文名、英文码、说明、标签命中路径。
+ *
+ * @return 分组数据源
+ */
+function sampleGroups(): ResourceGroup[] {
+  return [
+    {
+      groupName: TOOL_GROUP_BUILTIN,
+      items: [
+        {
+          id: 1,
+          name: '知识库检索',
+          code: 'kb_search',
+          description: '按问题检索知识库片段',
+          extra: '内置工具集',
+          tags: ['rag']
+        },
+        {
+          id: 2,
+          name: '联网搜索',
+          code: 'web_search',
+          description: '按关键词检索网页',
+          extra: '内置工具集'
+        }
+      ]
+    },
+    {
+      groupName: TOOL_GROUP_MCP,
+      items: [
+        {
+          id: 3,
+          name: '高德地理编码',
+          code: 'amap_geo',
+          description: '地址转坐标',
+          extra: '高德 MCP',
+          tags: ['地图']
+        }
+      ]
+    }
+  ]
+}
+
+test('筛选：空关键字不过滤，分组原样返回', () => {
+  const groups = sampleGroups()
+  assert.equal(filterResourceGroups(groups, '').length, 2)
+  assert.equal(filterResourceGroups(groups, '   ').length, 2)
+  assert.deepEqual(filterResourceGroups(groups, ''), groups)
+})
+
+test('筛选：按中文展示名包含匹配（大小写不敏感）', () => {
+  const filtered = filterResourceGroups(sampleGroups(), '知识库')
+  assert.equal(filtered.length, 1)
+  assert.equal(filtered[0].groupName, TOOL_GROUP_BUILTIN)
+  assert.deepEqual(filtered[0].items.map((item) => item.id), [1])
+})
+
+test('筛选：按英文代码包含匹配', () => {
+  const filtered = filterResourceGroups(sampleGroups(), 'WEB_SEARCH')
+  assert.equal(filtered.length, 1)
+  assert.deepEqual(filtered[0].items.map((item) => item.id), [2])
+})
+
+test('筛选：按说明包含匹配', () => {
+  const filtered = filterResourceGroups(sampleGroups(), '转坐标')
+  assert.equal(filtered.length, 1)
+  assert.equal(filtered[0].groupName, TOOL_GROUP_MCP)
+  assert.deepEqual(filtered[0].items.map((item) => item.id), [3])
+})
+
+test('筛选：命中为空的分组不出现', () => {
+  const filtered = filterResourceGroups(sampleGroups(), 'amap')
+  assert.equal(filtered.length, 1, '内置组无命中时整组丢弃')
+  assert.equal(filtered[0].groupName, TOOL_GROUP_MCP)
+})
+
+test('筛选：无任何命中时返回空数组', () => {
+  assert.deepEqual(filterResourceGroups(sampleGroups(), '不存在的关键字xyz'), [])
 })

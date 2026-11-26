@@ -11,6 +11,7 @@ import com.agenthub.workflow.domain.model.WorkflowGraph;
 import com.agenthub.workflow.domain.model.WorkflowNode;
 import com.agenthub.workflow.domain.model.WorkflowToolBinding;
 import com.agenthub.workflow.domain.service.WorkflowNodeConfig;
+import com.agenthub.workflow.domain.service.WorkflowToolSchema;
 import org.springframework.stereotype.Component;
 
 import java.util.HashMap;
@@ -74,6 +75,8 @@ public class WorkflowBindingResolver {
     }
 
     private WorkflowToolBinding toTool(ToolItem item) {
-        return new WorkflowToolBinding(item.getId(), item.getName(), item.getStatus());
+        // 只投影顶层必填参数：画布出槽与发布校验都按同一份 schema 口径
+        return new WorkflowToolBinding(item.getId(), item.getName(), item.getStatus(),
+                WorkflowToolSchema.requiredInputs(item.getInputSchemaJson()));
     }
 }

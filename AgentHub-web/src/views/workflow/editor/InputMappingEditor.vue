@@ -6,18 +6,32 @@
     </div>
 
     <!-- 一行 = 一次「目标字段 ← 来源节点 / 来源字段」映射 -->
-    <div v-for="(row, index) in rows" :key="row.uid" class="ime__row">
+    <div
+      v-for="(row, index) in rows"
+      :key="row.uid"
+      class="ime__row"
+      :class="{ 'ime__row--missing': row.slot && missingRequiredKeys.includes(row.slot.key) }"
+    >
       <div class="ime__head">
         <span class="ime__idx">{{ index + 1 }}</span>
+        <!-- 定义槽：目标字段由工具定义 / AGENT 默认槽固定，只读展示，不允许改名 -->
+        <div v-if="row.slot" class="ime__slot">
+          <span class="ime__slot-key">{{ slotPrimary(row.slot) }}</span>
+          <span v-if="slotSecondary(row.slot)" class="ime__slot-title">{{ slotSecondary(row.slot) }}</span>
+          <span v-if="row.slot.required" class="ime__slot-required">必填</span>
+        </div>
         <el-input
+          v-else
           v-model="row.target"
           size="small"
           maxlength="64"
-          placeholder="目标字段，如 query"
+          class="ime__target"
+          placeholder="目标字段（沿用节点入参名）"
           :disabled="disabled"
           @input="emitRows"
         />
-        <el-tooltip content="删除该映射" placement="top">
+        <!-- 换绑工具后旧键不在新定义里：仍显示并允许删除，不静默丢掉用户配过的来源 -->
+        <el-tooltip v-if="!row.slot" content="删除该映射" placement="top">
           <button
             type="button"
             class="ime__del"
@@ -30,75 +44,58 @@
         </el-tooltip>
       </div>
 
-      <div class="ime__line">
-        <span class="ime__label">来源</span>
-        <el-select
-          :model-value="sourceValue(row)"
-          size="small"
-          class="ime__control"
-          placeholder="选择来源"
-          :disabled="disabled"
-          @update:model-value="onSourceChange(row, $event)"
-        >
-          <el-option label="运行入参（$.input）" value="input" />
-          <el-option
-            v-for="item in sources"
-            :key="item.id"
-            :label="item.label"
-            :value="`node:${item.id}`"
-          />
-          <el-option label="流程变量（$.vars）" value="vars" />
-          <el-option label="自定义值 / 高级路径" value="custom" />
-        </el-select>
-      </div>
+      <!-- 工具定义里的说明原样展示；没有就只显示参数名，不翻译成中文 -->
+      <div v-if="row.slot?.description" class="ime__slot-desc">{{ row.slot.description }}</div>
+      <!-- 换绑工具后遗留的手填行：单独一行说明，不挤占目标字段宽度 -->
+      <div v-if="showUndefinedBadge(row)" class="ime__undefined">未在工具定义中（可删除）</div>
 
-      <div class="ime__line">
-        <span class="ime__label">字段</span>
-        <!-- 自定义值：常量或手写路径，既要能存「你是一名运维专家」，也要兜住陌生路径 -->
-        <el-input
-          v-if="row.sourceKind === 'custom'"
-          v-model="row.text"
-          size="small"
-          class="ime__control"
-          placeholder="常量文本，或 $. 开头的路径"
-          :disabled="disabled"
-          @input="emitRows"
-        />
-        <!-- 其余来源用可搜索 + 可新建的下拉：字段无法穷举时仍能手输（含嵌套路径） -->
-        <el-select
-          v-else
-          :model-value="row.sourceField"
-          size="small"
-          class="ime__control"
-          filterable
-          allow-create
-          default-first-option
-          :placeholder="fieldPlaceholder(row)"
-          :disabled="disabled"
-          @update:model-value="onFieldChange(row, $event)"
-        >
-          <el-option
-            v-for="item in fieldOptions(row)"
-            :key="item.value"
-            :label="item.label"
-            :value="item.value"
-          />
-        </el-select>
-      </div>
-
-      <!-- 实时回显最终落库路径：用户能一眼确认拼出来的字符串是否符合预期 -->
-      <div class="ime__path" :title="pathOf(row)">{{ pathOf(row) || '（未选择来源）' }}</div>
+      <!-- 来源 / 字段走三处共用的点选；自定义值走同一组件的手写模式 -->
+      <MappingPathPicker
+        :sources="pickerSources"
+        :source-value="sourceValue(row)"
+        :field-value="row.sourceField"
+        :mode="row.sourceKind === 'custom' ? 'manual' : 'pick'"
+        :manual-value="row.text"
+        :path-text="pathOf(row)"
+        :disabled="disabled"
+        :field-label="mappingFieldLabel(row.sourceKind)"
+        :manual-multiline="row.sourceKind === 'custom'"
+        allow-path-edit
+        :field-placeholder="fieldPlaceholder(row)"
+        manual-placeholder="填写固定内容（可换行）；也可直接填 $. 开头的路径"
+        :empty-text="row.sourceKind === 'unset' ? '（还没选择来源，这一行不会被保存）' : '（未选择来源）'"
+        @update:source-value="onSourceChange(row, $event)"
+        @update:field-value="onFieldChange(row, $event)"
+        @update:manual-value="onTextChange(row, $event)"
+        @update:path-value="onPathChange(row, $event)"
+      />
     </div>
 
-    <el-button link type="primary" class="ime__add" :disabled="disabled" @click="addRow">
-      + 添加映射
-    </el-button>
+    <div class="ime__actions">
+      <el-button link type="primary" class="ime__add" :disabled="disabled" @click="addRow">
+        + 添加映射
+      </el-button>
+      <!-- 一期只补空着的行，不做整体覆盖；带入后给条数提示，不静默改 -->
+      <el-button
+        link
+        type="primary"
+        class="ime__same"
+        :disabled="disabled || !rows.length"
+        @click="fillSameName"
+      >
+        按同名带入
+      </el-button>
+    </div>
 
+    <div v-if="missingRequiredKeys.length" class="ime__warn">
+      必填入参还没配来源：{{ missingRequiredKeys.join('、') }}。草稿可以先存，发布会被拦截。
+    </div>
     <div v-if="duplicateTargets.length" class="ime__warn">
       目标字段重复：{{ duplicateTargets.join('、') }}（保存时后一行覆盖前一行）
     </div>
     <div class="ime__hint">
-      路径由「来源 + 字段」自动拼装，无需手敲；字段下拉支持直接输入嵌套路径（如 data.items）。
+      路径由「来源 + 字段」自动拼装，默认不铺在行下；需要核对或微调时打开「高级」。
+      字段下拉支持直接输入嵌套路径（如 data.items）。
     </div>
   </div>
 </template>
@@ -108,19 +105,38 @@
  * 入参映射可视化编辑器。所属域：workflow 的前端画布层。
  * <p>职责：把「目标字段 ← 前置节点 / 输出字段」的 UI 行，与后端要求的
  * 「目标字段 → $.input / $.outputs.&lt;code&gt; / $.vars 路径」扁平对象互转。
- * <p>为什么 UI 与落库结构分开：后端 WorkflowNodeInputs 只认字符串路径，
- * 对象化结构会被判为非法值；因此本组件持行级状态，向上只 emit 拼好的字符串对象。
- * <p>解析 / 拼装 / 兼容旧草稿都走 utils/workflowMapping 的纯函数，本组件只管交互与展示。
+ * <p>按定义出槽：TOOL 节点按所绑工具的 inputSchemaJson 列出顶层参数槽，
+ * AGENT 节点给一个固定的「用户输入」槽；定义槽只读、不可删，编排者只选来源。
+ * 未绑定工具 / schema 为空时仍是自由添加。
+ * <p>点选交互收敛到 {@code MappingPathPicker}，与出参、循环打回反馈共用；
+ * 来源 / 字段一律展示人话标签，完整路径默认收起在「高级」里，需要核对时再展开。
+ * <p>解析 / 拼装 / 兼容旧草稿都走 utils/workflowMapping 的纯函数，
+ * 槽位解析与空键剔除走 utils/workflowInputSlots，本组件只管交互与展示。
  */
 import { computed, ref, watch } from 'vue'
+import { ElMessage } from 'element-plus'
 import { Close } from '@element-plus/icons-vue'
+import MappingPathPicker from './MappingPathPicker.vue'
 import {
+  applyMappingPathEdit,
   buildMappingObject,
+  isMappingRowEmpty,
+  mappingFieldLabel,
   mappingRowPath,
   parseMappingRow,
+  planSameNameFill,
   sameMapping
 } from '@/utils/workflowMapping'
-import type { MappingUiRow } from '@/utils/workflowMapping'
+import {
+  agentDefaultInputKey,
+  agentInputSlotForKey,
+  dropEmptyInputMapping,
+  planSlotRows,
+  resolveInputSlots,
+  slotSignature
+} from '@/utils/workflowInputSlots'
+import type { InputSlotDefinition } from '@/utils/workflowInputSlots'
+import type { MappingPickerSource, MappingUiRow } from '@/utils/workflowMapping'
 import type { WorkflowMappingSource } from '@/types/workflow'
 
 const props = defineProps<{
@@ -130,6 +146,10 @@ const props = defineProps<{
   sources: WorkflowMappingSource[]
   /** 图内所有 START 节点编码：用于把 $.outputs.<start> 归一成 $.input */
   startCodes: string[]
+  /** 当前节点类型：AGENT 出默认「用户输入」槽，TOOL 按工具 schema 出槽 */
+  nodeType?: string
+  /** TOOL 节点所绑工具的 inputSchemaJson；空表示未绑定或没有定义，保持自由添加 */
+  toolSchemaJson?: string | null
   /** 只读角色禁用全部交互 */
   disabled?: boolean
 }>()
@@ -138,9 +158,10 @@ const emit = defineEmits<{
   (e: 'update:modelValue', value: Record<string, string>): void
 }>()
 
-/** 行 + 稳定 key：行可增删、可重排，不能用 index 做 key */
+/** 行 + 稳定 key：行可增删、可重排，不能用 index 做 key；slot 表示这是定义槽 */
 interface Row extends MappingUiRow {
   uid: number
+  slot?: InputSlotDefinition
 }
 
 /** 运行入参的常用字段，与后端 WorkflowNodeInputs.message 的兜底顺序一致 */
@@ -151,15 +172,107 @@ let uidSeed = 0
 
 const rows = ref<Row[]>([])
 
-/** 节点 id → 来源项，拼路径与取输出字段都靠它 */
-const sourceById = computed(() => {
-  const map = new Map<string, WorkflowMappingSource>()
-  props.sources.forEach((item) => map.set(item.id, item))
-  return map
-})
-
 /** 纯函数所需的解析上下文 */
 const context = computed(() => ({ sources: props.sources, startCodes: props.startCodes }))
+
+/**
+ * AGENT 默认槽的键：打开编辑器时按已有映射定一次。
+ * <p>不在每次输入时重算：否则用户手输目标字段命中 query 的瞬间，槽位会换键并抢走这一行。
+ */
+const agentSlotKey = agentDefaultInputKey(props.modelValue)
+
+/**
+ * 当前节点的定义槽。
+ * <p>TOOL 按所绑工具的 inputSchemaJson；AGENT 按打开编辑器时的已有映射选一个默认键
+ * （键在本次挂载内固定，避免手输目标字段时槽位中途换键）；其它节点保持自由添加。
+ */
+const slots = computed(() =>
+  String(props.nodeType ?? '') === 'AGENT'
+    ? [agentInputSlotForKey(agentSlotKey)]
+    : resolveInputSlots(props.nodeType, props.toolSchemaJson)
+)
+
+/** 定义签名：换绑工具 / schema 同步后才重排行，逐次输入不会触发 */
+const currentSlotSignature = computed(() => slotSignature(slots.value))
+
+/** 必填但还没配来源的槽键：编辑器里直接标出；草稿仍可保存，发布由后端拦截 */
+const missingRequiredKeys = computed(() =>
+  slots.value
+    .filter((slot) => slot.required)
+    .filter((slot) => {
+      const row = rows.value.find((item) => item.slot?.key === slot.key)
+      // 没有对应行理论不会发生；按「没配」处理，避免提示漏报
+      return !row || isMappingRowEmpty(row)
+    })
+    .map((slot) => slot.key)
+)
+
+/** 手填行是否要标「未在工具定义中」：只有 TOOL 且确实读到了工具定义时才标 */
+function showUndefinedBadge(row: Row): boolean {
+  return String(props.nodeType ?? '') === 'TOOL' && slots.value.length > 0 && !row.slot
+}
+
+/** 槽的主标签：AGENT 默认槽是「用户输入」，工具槽是参数名（不翻译） */
+function slotPrimary(slot: InputSlotDefinition): string {
+  return slot.origin === 'agent' ? slot.title : slot.key
+}
+
+/** 槽的次标签：AGENT 补落库键，工具槽补 title；没有就留空不显示 */
+function slotSecondary(slot: InputSlotDefinition): string {
+  return slot.origin === 'agent' ? slot.key : slot.title
+}
+
+/**
+ * 三处共用的来源下拉数据：全部用节点名 / 字段名做人话标签，
+ * 完整路径只放在 hint 里；custom 仍是手写入口。
+ */
+const pickerSources = computed<MappingPickerSource[]>(() => {
+  const options: MappingPickerSource[] = [
+    {
+      value: 'input',
+      label: '运行入参',
+      hint: '$.input',
+      wholeLabel: '整个入参',
+      allowCustomField: true,
+      fields: INPUT_FIELD_HINTS.map((key) => ({
+        value: key,
+        label: key,
+        hint: `$.input.${key}`
+      }))
+    }
+  ]
+  props.sources.forEach((node) => {
+    // 没配 outputMapping 时后端只保留 {text}，字段下拉仍要给一个真实可取的项
+    const keys = node.outputKeys.length ? node.outputKeys : ['text']
+    options.push({
+      value: `node:${node.id}`,
+      label: node.name || node.code,
+      hint: node.code,
+      wholeLabel: '整段输出',
+      allowCustomField: true,
+      fields: keys.map((key) => ({
+        value: key,
+        label: key,
+        hint: `$.outputs.${node.code}.${key}`
+      }))
+    })
+  })
+  options.push({
+    value: 'vars',
+    label: '流程变量',
+    hint: '$.vars',
+    wholeLabel: '整个变量集合',
+    allowCustomField: true,
+    fields: []
+  })
+  options.push({
+    value: 'custom',
+    label: '自定义值 / 手写',
+    hint: '常量或 $. 路径',
+    fields: []
+  })
+  return options
+})
 
 /** 拓扑 / 输出字段签名：变化后尝试把之前解析失败的行升级成节点行 */
 const structureKey = computed(() =>
@@ -196,7 +309,8 @@ function makeRow(patch: Partial<MappingUiRow>): Row {
   return {
     uid: uidSeed,
     target: patch.target ?? '',
-    sourceKind: patch.sourceKind ?? 'input',
+    // 新行默认「未选择来源」：既能让「按同名带入」明确补空洞，也避免把默认值误存成 $.input
+    sourceKind: patch.sourceKind ?? 'unset',
     sourceNodeId: patch.sourceNodeId,
     sourceField: patch.sourceField ?? '',
     text: patch.text ?? ''
@@ -215,6 +329,40 @@ function parseRow(target: string, raw: string): Row {
 }
 
 /**
+ * 外部回填（切换节点、载入草稿、保存后刷新）时重建行。
+ * <p>定义槽先按定义顺序占位（同名键沿用已存的来源），其余已存行按原顺序跟在后面；
+ * 还没配来源的槽也保留在行里，用户可以直接给它选来源，它们不会进 mapping。
+ *
+ * @param mapping 落库形态的映射
+ */
+function rebuildRows(mapping: Record<string, string>) {
+  const parsed = Object.entries(mapping || {}).map(([target, value]) =>
+    parseRow(target, String(value ?? ''))
+  )
+  const planned = planSlotRows(parsed, slots.value, (target) => makeRow({ target }))
+  rows.value = planned.map(({ row, slot }) => ({ ...row, target: slot ? slot.key : row.target, slot }))
+}
+
+/**
+ * 定义变化（换绑工具 / AGENT 默认键变化）后重整行。
+ * <p>只调整归属与顺序，不动目标与来源，因此不需要上抛：
+ * 同名键保留已配来源，新槽先空着，不再属于新定义的旧键降为「未在工具定义中」的手填行。
+ */
+function syncSlotRows() {
+  const planned = planSlotRows(rows.value, slots.value, (target) => makeRow({ target }))
+  const next = planned.map(({ row, slot }) =>
+    slot ? { ...row, target: slot.key, slot } : { ...row, slot: undefined }
+  )
+  // 结构没变时保持原数组，避免多余的 v-for 重渲染
+  const signature = (list: Row[]) =>
+    list.map((row) => `${row.uid}:${row.slot?.key ?? ''}:${row.target}`).join('|')
+  if (signature(next) === signature(rows.value)) {
+    return
+  }
+  rows.value = next
+}
+
+/**
  * 计算单行的落库路径，用于实时回显。
  *
  * @param row UI 行
@@ -226,11 +374,12 @@ function pathOf(row: Row): string {
 
 /**
  * 行 → 扁平对象；空目标、空取值的行整行跳过。
+ * <p>只展示、还没配来源的定义槽不会写成空字符串键：空串会挡住 AGENT 无映射时的兜底取值。
  *
  * @return 目标字段 → 路径
  */
 function build(): Record<string, string> {
-  return buildMappingObject(rows.value, context.value)
+  return dropEmptyInputMapping(buildMappingObject(rows.value, context.value))
 }
 
 /** 上抛当前映射；父层直接覆盖 config.inputMapping */
@@ -240,32 +389,41 @@ function emitRows() {
 
 /* ============ 下拉选项与交互 ============ */
 
-/** 来源下拉的绑定值：kind 与节点 id 合成一个字符串 */
+/** 来源下拉的绑定值：kind 与节点 id 合成一个字符串；未选择返回空串走占位 */
 function sourceValue(row: Row): string {
+  if (row.sourceKind === 'unset') {
+    return ''
+  }
   if (row.sourceKind === 'node') {
-    return `node:${row.sourceNodeId ?? ''}`
+    return row.sourceNodeId ? `node:${row.sourceNodeId}` : ''
   }
   return row.sourceKind
 }
 
 /**
  * 切换来源。
- * <p>换节点时字段必须清空：不同节点的输出字段互不通用，留着旧字段会拼出一条取不到值的路径。
+ * <p>换来源时字段必须清空：不同节点的输出字段互不通用，留着旧字段会拼出一条取不到值的路径。
  *
  * @param row   UI 行
  * @param value 下拉值（kind 或 node:&lt;id&gt;）
  */
 function onSourceChange(row: Row, value: string) {
   const text = String(value ?? '')
+  if (!text) {
+    row.sourceKind = 'unset'
+    row.sourceNodeId = undefined
+    row.sourceField = ''
+    emitRows()
+    return
+  }
   if (text.startsWith('node:')) {
     row.sourceKind = 'node'
     row.sourceNodeId = text.slice(5)
-    row.sourceField = ''
   } else {
     row.sourceKind = text as MappingUiRow['sourceKind']
     row.sourceNodeId = undefined
-    row.sourceField = ''
   }
+  row.sourceField = ''
   emitRows()
 }
 
@@ -275,59 +433,88 @@ function onFieldChange(row: Row, value: string) {
   emitRows()
 }
 
-/** 字段下拉占位文案：随来源变化，提示默认取值 */
+/** 手写常量 / 高级路径：原文上抛，路径模型不变 */
+function onTextChange(row: Row, value: string) {
+  row.text = String(value ?? '')
+  emitRows()
+}
+
+/**
+ * 高级面板里直接改路径。
+ * <p>能归一成运行入参 / 前置节点 / 流程变量就回到点选；否则按固定值原文保留，
+ * 保存结构仍是「目标字段 → 路径字符串」。
+ *
+ * @param row   UI 行
+ * @param value 高级面板里输入的路径 / 常量
+ */
+function onPathChange(row: Row, value: string) {
+  const next = applyMappingPathEdit(row, value, context.value)
+  row.sourceKind = next.sourceKind
+  row.sourceNodeId = next.sourceNodeId
+  row.sourceField = next.sourceField
+  row.text = next.text
+  emitRows()
+}
+
+/** 字段下拉占位文案：随来源变化，提示留空的含义 */
 function fieldPlaceholder(row: Row): string {
+  if (row.sourceKind === 'unset') {
+    return '先选择来源'
+  }
   if (row.sourceKind === 'node') {
     return '选择输出字段（留空取整段输出）'
   }
   if (row.sourceKind === 'vars') {
-    return '输入变量名，如 orderId'
+    return '输入变量名（留空取整个变量集合）'
   }
-  return '选择入参字段（留空取整个 $.input）'
+  if (row.sourceKind === 'custom') {
+    return '常量文本，或 $. 开头的路径'
+  }
+  return '选择入参字段（留空取整个入参）'
 }
 
-/**
- * 字段下拉项。
- * <p>节点字段来源优先级：该节点 outputMapping 的键（真实产出结构）→ 无映射时只有 text
- * （后端 shapeOutput 未配置映射时保留 {text}）。当前值不在列表里时补一条，
- * 保证回显或手输的嵌套路径不会显示成空白。
- *
- * @param row UI 行
- * @return 下拉项，value 即 sourceField
- */
-function fieldOptions(row: Row): Array<{ label: string; value: string }> {
-  const options: Array<{ label: string; value: string }> = []
-  if (row.sourceKind === 'node') {
-    const node = sourceById.value.get(row.sourceNodeId ?? '')
-    const code = node?.code ?? ''
-    options.push({ label: `整段输出 $.outputs.${code}`, value: '' })
-    const keys = node?.outputKeys?.length ? node.outputKeys : ['text']
-    keys.forEach((key) => options.push({ label: `$.outputs.${code}.${key}`, value: key }))
-  } else if (row.sourceKind === 'vars') {
-    options.push({ label: '整个变量集合 $.vars', value: '' })
-  } else {
-    options.push({ label: '整个入参 $.input', value: '' })
-    INPUT_FIELD_HINTS.forEach((key) => options.push({ label: `$.input.${key}`, value: key }))
-  }
-  // 当前值（回显字段 / 手输嵌套路径）不在候选里时补一条，否则下拉显示不出语义
-  if (row.sourceField && !options.some((item) => item.value === row.sourceField)) {
-    options.push({ label: row.sourceField, value: row.sourceField })
-  }
-  return options
-}
-
-/** 追加一行空映射；目标是空的，用户填完目标与来源后才会落库 */
+/** 追加一行空映射；来源留空，用户填完目标与来源后才会落库 */
 function addRow() {
-  rows.value.push(makeRow({ target: '', sourceKind: 'input', sourceField: '' }))
+  rows.value.push(makeRow({ target: '' }))
 }
 
-/** 删除一行并立即上抛，避免父层仍持有被删的键 */
+/** 删除一行并立即上抛，避免父层仍持有被删的键；定义槽不允许删除 */
 function removeRow(index: number) {
+  const row = rows.value[index]
+  if (!row || row.slot) {
+    return
+  }
   rows.value.splice(index, 1)
   emitRows()
 }
 
+/**
+ * 按同名带入：只补「目标已填、来源还空着」的行，用前置节点 outputKeys 同名命中。
+ * <p>已有来源的行不覆盖；不新增行；结果用条数提示，不静默改动。
+ */
+function fillSameName() {
+  const plan = planSameNameFill(rows.value, props.sources)
+  if (!plan.length) {
+    ElMessage.info('没有可带入的同名字段：只补还没选来源的行。')
+    return
+  }
+  plan.forEach((item) => {
+    const row = rows.value[item.rowIndex]
+    if (!row) {
+      return
+    }
+    row.sourceKind = 'node'
+    row.sourceNodeId = item.sourceNodeId
+    row.sourceField = item.sourceField
+  })
+  emitRows()
+  ElMessage.success(`已按同名补了 ${plan.length} 项；已有来源的行没有改动。`)
+}
+
 /* ============ 同步 ============ */
+
+/** 首次回填要无条件建行（外部空映射与初始空行等价，不能靠 sameMapping 跳过） */
+let initialized = false
 
 /**
  * 外部回填（切换节点、载入草稿、保存后刷新）时重建行。
@@ -336,14 +523,28 @@ function removeRow(index: number) {
 watch(
   () => props.modelValue,
   (next) => {
+    if (!initialized) {
+      initialized = true
+      rebuildRows(next || {})
+      return
+    }
     const incoming = next || {}
     if (sameMapping(incoming, build())) {
       return
     }
-    rows.value = Object.entries(incoming).map(([target, value]) => parseRow(target, String(value ?? '')))
+    rebuildRows(incoming)
   },
   { immediate: true }
 )
+
+/**
+ * 定义变化（工具 schema 到位 / 换绑工具 / AGENT 默认键变化）后重整行。
+ * <p>选项是异步加载的：草稿先到时还没有工具定义，schema 到位后这里补出槽位，
+ * 不主动 emit，避免一次无关重渲染就把草稿标记成已修改。
+ */
+watch(currentSlotSignature, () => {
+  syncSlotRows()
+})
 
 /**
  * 拓扑或输出字段变化后，把之前「节点还没加载出来」而落到 custom 的 $.outputs 行升级成节点行。
@@ -395,6 +596,72 @@ watch(structureKey, () => {
   margin-bottom: 6px;
 }
 
+/* 手填行的目标字段：占满剩余宽度，不被右侧徽标 / 删除按钮挤没 */
+.ime__target {
+  flex: 1;
+  min-width: 0;
+}
+
+/* 定义槽：只读展示，参数名 + title + 必填标记一行内收 */
+.ime__slot {
+  display: flex;
+  flex: 1;
+  align-items: baseline;
+  gap: 6px;
+  min-width: 0;
+}
+
+.ime__slot-key {
+  overflow: hidden;
+  color: var(--ah-text);
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 12px;
+  font-weight: 600;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.ime__slot-title {
+  overflow: hidden;
+  color: var(--ah-text-secondary);
+  font-size: 12px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.ime__slot-required {
+  flex: none;
+  padding: 0 5px;
+  border-radius: 4px;
+  background: var(--ah-danger-tint);
+  color: var(--ah-danger);
+  font-size: 11px;
+  line-height: 16px;
+}
+
+/* 工具定义里的说明：原样展示，不翻译；过长时换行 */
+.ime__slot-desc {
+  margin-bottom: 4px;
+  color: var(--ah-text-faint);
+  font-size: 12px;
+  line-height: 1.5;
+  word-break: break-word;
+}
+
+/* 换绑工具后遗留的手填行：标出来但保留可删，不静默丢用户配置 */
+.ime__undefined {
+  margin-bottom: 4px;
+  color: var(--ah-warning);
+  font-size: 11px;
+  line-height: 1.5;
+}
+
+/* 必填槽还没配来源：整行给一条淡红描边，和发布拦截口径一致 */
+.ime__row--missing {
+  border-color: var(--ah-danger-tint);
+  box-shadow: 0 0 0 1px var(--ah-danger-tint) inset;
+}
+
 .ime__idx {
   flex: none;
   width: 16px;
@@ -434,42 +701,14 @@ watch(structureKey, () => {
   opacity: 0.5;
 }
 
-.ime__line {
+.ime__actions {
   display: flex;
   align-items: center;
-  gap: 6px;
-  margin-top: 5px;
+  gap: 12px;
 }
 
-/* 固定标签列：三个控件左边缘对齐，扫读时不会左右跳 */
-.ime__label {
-  flex: none;
-  width: 28px;
-  color: var(--ah-text-faint);
-  font-size: 12px;
-  line-height: 1.4;
-}
-
-.ime__control {
-  flex: 1;
-  min-width: 0;
-}
-
-.ime__path {
-  margin-top: 5px;
-  padding: 2px 6px;
-  overflow: hidden;
-  border-radius: 4px;
-  background: var(--ah-neutral-tint);
-  color: var(--ah-text-secondary);
-  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
-  font-size: 12px;
-  line-height: 1.6;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.ime__add {
+.ime__add,
+.ime__same {
   padding: 0;
   font-size: 12px;
 }
