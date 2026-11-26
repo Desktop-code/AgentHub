@@ -164,6 +164,43 @@ public final class WorkflowOutcomeTexts {
     }
 
     /**
+     * 去掉上一轮卡片正文里的平台等待提示，只留用户已经看到的问句与节点产出。
+     *
+     * <p>等待提示由收口追加在正文之后（{@link #replyWaitingText} / {@link #waitingText}）。
+     * 续跑后的新卡片会接着这段正文继续长；若把提示一起带上，用户会看到「节点已完成」的
+     * 同一张卡里仍写着「正在等待…」。只按段落删，不改中间文字。
+     *
+     * <p>用于调试按 run 续跑时的正文种子；判断口径与工作台按会话续跑保持一致，
+     * 两处都删「工作流…等待…」这一整段。
+     *
+     * @param answer 上一轮卡片正文；可空
+     * @return 去掉等待提示后的正文；全是提示时为空串
+     */
+    public static String withoutWaitingHint(String answer) {
+        if (answer == null || answer.isBlank()) {
+            return "";
+        }
+        StringBuilder kept = new StringBuilder();
+        for (String paragraph : answer.split("\\n\\s*\\n")) {
+            String text = paragraph == null ? "" : paragraph.trim();
+            if (text.isEmpty()) {
+                continue;
+            }
+            // 回复等待与人工等待都是平台追加的整段提示，不属于下一轮还要显示的正文
+            boolean hint = text.startsWith("工作流")
+                    && (text.contains("等待你的回复") || text.contains("等待人工处理"));
+            if (hint) {
+                continue;
+            }
+            if (kept.length() > 0) {
+                kept.append("\n\n");
+            }
+            kept.append(text);
+        }
+        return kept.toString().trim();
+    }
+
+    /**
      * 未结束 run 的防重提示：上一轮仍在跑 / 等人工时不允许再开第二 run。
      *
      * @param label 工作流称呼（带「」）

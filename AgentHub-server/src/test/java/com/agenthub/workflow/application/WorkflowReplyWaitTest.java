@@ -88,10 +88,12 @@ class WorkflowReplyWaitTest {
                 store.runs(), engine, codec, assembler, () -> 1L, new OperatorStub(),
                 (module, action, targetType, targetId, summary) -> {
                 }, store.defs(), json, new RecordingTraceWriter(), new com.agenthub.workflow.support.RecordingWorkbenchTimeline());
+        WorkflowTrialDispatcher dispatcher = new WorkflowTrialDispatcher(engine, store.runs(), Runnable::run);
         service = new WorkflowRunAppService(store.runs(), store.nodeRuns(), store.humanTasks(),
                 new EmptyReleaseRepository(), store.defs(), () -> 1L, new OperatorStub(), codec, engine,
                 assembler, human, (module, action, targetType, targetId, summary) -> {
-                }, properties, json, new RecordingTraceWriter());
+                }, properties, json, new RecordingTraceWriter(), dispatcher,
+                new EmptyDraftRepository(), null);
     }
 
     /** 单测用操作人：固定返回用户 7，不做任何 Sa-Token 调用。 */

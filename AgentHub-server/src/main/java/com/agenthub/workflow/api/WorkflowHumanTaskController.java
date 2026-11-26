@@ -6,7 +6,6 @@ import com.agenthub.workflow.api.dto.WorkflowHumanActReq;
 import com.agenthub.workflow.api.dto.WorkflowHumanTaskItemResp;
 import com.agenthub.workflow.api.dto.WorkflowRunDetailResp;
 import com.agenthub.workflow.application.WorkflowHumanTaskAppService;
-import com.agenthub.workflow.application.WorkflowRunAppService;
 import jakarta.validation.Valid;
 import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.PathVariable;
@@ -29,15 +28,15 @@ import java.util.List;
 public class WorkflowHumanTaskController {
 
     private final WorkflowHumanTaskAppService service;
-    private final WorkflowRunAppService runService;
+    private final WorkflowRunResponses responses;
 
     /**
-     * @param service    人工待办用例
-     * @param runService 详情 DTO 转换
+     * @param service   人工待办用例
+     * @param responses 详情响应（附卡片视图，与试跑详情同一份）
      */
-    public WorkflowHumanTaskController(WorkflowHumanTaskAppService service, WorkflowRunAppService runService) {
+    public WorkflowHumanTaskController(WorkflowHumanTaskAppService service, WorkflowRunResponses responses) {
         this.service = service;
-        this.runService = runService;
+        this.responses = responses;
     }
 
     /**
@@ -70,7 +69,7 @@ public class WorkflowHumanTaskController {
     public Result<WorkflowRunDetailResp> approve(@PathVariable Long id,
                                                  @Valid @RequestBody(required = false) WorkflowHumanActReq req) {
         String note = req == null ? null : req.getNote();
-        return Result.ok(runService.toResp(service.approve(id, note)));
+        return responses.ok(service.approve(id, note));
     }
 
     /**
@@ -85,6 +84,6 @@ public class WorkflowHumanTaskController {
     public Result<WorkflowRunDetailResp> reject(@PathVariable Long id,
                                                 @Valid @RequestBody(required = false) WorkflowHumanActReq req) {
         String note = req == null ? null : req.getNote();
-        return Result.ok(runService.toResp(service.reject(id, note)));
+        return responses.ok(service.reject(id, note));
     }
 }

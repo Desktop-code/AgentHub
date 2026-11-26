@@ -1,7 +1,8 @@
 /**
  * 工作流定义 / 草稿 / 校验 / 发布 / 试跑接口。所属域：workflow。
  * <p>定义路径前缀 /api/workflow/defs；试跑 /api/workflow/runs；人工待办 /api/workflow/human-tasks。
- * <p>试跑只绑已发布版本；权限码 workflow:run:trial、workflow:human:act 由后端注解拦截。
+ * <p>调试可按当前草稿跑（useDraft）；权限码 workflow:run:trial、workflow:human:act 由后端注解拦截。
+ * 切换默认发布与发布同码 workflow:def:publish。
  */
 import request from '@/utils/request'
 import type { PageResult, Result } from '@/types'
@@ -11,8 +12,10 @@ import type {
   WorkflowDraftResp,
   WorkflowGraph,
   WorkflowHumanTaskItem,
+  WorkflowReleaseActivateResult,
   WorkflowReleaseRow,
   WorkflowRunDetail,
+  WorkflowRunLiveCard,
   WorkflowRunSummary,
   WorkflowValidateResp
 } from '@/types/workflow'
@@ -69,9 +72,35 @@ export function saveWorkflowDraft(id: number, graph: WorkflowGraph, expectedUpda
   })
 }
 
-/** 校验当前草稿（以库里的草稿为准，前端需先保存） */
+/** 校验已保存的草稿（以库里的草稿为准） */
 export function validateWorkflow(id: number) {
   return request.post<Result<WorkflowValidateResp>>(`/api/workflow/defs/${id}/validate`)
+}
+
+/**
+ * 按画布此刻的图做发布口径校验，不落库。
+ *
+ * @param id 定义 id
+ * @param graph 画布上的 graph_json
+ */
+export function validateWorkflowGraph(id: number, graph: WorkflowGraph) {
+  return request.post<Result<WorkflowValidateResp>>(`/api/workflow/defs/${id}/validate`, graph)
+}
+
+/**
+ * 把草稿恢复成该已发布版本，并把默认发布指针指回去。不新增版本。
+ *
+ * @param id 定义 id
+ * @param releaseId 目标版本
+ * @param overwrite true 表示用户已确认覆盖未发布改动
+ * @param silent true 时不弹全局错误，调用方自己处理 409
+ */
+export function activateWorkflowRelease(id: number, releaseId: number, overwrite: boolean, silent = false) {
+  return request.post<Result<WorkflowReleaseActivateResult>>(
+    `/api/workflow/defs/${id}/releases/${releaseId}/activate`,
+    { overwrite },
+    { silent }
+  )
 }
 
 /** 发布当前草稿，生成不可变版本 */
@@ -85,14 +114,16 @@ export function listWorkflowReleases(id: number) {
 }
 
 /**
- * 发起试跑。只跑已发布版本；不传 releaseId 时后端用默认发布指针。
+ * 发起试跑。useDraft 为 true 时按当前已保存草稿跑，不绑发布版本。
+ * 不传 useDraft 时仍是旧口径：不传 releaseId 则用默认发布指针。
  *
- * @param data releaseId / workflowId / input 样例
+ * @param data releaseId / workflowId / useDraft / input 样例
  */
 export function startWorkflowTrial(data: {
   releaseId?: number
   workflowId: number
   useDefaultRelease?: boolean
+  useDraft?: boolean
   input: unknown
 }) {
   return request.post<Result<WorkflowRunDetail>>('/api/workflow/runs/trial', data)
@@ -103,9 +134,37 @@ export function getWorkflowRun(id: number) {
   return request.get<Result<WorkflowRunDetail>>(`/api/workflow/runs/${id}`)
 }
 
+/**
+ * 读取一次按 run 的调试直播快照。
+ *
+ * <p>运行中短轮询这里，卡片和节点状态都来自这条 run 自己的直播投影；
+ * 返回 {@code live=false} 时调用方退回 {@link getWorkflowRun} 的已落库卡片。
+ * 不创建工作台会话，也不读写会话事件流。
+ *
+ * <p>高频轮询用 silent：单次失败由调用方按「直播暂时不可用」退回详情，
+ * 不每 250ms 弹一条全局错误。
+ *
+ * @param id 试跑 run 主键
+ */
+export function getWorkflowRunLiveCard(id: number) {
+  return request.get<Result<WorkflowRunLiveCard>>(`/api/workflow/runs/${id}/live-card`, { silent: true })
+}
+
 /** 取消 run；已终态幂等返回 */
 export function cancelWorkflowRun(id: number) {
   return request.post<Result<WorkflowRunDetail>>(`/api/workflow/runs/${id}/cancel`)
+}
+
+/**
+ * 把一句回复送回这一条试跑并续跑。
+ *
+ * <p>不新建 run，不写工作台会话。选项点选传的是选项文案，与首页卡片同一口径。
+ *
+ * @param id 试跑 run 主键
+ * @param reply 下一句或选项文案
+ */
+export function replyWorkflowTrial(id: number, reply: string) {
+  return request.post<Result<WorkflowRunDetail>>(`/api/workflow/runs/${id}/reply`, { reply })
 }
 
 /** 某工作流最近 10 次 run */

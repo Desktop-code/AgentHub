@@ -1,6 +1,8 @@
 package com.agenthub.workflow.infra.persistence.entity;
 
+import com.baomidou.mybatisplus.annotation.FieldStrategy;
 import com.baomidou.mybatisplus.annotation.IdType;
+import com.baomidou.mybatisplus.annotation.TableField;
 import com.baomidou.mybatisplus.annotation.TableId;
 import com.baomidou.mybatisplus.annotation.TableName;
 import lombok.Data;
@@ -20,8 +22,18 @@ public class WorkflowRunEntity {
     private Long id;
     private Long tenantId;
     private Long workflowId;
+    /**
+     * 发布版本 id。按当前草稿调试时必须写成 NULL：
+     * 全局插入策略会跳过 null，列又曾经 NOT NULL，省略后插不进去或被默认成 1。
+     */
+    @TableField(insertStrategy = FieldStrategy.ALWAYS)
     private Long releaseId;
+    /** 发布版本号；草稿调试同样显式写 NULL，记录里才标得出「未发布」 */
+    @TableField(insertStrategy = FieldStrategy.ALWAYS)
     private Integer releaseVersion;
+    /** 草稿调试开始时的默认发布版本号快照；null=当时从未发布（或非草稿调试） */
+    @TableField(insertStrategy = FieldStrategy.ALWAYS)
+    private Integer draftBaseReleaseVersion;
     private String fingerprint;
     private String traceId;
     private String status;

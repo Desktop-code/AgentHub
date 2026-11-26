@@ -50,7 +50,8 @@ import java.util.Map;
  * 无外部出站的控制类节点（START / END / CONDITION / FORK / JOIN）的「算」在
  * {@link WorkflowNodeExecutors}，循环的计数、回边和超限出路在 {@link WorkflowLoopScheduler}，
  * 本类只负责分派、落库、发布与失败收口。
- * <p>线程模型：一次调用在请求线程内同步跑完（或停在 HUMAN），
+ * <p>线程模型：一次调用在<b>调用方线程</b>内同步跑完（或停在 HUMAN / 等待回复）。
+ * 工作台仍在请求线程调用；控制台试跑由后台池调用，本类不自己开线程。
  * FORK 分支按图顺序**顺序**执行而非真并发，语义上等待 JOIN 等齐。
  * <p>取消：协作式——每执行一个节点前重读 run 状态，发现 CANCELLED 立即退出。
  */

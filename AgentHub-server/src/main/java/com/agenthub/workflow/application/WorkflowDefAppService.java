@@ -12,27 +12,27 @@ import com.agenthub.workflow.api.dto.WorkflowDefUpdateReq;
 import com.agenthub.workflow.api.dto.WorkflowDraftResp;
 import com.agenthub.workflow.api.dto.WorkflowIssueResp;
 import com.agenthub.workflow.api.dto.WorkflowPublishReq;
+import com.agenthub.workflow.api.dto.WorkflowReleaseActivateReq;
+import com.agenthub.workflow.api.dto.WorkflowReleaseActivateResp;
 import com.agenthub.workflow.api.dto.WorkflowReleaseResp;
 import com.agenthub.workflow.api.dto.WorkflowValidateResp;
 import com.agenthub.workflow.domain.WorkflowConflictException;
 import com.agenthub.workflow.domain.enums.WorkflowDefStatus;
-import com.agenthub.workflow.domain.model.WorkflowBindingSnapshot;
 import com.agenthub.workflow.domain.model.WorkflowDef;
 import com.agenthub.workflow.domain.model.WorkflowDefQuery;
 import com.agenthub.workflow.domain.model.WorkflowDraft;
 import com.agenthub.workflow.domain.model.WorkflowGraph;
-import com.agenthub.workflow.domain.model.WorkflowIssue;
 import com.agenthub.workflow.domain.model.WorkflowRelease;
 import com.agenthub.workflow.domain.model.WorkflowValidationResult;
 import com.agenthub.workflow.domain.repository.WorkflowDefRepository;
 import com.agenthub.workflow.domain.repository.WorkflowDraftRepository;
 import com.agenthub.workflow.domain.repository.WorkflowReleaseRepository;
 import com.agenthub.workflow.domain.service.WorkflowFingerprint;
-import com.agenthub.workflow.domain.service.WorkflowGraphValidator;
 import com.agenthub.workflow.domain.service.WorkflowRunLimits;
 import com.agenthub.workflow.domain.service.WorkflowTenantProvider;
 import com.agenthub.workflow.infra.WorkflowProperties;
 import com.fasterxml.jackson.databind.JsonNode;
+import com.fasterxml.jackson.databind.node.ObjectNode;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
@@ -67,7 +67,8 @@ public class WorkflowDefAppService {
     private final WorkflowTenantProvider tenantProvider;
     private final OperatorContext operatorContext;
     private final WorkflowGraphCodec codec;
-    private final WorkflowBindingResolver bindingResolver;
+    /** 校验 / 发布 / 调试入口共用的发布口径检查 */
+    private final WorkflowPublishCheck publishCheck;
     private final OperLogWriter operLogWriter;
     private final WorkflowProperties properties;
 
@@ -78,7 +79,7 @@ public class WorkflowDefAppService {
      * @param tenantProvider  当前租户
      * @param operatorContext 当前操作人
      * @param codec           图 JSON 解析
-     * @param bindingResolver 绑定快照
+     * @param publishCheck    发布口径的图检查（校验、发布、调试入口共用）
      * @param operLogWriter   操作日志（不写图正文）
      * @param properties      硬顶配置（max-nodes-per-graph）
      */
@@ -88,7 +89,7 @@ public class WorkflowDefAppService {
                                  WorkflowTenantProvider tenantProvider,
                                  OperatorContext operatorContext,
                                  WorkflowGraphCodec codec,
-                                 WorkflowBindingResolver bindingResolver,
+                                 WorkflowPublishCheck publishCheck,
                                  OperLogWriter operLogWriter,
                                  WorkflowProperties properties) {
         this.defs = defs;
@@ -97,7 +98,7 @@ public class WorkflowDefAppService {
         this.tenantProvider = tenantProvider;
         this.operatorContext = operatorContext;
         this.codec = codec;
-        this.bindingResolver = bindingResolver;
+        this.publishCheck = publishCheck;
         this.operLogWriter = operLogWriter;
         this.properties = properties;
     }
@@ -263,12 +264,23 @@ public class WorkflowDefAppService {
     public WorkflowValidateResp validate(Long id) {
         requireDef(id);
         WorkflowDraft draft = requireDraft(id);
-        WorkflowGraph graph = codec.parse(draft.getGraphJson());
-        WorkflowBindingSnapshot bindings = bindingResolver.resolve(graph);
-        WorkflowValidationResult result = WorkflowGraphValidator.validate(graph, bindings, true,
-                properties.effectiveMaxNodesPerGraph(), properties.effectiveMaxLoopIterations());
-        appendLimitIssues(graph, result);
-        return toValidateResp(result);
+        return toValidateResp(publishCheck.check(codec.parse(draft.getGraphJson())));
+    }
+
+    /**
+     * 校验调用方交来的图，不落库。
+     * <p>调试按钮要按画布此刻的编排检查，不能只读已经保存的草稿。
+     * 规则与 {@link #validate(Long)}、发布前检查相同。
+     *
+     * @param id    主键（只用来确认定义存在且属于当前租户）
+     * @param graph 画布此刻的 graph_json
+     * @return errors / warns / passed
+     * @throws BizException 图结构不合法，或定义不存在
+     */
+    public WorkflowValidateResp validateGraph(Long id, JsonNode graph) {
+        requireDef(id);
+        WorkflowGraph parsed = codec.parse(codec.write(graph));
+        return toValidateResp(publishCheck.check(parsed));
     }
 
     /**
@@ -284,10 +296,7 @@ public class WorkflowDefAppService {
         WorkflowDef def = requireDef(id);
         WorkflowDraft draft = requireDraft(id);
         WorkflowGraph graph = codec.parse(draft.getGraphJson());
-        WorkflowBindingSnapshot bindings = bindingResolver.resolve(graph);
-        WorkflowValidationResult result = WorkflowGraphValidator.validate(graph, bindings, true,
-                properties.effectiveMaxNodesPerGraph(), properties.effectiveMaxLoopIterations());
-        appendLimitIssues(graph, result);
+        WorkflowValidationResult result = publishCheck.check(graph);
         if (!result.passed()) {
             throw new BizException(ErrorCode.BAD_REQUEST, publishFailureMessage(result));
         }
@@ -321,6 +330,50 @@ public class WorkflowDefAppService {
     public List<WorkflowReleaseResp> releases(Long id) {
         requireDef(id);
         return releases.listByWorkflowId(id).stream().map(this::toReleaseResp).toList();
+    }
+
+    /**
+     * 把画布草稿恢复成某个已发布版本，并把默认发布指针指回该版本。
+     * <p>不新增版本号，也不改那条 release 的图。工作台之后的「运行」读这个指针，
+     * 已经跑完的 run 仍用自己建当时拷下的图。
+     * <p>草稿与当前默认发布的图不一致时，必须由调用方明确 overwrite，否则 409。
+     *
+     * @param id        工作流定义 id
+     * @param releaseId 要切过去的已发布版本
+     * @param req       overwrite=true 表示用户已确认覆盖未发布改动
+     * @return 版本元数据、该版的图、草稿新的更新时间
+     * @throws WorkflowConflictException 还有未发布改动且未确认覆盖
+     * @throws BizException              版本不存在或不属于该工作流
+     */
+    @Transactional
+    public WorkflowReleaseActivateResp activate(Long id, Long releaseId, WorkflowReleaseActivateReq req) {
+        WorkflowDef def = requireDef(id);
+        WorkflowRelease target = releases.findById(releaseId)
+                .orElseThrow(() -> new BizException(ErrorCode.NOT_FOUND, "发布版本不存在"));
+        if (!id.equals(target.getWorkflowId())) {
+            throw new BizException(ErrorCode.BAD_REQUEST, "发布版本不属于该工作流");
+        }
+        WorkflowDraft draft = requireDraft(id);
+        boolean overwrite = req != null && Boolean.TRUE.equals(req.getOverwrite());
+        // 未发布改动只存在于草稿：与当前默认发布的图不同（或还从未发布）就要先确认
+        if (!overwrite && hasUnpublishedChanges(def, draft)) {
+            throw new WorkflowConflictException(
+                    "画布上还有未发布的改动，确认后将覆盖为所选版本，并把线上默认切过去");
+        }
+        Long operatorId = operatorContext.requireUserId();
+        int touched = drafts.updateGraph(id, target.getGraphJson(), null, operatorId);
+        if (touched == 0) {
+            throw new BizException(ErrorCode.NOT_FOUND, "工作流草稿不存在");
+        }
+        // 只移动默认指针，不插入新的 release，版本号保持原样
+        defs.markPublished(id, def.getTenantId(), target.getId(), operatorId);
+        operLogWriter.write("workflow", "def_activate", "workflow_release", String.valueOf(target.getId()),
+                "切换默认发布 code=" + def.getCode() + " v" + target.getVersion());
+        WorkflowDraft fresh = requireDraft(id);
+        WorkflowReleaseActivateResp resp = toActivateResp(target);
+        resp.setGraph(codec.read(target.getGraphJson()));
+        resp.setDraftUpdateTime(fresh.getUpdateTime());
+        return resp;
     }
 
     /**
@@ -386,14 +439,37 @@ public class WorkflowDefAppService {
     }
 
     /**
-     * 把运行时限问题并入校验 / 发布的 errors（走同一份校验结果，页面能看到条目而不是只有一句 toast）。
-     *
-     * @param graph  草稿图
-     * @param result 图校验结果（原地追加）
+     * 草稿相对当前线上版本还有没有没发布的改动。
+     * <p>从未发布，或默认发布记录缺失，都算还有未发布内容，切换前必须确认。
+     * 只比节点、连线和时限；视口平移不算改动。
      */
-    private void appendLimitIssues(WorkflowGraph graph, WorkflowValidationResult result) {
-        for (String message : WorkflowRunLimits.issues(graph, properties.effectiveWallMs())) {
-            result.getErrors().add(new WorkflowIssue("RUN_LIMITS_INVALID", message, null, null));
+    private boolean hasUnpublishedChanges(WorkflowDef def, WorkflowDraft draft) {
+        if (def.getDefaultReleaseId() == null) {
+            return true;
+        }
+        WorkflowRelease current = releases.findById(def.getDefaultReleaseId()).orElse(null);
+        if (current == null) {
+            return true;
+        }
+        return !sameCanvas(draft.getGraphJson(), current.getGraphJson());
+    }
+
+    /**
+     * 两份图去掉视口后是否相同。解析失败视为不同，避免静默覆盖一份读不出来的草稿。
+     */
+    private boolean sameCanvas(String left, String right) {
+        try {
+            JsonNode a = codec.read(left);
+            JsonNode b = codec.read(right);
+            if (a instanceof ObjectNode object) {
+                object.remove("viewport");
+            }
+            if (b instanceof ObjectNode object) {
+                object.remove("viewport");
+            }
+            return a.equals(b);
+        } catch (RuntimeException ex) {
+            return false;
         }
     }
 
@@ -407,6 +483,18 @@ public class WorkflowDefAppService {
 
     private WorkflowReleaseResp toReleaseResp(WorkflowRelease release) {
         WorkflowReleaseResp resp = new WorkflowReleaseResp();
+        resp.setId(release.getId());
+        resp.setWorkflowId(release.getWorkflowId());
+        resp.setVersion(release.getVersion());
+        resp.setFingerprint(release.getFingerprint());
+        resp.setPublishNote(release.getPublishNote());
+        resp.setPublishedBy(release.getPublishedBy());
+        resp.setPublishTime(release.getPublishTime());
+        return resp;
+    }
+
+    private WorkflowReleaseActivateResp toActivateResp(WorkflowRelease release) {
+        WorkflowReleaseActivateResp resp = new WorkflowReleaseActivateResp();
         resp.setId(release.getId());
         resp.setWorkflowId(release.getWorkflowId());
         resp.setVersion(release.getVersion());

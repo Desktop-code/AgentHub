@@ -52,6 +52,9 @@ public class AsyncConfig implements AsyncConfigurer {
     /** 记忆召回（Embedding / Rerank / 向量检索）池线程名前缀 */
     private static final String MEMORY_RECALL_THREAD_PREFIX = "memory-recall-";
 
+    /** 工作流调试后台调度池线程名前缀 */
+    private static final String WORKFLOW_TRIAL_THREAD_PREFIX = "wf-trial-";
+
     /**
      * Router 并行子 Agent 执行池。
      * <p>
@@ -190,6 +193,28 @@ public class AsyncConfig implements AsyncConfigurer {
         executor.setQueueCapacity(100);
         executor.setThreadNamePrefix(MEMORY_RECALL_THREAD_PREFIX);
         // 池满即降级：绝不把召回出站退回请求线程（那会让超时上限失效）
+        executor.setRejectedExecutionHandler(new ThreadPoolExecutor.AbortPolicy());
+        executor.setDaemon(true);
+        executor.initialize();
+        return executor;
+    }
+
+    /**
+     * 工作流调试调度池。
+     *
+     * <p>用途：试跑 run 落库后把 {@code WorkflowEngine.execute} 挪出请求线程，
+     * 调用方先拿到 runId 再轮询。一次执行会占住线程直到终态或等待，因此池要小、
+     * 队列有界。拒绝策略用 Abort：退回请求线程会把「先返回」重新堵死。
+     *
+     * @return 有界队列（32）+ Abort 的执行器，核心 2 / 最大 4
+     */
+    @Bean("workflowTrialExecutor")
+    public ThreadPoolTaskExecutor workflowTrialExecutor() {
+        ThreadPoolTaskExecutor executor = new ThreadPoolTaskExecutor();
+        executor.setCorePoolSize(2);
+        executor.setMaxPoolSize(4);
+        executor.setQueueCapacity(32);
+        executor.setThreadNamePrefix(WORKFLOW_TRIAL_THREAD_PREFIX);
         executor.setRejectedExecutionHandler(new ThreadPoolExecutor.AbortPolicy());
         executor.setDaemon(true);
         executor.initialize();

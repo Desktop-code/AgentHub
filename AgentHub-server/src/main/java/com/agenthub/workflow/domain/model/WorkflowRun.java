@@ -6,8 +6,10 @@ import java.time.LocalDateTime;
 
 /**
  * 一次工作流运行实例。所属域：workflow 的 domain。对应表 workflow_run。
- * <p>执行真源是 {@link #graphJson}：建 run 时从 workflow_release 拷贝，
+ * <p>执行真源是 {@link #graphJson}：建 run 时从发布快照或当时的草稿拷贝，
  * 之后发布指针怎么变都不影响已创建的实例。
+ * <p>按当前草稿调试时 {@link #releaseId} 与 {@link #releaseVersion} 都为空，
+ * 不插入 workflow_release，也不改默认发布指针。
  * <p>状态迁移不允许直接 set 后入库：必须经 {@code WorkflowStateMachine} 校验，
  * 由 {@code WorkflowRunRepository#updateStatus} 持久化。
  */
@@ -20,10 +22,17 @@ public class WorkflowRun {
     private Long tenantId;
     /** workflow_def.id */
     private Long workflowId;
-    /** workflow_release.id */
+    /** workflow_release.id；按当前草稿调试时为空 */
     private Long releaseId;
-    /** 发布版本号，冗余便于排障 */
+    /** 发布版本号；按当前草稿调试时为空，记录展示「未发布」 */
     private Integer releaseVersion;
+    /**
+     * 开始这次未发布调试时，该定义的默认发布版本号（快照）。
+     *
+     * <p>只对按草稿调试有意义：记录列表要能显示「当时默认 vN + 未发布」，
+     * 之后又发布了新版也不改写这条历史。从未发布过、或非草稿调试时为空。
+     */
+    private Integer draftBaseReleaseVersion;
     /** 依赖指纹 */
     private String fingerprint;
     /** 预留 trace 标识；本刀不写 obs span */

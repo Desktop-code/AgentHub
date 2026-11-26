@@ -25,14 +25,18 @@ import com.agenthub.workflow.domain.repository.WorkflowNodeRunRepository;
 import com.agenthub.workflow.domain.repository.WorkflowRunRepository;
 import com.agenthub.workflow.domain.service.WorkflowAssigneeRule;
 import com.agenthub.workflow.domain.service.WorkflowOutcomeTexts;
+import com.agenthub.workflow.domain.service.WorkflowRunListener;
 import com.agenthub.workflow.domain.service.WorkflowStateMachine;
 import com.agenthub.workflow.domain.service.WorkflowTenantProvider;
 import com.agenthub.workflow.domain.service.WorkflowTraceWriter;
+import com.agenthub.workflow.domain.service.WorkflowTrialLive;
 import com.agenthub.workflow.domain.service.WorkbenchTimelinePort;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.springframework.beans.factory.ObjectProvider;
+import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.stereotype.Service;
 
 import java.time.LocalDateTime;
@@ -71,8 +75,15 @@ public class WorkflowHumanTaskAppService {
     private final WorkflowTraceWriter traces;
     /** 工作台时间线端口（刀5B）：人工恢复跑到终态后，把结果主动追写回原会话 */
     private final WorkbenchTimelinePort workbenchTimeline;
+    /**
+     * 调试直播挂载口：人工通过 / 驳回续跑时也把过程接回同一条 TRIAL 运行。
+     * <p>工作台 run 的 open 返回空，这里不会碰会话直播。
+     */
+    private final ObjectProvider<WorkflowTrialLive> trialLive;
 
     /**
+     * 单测构造：不接直播。
+     *
      * @param humanTasks      待办仓储
      * @param nodeRuns        节点运行态
      * @param runs            run 仓储
@@ -100,6 +111,41 @@ public class WorkflowHumanTaskAppService {
                                        ObjectMapper json,
                                        WorkflowTraceWriter traces,
                                        WorkbenchTimelinePort workbenchTimeline) {
+        this(humanTasks, nodeRuns, runs, engine, codec, assembler, tenantProvider, operatorContext,
+                operLogWriter, defs, json, traces, workbenchTimeline, null);
+    }
+
+    /**
+     * @param humanTasks      待办仓储
+     * @param nodeRuns        节点运行态
+     * @param runs            run 仓储
+     * @param engine          调度引擎（批准后续跑）
+     * @param codec           图解析（取 HUMAN 节点出边）
+     * @param assembler       详情组装
+     * @param tenantProvider  当前租户
+     * @param operatorContext 当前操作人
+     * @param operLogWriter   操作日志
+     * @param defs            工作流定义（待办列表展示工作流名）
+     * @param json            全站 ObjectMapper
+     * @param traces          工作流埋点
+     * @param workbenchTimeline 工作台时间线（人工恢复后追写结果）；无工作台会话时不写
+     * @param trialLive       调试试跑直播挂载口；可空
+     */
+    @Autowired
+    public WorkflowHumanTaskAppService(WorkflowHumanTaskRepository humanTasks,
+                                       WorkflowNodeRunRepository nodeRuns,
+                                       WorkflowRunRepository runs,
+                                       WorkflowEngine engine,
+                                       WorkflowGraphCodec codec,
+                                       WorkflowRunAssembler assembler,
+                                       WorkflowTenantProvider tenantProvider,
+                                       OperatorContext operatorContext,
+                                       OperLogWriter operLogWriter,
+                                       WorkflowDefRepository defs,
+                                       ObjectMapper json,
+                                       WorkflowTraceWriter traces,
+                                       WorkbenchTimelinePort workbenchTimeline,
+                                       ObjectProvider<WorkflowTrialLive> trialLive) {
         this.humanTasks = humanTasks;
         this.nodeRuns = nodeRuns;
         this.runs = runs;
@@ -113,6 +159,7 @@ public class WorkflowHumanTaskAppService {
         this.json = json;
         this.traces = traces;
         this.workbenchTimeline = workbenchTimeline;
+        this.trialLive = trialLive;
     }
 
     /**
@@ -441,6 +488,76 @@ public class WorkflowHumanTaskAppService {
     }
 
     /**
+     * 人工通过 / 驳回带错误边续跑时挂上调试直播；工作台 run 的实现返回空，行为不变。
+     *
+     * @param run        已回到 RUNNING 的 run
+     * @param operatorId 操作人
+     */
+    private void executeWithLive(WorkflowRun run, long operatorId) {
+        WorkflowTrialLive live = liveOrNull();
+        WorkflowRunListener listener = openLive(live, run);
+        try {
+            engine.execute(run, operatorId, listener);
+        } finally {
+            // 同线程成对收口：最后一帧按库里终态落定，节点过程范围同时释放
+            if (live != null && listener != null) {
+                finishLive(run.getId());
+            }
+        }
+    }
+
+    /**
+     * @return 直播实现；未装配时为空
+     */
+    private WorkflowTrialLive liveOrNull() {
+        if (trialLive == null) {
+            return null;
+        }
+        try {
+            return trialLive.getIfAvailable();
+        } catch (RuntimeException ex) {
+            log.warn("调试直播实现不可用 type={}", ex.getClass().getSimpleName());
+            return null;
+        }
+    }
+
+    /**
+     * 挂调试直播观察者；失败按「不接直播」继续，不影响人工结果。
+     *
+     * @param live 直播实现；可空
+     * @param run  运行实例
+     * @return 观察者；不接时为空
+     */
+    private WorkflowRunListener openLive(WorkflowTrialLive live, WorkflowRun run) {
+        if (live == null) {
+            return null;
+        }
+        try {
+            return live.open(run, null);
+        } catch (RuntimeException ex) {
+            log.warn("调试直播挂载失败 runId={} type={}", run.getId(), ex.getClass().getSimpleName());
+            return null;
+        }
+    }
+
+    /**
+     * 按库收口调试直播。没有对应条目时实现方会安全空跑。
+     *
+     * @param runId 运行主键
+     */
+    private void finishLive(Long runId) {
+        WorkflowTrialLive live = liveOrNull();
+        if (live == null || runId == null) {
+            return;
+        }
+        try {
+            live.finish(runId);
+        } catch (RuntimeException ex) {
+            log.warn("调试直播收口失败 runId={} type={}", runId, ex.getClass().getSimpleName());
+        }
+    }
+
+    /**
      * 通过：节点 SUCCESS，按 NORMAL/COND/DEFAULT 出边继续；run 回 RUNNING 后同步续跑。
      */
     private void approveNode(WorkflowRun run, WorkflowNodeRun nodeRun, String note, long operatorId) {
@@ -456,7 +573,7 @@ public class WorkflowHumanTaskAppService {
         nodeRuns.update(nodeRun);
 
         resume(run, operatorId);
-        engine.execute(run, operatorId);
+        executeWithLive(run, operatorId);
     }
 
     /**
@@ -474,7 +591,7 @@ public class WorkflowHumanTaskAppService {
         if (!errorEdges.isEmpty()) {
             // 与普通节点失败同语义：错误边接管，run 继续
             resume(run, operatorId);
-            engine.execute(run, operatorId);
+            executeWithLive(run, operatorId);
             return;
         }
         WorkflowStateMachine.requireRun(WorkflowRunStatus.PAUSED_HUMAN, WorkflowRunStatus.FAILED);
@@ -485,6 +602,8 @@ public class WorkflowHumanTaskAppService {
                 null, run.getEndTime(), operatorId);
         // 其余未走分支统一收口，画布上不再出现「一直转圈」
         nodeRuns.cancelOpen(run.getId());
+        // 这条 FAILED 不经过引擎：把调试直播也按库收口，避免抽屉还停在上一段「等待人工」
+        finishLive(run.getId());
         // 这条 FAILED 不经过引擎：收口根 trace，避免 Trace 页一直显示进行中
         // 拒绝已被 accepted 落库，埋点失败不能把操作变红：只告警
         try {

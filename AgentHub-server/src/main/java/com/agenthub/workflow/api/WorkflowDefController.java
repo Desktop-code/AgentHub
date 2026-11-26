@@ -9,6 +9,8 @@ import com.agenthub.workflow.api.dto.WorkflowDefResp;
 import com.agenthub.workflow.api.dto.WorkflowDefUpdateReq;
 import com.agenthub.workflow.api.dto.WorkflowDraftResp;
 import com.agenthub.workflow.api.dto.WorkflowPublishReq;
+import com.agenthub.workflow.api.dto.WorkflowReleaseActivateReq;
+import com.agenthub.workflow.api.dto.WorkflowReleaseActivateResp;
 import com.agenthub.workflow.api.dto.WorkflowReleaseResp;
 import com.agenthub.workflow.api.dto.WorkflowValidateResp;
 import com.agenthub.workflow.application.WorkflowDefAppService;
@@ -133,14 +135,20 @@ public class WorkflowDefController {
     }
 
     /**
-     * 校验当前草稿；绑定缺失/停用按发布严格模式记 error。
+     * 校验图。请求体为空时检查已保存的草稿；带 graph_json 时检查画布此刻的编排，不落库。
+     * <p>规则与发布前检查相同。
      *
-     * @param id 主键
+     * @param id    主键
+     * @param graph 可选，画布此刻的图
      * @return errors / warns / passed
      */
     @SaCheckPermission(WorkflowPermissions.DEF_VIEW)
     @PostMapping("/{id:\\d+}/validate")
-    public Result<WorkflowValidateResp> validate(@PathVariable Long id) {
+    public Result<WorkflowValidateResp> validate(@PathVariable Long id,
+                                                @RequestBody(required = false) JsonNode graph) {
+        if (graph != null && !graph.isNull() && graph.isObject() && graph.size() > 0) {
+            return Result.ok(service.validateGraph(id, graph));
+        }
         return Result.ok(service.validate(id));
     }
 
@@ -166,5 +174,22 @@ public class WorkflowDefController {
     @GetMapping("/{id:\\d+}/releases")
     public Result<List<WorkflowReleaseResp>> releases(@PathVariable Long id) {
         return Result.ok(service.releases(id));
+    }
+
+    /**
+     * 把草稿恢复成该已发布版本，并把默认发布指针指回去。
+     * <p>不新增版本。权限与发布相同，因为会改线上默认。
+     *
+     * @param id        工作流定义 id
+     * @param releaseId 目标版本
+     * @param req       overwrite 表示用户已确认覆盖未发布改动
+     * @return 版本元数据与该版的图
+     */
+    @SaCheckPermission(WorkflowPermissions.DEF_PUBLISH)
+    @PostMapping("/{id:\\d+}/releases/{releaseId:\\d+}/activate")
+    public Result<WorkflowReleaseActivateResp> activate(@PathVariable Long id,
+                                                       @PathVariable Long releaseId,
+                                                       @RequestBody(required = false) WorkflowReleaseActivateReq req) {
+        return Result.ok(service.activate(id, releaseId, req));
     }
 }

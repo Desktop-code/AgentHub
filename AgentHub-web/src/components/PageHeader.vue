@@ -3,6 +3,10 @@
   <div class="ph-toolbar">
     <!-- 左侧：标题与说明同行；说明超长省略，避免把右侧按钮挤走 -->
     <div class="ph-left">
+      <!-- 标题左侧的返回 / 上级入口：由页面按需提供，不传则不占位 -->
+      <div v-if="$slots['title-leading']" class="ph-leading">
+        <slot name="title-leading" />
+      </div>
       <h2 class="ph-title">{{ title }}</h2>
       <span v-if="description" class="ph-desc" :title="description">{{ description }}</span>
     </div>
@@ -59,6 +63,14 @@ defineProps<{
   line-height: 1.4;
   color: var(--ah-text-primary);
   letter-spacing: 0;
+}
+
+/* 标题左侧入口与标题垂直居中，基线对齐会让按钮相对文字偏上 */
+.ph-leading {
+  display: inline-flex;
+  flex: none;
+  align-self: center;
+  align-items: center;
 }
 
 /* 单行省略：工具栏高度恒定，不因长文案换行而撑高 */
