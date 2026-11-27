@@ -3,6 +3,7 @@ package com.agenthub.workflow.domain.service;
 import com.agenthub.workflow.application.WorkflowGraphCodec;
 import com.agenthub.workflow.domain.model.WorkflowAgentBinding;
 import com.agenthub.workflow.domain.model.WorkflowBindingSnapshot;
+import com.agenthub.workflow.domain.model.WorkflowSubgraphBinding;
 import com.agenthub.workflow.domain.model.WorkflowToolBinding;
 import com.agenthub.workflow.domain.model.WorkflowValidationResult;
 import com.fasterxml.jackson.databind.ObjectMapper;
@@ -257,16 +258,121 @@ class WorkflowGraphValidatorTest {
     }
 
     @Test
-    @DisplayName("P1 节点（SUBGRAPH）本刀不支持，报 NODE_TYPE_P1_ONLY")
-    void p1NodeRejected() {
+    @DisplayName("SUBGRAPH 已解锁结构校验；未绑定时报 SUBGRAPH_BINDING_MISSING，不再报 P1")
+    void subgraphBindingMissingFails() {
         String json = graph(
                 node("n1", "start", "START", "{}") + "," +
                         node("n2", "sub", "SUBGRAPH", "{}") + "," +
                         node("n3", "end", "END", "{}"),
                 edge("e1", "n1", "n2", "NORMAL") + "," + edge("e2", "n2", "n3", "NORMAL"));
 
+        WorkflowValidationResult result = validate(json, WorkflowBindingSnapshot.empty(), true);
+
+        assertThat(codes(result.getErrors())).contains("SUBGRAPH_BINDING_MISSING");
+        assertThat(codes(result.getErrors())).doesNotContain("NODE_TYPE_P1_ONLY");
+    }
+
+    @Test
+    @DisplayName("SUBGRAPH 只绑工作流没选版本：报 SUBGRAPH_RELEASE_MISSING")
+    void subgraphReleaseMissingFails() {
+        String json = graph(
+                node("n1", "start", "START", "{}") + "," +
+                        node("n2", "sub", "SUBGRAPH", "{\"subWorkflowId\":5}") + "," +
+                        node("n3", "end", "END", "{}"),
+                edge("e1", "n1", "n2", "NORMAL") + "," + edge("e2", "n2", "n3", "NORMAL"));
+
         assertThat(codes(validate(json, WorkflowBindingSnapshot.empty(), true).getErrors()))
-                .contains("NODE_TYPE_P1_ONLY");
+                .contains("SUBGRAPH_RELEASE_MISSING");
+    }
+
+    @Test
+    @DisplayName("SUBGRAPH 版本失效（快照查不到）报 SUBGRAPH_RELEASE_NOT_FOUND")
+    void subgraphReleaseUnavailableFails() {
+        String json = graph(
+                node("n1", "start", "START", "{}") + "," +
+                        node("n2", "sub", "SUBGRAPH",
+                                "{\"subWorkflowId\":5,\"subReleaseId\":700}") + "," +
+                        node("n3", "end", "END", "{}"),
+                edge("e1", "n1", "n2", "NORMAL") + "," + edge("e2", "n2", "n3", "NORMAL"));
+
+        assertThat(codes(validate(json, WorkflowBindingSnapshot.empty(), true).getErrors()))
+                .contains("SUBGRAPH_RELEASE_NOT_FOUND");
+    }
+
+    @Test
+    @DisplayName("换绑工作流后残留旧版本 id：报 SUBGRAPH_RELEASE_MISMATCH")
+    void subgraphReleaseMismatchFails() {
+        String json = graph(
+                node("n1", "start", "START", "{}") + "," +
+                        node("n2", "sub", "SUBGRAPH",
+                                "{\"subWorkflowId\":6,\"subReleaseId\":700}") + "," +
+                        node("n3", "end", "END", "{}"),
+                edge("e1", "n1", "n2", "NORMAL") + "," + edge("e2", "n2", "n3", "NORMAL"));
+        WorkflowBindingSnapshot bindings = new WorkflowBindingSnapshot(Map.of(), Map.of(),
+                Map.of(700L, new WorkflowSubgraphBinding(700L, 5L, 3, "退款流程", List.of())));
+
+        assertThat(codes(validate(json, bindings, true).getErrors()))
+                .contains("SUBGRAPH_RELEASE_MISMATCH");
+    }
+
+    @Test
+    @DisplayName("SUBGRAPH 按钉死版本的 START 声明拦必填；配齐后放行")
+    void subgraphRequiredInputsFollowsPinnedRelease() {
+        String template = graph(
+                node("n1", "start", "START", "{}") + "," +
+                        node("n2", "sub", "SUBGRAPH",
+                                "{\"subWorkflowId\":5,\"subReleaseId\":700,\"inputMapping\":%s}") + "," +
+                        node("n3", "end", "END", "{}"),
+                edge("e1", "n1", "n2", "NORMAL") + "," + edge("e2", "n2", "n3", "NORMAL"));
+        WorkflowBindingSnapshot bindings = new WorkflowBindingSnapshot(Map.of(), Map.of(),
+                Map.of(700L, new WorkflowSubgraphBinding(700L, 5L, 3, "退款流程",
+                        List.of("orderNo", "reason"))));
+
+        WorkflowValidationResult missing = validate(String.format(template, "{}"), bindings, true);
+        assertThat(codes(missing.getErrors())).contains("SUBGRAPH_INPUT_REQUIRED_MISSING");
+        assertThat(missing.getErrors())
+                .filteredOn(issue -> "SUBGRAPH_INPUT_REQUIRED_MISSING".equals(issue.getCode()))
+                .singleElement()
+                .satisfies(issue -> {
+                    assertThat(issue.getMessage()).contains("退款流程", "v3", "orderNo", "reason");
+                    assertThat(issue.getNodeCode()).isEqualTo("sub");
+                });
+
+        // 空串等同没配，仍然拦
+        assertThat(codes(validate(String.format(template, "{\"orderNo\":\"  \"}"), bindings, true).getErrors()))
+                .contains("SUBGRAPH_INPUT_REQUIRED_MISSING");
+        // 配齐才放行
+        assertThat(validate(String.format(template,
+                "{\"orderNo\":\"$.input.orderNo\",\"reason\":\"$.input.reason\"}"), bindings, true).getErrors())
+                .isEmpty();
+    }
+
+    @Test
+    @DisplayName("AGENT 有入参声明时，必填槽未配来源拦发布；无声明不增加约束")
+    void agentDeclaredRequiredInputs() {
+        String template = graph(
+                node("n1", "start", "START", "{}") + "," +
+                        node("n2", "reply", "AGENT", "{\"agentId\":9,\"inputMapping\":%s}") + "," +
+                        node("n3", "end", "END", "{}"),
+                edge("e1", "n1", "n2", "NORMAL") + "," + edge("e2", "n2", "n3", "NORMAL"));
+        Map<Long, WorkflowAgentBinding> agents = new HashMap<>();
+        agents.put(9L, new WorkflowAgentBinding(9L, "写作助手", "REACT", 1, List.of("topic")));
+
+        WorkflowValidationResult missing = validate(String.format(template, "{}"), new WorkflowBindingSnapshot(agents, Map.of()), true);
+        assertThat(codes(missing.getErrors())).contains("AGENT_INPUT_REQUIRED_MISSING");
+        assertThat(missing.getErrors())
+                .filteredOn(issue -> "AGENT_INPUT_REQUIRED_MISSING".equals(issue.getCode()))
+                .singleElement()
+                .satisfies(issue -> assertThat(issue.getMessage()).contains("写作助手", "topic"));
+
+        assertThat(validate(String.format(template, "{\"topic\":\"$.input.query\"}"),
+                new WorkflowBindingSnapshot(agents, Map.of()), true).getErrors()).isEmpty();
+
+        // 无声明：即使 mapping 为空也不产生必填拦截
+        Map<Long, WorkflowAgentBinding> noDeclaration = Map.of(
+                9L, new WorkflowAgentBinding(9L, "写作助手", "REACT", 1));
+        assertThat(validate(String.format(template, "{}"),
+                new WorkflowBindingSnapshot(noDeclaration, Map.of()), true).getErrors()).isEmpty();
     }
 
     @Test

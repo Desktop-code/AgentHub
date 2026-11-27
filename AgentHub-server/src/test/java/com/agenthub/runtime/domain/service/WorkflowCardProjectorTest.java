@@ -423,6 +423,32 @@ class WorkflowCardProjectorTest {
                 .findFirst().orElseThrow().group());
     }
 
+    /** 子图内部节点写出的文件：挂到带范围前缀的内部节点上，不丢、不挂到父 SUBGRAPH 节点。 */
+    @Test
+    void subgraphNodeFileLandsOnInnerNode() {
+        RecordingProgress progress = new RecordingProgress();
+        WorkflowCardProjector projector = new WorkflowCardProjector("小游戏研发", "mini_game_dev",
+                progress, JSON);
+        WorkflowNode sub = node("n8", "impl_check", "实现和检查", "SUBGRAPH");
+        String prefix = "x8f9629e7_";
+        String innerCode = prefix + "impl_agent";
+        WorkflowNode inner = node(prefix + "n1", innerCode, "游戏实现", "AGENT");
+        projector.runStarted(List.of(node("n1", "start", "开始", "START"), sub,
+                node("n9", "end", "结束", "END")), List.of(pending("n8")));
+        projector.scopeStarted(new com.agenthub.workflow.domain.model.WorkflowScopeView(
+                "root/n8#1", "实现和检查 · v1", "impl_check", 1, List.of(inner),
+                Map.of(), List.of(row(prefix + "n1", "RUNNING", null)), Map.of(prefix + "n1", "impl_agent")));
+
+        projector.file(innerCode, "guess-number.html", 1234);
+        projector.nodeChanged(inner, row(prefix + "n1", "SUCCESS", "{\"text\":\"已写出页面\"}"));
+
+        WorkflowRunView.Node innerView = progress.last().nodes().stream()
+                .filter(node -> innerCode.equals(node.code())).findFirst().orElseThrow();
+        assertEquals(1, innerView.files().size(), "子图内部节点的文件行应挂在它自己身上");
+        assertEquals("guess-number.html", innerView.files().get(0).fileName());
+        assertEquals(1234, innerView.files().get(0).size());
+    }
+
     private static WorkflowEdge edge(String id, String source, String target, String type) {
         WorkflowEdge edge = new WorkflowEdge();
         edge.setId(id);

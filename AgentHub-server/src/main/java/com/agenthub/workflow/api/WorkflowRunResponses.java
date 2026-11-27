@@ -12,6 +12,8 @@ import com.agenthub.workflow.domain.model.WorkflowRunDetail;
 import com.agenthub.workflow.domain.service.WorkflowTenantProvider;
 import org.springframework.stereotype.Component;
 
+import java.util.Map;
+
 /**
  * 把 run 详情收成带卡片视图的响应。所属域：workflow 的 api。
  *
@@ -50,7 +52,17 @@ public class WorkflowRunResponses {
     public Result<WorkflowRunDetailResp> ok(WorkflowRunDetail detail) {
         WorkflowRunDetailResp resp = runs.toResp(detail);
         if (detail != null && detail.getRun() != null) {
-            resp.setCard(cards.payload(detail));
+            Map<String, Object> payload = cards.payload(detail);
+            /*
+             * 调试运行没有工作台会话事件骨架：节点文件清单只活在直播快照里，
+             * 按库现算只能算出状态与正文。刷新 / 换一条记录再看时若不补，
+             * 子图内部节点的文件行就整块消失（下载入口也跟着没了）。
+             * 只搬文件行，卡片其余字段仍以按库现算的为准。
+             */
+            WorkflowDebugLiveCards.Snapshot live = liveCards.snapshot(detail.getRun().getId());
+            boolean sameTenant = live != null && live.tenantId() != null
+                    && live.tenantId().longValue() == tenantProvider.currentTenantId();
+            resp.setCard(sameTenant ? cards.withLiveFiles(payload, live.view()) : payload);
         }
         return Result.ok(resp);
     }

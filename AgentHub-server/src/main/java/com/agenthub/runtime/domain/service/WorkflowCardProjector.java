@@ -6,6 +6,7 @@ import com.agenthub.workflow.domain.model.WorkflowEdge;
 import com.agenthub.workflow.domain.model.WorkflowNode;
 import com.agenthub.workflow.domain.model.WorkflowNodeRun;
 import com.agenthub.workflow.domain.model.WorkflowRun;
+import com.agenthub.workflow.domain.model.WorkflowScopeView;
 import com.agenthub.workflow.domain.service.WorkflowCardLimits;
 import com.agenthub.workflow.domain.service.WorkflowOutcomeTexts;
 import com.agenthub.workflow.domain.service.WorkflowRunListener;
@@ -79,6 +80,18 @@ public final class WorkflowCardProjector implements WorkflowRunListener, Workflo
     private final Map<String, String> loopGroupByNode = new LinkedHashMap<>();
     /** 节点 id → 图内位置：开始时刻相同时按图顺序排，未开始的节点排在最后 */
     private final Map<String, Integer> nodeIndexById = new LinkedHashMap<>();
+    /**
+     * 子图节点 id → 原始编码。子图运行行用带范围前缀的编码保证唯一，
+     * 卡片附注仍显示用户画布上的原编码，不把内部前缀暴露给用户。
+     */
+    private final Map<String, String> displayCodeByNodeId = new LinkedHashMap<>();
+    /**
+     * 子图节点 id → 父图 SUBGRAPH 节点编码。
+     *
+     * <p>直播的 {@code nodeChanged} 只拿到节点本身，必须靠这份映射把子图内部节点
+     * 继续归到同一个框下；否则状态一变就会从框里掉出来。
+     */
+    private final Map<String, String> scopeGroupByNodeId = new LinkedHashMap<>();
     /**
      * 节点视图键（{@code nodeId#attempt}）→ 该轮开始时刻（epoch 毫秒）。
      *
@@ -213,6 +226,8 @@ public final class WorkflowCardProjector implements WorkflowRunListener, Workflo
         liveOutput.clear();
         nodeFiles.clear();
         nodeStartMs.clear();
+        displayCodeByNodeId.clear();
+        scopeGroupByNodeId.clear();
         lastLiveEmitAt = 0L;
         // 续跑轮：上一轮已经点过的选项不再展示（用户已经选完了）
         choice = null;
@@ -281,6 +296,85 @@ public final class WorkflowCardProjector implements WorkflowRunListener, Workflo
             nodes.put(node.getId() + "#1", toView(node, null));
         }
         emitRunning();
+    }
+
+    /**
+     * 进入一层子图：把子图自己的节点补进同一张卡，并归到父图 SUBGRAPH 节点的框下。
+     *
+     * <p>只做展示：不改调度、不另开卡片 / 时间线。框的默认展开由前端负责，
+     * 这里只保证「子图还没跑到时没有节点」，不会提前摆出空框。
+     *
+     * @param scope 子图范围快照；可空
+     */
+    @Override
+    public void scopeStarted(WorkflowScopeView scope) {
+        if (scope == null || scope.nodes().isEmpty()) {
+            return;
+        }
+        registerScope(scope);
+        emitRunning();
+    }
+
+    /**
+     * 把一层子图的节点、循环分组和展示编码登记进同一份时间线。
+     *
+     * <p>子图节点的 id / code 已带范围前缀，与父图同名节点不会互相覆盖；
+     * 展示编码另存一份，步骤卡附注仍显示画布上的原编码。
+     *
+     * @param scope 子图范围
+     */
+    private void registerScope(WorkflowScopeView scope) {
+        String defaultGroup = scope.parentNodeCode();
+        // 子图内部的循环仍用同一套循环框；编码带范围前缀，不会和父图循环撞框
+        loopGroupByNode.putAll(WorkflowLoopCards.groupByNode(scope.nodes(),
+                WorkflowLoopCards.bodiesOf(scope.nodes(), scope.outgoing())));
+        for (WorkflowNode node : scope.nodes()) {
+            if (node == null || node.getId() == null) {
+                continue;
+            }
+            String displayCode = scope.displayCodeOf(node.getId());
+            if (!displayCode.isBlank()) {
+                displayCodeByNodeId.put(node.getId(), displayCode);
+            }
+            // 子图里的每个节点都记住外层框编码，直播覆盖同一视图键时不会把 group 丢掉
+            if (defaultGroup != null && !defaultGroup.isBlank()) {
+                scopeGroupByNodeId.put(node.getId(), defaultGroup);
+            }
+            if (!isBoundary(node) && !nodeIndexById.containsKey(node.getId())) {
+                nodeIndexById.put(node.getId(), nodeIndexById.size());
+            }
+        }
+        // 同一节点可能有多轮（循环内的子图），每一轮各占一条；同 key 以新行为准
+        Map<String, List<WorkflowNodeRun>> rowsByNode = new LinkedHashMap<>();
+        for (WorkflowNodeRun row : scope.rows()) {
+            if (row == null || row.getNodeId() == null) {
+                continue;
+            }
+            rowsByNode.computeIfAbsent(row.getNodeId(), ignored -> new ArrayList<>()).add(row);
+        }
+        for (WorkflowNode node : scope.nodes()) {
+            if (node == null || node.getId() == null || isBoundary(node)) {
+                continue;
+            }
+            List<WorkflowNodeRun> rows = rowsByNode.get(node.getId());
+            if (rows == null || rows.isEmpty()) {
+                nodes.putIfAbsent(node.getId() + "#1", toView(node, null, defaultGroup));
+                continue;
+            }
+            for (WorkflowNodeRun row : rows) {
+                int attempt = attemptOf(row);
+                String status = row.getStatus() == null ? "" : row.getStatus().trim().toUpperCase();
+                if (attempt > 1 && "PENDING".equals(status)) {
+                    continue;
+                }
+                String viewKey = node.getId() + "#" + attempt;
+                nodes.put(viewKey, toView(node, row, defaultGroup));
+                nodeStartMs.put(viewKey, startMsOf(row, attempt));
+                if (resume && "SUCCESS".equals(status)) {
+                    streamedNodes.add(viewKey);
+                }
+            }
+        }
     }
 
     @Override
@@ -451,13 +545,44 @@ public final class WorkflowCardProjector implements WorkflowRunListener, Workflo
     public WorkflowRunView persisted(WorkflowRun run, List<WorkflowNode> graphNodes,
                                      Map<String, List<WorkflowEdge>> outgoing,
                                      List<WorkflowNodeRun> rows, String tail) {
+        return persisted(run, graphNodes, outgoing, rows, List.of(), tail);
+    }
+
+    /**
+     * 只凭已落库的 run、节点行与已经还原的子图范围现算一张卡片。
+     *
+     * <p>子图范围按父 → 子的先序补进同一张卡；每层内部的循环仍用原有循环框。
+     *
+     * @param run        运行实例；可空时按失败卡片
+     * @param graphNodes 父图节点（SUBGRAPH 节点名已换成「被调工作流名 · vN」）
+     * @param outgoing   父图节点 id → 出边；可空则循环框不分组
+     * @param rows       该 run 的节点行（含各层子图与历史轮次）
+     * @param scopes     已还原的子图范围，父 → 子先序；可空
+     * @param tail       收口说明；可空
+     * @return 与直播收口同一形状的视图
+     */
+    public WorkflowRunView persisted(WorkflowRun run, List<WorkflowNode> graphNodes,
+                                     Map<String, List<WorkflowEdge>> outgoing,
+                                     List<WorkflowNodeRun> rows, List<WorkflowScopeView> scopes,
+                                     String tail) {
         runId = run == null ? null : run.getId();
         // 先按图铺节点：产出、循环框、状态都走直播的 toView，不另写一套映射
         runStarted(graphNodes, rows, outgoing);
+        // 子图范围只补「已经发生」的那几层：没跑到的子图不提前占空框
+        for (WorkflowScopeView scope : scopes == null ? List.<WorkflowScopeView>of() : scopes) {
+            registerScope(scope);
+        }
         Map<String, WorkflowNode> byId = new LinkedHashMap<>();
         for (WorkflowNode node : graphNodes == null ? List.<WorkflowNode>of() : graphNodes) {
             if (node != null && node.getId() != null) {
                 byId.put(node.getId(), node);
+            }
+        }
+        for (WorkflowScopeView scope : scopes == null ? List.<WorkflowScopeView>of() : scopes) {
+            for (WorkflowNode node : scope.nodes()) {
+                if (node != null && node.getId() != null) {
+                    byId.putIfAbsent(node.getId(), node);
+                }
             }
         }
         choice = null;
@@ -531,7 +656,7 @@ public final class WorkflowCardProjector implements WorkflowRunListener, Workflo
             nodes.put(key, new WorkflowRunView.Node(current.code(), current.name(), current.type(),
                     current.status(), current.note(), current.output(), current.steps(), current.files(),
                     replyText, current.attempt(), current.group(), current.loopRound(), current.loopTotal(),
-                    current.loopDecision()));
+                    current.loopDecision(), current.displayCode()));
         }
     }
 
@@ -559,7 +684,8 @@ public final class WorkflowCardProjector implements WorkflowRunListener, Workflo
         String nodeCode = null;
         String nodeName = null;
         if (active != null) {
-            nodeCode = active.getNodeCode();
+            // 子图节点行存的是范围前缀后的编码；时限行展示原始编码，不把内部前缀带给用户
+            nodeCode = displayCodeByNodeId.getOrDefault(active.getNodeId(), active.getNodeCode());
             WorkflowNode node = byId.get(active.getNodeId());
             nodeName = node == null || node.getName() == null || node.getName().isBlank()
                     ? nodeCode : node.getName();
@@ -615,12 +741,14 @@ public final class WorkflowCardProjector implements WorkflowRunListener, Workflo
                 || "WAITING_REPLY".equals(nodeStatus)) {
             return new WorkflowRunView.Node(node.code(), node.name(), node.type(), "CANCELLED", "已中断",
                     node.output(), node.steps(), node.files(), node.reply(), node.attempt(),
-                    node.group(), node.loopRound(), node.loopTotal(), node.loopDecision());
+                    node.group(), node.loopRound(), node.loopTotal(), node.loopDecision(),
+                    node.displayCode());
         }
         if ("PENDING".equals(nodeStatus)) {
             return new WorkflowRunView.Node(node.code(), node.name(), node.type(), "SKIPPED", "已跳过",
                     node.output(), node.steps(), node.files(), node.reply(), node.attempt(),
-                    node.group(), node.loopRound(), node.loopTotal(), node.loopDecision());
+                    node.group(), node.loopRound(), node.loopTotal(), node.loopDecision(),
+                    node.displayCode());
         }
         return node;
     }
@@ -1012,7 +1140,7 @@ public final class WorkflowCardProjector implements WorkflowRunListener, Workflo
                 steps == null ? List.of() : List.copyOf(steps),
                 files == null ? List.of() : List.copyOf(files),
                 node.reply(), node.attempt(), node.group(), node.loopRound(), node.loopTotal(),
-                node.loopDecision());
+                node.loopDecision(), node.displayCode());
     }
 
     /** 取（或建）一个节点某一轮的过程步列表；调用方必须持有本对象锁。 */
@@ -1086,16 +1214,32 @@ public final class WorkflowCardProjector implements WorkflowRunListener, Workflo
      * @return 步骤视图
      */
     private WorkflowRunView.Node toView(WorkflowNode node, WorkflowNodeRun row) {
+        // 子图节点在 registerScope 时登记过外层框；直播后续覆盖同一视图键仍要留在框里
+        String group = node == null || node.getId() == null ? ""
+                : scopeGroupByNodeId.getOrDefault(node.getId(), "");
+        return toView(node, row, group);
+    }
+
+    /**
+     * 一行运行态 → 卡片步骤，并指定该节点不在循环体里时的默认框（子图节点编码）。
+     *
+     * @param node         节点定义
+     * @param row          运行态；缺行按「未开始」
+     * @param defaultGroup 外层子图节点编码；根图为空串
+     * @return 步骤视图
+     */
+    private WorkflowRunView.Node toView(WorkflowNode node, WorkflowNodeRun row, String defaultGroup) {
         String code = node.getCode() == null ? "" : node.getCode().trim();
         String name = node.getName() == null || node.getName().isBlank() ? code : node.getName().trim();
         String type = node.getType() == null ? "" : node.getType().trim().toUpperCase();
         String status = row == null || row.getStatus() == null ? "PENDING" : row.getStatus().trim().toUpperCase();
         String error = row == null || row.getErrorSummary() == null ? "" : row.getErrorSummary().trim();
         String output = outputOf(code, type, status, row);
+        String displayCode = node.getId() == null ? "" : displayCodeByNodeId.getOrDefault(node.getId(), "");
         WorkflowRunView.Node view = new WorkflowRunView.Node(code, name, type, status,
                 noteOf(status, error), output, List.of(), List.of(), replyOf(row),
-                row == null ? 1 : attemptOf(row));
-        return withLoop(view, node, row);
+                row == null ? 1 : attemptOf(row), "", 0, 0, "", displayCode);
+        return withLoop(view, node, row, defaultGroup);
     }
 
     /**
@@ -1105,16 +1249,21 @@ public final class WorkflowCardProjector implements WorkflowRunListener, Workflo
      * 「循环节点」带 {@code group}（嵌套时归外层）、{@code loopRound} / {@code loopTotal} /
      * {@code loopDecision}，前端据此写「循环 · 第 1/3 轮 · 进行中」并决定框是否收口。
      *
-     * @param view 已建好的节点视图
-     * @param node 节点定义
-     * @param row  运行态；可空
+     * @param view         已建好的节点视图
+     * @param node         节点定义
+     * @param row          运行态；可空
+     * @param defaultGroup 不在循环体里时归到哪只子图框；根图为空串
      * @return 补好循环字段的视图；不在循环里的节点原样返回
      */
     private WorkflowRunView.Node withLoop(WorkflowRunView.Node view, WorkflowNode node,
-                                          WorkflowNodeRun row) {
+                                          WorkflowNodeRun row, String defaultGroup) {
         String nodeId = node.getId();
         String group = nodeId == null ? "" : loopGroupByNode.getOrDefault(nodeId, "");
         boolean isLoop = "LOOP".equals(view.type());
+        if (group.isEmpty() && defaultGroup != null && !defaultGroup.isBlank()) {
+            // 子图里的普通节点 / 内层循环 / 内层子图都先归到本层子图框；循环体节点自己的 group 优先
+            group = defaultGroup;
+        }
         if (!isLoop && group.isEmpty()) {
             return view;
         }
@@ -1131,7 +1280,7 @@ public final class WorkflowCardProjector implements WorkflowRunListener, Workflo
         }
         return new WorkflowRunView.Node(view.code(), view.name(), view.type(), view.status(),
                 view.note(), view.output(), view.steps(), view.files(), view.reply(),
-                view.attempt(), group, round, total, decision);
+                view.attempt(), group, round, total, decision, view.displayCode());
     }
 
     /**

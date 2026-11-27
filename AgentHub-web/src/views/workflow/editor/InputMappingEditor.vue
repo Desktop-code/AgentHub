@@ -2,7 +2,7 @@
   <div class="ime">
     <!-- 空态：直接说明后端兜底顺序，避免用户以为不配就取不到值 -->
     <div v-if="!rows.length" class="ime__empty">
-      尚未配置。不配时后端按 input.message → query → text → content 依次兜底。
+      {{ emptyText }}
     </div>
 
     <!-- 一行 = 一次「目标字段 ← 来源节点 / 来源字段」映射 -->
@@ -46,8 +46,8 @@
 
       <!-- 工具定义里的说明原样展示；没有就只显示参数名，不翻译成中文 -->
       <div v-if="row.slot?.description" class="ime__slot-desc">{{ row.slot.description }}</div>
-      <!-- 换绑工具后遗留的手填行：单独一行说明，不挤占目标字段宽度 -->
-      <div v-if="showUndefinedBadge(row)" class="ime__undefined">未在工具定义中（可删除）</div>
+      <!-- 换绑工具 / 换绑子图版本 / Agent 改声明后，旧键不在新定义里：仍显示并允许删除 -->
+      <div v-if="showUndefinedBadge(row)" class="ime__undefined">未在定义中（可删除）</div>
 
       <!-- 来源 / 字段走三处共用的点选；自定义值走同一组件的手写模式 -->
       <MappingPathPicker
@@ -105,9 +105,10 @@
  * 入参映射可视化编辑器。所属域：workflow 的前端画布层。
  * <p>职责：把「目标字段 ← 前置节点 / 输出字段」的 UI 行，与后端要求的
  * 「目标字段 → $.input / $.outputs.&lt;code&gt; / $.vars 路径」扁平对象互转。
- * <p>按定义出槽：TOOL 节点按所绑工具的 inputSchemaJson 列出顶层参数槽，
- * AGENT 节点给一个固定的「用户输入」槽；定义槽只读、不可删，编排者只选来源。
- * 未绑定工具 / schema 为空时仍是自由添加。
+ * <p>按定义出槽：TOOL 节点按所绑工具的 inputSchemaJson 列出顶层参数槽；
+ * AGENT / SUBGRAPH 节点按入参声明出槽（Agent 定义 / 钉死的子图发布版本），
+ * AGENT 没有声明时给一个固定的「用户输入」槽；定义槽只读、不可删，编排者只选来源。
+ * 未绑定 / 没有声明时仍是自由添加。
  * <p>点选交互收敛到 {@code MappingPathPicker}，与出参、循环打回反馈共用；
  * 来源 / 字段一律展示人话标签，完整路径默认收起在「高级」里，需要核对时再展开。
  * <p>解析 / 拼装 / 兼容旧草稿都走 utils/workflowMapping 的纯函数，
@@ -135,6 +136,7 @@ import {
   resolveInputSlots,
   slotSignature
 } from '@/utils/workflowInputSlots'
+import { declaredInputSlots } from '@/utils/workflowInputDeclaration'
 import type { InputSlotDefinition } from '@/utils/workflowInputSlots'
 import type { MappingPickerSource, MappingUiRow } from '@/utils/workflowMapping'
 import type { WorkflowMappingSource } from '@/types/workflow'
@@ -146,10 +148,17 @@ const props = defineProps<{
   sources: WorkflowMappingSource[]
   /** 图内所有 START 节点编码：用于把 $.outputs.<start> 归一成 $.input */
   startCodes: string[]
-  /** 当前节点类型：AGENT 出默认「用户输入」槽，TOOL 按工具 schema 出槽 */
+  /** 当前节点类型：AGENT / SUBGRAPH 按声明出槽，TOOL 按工具 schema 出槽 */
   nodeType?: string
   /** TOOL 节点所绑工具的 inputSchemaJson；空表示未绑定或没有定义，保持自由添加 */
   toolSchemaJson?: string | null
+  /**
+   * 当前节点的入参声明（Agent 定义 / 子图钉死版本的开始节点）。
+   * <p>传对象或 JSON 文本均可；null / 没有 properties 表示该节点没有声明。
+   */
+  inputDeclaration?: unknown
+  /** 声明是否正在加载：加载中给出明确文案，避免被误读成「对方没有声明」 */
+  declarationLoading?: boolean
   /** 只读角色禁用全部交互 */
   disabled?: boolean
 }>()
@@ -183,14 +192,30 @@ const agentSlotKey = agentDefaultInputKey(props.modelValue)
 
 /**
  * 当前节点的定义槽。
- * <p>TOOL 按所绑工具的 inputSchemaJson；AGENT 按打开编辑器时的已有映射选一个默认键
- * （键在本次挂载内固定，避免手输目标字段时槽位中途换键）；其它节点保持自由添加。
+ * <p>有入参声明（开始节点同步到 AGENT / 子图钉死版本）就按声明出槽；
+ * 没有声明时：AGENT 按打开编辑器时的已有映射选一个默认键（键在本次挂载内固定，
+ * 避免手输目标字段时槽位中途换键），TOOL 按工具 schema，其它节点保持自由添加。
  */
-const slots = computed(() =>
-  String(props.nodeType ?? '') === 'AGENT'
+const slots = computed(() => {
+  const declared = declaredInputSlots(props.inputDeclaration)
+  if (declared.length) {
+    return declared
+  }
+  return String(props.nodeType ?? '') === 'AGENT'
     ? [agentInputSlotForKey(agentSlotKey)]
     : resolveInputSlots(props.nodeType, props.toolSchemaJson)
-)
+})
+
+/** 空态文案：加载中 / 子图没有声明 / 普通兜底，三种口径不能混 */
+const emptyText = computed(() => {
+  // 声明还没回来时不能断言「没有声明」，否则用户会以为对方没定义
+  if (props.declarationLoading) {
+    return '正在读取该发布版本的入参声明…'
+  }
+  return String(props.nodeType ?? '') === 'SUBGRAPH'
+    ? '还没拿到对方版本的入参声明：先在上方选好被调工作流与发布版本；该版本没有声明时也可以自由添加目标字段。'
+    : '尚未配置。不配时后端按 input.message → query → text → content 依次兜底。'
+})
 
 /** 定义签名：换绑工具 / schema 同步后才重排行，逐次输入不会触发 */
 const currentSlotSignature = computed(() => slotSignature(slots.value))
@@ -207,9 +232,12 @@ const missingRequiredKeys = computed(() =>
     .map((slot) => slot.key)
 )
 
-/** 手填行是否要标「未在工具定义中」：只有 TOOL 且确实读到了工具定义时才标 */
+/**
+ * 手填行是否要标「未在定义中」：只要当前节点确实读到了定义（工具 / 声明）就标，
+ * 说明这一行的目标已不在定义里，可删；没有定义时是自由添加，不该误标。
+ */
 function showUndefinedBadge(row: Row): boolean {
-  return String(props.nodeType ?? '') === 'TOOL' && slots.value.length > 0 && !row.slot
+  return slots.value.length > 0 && !row.slot
 }
 
 /** 槽的主标签：AGENT 默认槽是「用户输入」，工具槽是参数名（不翻译） */
@@ -344,9 +372,9 @@ function rebuildRows(mapping: Record<string, string>) {
 }
 
 /**
- * 定义变化（换绑工具 / AGENT 默认键变化）后重整行。
+ * 定义变化（换绑工具 / 声明到位 / AGENT 默认键变化）后重整行。
  * <p>只调整归属与顺序，不动目标与来源，因此不需要上抛：
- * 同名键保留已配来源，新槽先空着，不再属于新定义的旧键降为「未在工具定义中」的手填行。
+ * 同名键保留已配来源，新槽先空着，不再属于新定义的旧键降为「未在定义中」的手填行。
  */
 function syncSlotRows() {
   const planned = planSlotRows(rows.value, slots.value, (target) => makeRow({ target }))

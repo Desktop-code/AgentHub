@@ -44,14 +44,17 @@ public class WorkspaceDownloadAppService {
     /**
      * 解析出可下载的文件。
      *
-     * @param sessionId 会话主键
+     * <p>归属校验用 {@link TrialAccess#requireWorkspace}：工作台按会话认，
+     * 画布调试按试跑运行认（它没有会话，沙箱目录同样叫 {@code trial-<runId>}）。
+     *
+     * @param sessionId 工作台会话主键，或画布调试的 {@code workflow_run} 主键
      * @param fileName  相对文件名，可带 /workspace/ 前缀
      * @return 已校验的文件描述（路径 + 展示用文件名）
-     * @throws BizException 会话不属于当前用户、文件名非法、路径越界或文件不存在
+     * @throws BizException 会话 / 运行不属于当前用户、文件名非法、路径越界或文件不存在
      */
     public Downloadable resolve(Long sessionId, String fileName) {
-        // 先确认会话归属：越权请求不应该走到任何文件系统操作
-        access.require(sessionId);
+        // 先确认归属：越权请求不应该走到任何文件系统操作
+        access.requireWorkspace(sessionId);
         Path path;
         try {
             path = files.resolveForDownload(String.valueOf(sessionId), fileName);

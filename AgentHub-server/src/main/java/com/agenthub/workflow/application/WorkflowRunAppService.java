@@ -22,6 +22,7 @@ import com.agenthub.workflow.domain.model.WorkflowNodeRun;
 import com.agenthub.workflow.domain.model.WorkflowRelease;
 import com.agenthub.workflow.domain.model.WorkflowRun;
 import com.agenthub.workflow.domain.model.WorkflowRunDetail;
+import com.agenthub.workflow.domain.model.WorkflowScopeView;
 import com.agenthub.workflow.domain.model.WorkflowWorkbenchOutcome;
 import com.agenthub.workflow.domain.repository.WorkflowDefRepository;
 import com.agenthub.workflow.domain.repository.WorkflowDraftRepository;
@@ -94,6 +95,12 @@ public class WorkflowRunAppService {
     private final WorkflowPublishCheck publishCheck;
 
     /**
+     * 子图范围还原：只用于「复用进行中的 run」时补报已发生的子图框。
+     * 这是展示旁路，单测可不起 Spring 容器；缺失时退化为只报父图节点。
+     */
+    private WorkflowScopeTreeBuilder scopeTreeBuilder;
+
+    /**
      * @param runs             run 仓储
      * @param nodeRuns         node_run 仓储
      * @param humanTasks       人工待办仓储（取消时收口 OPEN 待办）
@@ -149,6 +156,19 @@ public class WorkflowRunAppService {
         this.trialDispatcher = trialDispatcher;
         this.drafts = drafts;
         this.publishCheck = publishCheck;
+    }
+
+    /**
+     * 注入子图范围还原器（展示旁路，可选）。
+     *
+     * <p>用 setter 而不是构造参数：单测直接 new 本类时不关心展示补报，
+     * 缺失时只是复用分支少报子图框，不影响调度 / 权限 / 落库。
+     *
+     * @param scopeTreeBuilder 子图范围还原器
+     */
+    @org.springframework.beans.factory.annotation.Autowired(required = false)
+    public void setScopeTreeBuilder(WorkflowScopeTreeBuilder scopeTreeBuilder) {
+        this.scopeTreeBuilder = scopeTreeBuilder;
     }
 
     /**
@@ -240,8 +260,8 @@ public class WorkflowRunAppService {
             throw new BizException(ErrorCode.BAD_REQUEST, "试跑输入必须是 JSON 对象，例如 {\"query\":\"...\"}");
         }
         WorkflowGraph graph = codec.parse(draft.getGraphJson());
-        // 与发布同一套检查：没通过就不建 run，避免用坏图开跑
-        publishCheck.requirePublishable(graph);
+        // 与发布同一套检查：没通过就不建 run，避免用坏图开跑；子图链路一并校验
+        publishCheck.requirePublishable(def.getId(), def.getTenantId(), graph);
         WorkflowRuntimeGraph runtime = WorkflowRuntimeGraph.of(graph);
         int nodeRunsCap = properties.effectiveMaxNodeRunsPerRun();
         if (runtime.nodes().size() > nodeRunsCap) {
@@ -395,8 +415,21 @@ public class WorkflowRunAppService {
         try {
             WorkflowGraph graph = codec.parse(run.getGraphJson());
             WorkflowRuntimeGraph runtime = WorkflowRuntimeGraph.of(graph);
-            listener.runStarted(runtime.nodes(), nodeRuns.listByRunId(run.getId()),
-                    runtime.outgoingIndex());
+            List<WorkflowNodeRun> rows = nodeRuns.listByRunId(run.getId());
+            /*
+             * 复用进行中的 run：子图节点行已经在库里，按同一套范围还原先报一次框，
+             * 否则防重命中拿到的卡片只有父图节点，子图进度要等下一次节点变更才出现。
+             * 根节点也用还原后的展示名（SUBGRAPH 换成「被调工作流名 · vN」），与直播一致。
+             */
+            WorkflowScopeTree tree = scopeTreeBuilder == null
+                    ? null : scopeTreeBuilder.build(run, graph, rows);
+            listener.runStarted(tree == null ? runtime.nodes() : tree.rootNodes(), rows,
+                    tree == null ? runtime.outgoingIndex() : tree.rootOutgoing());
+            if (tree != null) {
+                for (WorkflowScopeView scope : tree.childViews()) {
+                    listener.scopeStarted(scope);
+                }
+            }
         } catch (RuntimeException ex) {
             log.warn("复用工作流 run 时读取节点状态失败 runId={} type={}",
                     run.getId(), ex.getClass().getSimpleName());
@@ -717,6 +750,29 @@ public class WorkflowRunAppService {
     }
 
     /**
+     * 批量取多张卡片对应的 run 头（只读）。回放补全需要 run 上的图快照来还原子图框。
+     *
+     * <p>一次刷新通常只有一两张工作流卡；这里按主键逐个读，避免为一个展示旁路新增批量查询。
+     * 已删除 / 跨租户的 run 直接跳过，调用方保留骨架不补子图框。
+     *
+     * @param runIds run 主键集合；可空
+     * @return runId → run；入参为空时为空表
+     */
+    public Map<Long, WorkflowRun> cardRunsOf(Collection<Long> runIds) {
+        if (runIds == null || runIds.isEmpty()) {
+            return Map.of();
+        }
+        Map<Long, WorkflowRun> found = new LinkedHashMap<>();
+        for (Long id : runIds) {
+            if (id == null) {
+                continue;
+            }
+            runs.findById(id).ifPresent(run -> found.put(id, run));
+        }
+        return found;
+    }
+
+    /**
      * 批量取多张卡片对应的节点行，按 runId 分组。
      *
      * <p>一次刷新可能带同一条会话里的多张工作流卡；用一次 IN 查询代替逐卡查询。
@@ -932,8 +988,22 @@ public class WorkflowRunAppService {
         List<WorkflowEdge> edges = new ArrayList<>();
         try {
             WorkflowGraph graph = codec.parse(run.getGraphJson());
+            /*
+             * 等待中的节点可能在子图内部：它的 node_id 带范围前缀，根图里查不到出边。
+             * 用与回放同一套范围还原找到它属于哪一层，再按那层的出边续跑；
+             * 找不到（老数据 / 单测没装还原器）退回根图，行为与改动前一致。
+             */
             WorkflowRuntimeGraph runtime = WorkflowRuntimeGraph.of(graph);
-            for (WorkflowEdge edge : runtime.outgoing(row.getNodeId())) {
+            String nodeId = row.getNodeId();
+            if (scopeTreeBuilder != null && nodeId != null && !nodeId.isBlank()) {
+                WorkflowScope scope = scopeTreeBuilder
+                        .build(run, graph, nodeRuns.listByRunId(run.getId()))
+                        .scopeOfNode(nodeId);
+                if (scope != null) {
+                    runtime = scope.runtime();
+                }
+            }
+            for (WorkflowEdge edge : runtime.outgoing(nodeId)) {
                 if (WorkflowEdgeType.parseOrDefault(edge.getType()) != WorkflowEdgeType.ERROR) {
                     edges.add(edge);
                 }

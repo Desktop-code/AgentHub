@@ -50,7 +50,7 @@ const emit = defineEmits<{
   other: []
 }>()
 
-const view = computed(() => asWorkflowView(props.run?.card))
+const view = computed(() => asWorkflowView(props.run?.card, props.run?.id))
 const participant = computed(() => (props.run && view.value ? debugParticipant(view.value, props.run.id) : null))
 const hold = computed(() => debugHold(props.run?.status))
 </script>

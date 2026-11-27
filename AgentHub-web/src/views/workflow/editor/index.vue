@@ -315,6 +315,20 @@
               <el-input v-model="selectedNode.data.name" maxlength="64" :disabled="!canEdit" />
             </el-form-item>
 
+            <!-- START：对外入参声明；这里是合同，不是给自己配来源 -->
+            <template v-if="selectedNode.data.nodeType === 'START'">
+              <el-form-item label="入参声明">
+                <InputDeclarationEditor
+                  :model-value="selectedNode.data.config.inputSchema"
+                  :disabled="!canEdit"
+                  @update:model-value="setInputDeclaration"
+                />
+              </el-form-item>
+              <div class="wf-tip">
+                声明只影响编排按哪些键出槽；调试框与工作台仍只收一个问题。旧的开始节点没有声明也能照常运行、照常发布。
+              </div>
+            </template>
+
             <!-- AGENT：只能绑叶子 Agent，ROUTER 已在选项中排除 -->
             <template v-if="selectedNode.data.nodeType === 'AGENT'">
               <el-form-item label="绑定 Agent" required>
@@ -398,6 +412,75 @@
               <!-- 画布节点标题会优先显示工具显示名；这里说明回退规则 -->
               <div class="wf-tip">
                 画布上优先显示工具的显示名；未绑定或工具已删除时回退显示「显示名」。
+              </div>
+            </template>
+
+            <!-- SUBGRAPH：绑已发布工作流并钉死版本；运行时只跑该版本，出参挂回本节点 outputs -->
+            <template v-else-if="selectedNode.data.nodeType === 'SUBGRAPH'">
+              <el-form-item label="被调工作流" required>
+                <el-alert
+                  v-if="subgraphWorkflowsError"
+                  :title="subgraphWorkflowsError"
+                  type="error"
+                  show-icon
+                  :closable="false"
+                  class="block-alert"
+                />
+                <el-select
+                  v-else
+                  :model-value="selectedNode.data.config.subWorkflowId"
+                  class="wf-field"
+                  clearable
+                  filterable
+                  :loading="subgraphWorkflowsLoading"
+                  placeholder="选择已发布的工作流（同租户）"
+                  :disabled="!canEdit"
+                  @update:model-value="setSubgraphWorkflow"
+                >
+                  <el-option
+                    v-for="item in subgraphWorkflowOptions"
+                    :key="item.id"
+                    :label="`${item.name}（${item.code}）`"
+                    :value="item.id"
+                  />
+                </el-select>
+              </el-form-item>
+              <el-form-item label="发布版本" required>
+                <el-alert
+                  v-if="subgraphReleasesError"
+                  :title="subgraphReleasesError"
+                  type="error"
+                  show-icon
+                  :closable="false"
+                  class="block-alert"
+                />
+                <el-select
+                  v-else
+                  :model-value="selectedNode.data.config.subReleaseId"
+                  class="wf-field"
+                  clearable
+                  :loading="subgraphReleasesLoading"
+                  :disabled="!canEdit || !selectedNode.data.config.subWorkflowId"
+                  placeholder="必须钉死一个已发布版本"
+                  @update:model-value="setSubgraphRelease"
+                >
+                  <el-option
+                    v-for="item in subgraphReleaseOptions"
+                    :key="item.id"
+                    :label="`v${item.version}${item.publishNote ? ` · ${item.publishNote}` : ''}`"
+                    :value="item.id"
+                  />
+                </el-select>
+              </el-form-item>
+              <div class="wf-tip">
+                入参槽按「该发布版本」开始节点上的声明出槽；换版本时同名键保留已配来源，不再属于新声明的旧键标为「未在定义中」。
+              </div>
+              <div class="wf-tip">
+                运行时只跑这里钉死的发布版本，对方后来发的新版不会影响本图；子图整张图的产出挂到本节点的
+                $.outputs 下供下游取用。
+              </div>
+              <div class="wf-tip wf-tip--error">
+                子图可以继续嵌套，但最多 3 层；调用链上同一工作流出现两次会按循环拒绝运行。
               </div>
             </template>
 
@@ -516,6 +599,8 @@
                   :start-codes="startCodes"
                   :node-type="String(selectedNode.data.nodeType || '')"
                   :tool-schema-json="selectedToolSchema"
+                  :input-declaration="selectedInputDeclaration"
+                  :declaration-loading="selectedDeclarationLoading"
                   :disabled="!canEdit"
                   @update:model-value="setInputMapping"
                 />
@@ -701,6 +786,8 @@ import WorkflowEdge from './WorkflowEdge.vue'
 import { WORKFLOW_EDGE_INTERACTION } from './workflowEdgeInteraction'
 import WorkflowTrialDrawer from './WorkflowTrialDrawer.vue'
 import WorkflowReleaseSwitcher from './WorkflowReleaseSwitcher.vue'
+import InputDeclarationEditor from '@/components/common/InputDeclarationEditor.vue'
+import { useSubgraphBindings } from './useSubgraphBindings'
 import { useWorkflowRunFollow } from './useWorkflowRunFollow'
 import { pageAgents, getAgent } from '@/api/agent'
 import { listAllItems } from '@/api/tool'
@@ -720,6 +807,7 @@ import {
   missingRequiredSlotKeys,
   parseToolInputSlots
 } from '@/utils/workflowInputSlots'
+import { declaredInputSlots } from '@/utils/workflowInputDeclaration'
 import type { AgentCard } from '@/types/agent'
 import type { ToolItemRow } from '@/types/tool'
 import type {
@@ -755,7 +843,7 @@ const PALETTE: WorkflowPaletteItem[] = [
   { type: 'PARALLEL_JOIN', label: '并行汇合', hint: '按 forkGroupId 成对', p0: true },
   { type: 'HUMAN', label: '人工审批', hint: '必须配超时策略', p0: true },
   { type: 'LOOP', label: '循环', hint: '显式声明次数和超限出路', p0: true },
-  { type: 'SUBGRAPH', label: '子图', hint: 'P1；跨租户永久禁止', p0: false },
+  { type: 'SUBGRAPH', label: '子图', hint: '绑已发布工作流并钉死版本', p0: true },
   { type: 'KB_RETRIEVE', label: '知识检索', hint: 'P1', p0: false },
   { type: 'SKILL_INJECT', label: 'Skill 注入', hint: 'P1', p0: false },
   { type: 'TIMER', label: '定时等待', hint: 'P1', p0: false },
@@ -772,7 +860,8 @@ const NODE_NAME: Record<string, string> = {
   PARALLEL_FORK: '并行分叉',
   PARALLEL_JOIN: '并行汇合',
   HUMAN: '人工审批',
-  LOOP: '循环'
+  LOOP: '循环',
+  SUBGRAPH: '子图'
 }
 
 /** code 生成前缀 */
@@ -785,7 +874,8 @@ const CODE_PREFIX: Record<string, string> = {
   PARALLEL_FORK: 'fork',
   PARALLEL_JOIN: 'join',
   HUMAN: 'human',
-  LOOP: 'loop'
+  LOOP: 'loop',
+  SUBGRAPH: 'sub'
 }
 
 /** 类型中文名（属性面板标题用） */
@@ -798,7 +888,8 @@ const NODE_TYPE_LABEL: Record<string, string> = {
   PARALLEL_FORK: '并行分叉',
   PARALLEL_JOIN: '并行汇合',
   HUMAN: '人工审批',
-  LOOP: '循环'
+  LOOP: '循环',
+  SUBGRAPH: '子图'
 }
 
 /** 边类型下拉；CANCEL 本刀不产出 */
@@ -868,8 +959,8 @@ const {
 /** 专注模式跨壳层开关；本页只负责进入 / 退出与失活复位 */
 const { setFocus: setWorkflowFocus } = useWorkflowFocus()
 
-/** 下拉第一页以外的 Agent 名称缓存（id → 名称 / 编码），只服务画布标题展示 */
-const agentLabelCache = new Map<number, { name: string; code: string }>()
+/** 下拉第一页以外的 Agent 名称 / 声明缓存（id → 名称 / 编码 / 入参声明），只服务画布展示与出槽 */
+const agentLabelCache = new Map<number, { name: string; code: string; inputSchema?: unknown }>()
 /** 详情接口也解析不到的 id（已删除 / 无权限），避免反复请求 */
 const agentLabelMissing = new Set<number>()
 /** 详情补查进行中标记：防止回填触发递归请求 */
@@ -1089,10 +1180,10 @@ const selectedEdge = computed<GraphEdge<WorkflowFlowEdgeData> | null>(() => {
   return (found as GraphEdge<WorkflowFlowEdgeData> | undefined) ?? null
 })
 
-/** 只有带输入输出的节点才展示映射编辑 */
+/** 只有带输入输出的节点才展示映射编辑；START 是「定义合同」，不给自己配来源 */
 const showMapping = computed(() => {
   const type = selectedNode.value?.data?.nodeType
-  return type === 'START' || type === 'END' || type === 'AGENT' || type === 'TOOL'
+  return type === 'END' || type === 'AGENT' || type === 'TOOL' || type === 'SUBGRAPH'
 })
 
 /** 图内所有 START 节点编码：入参映射把 $.outputs.&lt;start&gt; 归一成 $.input，需要这份名单 */
@@ -1172,6 +1263,299 @@ function toolInputHint(
   const missing = missingRequiredSlotKeys(parseToolInputSlots(tool?.inputSchemaJson), mapping)
   return missing.length ? `必填入参未配：${missing.join('、')}` : ''
 }
+
+/**
+ * AGENT 节点必填入参未配来源的提示。
+ * <p>Agent 定义没有声明时返回空串（退回默认「用户输入」槽，不增加拦截）；
+ * 有声明但必填键没配来源时，画布直接标出来，草稿仍可保存，发布由后端拦。
+ *
+ * @param agent   绑定的 Agent（列表随身带入参声明；只关心声明字段）
+ * @param mapping 当前入参映射
+ * @return 提示文案；没有缺失返回空串
+ */
+function agentInputHint(
+  agent: { inputSchema?: unknown } | undefined,
+  mapping?: Record<string, string> | null
+): string {
+  const slots = declaredInputSlots(agent?.inputSchema)
+  if (!slots.length) {
+    return ''
+  }
+  const missing = missingRequiredSlotKeys(slots, mapping)
+  return missing.length ? `必填入参未配：${missing.join('、')}` : ''
+}
+
+/* ============ 子图绑定与声明 ============ */
+
+/** 子图绑定数据源：已发布工作流、版本列表、按版本缓存的入参声明 */
+const subgraph = useSubgraphBindings()
+
+/** 当前 AGENT 节点所绑 Agent 的入参声明（列表随身下发；第一页以外走补查缓存） */
+const selectedAgentDeclaration = computed(() => {
+  const agentId = Number(selectedNode.value?.data?.config?.agentId)
+  if (!agentId) {
+    return null
+  }
+  const agent =
+    agentOptions.value.find((item) => item.id === agentId) ?? agentLabelCache.get(agentId)
+  return agent?.inputSchema ?? null
+})
+
+/** 当前 SUBGRAPH 节点绑定的被调工作流 id */
+const subWorkflowId = computed(() => {
+  const value = Number(selectedNode.value?.data?.config?.subWorkflowId)
+  return Number.isFinite(value) && value > 0 ? value : null
+})
+
+/** 当前 SUBGRAPH 节点钉死的发布版本 id */
+const subReleaseId = computed(() => {
+  const value = Number(selectedNode.value?.data?.config?.subReleaseId)
+  return Number.isFinite(value) && value > 0 ? value : null
+})
+
+/**
+ * 当前 SUBGRAPH 节点钉死版本的入参声明。
+ * <p>先读缓存；缓存写入后由 declarationVersion 推进触发重算。只认该版本，不读对方草稿。
+ */
+const selectedSubgraphDeclaration = computed(() => {
+  // 显式建立依赖：声明缓存是普通 Map，写入后靠版本号通知重算
+  void subgraph.declarationVersion.value
+  return subgraph.declarationFor(subWorkflowId.value, subReleaseId.value)
+})
+
+/**
+ * 已发布工作流下拉项。
+ * <p>只用于「子图绑定」这一处候选：排除当前正在编辑的这条工作流（所有版本都不作为候选），
+ * 避免新选到自己形成必然的循环调用。图里已经绑了自身的存量数据仍原样保留，
+ * 保存 / 校验 / 发布与运行时的环检测照旧拦截，不在这里静默改绑。
+ */
+const subgraphWorkflowOptions = computed(() =>
+  subgraph.workflows.value.filter((item) => item.id !== workflowId.value)
+)
+
+/** 当前选中工作流对应的版本下拉项 */
+const subgraphReleaseOptions = computed(() => subgraph.releases.value)
+
+/** 子图绑定相关的加载 / 错误态：模板里需要的是普通值，统一在这里解包 */
+const subgraphWorkflowsLoading = computed(() => subgraph.workflowsLoading.value)
+const subgraphWorkflowsError = computed(() => subgraph.workflowsError.value)
+const subgraphReleasesLoading = computed(() => subgraph.releasesLoading.value)
+const subgraphReleasesError = computed(() => subgraph.releasesError.value)
+const subgraphDeclarationLoading = computed(() => subgraph.declarationsLoading.value)
+
+/** 当前节点给映射编辑器的入参声明：只有 AGENT / SUBGRAPH 有 */
+const selectedInputDeclaration = computed(() => {
+  const type = String(selectedNode.value?.data?.nodeType ?? '')
+  if (type === 'AGENT') {
+    return selectedAgentDeclaration.value
+  }
+  if (type === 'SUBGRAPH') {
+    return selectedSubgraphDeclaration.value
+  }
+  return null
+})
+
+/** 只有子图需要「声明读取中」文案：Agent 声明随列表同步下发，不存在等待 */
+const selectedDeclarationLoading = computed(
+  () =>
+    String(selectedNode.value?.data?.nodeType ?? '') === 'SUBGRAPH' &&
+    subgraphDeclarationLoading.value
+)
+
+/**
+ * 子图节点的必填入参提示。
+ * <p>声明来自「钉死版本」；没缓存时返回空串，等预热完成后再由 syncSubgraphLabels 补上。
+ *
+ * @param data 画布节点 data
+ * @return 提示文案；没有声明 / 没有缺失返回空串
+ */
+function subgraphInputHint(data: WorkflowFlowNodeData): string {
+  const workflowId = Number(data.config?.subWorkflowId)
+  const releaseId = Number(data.config?.subReleaseId)
+  if (!workflowId || !releaseId) {
+    return ''
+  }
+  const slots = declaredInputSlots(subgraph.declarationFor(workflowId, releaseId))
+  if (!slots.length) {
+    return ''
+  }
+  const missing = missingRequiredSlotKeys(slots, data.config?.inputMapping)
+  return missing.length ? `必填入参未配：${missing.join('、')}` : ''
+}
+
+/**
+ * 回填所有 SUBGRAPH 节点的展示名、版本号与必填提示。
+ * <p>工作流名称来自已发布列表（全局一次），版本号来自当前选中工作流的版本列表；
+ * 其它节点的版本号拿不到就留空，不猜。
+ */
+function syncSubgraphLabels() {
+  const byId = new Map(subgraph.workflows.value.map((item) => [item.id, item]))
+  const releaseById = new Map(subgraph.releases.value.map((item) => [item.id, item]))
+  vf.nodes.value.forEach((node) => {
+    const data = (node.data || {}) as WorkflowFlowNodeData
+    if (String(data.nodeType) !== 'SUBGRAPH') {
+      return
+    }
+    const workflowId = Number(data.config?.subWorkflowId)
+    const releaseId = Number(data.config?.subReleaseId)
+    const workflow = byId.get(workflowId)
+    const release = releaseById.get(releaseId)
+    const subWorkflowName = workflow?.name ?? data.subWorkflowName ?? ''
+    // 版本号优先取当前工作流的版本列表，其次取声明接口顺手缓存的版本号
+    const subReleaseVersion =
+      release?.version ?? subgraph.versionFor(workflowId, releaseId) ?? data.subReleaseVersion ?? null
+    const missingInputHint = subgraphInputHint(data)
+    if (
+      data.subWorkflowName === subWorkflowName &&
+      (data.subReleaseVersion ?? null) === subReleaseVersion &&
+      (data.missingInputHint ?? '') === missingInputHint
+    ) {
+      return
+    }
+    node.data = { ...data, subWorkflowName, subReleaseVersion, missingInputHint }
+  })
+}
+
+/** 画布上所有已绑定的子图节点：用于批量预热声明缓存 */
+function collectSubgraphRefs(): Array<{ workflowId: number; releaseId: number }> {
+  return vf.nodes.value
+    .map((node) => (node.data || {}) as WorkflowFlowNodeData)
+    .filter((data) => String(data.nodeType) === 'SUBGRAPH')
+    .map((data) => ({
+      workflowId: Number(data.config?.subWorkflowId) || 0,
+      releaseId: Number(data.config?.subReleaseId) || 0
+    }))
+    .filter((item) => item.workflowId > 0 && item.releaseId > 0)
+}
+
+/**
+ * 铺完图 / 打开子图属性后预热：先拿已发布工作流名称，再批量取各节点钉死版本的声明。
+ * <p>整张图没有 SUBGRAPH 节点时直接返回：不为无关页面多发一次列表请求。
+ * <p>失败只影响提示与出槽，不阻断画布编辑。
+ */
+async function primeSubgraphBindings() {
+  const hasSubgraph = vf.nodes.value.some(
+    (node) => String((node.data as WorkflowFlowNodeData | undefined)?.nodeType) === 'SUBGRAPH'
+  )
+  if (!hasSubgraph) {
+    return
+  }
+  await subgraph.ensureWorkflows()
+  syncSubgraphLabels()
+  const refs = collectSubgraphRefs()
+  if (!refs.length) {
+    return
+  }
+  await subgraph.ensureDeclarations(refs)
+  syncSubgraphLabels()
+}
+
+/**
+ * 选中子图节点后补齐它自己的版本列表与声明。
+ * <p>版本列表按工作流懒加载：一张图里通常只钉一两个工作流，不必全量拉。
+ */
+async function hydrateSelectedSubgraph() {
+  await subgraph.ensureWorkflows()
+  const data = selectedNode.value?.data
+  if (!data || String(data.nodeType) !== 'SUBGRAPH') {
+    return
+  }
+  const workflowId = Number(data.config?.subWorkflowId) || 0
+  await subgraph.loadReleases(workflowId || null)
+  const fresh = selectedNode.value?.data
+  const releaseId = Number(fresh?.config?.subReleaseId) || 0
+  if (workflowId && releaseId) {
+    await subgraph.ensureDeclaration(workflowId, releaseId)
+  }
+  syncSubgraphLabels()
+}
+
+/**
+ * START 节点的入参声明写回 config。
+ * <p>只在 START 上生效：其它节点即便带了 inputSchema 字段也不在这里改。
+ *
+ * @param value 归一后的声明；null 表示没有声明（键留空，不存空对象）
+ */
+function setInputDeclaration(value: unknown) {
+  const node = selectedNode.value
+  if (!node || String(node.data.nodeType) !== 'START') {
+    return
+  }
+  node.data = {
+    ...node.data,
+    config: { ...node.data.config, inputSchema: value ?? undefined }
+  }
+}
+
+/**
+ * 换绑被调工作流。
+ * <p>换绑后版本 id 必须重置：旧版本可能属于上一个工作流，留着会被后端判「版本与工作流不匹配」。
+ * 优先自动钉住该工作流的默认发布版本，编排者仍可在下拉里换成历史版本。
+ *
+ * @param value 下拉选中的 workflowId；清空时为 undefined / 空串
+ */
+function setSubgraphWorkflow(value: number | string | undefined) {
+  const node = selectedNode.value
+  if (!node) {
+    return
+  }
+  const workflowId = value === undefined || value === null || value === '' ? undefined : Number(value)
+  const workflow = subgraphWorkflowOptions.value.find((item) => item.id === workflowId)
+  const releaseId = workflow?.defaultReleaseId ?? undefined
+  node.data = {
+    ...node.data,
+    config: { ...node.data.config, subWorkflowId: workflowId, subReleaseId: releaseId },
+    subWorkflowName: workflow?.name ?? '',
+    subReleaseVersion: workflow?.defaultVersion ?? null,
+    // 换绑后先清掉旧提示，等声明加载完成再按新版本重算
+    missingInputHint: ''
+  }
+  void hydrateSelectedSubgraph()
+}
+
+/**
+ * 改子图钉死的发布版本。
+ * <p>同名键保留已配来源：只换「定义」，不洗掉用户配好的映射；不再属于新声明的旧键
+ * 由映射编辑器标成「未在定义中」并允许删除。
+ *
+ * @param value 下拉选中的 releaseId；清空时为 undefined / 空串
+ */
+function setSubgraphRelease(value: number | string | undefined) {
+  const node = selectedNode.value
+  if (!node) {
+    return
+  }
+  const releaseId = value === undefined || value === null || value === '' ? undefined : Number(value)
+  const release = subgraphReleaseOptions.value.find((item) => item.id === releaseId)
+  node.data = {
+    ...node.data,
+    config: { ...node.data.config, subReleaseId: releaseId },
+    subReleaseVersion: release?.version ?? null,
+    missingInputHint: ''
+  }
+  const workflowId = Number(node.data.config?.subWorkflowId)
+  if (workflowId && releaseId) {
+    void subgraph.ensureDeclaration(workflowId, releaseId).then(() => syncSubgraphLabels())
+  }
+}
+
+/** 声明缓存更新（子图预热 / 换版本）后重算画布必填提示 */
+watch(
+  () => subgraph.declarationVersion.value,
+  () => syncSubgraphLabels()
+)
+
+/** 选中 / 切换到子图节点时补齐版本列表与声明 */
+watch(
+  [() => selectedNode.value?.id, () => String(selectedNode.value?.data?.nodeType ?? '')],
+  () => {
+    const data = selectedNode.value?.data
+    if (!data || String(data.nodeType) !== 'SUBGRAPH') {
+      return
+    }
+    void hydrateSelectedSubgraph()
+  }
+)
 
 /**
  * 循环打回来源：指向当前循环节点的 LOOP_BACK 边起点。
@@ -1911,6 +2295,8 @@ function paintGraph(graph: WorkflowGraph, updateTime: string) {
   // Agent / 工具选项可能已先加载完成：铺完节点立刻补一次名称，避免首屏闪「Agent #30」
   syncAgentLabels()
   syncToolLabels()
+  // 子图名称 / 钉死版本与必填提示：异步预热，失败只影响提示，不阻断画布
+  void primeSubgraphBindings()
   draftUpdateTime.value = updateTime
   selected.value = null
   issues.value = []
@@ -2426,7 +2812,9 @@ function setNodeAgent(value: number | string | undefined) {
     ...node.data,
     config: { ...node.data.config, agentId },
     agentName: agent?.name ?? '',
-    agentCode: agent?.code ?? ''
+    agentCode: agent?.code ?? '',
+    // 换绑后必填提示跟着新 Agent 的声明走；旧映射里同名的键仍然算已配
+    missingInputHint: agentInputHint(agent, node.data.config.inputMapping)
   }
 }
 
@@ -2451,10 +2839,16 @@ function syncAgentLabels() {
     }
     const agentName = agent?.name ?? ''
     const agentCode = agent?.code ?? ''
-    if (data.agentName === agentName && data.agentCode === agentCode) {
+    // Agent 定义里的入参声明随列表下发：有声明且必填键没配来源时，画布上直接标出来
+    const missingInputHint = agentInputHint(agent, data.config?.inputMapping)
+    if (
+      data.agentName === agentName &&
+      data.agentCode === agentCode &&
+      (data.missingInputHint ?? '') === missingInputHint
+    ) {
       return
     }
-    node.data = { ...data, agentName, agentCode }
+    node.data = { ...data, agentName, agentCode, missingInputHint }
   })
   // 下拉还没加载完就先不补查详情：等 loadAgentOptions 收尾后会再同步一次
   if (agentOptionsReady) {
@@ -2482,7 +2876,9 @@ async function resolveAgentLabels(ids: number[]) {
         try {
           const { data } = await getAgent(id)
           const detail = data.data
-          return detail ? { id, name: detail.name, code: detail.code } : { id, missing: true as const }
+          return detail
+            ? { id, name: detail.name, code: detail.code, inputSchema: detail.inputSchema ?? null }
+            : { id, missing: true as const }
         } catch {
           // 已删除 / 无查看权限：记下来，后续不再重复请求
           return { id, missing: true as const }
@@ -2494,7 +2890,11 @@ async function resolveAgentLabels(ids: number[]) {
         agentLabelMissing.add(item.id)
         return
       }
-      agentLabelCache.set(item.id, { name: item.name, code: item.code })
+      agentLabelCache.set(item.id, {
+        name: item.name,
+        code: item.code,
+        inputSchema: item.inputSchema
+      })
     })
   } finally {
     agentLabelResolving = false
@@ -2520,10 +2920,23 @@ function setMapping(field: 'inputMapping' | 'outputMapping', value: Record<strin
   }
   const config = { ...node.data.config, [field]: value }
   node.data = { ...node.data, config }
-  // TOOL 的必填提示跟着入参映射走：只重算当前节点，避免每次输入都全图扫工具列表
-  if (field === 'inputMapping' && String(node.data.nodeType) === 'TOOL') {
-    const tool = toolOptions.value.find((item) => item.id === Number(config.toolId))
-    node.data = { ...node.data, missingInputHint: toolInputHint(tool, value) }
+  // 必填提示跟着入参映射走：只重算当前节点，避免每次输入都全图扫列表
+  if (field === 'inputMapping') {
+    const type = String(node.data.nodeType)
+    if (type === 'TOOL') {
+      const tool = toolOptions.value.find((item) => item.id === Number(config.toolId))
+      node.data = { ...node.data, missingInputHint: toolInputHint(tool, value) }
+    } else if (type === 'AGENT') {
+      const agentId = Number(config.agentId)
+      const agent =
+        agentOptions.value.find((item) => item.id === agentId) ?? agentLabelCache.get(agentId)
+      node.data = { ...node.data, missingInputHint: agentInputHint(agent, value) }
+    } else if (type === 'SUBGRAPH') {
+      node.data = {
+        ...node.data,
+        missingInputHint: subgraphInputHint({ ...node.data, config } as WorkflowFlowNodeData)
+      }
+    }
   }
 }
 

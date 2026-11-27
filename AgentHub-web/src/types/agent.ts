@@ -29,6 +29,11 @@ export interface AgentCard {
   runMode: string
   /** 是否允许被编排挂为子专家；ROUTER 恒为 false */
   allowOrchestrated?: boolean
+  /**
+   * 入参声明（顶层 properties / required）。null 表示没有声明。
+   * <p>画布 AGENT 节点按这份声明出槽；列表随身下发，避免画布再按 id 补查。
+   */
+  inputSchema?: unknown
   status: number
   updateTime?: string
 }
@@ -63,6 +68,11 @@ export interface AgentDetail {
   prompt?: PromptBinding
   /** 当前运行模式的只读平台前缀 */
   platformPrefix?: string
+  /**
+   * 入参声明（顶层 properties / required）。null 表示没有声明。
+   * <p>只是对外合同：编排按这些键出槽；对话入口仍只收一个问题。
+   */
+  inputSchema?: unknown
   /** 保存响应里的告警。查询详情一般为空 */
   warnings?: string[]
   /** 运行限制覆盖，空/undefined=跟平台 */
@@ -181,6 +191,11 @@ export interface AgentSave {
   consecutiveFailAbort?: number | null
   toolResultMaxChars?: number | null
   runtimeConfig?: AgentRuntimeConfig
+  /**
+   * 入参声明。不传 = 不改现有声明；传 `{ properties: {} }` = 清空。
+   * <p>不能把「没传」当成清空：运行时开关等旁路保存也走这个整份保存接口。
+   */
+  inputSchema?: unknown
 }
 
 export interface ModelBind {

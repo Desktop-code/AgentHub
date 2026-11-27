@@ -5,20 +5,28 @@ import com.agenthub.runtime.domain.model.EventType;
 import com.agenthub.runtime.domain.model.WorkflowRunView;
 import com.agenthub.runtime.domain.service.WorkflowCardProjector;
 import com.agenthub.runtime.domain.service.WorkflowRunJson;
+import com.agenthub.workflow.application.WorkflowGraphCodec;
 import com.agenthub.workflow.application.WorkflowRunAppService;
+import com.agenthub.workflow.application.WorkflowRuntimeGraph;
+import com.agenthub.workflow.application.WorkflowScopeTree;
+import com.agenthub.workflow.application.WorkflowScopeTreeBuilder;
 import com.agenthub.workflow.domain.enums.WorkflowNodeRunStatus;
 import com.agenthub.workflow.domain.model.WorkflowEdge;
+import com.agenthub.workflow.domain.model.WorkflowGraph;
 import com.agenthub.workflow.domain.model.WorkflowNode;
 import com.agenthub.workflow.domain.model.WorkflowNodeRun;
 import com.agenthub.workflow.domain.model.WorkflowRun;
+import com.agenthub.workflow.domain.model.WorkflowScopeView;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ArrayNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.stereotype.Component;
 
+import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
@@ -76,13 +84,35 @@ public class WorkflowCardRebuilder {
     /** 全站 ObjectMapper：解析骨架与节点产出 */
     private final ObjectMapper json;
 
+    /** 图 JSON 解析：回放还原子图范围时读 run 上的图快照 */
+    private final WorkflowGraphCodec codec;
+
+    /** 子图范围还原：只读，按已落库的 SUBGRAPH 行展开；可空时退化为不补子图框 */
+    private final WorkflowScopeTreeBuilder scopeTree;
+
     /**
-     * @param workflowRuns 工作流只读入口（不加权限注解、无副作用）
+     * 单测 / 旧入口用的构造：不带子图范围还原。
+     *
+     * @param workflowRuns 工作流只读入口
      * @param json         全站 ObjectMapper
      */
     public WorkflowCardRebuilder(WorkflowRunAppService workflowRuns, ObjectMapper json) {
+        this(workflowRuns, json, null, null);
+    }
+
+    /**
+     * @param workflowRuns 工作流只读入口（不加权限注解、无副作用）
+     * @param json         全站 ObjectMapper
+     * @param codec        图 JSON 解析
+     * @param scopeTree    子图范围还原
+     */
+    @Autowired
+    public WorkflowCardRebuilder(WorkflowRunAppService workflowRuns, ObjectMapper json,
+                                 WorkflowGraphCodec codec, WorkflowScopeTreeBuilder scopeTree) {
         this.workflowRuns = workflowRuns;
         this.json = json;
+        this.codec = codec;
+        this.scopeTree = scopeTree;
     }
 
     /**
@@ -113,6 +143,8 @@ public class WorkflowCardRebuilder {
         }
         // 一次批量取回本次刷新涉及的全部节点行：不按卡片逐张查库
         Map<Long, List<WorkflowNodeRun>> held = workflowRuns.cardNodesOf(runIds);
+        // 子图框需要 run 上的图快照；没有 run 头的卡片保持原补全路径
+        Map<Long, WorkflowRun> runsById = workflowRuns.cardRunsOf(runIds);
         /*
          * 每条 run 只校准「最后一张」骨架（按事件 seq 判末位）。
          *
@@ -143,6 +175,16 @@ public class WorkflowCardRebuilder {
             // 只有该 run 的最后一张骨架才按库里最新状态校准等待态；更早的卡片保持原样
             boolean calibrate = Integer.valueOf(entry.getKey()).equals(latestIndexByRun.get(runId));
             try {
+                /*
+                 * 有子图范围时，最后一张骨架整卡按库重建：只补正文无法补出「当时还没铺上去」的子图节点，
+                 * 刷新后会看不到框内进度。重建仍走 persisted → 与直播同一套投影，不另起时间线。
+                 * 没有子图的旧 run 继续走原 fill，行为不变。
+                 */
+                ObjectNode rebuilt = calibrate ? rebuiltWithScopes(runsById.get(runId), nodeRows, body) : null;
+                if (rebuilt != null) {
+                    item.setContentText(json.writeValueAsString(rebuilt));
+                    continue;
+                }
                 fill(body, nodeRows, calibrate);
                 item.setContentText(json.writeValueAsString(body));
             } catch (Exception ex) {
@@ -175,8 +217,285 @@ public class WorkflowCardRebuilder {
                                   List<WorkflowNode> graphNodes,
                                   Map<String, List<WorkflowEdge>> outgoing,
                                   List<WorkflowNodeRun> rows, String tail) {
+        return viewOf(name, code, run, graphNodes, outgoing, rows, List.of(), tail);
+    }
+
+    /**
+     * 只凭已落库的 run、图快照与节点行现算一张卡，并还原所有已经发生的子图框。
+     *
+     * @param name     工作流展示名；可空
+     * @param code     工作流编码；可空
+     * @param run      运行实例
+     * @param graph    run 上的图快照
+     * @param rows     该 run 的全部节点行（含各层子图）
+     * @param tail     收口说明；可空
+     * @return 卡片视图
+     */
+    public WorkflowRunView viewOf(String name, String code, WorkflowRun run,
+                                  WorkflowGraph graph, List<WorkflowNodeRun> rows, String tail) {
+        if (graph == null) {
+            return viewOf(name, code, run, List.of(), Map.of(), rows, tail);
+        }
+        WorkflowRuntimeGraph runtime = WorkflowRuntimeGraph.of(graph);
+        if (scopeTree == null || run == null) {
+            return viewOf(name, code, run, runtime.nodes(), runtime.outgoingIndex(), rows, tail);
+        }
+        try {
+            WorkflowScopeTree tree = scopeTree.build(run, graph, rows);
+            // 根图 SUBGRAPH 节点名与子图框内的嵌套 SUBGRAPH 一并换成「被调工作流名 · vN」
+            return viewOf(name, code, run, tree.rootNodes(), tree.rootOutgoing(), rows,
+                    tree.childViews(), tail);
+        } catch (RuntimeException ex) {
+            log.warn("工作流子图范围还原失败 runId={} type={}",
+                    run.getId(), ex.getClass().getSimpleName());
+            return viewOf(name, code, run, runtime.nodes(), runtime.outgoingIndex(), rows, tail);
+        }
+    }
+
+    /**
+     * 只凭已落库事实重建一张卡（含子图框）。
+     *
+     * @param name       工作流展示名
+     * @param code       工作流编码
+     * @param run        运行实例
+     * @param graphNodes 父图节点（SUBGRAPH 节点名已换成「被调工作流名 · vN」）
+     * @param outgoing   父图出边
+     * @param rows       全部节点行
+     * @param scopes     子图范围
+     * @param tail       收口说明
+     * @return 卡片视图
+     */
+    private WorkflowRunView viewOf(String name, String code, WorkflowRun run,
+                                   List<WorkflowNode> graphNodes,
+                                   Map<String, List<WorkflowEdge>> outgoing,
+                                   List<WorkflowNodeRun> rows, List<WorkflowScopeView> scopes,
+                                   String tail) {
         WorkflowCardProjector projector = new WorkflowCardProjector(name, code, null, json);
-        return projector.persisted(run, graphNodes, outgoing, rows, tail);
+        return projector.persisted(run, graphNodes, outgoing, rows, scopes, tail);
+    }
+
+    /**
+     * 回放最后一张骨架时，按库里的 run + 节点行整卡重建；没有子图范围时返回 null。
+     *
+     * <p>只重建「最新」那一张，与既有「同一条 run 只校准最后一张骨架」的口径一致：
+     * 历史等待卡保持当时的样子，前端仍能靠它认出续跑。
+     *
+     * @param run      运行实例；可空
+     * @param nodeRows 该 run 的全部节点行
+     * @param skeleton 原骨架（取 name / code，保持展示名不变）
+     * @return 新骨架；不需要 / 不能重建时为 null
+     */
+    private ObjectNode rebuiltWithScopes(WorkflowRun run, List<WorkflowNodeRun> nodeRows,
+                                         ObjectNode skeleton) {
+        if (run == null || codec == null || scopeTree == null) {
+            return null;
+        }
+        try {
+            WorkflowGraph graph = codec.parse(run.getGraphJson());
+            WorkflowScopeTree tree = scopeTree.build(run, graph, nodeRows);
+            List<WorkflowScopeView> scopes = tree.childViews();
+            if (scopes.isEmpty()) {
+                return null;
+            }
+            String name = skeleton.path("name").asText("");
+            String code = skeleton.path("code").asText("");
+            WorkflowRunView view = viewOf(name, code, run, tree.rootNodes(), tree.rootOutgoing(),
+                    nodeRows, scopes, "");
+            ObjectNode body = (ObjectNode) json.valueToTree(WorkflowRunJson.payload(view));
+            body.put("v", WorkflowRunJson.STORAGE_VERSION);
+            /*
+             * 文件行必须从原骨架搬过来：库里没有「哪个节点写了哪个文件」这一列
+             * （文件清单只活在落库骨架里，文件本身在 run 的工作区目录）。整卡重建时不搬，
+             * 刷新后子图内部（以及父图）的文件行就整块消失——与「刷新丢卡」同一类问题。
+             */
+            carryNodeFiles(skeleton, body);
+            return body;
+        } catch (RuntimeException ex) {
+            log.warn("工作流卡片按子图重建失败 runId={} type={}",
+                    run.getId(), ex.getClass().getSimpleName());
+            return null;
+        }
+    }
+
+    /**
+     * 把原骨架上的节点文件行搬进重建后的卡片。
+     *
+     * <p>为什么必须单独搬：{@code WorkflowCardProjector#persisted} 是按库现算，
+     * 只能算出状态 / 正文 / 回复，算不出文件（{@code workflow_node_run} 没有这一列）。
+     * 而重建前的骨架是直播收口那一份，节点上的 {@code files} 就是「这个节点写出了哪些文件」的唯一记录。
+     *
+     * <p>匹配口径：节点编码 + 轮次（第 1 轮骨架不写 {@code attempt} 键，按 1 归一）。
+     * 重建后的节点若已经自带同名文件行则不覆盖；同名文件合并时只保留一份，
+     * 重复执行不会堆出多行。只补文件，不动状态、正文与过程步——重建的其余口径保持不变。
+     *
+     * <p><b>子图被拍平时不吞文件</b>：正常情况子图内部节点都在重建结果里，文件就挂回原节点；
+     * 但按库还原子图范围失败时，重建结果只剩父图节点，内部节点整块不见了。
+     * 这时把文件改挂到看得见的那层父图 SUBGRAPH 节点上（同名的仍然只一行），
+     * 而不是随内部节点一起消失。
+     *
+     * @param skeleton 原骨架（刚被重建的那一份，含节点 files）
+     * @param body     重建后的卡片（原地补 files）
+     */
+    static void carryNodeFiles(ObjectNode skeleton, ObjectNode body) {
+        if (skeleton == null || body == null) {
+            return;
+        }
+        JsonNode stored = skeleton.get("nodes");
+        JsonNode rebuilt = body.get("nodes");
+        if (!(stored instanceof ArrayNode from) || !(rebuilt instanceof ArrayNode to)) {
+            return;
+        }
+        // 骨架侧两份索引：按「编码#轮次」找同一节点，按编码找祖先框（子图拍平时的落点）
+        Map<String, ObjectNode> storedByKey = new LinkedHashMap<>();
+        Map<String, ObjectNode> storedByCode = new LinkedHashMap<>();
+        boolean hasFiles = false;
+        for (JsonNode item : from) {
+            if (!(item instanceof ObjectNode node)) {
+                continue;
+            }
+            storedByKey.putIfAbsent(nodeKeyOf(node), node);
+            String code = node.path("code").asText("").trim();
+            if (!code.isEmpty()) {
+                storedByCode.putIfAbsent(code, node);
+            }
+            hasFiles = hasFiles || listsFiles(node);
+        }
+        if (!hasFiles) {
+            return;
+        }
+        // 重建侧同样两份索引：同节点优先，找不到时再沿祖先框回落
+        Map<String, ObjectNode> rebuiltByKey = new LinkedHashMap<>();
+        Map<String, List<ObjectNode>> rebuiltByCode = new LinkedHashMap<>();
+        for (JsonNode item : to) {
+            if (!(item instanceof ObjectNode node)) {
+                continue;
+            }
+            rebuiltByKey.putIfAbsent(nodeKeyOf(node), node);
+            String code = node.path("code").asText("").trim();
+            if (!code.isEmpty()) {
+                rebuiltByCode.computeIfAbsent(code, ignored -> new ArrayList<>()).add(node);
+            }
+        }
+        for (Map.Entry<String, ObjectNode> entry : storedByKey.entrySet()) {
+            ObjectNode source = entry.getValue();
+            JsonNode files = source.get("files");
+            if (!(files instanceof ArrayNode list) || list.isEmpty()) {
+                continue;
+            }
+            ObjectNode target = rebuiltByKey.get(entry.getKey());
+            if (target == null) {
+                target = visibleFrameOf(source, storedByCode, rebuiltByCode);
+            }
+            if (target != null) {
+                mergeFiles(target, list);
+            }
+        }
+    }
+
+    /**
+     * 节点在重建结果里不见了时，找它看得见的那层父图 SUBGRAPH 节点。
+     *
+     * <p>只认 SUBGRAPH 祖先：循环节点在时间线上不是步骤卡（由前端画成框），
+     * 把文件挂过去等于再吞一次；子图父节点在内部节点缺失时仍会画成一张步骤卡，
+     * 文件行才有地方落地。多轮时取最新一轮那张，避免同一份文件在多张卡上重复。
+     *
+     * @param source        骨架里写出文件的节点（用它的 {@code group} 往上走）
+     * @param storedByCode  骨架侧编码 → 节点
+     * @param rebuiltByCode 重建侧编码 → 同编码的节点（可能多轮）
+     * @return 可挂文件的 SUBGRAPH 节点；没有则为 null
+     */
+    private static ObjectNode visibleFrameOf(ObjectNode source, Map<String, ObjectNode> storedByCode,
+                                             Map<String, List<ObjectNode>> rebuiltByCode) {
+        String group = source.path("group").asText("").trim();
+        // 防御脏数据造成的环：每条链最多走节点数个框
+        int guard = 0;
+        while (!group.isEmpty() && guard < 32) {
+            guard += 1;
+            List<ObjectNode> candidates = rebuiltByCode.get(group);
+            if (candidates != null) {
+                ObjectNode frame = latestSubgraph(candidates);
+                if (frame != null) {
+                    return frame;
+                }
+            }
+            ObjectNode parent = storedByCode.get(group);
+            group = parent == null ? "" : parent.path("group").asText("").trim();
+        }
+        return null;
+    }
+
+    /**
+     * 同编码的多个节点里挑出「最新一轮的 SUBGRAPH 节点」。
+     *
+     * @param candidates 同编码节点
+     * @return 可作为文件落点的子图节点；都不是 SUBGRAPH 时为 null
+     */
+    private static ObjectNode latestSubgraph(List<ObjectNode> candidates) {
+        ObjectNode chosen = null;
+        int chosenAttempt = 0;
+        for (ObjectNode candidate : candidates) {
+            if (!"SUBGRAPH".equalsIgnoreCase(candidate.path("type").asText(""))) {
+                continue;
+            }
+            int attempt = Math.max(1, candidate.path("attempt").asInt(0));
+            if (chosen == null || attempt >= chosenAttempt) {
+                chosen = candidate;
+                chosenAttempt = attempt;
+            }
+        }
+        return chosen;
+    }
+
+    /**
+     * 合并文件行：同名保留目标里已有的那份，新名字追加在后面。
+     *
+     * <p>为什么不直接覆盖：重建结果若自己带了文件（同一套投影已经算出来的），
+     * 以它为准；骨架只补缺的那几个，避免体积 / 顺序被旧快照改回去。
+     *
+     * @param target 目标节点（原地修改）
+     * @param source 骨架上的文件行
+     */
+    private static void mergeFiles(ObjectNode target, ArrayNode source) {
+        ArrayNode merged = target.get("files") instanceof ArrayNode existing
+                ? existing.deepCopy() : target.arrayNode();
+        Set<String> names = new LinkedHashSet<>();
+        for (JsonNode file : merged) {
+            names.add(file.path("fileName").asText(""));
+        }
+        for (JsonNode file : source) {
+            if (!(file instanceof ObjectNode one)) {
+                continue;
+            }
+            String fileName = one.path("fileName").asText("").trim();
+            if (fileName.isEmpty() || !names.add(fileName)) {
+                continue;
+            }
+            merged.add(one.deepCopy());
+        }
+        if (!merged.isEmpty()) {
+            target.set("files", merged);
+        }
+    }
+
+    /** 节点上是否有非空文件行。 */
+    private static boolean listsFiles(ObjectNode node) {
+        JsonNode files = node.get("files");
+        return files instanceof ArrayNode list && !list.isEmpty();
+    }
+
+    /**
+     * 卡片节点上的匹配键：编码 + 轮次。
+     *
+     * <p>为什么按编码而不按节点 id：{@code workflow_node_run} 与卡片都带编码，骨架里也可以没有 id；
+     * 子图内部编码带范围前缀，和父图节点天然不撞。
+     *
+     * @param node 卡片 / 骨架上的节点对象
+     * @return {@code 编码#轮次}
+     */
+    private static String nodeKeyOf(ObjectNode node) {
+        String code = node.path("code").asText("").trim();
+        int attempt = node.path("attempt").asInt(0);
+        return code + "#" + (attempt > 0 ? attempt : 1);
     }
 
     /**

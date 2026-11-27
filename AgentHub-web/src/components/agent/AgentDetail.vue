@@ -160,6 +160,30 @@
                 <el-form-item label="备注">
                   <el-input v-model="form.remark" type="textarea" maxlength="500" :rows="3" :disabled="!canEdit" />
                 </el-form-item>
+                <!--
+                  入参声明：Agent 被编排调用时的对外合同。
+                  只在「允许被编排」打开（且非 ROUTER）时出现，默认折叠。
+                  关掉开关只是不展示，不清空已存声明：保存体仍带回表单里的当前声明。
+                  与工作流开始节点同一套结构，只是落 agent_def.input_schema_json。
+                -->
+                <el-form-item v-if="showInputDeclaration" label="入参声明">
+                  <el-collapse v-model="inputDeclarationOpen" class="declaration-collapse">
+                    <el-collapse-item name="declaration">
+                      <template #title>
+                        <span class="declaration-collapse__hint">用于工作流编排出槽，不影响对话和方案</span>
+                      </template>
+                      <InputDeclarationEditor
+                        :model-value="form.inputSchema"
+                        :disabled="!canEdit"
+                        :show-hints="false"
+                        @update:model-value="onInputSchemaChange"
+                      />
+                      <div class="declaration-hint">
+                        按这些键在工作流里出槽；工作台对话和方案运行仍只收一个问题。没有声明时，画布用默认的「用户输入」槽。
+                      </div>
+                    </el-collapse-item>
+                  </el-collapse>
+                </el-form-item>
               </el-form>
               <!--
                 历史遗留子路由提示：本页已无编排 Tab，Router 主控改到「多智能体」维护。
@@ -554,6 +578,7 @@ import SkillBindDialog from '@/components/agent/SkillBindDialog.vue'
 import ToolBindDialog from '@/components/agent/ToolBindDialog.vue'
 import TablePager from '@/components/TablePager.vue'
 import LoadError from '@/components/common/LoadError.vue'
+import InputDeclarationEditor from '@/components/common/InputDeclarationEditor.vue'
 import { normalizeAgentAvatarConfig } from '@/constants/agentLooks'
 import { isPlatformDefaultAssistant } from '@/constants/platformAgents'
 import { useUserStore } from '@/stores/user'
@@ -1017,6 +1042,16 @@ const canEdit = computed(() => user.hasPerm('agent:edit'))
 const canEditMemory = computed(() => user.hasPerm('memory:policy:edit'))
 const canEnable = computed(() => user.hasPerm('agent:enable'))
 /**
+ * 是否展示「入参声明」区块。
+ * <p>跟现有「允许被编排」开关联动：只有开关打开（非 ROUTER）时才展示；
+ * 关掉只是隐藏，不清空表单里已载入的声明，随底栏保存也不会把库里的声明写成空表。
+ */
+const showInputDeclaration = computed(() =>
+  !!form.value && form.value.runMode !== 'ROUTER' && form.value.allowOrchestrated !== false
+)
+/** 入参声明折叠状态：默认折叠；开关关掉 / 切换 Agent 后回到折叠。 */
+const inputDeclarationOpen = ref<string[]>([])
+/**
  * 当前详情是否为平台默认智能助手。
  * 按编码识别（与后端锁定策略同口径）；未加载完成时按 false 处理，避免闪烁式禁用。
  */
@@ -1132,6 +1167,8 @@ interface DraftSnap {
   systemPrompt: string
   /** L3 四列；取消时一并回滚，避免只回滚正文留下半套配置 */
   prompt: PromptBinding
+  /** 入参声明：Agent 被编排调用时的对外合同；undefined=没有声明 */
+  inputSchema: unknown
   remark: string
   timeoutMs: number | null
   maxRounds: number | null
@@ -1212,6 +1249,8 @@ function draftFromForm(source: AgentDetail | null): DraftSnap | null {
     avatarConfig: normalizeAgentAvatarConfig(source.avatarConfig),
     systemPrompt: source.systemPrompt || '',
     prompt: normalizePromptBinding(source.prompt),
+    // 声明是合同文本：直接进快照，取消 / 脏检查都能把它回滚
+    inputSchema: source.inputSchema ?? undefined,
     remark: source.remark || '',
     timeoutMs: source.timeoutMs ?? null,
     maxRounds: source.maxRounds ?? null,
@@ -1256,6 +1295,7 @@ function restoreDraft(snap: DraftSnap) {
   target.avatarConfig = normalizeAgentAvatarConfig(snap.avatarConfig)
   target.systemPrompt = snap.systemPrompt
   target.prompt = normalizePromptBinding(snap.prompt)
+  target.inputSchema = snap.inputSchema
   target.remark = snap.remark
   target.timeoutMs = snap.timeoutMs
   target.maxRounds = snap.maxRounds
@@ -1325,6 +1365,8 @@ watch(
     saved.value = null
     // 计数属于上一个 Agent：先清成「未知」，避免切过去短暂显示旧数字
     kbBindCount.value = null
+    // 入参声明回到默认折叠：换 Agent 不沿用上一个的展开态
+    inputDeclarationOpen.value = []
     markClean()
     load(false)
   },
@@ -1347,6 +1389,16 @@ onActivated(() => {
 watch(showReactBindTabs, (reactVisible) => {
   if (!reactVisible && ['tool', 'skill', 'memory', 'kb'].includes(tab.value)) {
     tab.value = 'basic'
+  }
+})
+
+/**
+ * 「允许被编排」关掉（或切到 ROUTER）时把入参声明收回折叠态：
+ * 再次打开时仍保持默认折叠，不会因为上一次展开过而自动铺开。
+ */
+watch(showInputDeclaration, (visible) => {
+  if (!visible) {
+    inputDeclarationOpen.value = []
   }
 })
 
@@ -1407,6 +1459,26 @@ function onRunModeChange(value: string | number | boolean) {
 }
 
 /**
+ * 空白入参声明：显式「清空」用。
+ * <p>后端 update 只在 inputSchema 非 null 时才写库，直接传 null 会被当成「本次不改」；
+ * 传一个空的 properties 对象，归一后即 null，列被清空，而语义仍是「整份保存」。
+ */
+const EMPTY_INPUT_SCHEMA = { type: 'object', properties: {} }
+
+/**
+ * 入参声明改动：只改表单草稿，随底栏保存一次落库。
+ * <p>编辑器回抛 null 表示「没有声明」，这里落成 undefined（快照里等同「无」）。
+ *
+ * @param value 归一后的声明；null / undefined 表示清空
+ */
+function onInputSchemaChange(value: unknown) {
+  if (!form.value) {
+    return
+  }
+  form.value.inputSchema = value ?? undefined
+}
+
+/**
  * 开关「允许被编排调用」。
  *
  * <p>只改表单草稿，随页面底部保存一次落库（与其它填写类字段同口径）。
@@ -1419,6 +1491,10 @@ function onAllowOrchestratedChange(value: string | number | boolean) {
     return
   }
   form.value.allowOrchestrated = form.value.runMode === 'ROUTER' ? false : value === true
+  // 关掉即收起声明块：下次打开保持默认折叠，不沿用上一次的展开态
+  if (!form.value.allowOrchestrated) {
+    inputDeclarationOpen.value = []
+  }
 }
 
 onBeforeUnmount(() => {
@@ -1580,6 +1656,8 @@ function payload(): AgentSave | null {
       promptExtra: settled.promptExtra
     },
     remark: form.value.remark?.trim() || '',
+    // 空声明也显式提交：传 null 会被后端当成「本次不改」，清空操作就落不了库
+    inputSchema: form.value.inputSchema ?? EMPTY_INPUT_SCHEMA,
     timeoutMs: form.value.timeoutMs ?? null,
     maxRounds: form.value.maxRounds ?? null,
     toolTimeoutMs: form.value.toolTimeoutMs ?? null,
@@ -1856,6 +1934,8 @@ function payloadFromSaved(snapshot: SavedSnap): AgentSave {
       promptExtra: settled.promptExtra
     },
     remark: snapshot.remark,
+    // 即时保存也整份回传：漏传会被后端当成「不改」，但这里带的是已落库值，不会洗掉声明
+    inputSchema: snapshot.inputSchema ?? EMPTY_INPUT_SCHEMA,
     timeoutMs: snapshot.timeoutMs,
     maxRounds: snapshot.maxRounds,
     toolTimeoutMs: snapshot.toolTimeoutMs,
@@ -2459,6 +2539,27 @@ async function removeSkill(row: SkillBind) {
   margin: 0;
   color: var(--ah-text-secondary);
   font-size: 13px;
+}
+
+/* 入参声明折叠条：只留一句用途提示，展开后才铺编辑器 */
+.declaration-collapse :deep(.el-collapse-item__header) {
+  height: auto;
+  min-height: 32px;
+  line-height: 1.5;
+}
+
+.declaration-collapse__hint {
+  color: var(--ah-text-secondary);
+  font-size: 12px;
+  line-height: 1.5;
+}
+
+/* 入参声明展开后的说明：只保留一句合同口径，不再堆重复说明 */
+.declaration-hint {
+  margin: 8px 0 0;
+  color: var(--ah-text-faint);
+  font-size: 12px;
+  line-height: 1.6;
 }
 
 .basic-grid {

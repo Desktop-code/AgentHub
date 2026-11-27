@@ -2,7 +2,7 @@ package com.agenthub.workflow.domain.enums;
 
 /**
  * 工作流节点类型。所属域：workflow 的 domain。
- * <p>P0 落地 START/END/AGENT/TOOL/CONDITION/PARALLEL_FORK/PARALLEL_JOIN/HUMAN/LOOP；
+ * <p>P0 落地 START/END/AGENT/TOOL/CONDITION/PARALLEL_FORK/PARALLEL_JOIN/HUMAN/LOOP/SUBGRAPH；
  * 其余类型在画布面板灰显并标注 P1，手改入库由校验器拒绝。
  */
 public enum WorkflowNodeType {
@@ -32,7 +32,7 @@ public enum WorkflowNodeType {
     KB_RETRIEVE,
     /** 技能注入；P1 */
     SKILL_INJECT,
-    /** 子图；P1，且永久禁止跨租户 */
+    /** 子图；按钉死发布版本递归执行，永久禁止跨租户 */
     SUBGRAPH,
     /** 列表映射；P1 */
     MAP,
@@ -62,12 +62,15 @@ public enum WorkflowNodeType {
 
     /**
      * 是否属于本刀（P0）支持的类型。
+     * <p>SUBGRAPH 已解锁「绑定 + 发布校验 + 运行时执行」：引擎按钉死发布版本递归执行，
+     * 图能存、能发、能跑；跨租户与成环 / 超过 3 层由校验器与运行时共同拒绝。
      *
-     * @return true 表示可建图、可发布
+     * @return true 表示可建图、可发布、可运行
      */
     public boolean p0Supported() {
         return switch (this) {
-            case START, END, AGENT, TOOL, CONDITION, PARALLEL_FORK, PARALLEL_JOIN, HUMAN, LOOP -> true;
+            case START, END, AGENT, TOOL, CONDITION, PARALLEL_FORK, PARALLEL_JOIN, HUMAN, LOOP,
+                    SUBGRAPH -> true;
             default -> false;
         };
     }

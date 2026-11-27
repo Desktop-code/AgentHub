@@ -2153,12 +2153,13 @@ function normalizeWorkflowSteps(raw: unknown): TrialWorkflowStepView[] {
  * 归一化节点文件行：只存文件名 / 体积，下载地址按当前会话现拼。
  *
  * <p>不把 downloadUrl 写进快照：会话复制或迁移后旧地址会失效，回放应读当前会话。
+ * 工作台回放与画布调试（调试传 run 主键）共用这一份口径，避免两处各拼一套地址。
  *
  * @param raw       节点 files 字段
- * @param sessionId 会话主键；缺失时地址为空串，FileCard 会置灰
+ * @param sessionId 会话主键（调试传运行主键）；缺失时地址为空串，FileCard 会置灰
  * @return 文件视图；没有或结构不合格时为空表
  */
-function normalizeWorkflowNodeFiles(raw: unknown, sessionId?: number): TrialFileView[] {
+export function normalizeWorkflowNodeFiles(raw: unknown, sessionId?: number): TrialFileView[] {
   if (!Array.isArray(raw)) {
     return []
   }

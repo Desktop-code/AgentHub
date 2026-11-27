@@ -21,8 +21,12 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.stereotype.Component;
 
+import java.util.ArrayList;
+import java.util.LinkedHashMap;
+import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 
 /**
@@ -187,11 +191,169 @@ public class WorkflowDebugLive implements WorkflowTrialLive {
                 return;
             }
             List<WorkflowNodeRun> rows = nodeRuns.listByRunId(runId);
-            liveCards.finish(runId, persistedView(fresh, rows), rows,
-                    fresh.getStatus(), fresh.getErrorSummary());
+            /*
+             * 取消 / 人工驳回走请求线程，拿不到引擎线程上的投影（ACTIVE 是 ThreadLocal），
+             * 只能按库现算终态卡。但库里没有「哪个节点写了哪个文件」这一列，
+             * 现算的卡会把已经流出的文件行整块抹掉；这里从上一帧补回来，
+             * 状态与正文仍以按库现算的为准（终态必须对齐）。
+             */
+            WorkflowRunView view = withNodeFiles(persistedView(fresh, rows), liveCards.viewOf(runId));
+            liveCards.finish(runId, view, rows, fresh.getStatus(), fresh.getErrorSummary());
         } catch (RuntimeException ex) {
             log.warn("调试直播按库收口失败 runId={} type={}", runId, ex.getClass().getSimpleName());
         }
+    }
+
+    /**
+     * 把上一帧已经流出的节点文件行补到按库现算的卡片上。
+     *
+     * <p>为什么需要：{@code workflow_node_run} 没有文件清单这一列，取消 / 驳回这类
+     * 不经引擎线程的收口只能按库现算终态卡；不补就会把用户已经看到的文件行连同下载入口一起抹掉。
+     * 口径与刷新回放一致：同名文件只留一份，重建卡里已有的那份优先。
+     *
+     * <p>子图被拍平（按库还原子图范围失败、内部节点缺席）时，文件改挂到看得见的父图
+     * SUBGRAPH 节点，不能随内部节点一起消失。
+     *
+     * @param rebuilt  按库现算的终态卡；可空
+     * @param previous 上一帧直播卡；可空
+     * @return 补好文件行的卡；没有可补的内容时是 {@code rebuilt} 本身
+     */
+    static WorkflowRunView withNodeFiles(WorkflowRunView rebuilt, WorkflowRunView previous) {
+        if (rebuilt == null || previous == null || previous.nodes().isEmpty()) {
+            return rebuilt;
+        }
+        Map<String, List<WorkflowRunView.NodeFile>> filesByKey = new LinkedHashMap<>();
+        Map<String, WorkflowRunView.Node> previousByCode = new LinkedHashMap<>();
+        for (WorkflowRunView.Node node : previous.nodes()) {
+            String code = node.code() == null ? "" : node.code().trim();
+            previousByCode.putIfAbsent(code, node);
+            if (!node.files().isEmpty()) {
+                filesByKey.putIfAbsent(nodeKeyOf(node), node.files());
+            }
+        }
+        if (filesByKey.isEmpty()) {
+            return rebuilt;
+        }
+        Map<String, WorkflowRunView.Node> rebuiltByKey = new LinkedHashMap<>();
+        Map<String, WorkflowRunView.Node> rebuiltByCode = new LinkedHashMap<>();
+        for (WorkflowRunView.Node node : rebuilt.nodes()) {
+            rebuiltByKey.putIfAbsent(nodeKeyOf(node), node);
+            String code = node.code() == null ? "" : node.code().trim();
+            if (!code.isEmpty()) {
+                rebuiltByCode.putIfAbsent(code, node);
+            }
+        }
+        Map<String, List<WorkflowRunView.NodeFile>> merged = new LinkedHashMap<>();
+        for (Map.Entry<String, List<WorkflowRunView.NodeFile>> entry : filesByKey.entrySet()) {
+            WorkflowRunView.Node target = rebuiltByKey.get(entry.getKey());
+            if (target == null) {
+                target = visibleFrameOf(previousByCode.get(codeOfKey(entry.getKey())),
+                        previousByCode, rebuiltByCode);
+            }
+            if (target == null) {
+                continue;
+            }
+            // 目标自己已经带的文件行优先，骨架只补缺的名字
+            merged.merge(nodeKeyOf(target), unionFiles(target.files(), entry.getValue()),
+                    WorkflowDebugLive::unionFiles);
+        }
+        if (merged.isEmpty()) {
+            return rebuilt;
+        }
+        List<WorkflowRunView.Node> nodes = new ArrayList<>(rebuilt.nodes().size());
+        for (WorkflowRunView.Node node : rebuilt.nodes()) {
+            List<WorkflowRunView.NodeFile> extra = merged.get(nodeKeyOf(node));
+            nodes.add(extra == null ? node : copyWithFiles(node, extra));
+        }
+        return new WorkflowRunView(rebuilt.name(), rebuilt.code(), rebuilt.status(), rebuilt.answer(),
+                nodes, rebuilt.choice(), rebuilt.limits(), rebuilt.runId());
+    }
+
+    /**
+     * 节点在重建卡里不见时，沿 {@code group} 往上找看得见的那层父图 SUBGRAPH 节点。
+     *
+     * @param source        上一帧里写出文件的节点
+     * @param previousByCode 上一帧编码 → 节点（用来继续往上走）
+     * @param rebuiltByCode  重建卡编码 → 节点
+     * @return 可挂文件的子图节点；没有则为 {@code null}
+     */
+    private static WorkflowRunView.Node visibleFrameOf(WorkflowRunView.Node source,
+                                                       Map<String, WorkflowRunView.Node> previousByCode,
+                                                       Map<String, WorkflowRunView.Node> rebuiltByCode) {
+        if (source == null) {
+            return null;
+        }
+        String group = source.group() == null ? "" : source.group().trim();
+        // 防御脏数据造成的环
+        int guard = 0;
+        while (!group.isEmpty() && guard < 32) {
+            guard += 1;
+            WorkflowRunView.Node frame = rebuiltByCode.get(group);
+            if (frame != null && "SUBGRAPH".equalsIgnoreCase(frame.type())) {
+                return frame;
+            }
+            WorkflowRunView.Node parent = previousByCode.get(group);
+            group = parent == null || parent.group() == null ? "" : parent.group().trim();
+        }
+        return null;
+    }
+
+    /**
+     * 合并文件行：已有那份优先，只补新名字。
+     *
+     * @param current 目标节点已有的文件行
+     * @param extra   要补的文件行
+     * @return 合并结果（不修改入参）
+     */
+    private static List<WorkflowRunView.NodeFile> unionFiles(List<WorkflowRunView.NodeFile> current,
+                                                             List<WorkflowRunView.NodeFile> extra) {
+        List<WorkflowRunView.NodeFile> merged = new ArrayList<>(current);
+        Set<String> names = new LinkedHashSet<>();
+        for (WorkflowRunView.NodeFile file : current) {
+            names.add(file.fileName());
+        }
+        for (WorkflowRunView.NodeFile file : extra) {
+            if (names.add(file.fileName())) {
+                merged.add(file);
+            }
+        }
+        return List.copyOf(merged);
+    }
+
+    /**
+     * 复制一个节点并换掉文件行。
+     *
+     * @param node  原节点
+     * @param files 新的文件行
+     * @return 新节点
+     */
+    private static WorkflowRunView.Node copyWithFiles(WorkflowRunView.Node node,
+                                                      List<WorkflowRunView.NodeFile> files) {
+        return new WorkflowRunView.Node(node.code(), node.name(), node.type(), node.status(), node.note(),
+                node.output(), node.steps(), files, node.reply(), node.attempt(), node.group(),
+                node.loopRound(), node.loopTotal(), node.loopDecision(), node.displayCode());
+    }
+
+    /**
+     * 节点匹配键：编码 + 轮次（缺省第 1 轮）。
+     *
+     * @param node 节点
+     * @return {@code 编码#轮次}
+     */
+    private static String nodeKeyOf(WorkflowRunView.Node node) {
+        String code = node.code() == null ? "" : node.code().trim();
+        return code + "#" + Math.max(1, node.attempt());
+    }
+
+    /**
+     * 从匹配键里取回节点编码。
+     *
+     * @param key {@code 编码#轮次}
+     * @return 编码
+     */
+    private static String codeOfKey(String key) {
+        int cut = key.lastIndexOf('#');
+        return cut < 0 ? key : key.substring(0, cut);
     }
 
     /**
@@ -311,6 +473,18 @@ public class WorkflowDebugLive implements WorkflowTrialLive {
                                Map<String, List<WorkflowEdge>> outgoing) {
             capture(currentRows);
             projector.runStarted(nodes, currentRows, outgoing);
+        }
+
+        @Override
+        public void scopeStarted(com.agenthub.workflow.domain.model.WorkflowScopeView scope) {
+            if (scope == null) {
+                return;
+            }
+            // 子图节点行也要进直播快照：画布高亮与过程区框共用同一份行清单
+            for (WorkflowNodeRun row : scope.rows()) {
+                capture(row);
+            }
+            projector.scopeStarted(scope);
         }
 
         @Override

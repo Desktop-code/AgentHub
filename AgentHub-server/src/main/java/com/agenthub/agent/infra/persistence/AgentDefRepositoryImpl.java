@@ -134,6 +134,7 @@ public class AgentDefRepositoryImpl implements AgentDefRepository {
         entity.setPromptOverrideJson(agent.getPromptOverrideJson());
         entity.setPromptExtra(agent.getPromptExtra());
         copyLimits(agent, entity);
+        entity.setInputSchemaJson(agent.getInputSchemaJson());
         entity.setStatus(agent.getStatus());
         entity.setRemark(agent.getRemark());
         entity.setCreatedBy(operatorId);
@@ -168,6 +169,7 @@ public class AgentDefRepositoryImpl implements AgentDefRepository {
                 .set(AgentDefEntity::getConsecutiveFailAbort, agent.getConsecutiveFailAbort())
                 .set(AgentDefEntity::getToolResultMaxChars, agent.getToolResultMaxChars())
                 .set(AgentDefEntity::getRuntimeConfigJson, agent.getRuntimeConfigJson())
+                .set(AgentDefEntity::getInputSchemaJson, agent.getInputSchemaJson())
                 .set(AgentDefEntity::getRemark, agent.getRemark())
                 .set(AgentDefEntity::getUpdatedBy, operatorId));
     }
@@ -226,6 +228,7 @@ public class AgentDefRepositoryImpl implements AgentDefRepository {
         agent.setConsecutiveFailAbort(entity.getConsecutiveFailAbort());
         agent.setToolResultMaxChars(entity.getToolResultMaxChars());
         agent.setRuntimeConfigJson(entity.getRuntimeConfigJson());
+        agent.setInputSchemaJson(entity.getInputSchemaJson());
         agent.setStatus(entity.getStatus());
         // 普通查询走 @TableLogic 只会是 0；含删查询才可能为 1
         agent.setDeleted(entity.getDeleted());

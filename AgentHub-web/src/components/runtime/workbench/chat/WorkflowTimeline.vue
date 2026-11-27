@@ -7,7 +7,9 @@
   <div class="wf-timeline" :class="{ 'is-nested': depth > 0 }">
     <template
       v-for="(entry, position) in entries"
-      :key="entry.kind === 'loop' ? 'loop:' + entry.loop.key : 'step:' + stepKeyOf(entry, position)"
+      :key="entry.kind === 'loop'
+        ? 'loop:' + entry.loop.key
+        : entry.kind === 'subgraph' ? 'subgraph:' + entry.subgraph.key : 'step:' + stepKeyOf(entry, position)"
     >
       <!-- 循环：一层分组框，标题写清轮次与状态 -->
       <div v-if="entry.kind === 'loop'" class="wf-loop" :class="'is-' + entry.loop.state">
@@ -29,6 +31,46 @@
           收起只影响显示范围，已流出的正文与已发生的轮次都还在。
         -->
         <div class="wf-loop-fold" :class="{ 'is-collapsed': !loopOpen(entry.loop.key) }">
+          <div class="wf-loop-fold-body">
+            <WorkflowTimeline
+              :entries="entry.entries"
+              :turn="turn"
+              :card="card"
+              :choice-enabled="choiceEnabled"
+              :workbench="workbench"
+              :peers="peers"
+              :depth="depth + 1"
+              @choose="emit('choose', $event)"
+              @other="emit('other')"
+            />
+          </div>
+        </div>
+      </div>
+      <!-- 子图：与循环框同一套折叠结构，标题用被调工作流名 + 版本，默认展开 -->
+      <div
+        v-else-if="entry.kind === 'subgraph'"
+        class="wf-loop wf-subgraph"
+        :class="'is-' + entry.subgraph.state"
+      >
+        <button
+          type="button"
+          class="wf-loop-head"
+          :aria-expanded="loopOpen(entry.subgraph.key, 'subgraph')"
+          @click.stop.prevent="toggleLoop(entry.subgraph.key, 'subgraph')"
+        >
+          <span
+            class="wf-loop-chevron"
+            :class="{ open: loopOpen(entry.subgraph.key, 'subgraph') }"
+            aria-hidden="true"
+          />
+          <span class="wf-loop-title">{{ entry.subgraph.title }}</span>
+          <span v-if="entry.subgraph.state === 'running'" class="wf-spin" aria-hidden="true">⏳</span>
+        </button>
+        <!-- 子图内部节点 / 内层循环都套在这个框里，与父图共用同一份开合状态 -->
+        <div
+          class="wf-loop-fold"
+          :class="{ 'is-collapsed': !loopOpen(entry.subgraph.key, 'subgraph') }"
+        >
           <div class="wf-loop-fold-body">
             <WorkflowTimeline
               :entries="entry.entries"
@@ -123,28 +165,30 @@ if (!injected) {
 const stepPeers = computed(() => props.peers)
 
 /**
- * 某个框的折叠键：轮 + 参与者 + 框编码，回放重建组件时仍落到同一个键上。
+ * 某个框的折叠键：轮 + 参与者 + 框类别 + 框编码，回放重建组件时仍落到同一个键上。
  *
- * @param code 循环编码
+ * @param code 框编码（循环节点 / 父图 SUBGRAPH 节点）
+ * @param kind 框类别：循环或子图
  * @return 折叠键
  */
-function foldKeyOf(code: string): string {
-  return `${props.turn.key}:${props.card.key}:loop:${code}`
+function foldKeyOf(code: string, kind: 'loop' | 'subgraph' = 'loop'): string {
+  return `${props.turn.key}:${props.card.key}:${kind}:${code}`
 }
 
-/** 框当前是否展开：默认展开，用户点过就以点击为准 */
-function loopOpen(code: string): boolean {
-  const value = foldOverrides[foldKeyOf(code)]
+/** 框当前是否展开：默认展开（子图框也默认展开），用户点过就以点击为准 */
+function loopOpen(code: string, kind: 'loop' | 'subgraph' = 'loop'): boolean {
+  const value = foldOverrides[foldKeyOf(code, kind)]
   return typeof value === 'boolean' ? value : true
 }
 
 /**
  * 点一次框标题：只改显示范围，不动已产出的内容。
  *
- * @param code 循环编码
+ * @param code 框编码
+ * @param kind 框类别：循环或子图
  */
-function toggleLoop(code: string): void {
-  foldOverrides[foldKeyOf(code)] = !loopOpen(code)
+function toggleLoop(code: string, kind: 'loop' | 'subgraph' = 'loop'): void {
+  foldOverrides[foldKeyOf(code, kind)] = !loopOpen(code, kind)
 }
 
 /**
@@ -157,6 +201,9 @@ function toggleLoop(code: string): void {
 function stepKeyOf(entry: WfTimelineEntry, position: number): string {
   if (entry.kind === 'loop') {
     return entry.loop.key
+  }
+  if (entry.kind === 'subgraph') {
+    return entry.subgraph.key
   }
   const node = entry.node
   return `${node.code || 'node'}#${node.attempt || 1}#${position}`

@@ -6,6 +6,8 @@
 import type { ParticipantCard } from '@/components/runtime/workbench/workbenchParticipantFeed'
 import type { ChatTurn, TrialWorkflowView } from '@/types/runtime'
 import type { WorkflowRunDetail, WorkflowRunLiveCard } from '@/types/workflow'
+// 相对路径带 .ts：本模块要能在 node 窄测里直接 import，别名只有 Vite 认得
+import { normalizeWorkflowNodeFiles } from '../../../components/runtime/trialMessages.ts'
 
 /** 过程区还没开始时的空态，不要写成「等待执行」 */
 export const DEBUG_EMPTY_HINT = '输入要调试的内容，开始后过程会出现在这里'
@@ -29,10 +31,15 @@ export type DebugSendMode = 'start' | 'reply' | 'blocked'
  *
  * <p>缺状态或缺节点数组时返回空，调用方保持空态，不去读 nodeRuns 补节点。
  *
+ * <p>带 {@code workspaceSessionId} 时会顺带把节点文件行补上下载地址：
+ * 后端投影只给文件名 / 体积，地址必须由前端按本次运行现拼。调试没有工作台会话，
+ * 这里传 run 主键（沙箱目录同样按 run 命名，下载后端也认 run 主键）。
+ *
  * @param value 详情里的 card；形状不对时为任意 JSON
- * @return 同一引用的视图；认不出时为 null
+ * @param workspaceSessionId 拼下载地址用的主键；缺省则原样返回
+ * @return 视图；不带主键时是同一引用，带主键且真的补了文件时是新对象
  */
-export function asWorkflowView(value: unknown): TrialWorkflowView | null {
+export function asWorkflowView(value: unknown, workspaceSessionId?: number): TrialWorkflowView | null {
   if (!value || typeof value !== 'object' || Array.isArray(value)) {
     return null
   }
@@ -40,7 +47,18 @@ export function asWorkflowView(value: unknown): TrialWorkflowView | null {
   if (typeof record.status !== 'string' || !Array.isArray(record.nodes)) {
     return null
   }
-  return value as TrialWorkflowView
+  const view = value as TrialWorkflowView
+  if (!workspaceSessionId) {
+    return view
+  }
+  let touched = false
+  // 只补文件行的下载地址，状态 / 正文 / 分组原样保留
+  const nodes = view.nodes.map((node) => {
+    const files = normalizeWorkflowNodeFiles((node as { files?: unknown }).files, workspaceSessionId)
+    touched = touched || files.length > 0
+    return { ...node, files }
+  })
+  return touched ? { ...view, nodes } : view
 }
 
 /**

@@ -1,5 +1,6 @@
 package com.agenthub.agent.api.dto;
 
+import com.fasterxml.jackson.databind.JsonNode;
 import jakarta.validation.constraints.NotBlank;
 import jakarta.validation.constraints.Size;
 import lombok.Data;
@@ -60,4 +61,11 @@ public class AgentUpdateReq {
 
     /** Router 等运行配置；可空，空则按模式默认写入 */
     private AgentRuntimeConfigReq runtimeConfig;
+
+    /**
+     * 入参声明（顶层 JSON Schema：properties / required / title / description）。
+     * <p>键即编排里 {@code $.input} 下的字段名；null / 空 properties = 清空声明。
+     * 结构非法（非对象、键为空、超长）保存时直接 400。
+     */
+    private JsonNode inputSchema;
 }

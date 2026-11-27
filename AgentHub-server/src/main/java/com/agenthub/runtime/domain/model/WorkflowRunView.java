@@ -194,11 +194,13 @@ public record WorkflowRunView(String name, String code, String status, String an
      */
     public record Node(String code, String name, String type, String status, String note,
                        String output, List<Step> steps, List<NodeFile> files, String reply,
-                       int attempt, String group, int loopRound, int loopTotal, String loopDecision) {
+                       int attempt, String group, int loopRound, int loopTotal, String loopDecision,
+                       String displayCode) {
 
         /** 防御性归一：状态缺省按「未开始」，文案缺省为空串，列表缺省为空表，轮次至少为 1。 */
         public Node {
             code = code == null ? "" : code.trim();
+            displayCode = displayCode == null ? "" : displayCode.trim();
             name = name == null ? "" : name.trim();
             type = type == null ? "" : type.trim().toUpperCase();
             status = status == null || status.isBlank() ? "PENDING" : status.trim().toUpperCase();
@@ -214,6 +216,16 @@ public record WorkflowRunView(String name, String code, String status, String an
             loopRound = Math.max(0, loopRound);
             loopTotal = Math.max(0, loopTotal);
             loopDecision = loopDecision == null ? "" : loopDecision.trim().toUpperCase();
+        }
+
+        /**
+         * 兼容构造：不带展示编码的调用点按「展示编码同节点编码」处理。
+         */
+        public Node(String code, String name, String type, String status, String note,
+                    String output, List<Step> steps, List<NodeFile> files, String reply,
+                    int attempt, String group, int loopRound, int loopTotal, String loopDecision) {
+            this(code, name, type, status, note, output, steps, files, reply, attempt,
+                    group, loopRound, loopTotal, loopDecision, "");
         }
 
         /**

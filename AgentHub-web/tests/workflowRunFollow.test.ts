@@ -89,6 +89,35 @@ test('步骤间隙不跟已完成的节点', () => {
   assert.equal(pickFollowTarget([row('skip', 'SKIPPED')], 'SUCCESS'), null)
 })
 
+test('子图内部节点不抢镜头：跟随停在父图 SUBGRAPH 节点', () => {
+  const rows = [
+    row('call', 'RUNNING', {
+      nodeType: 'SUBGRAPH',
+      id: 1,
+      startTime: '2026-11-27 10:00:00.000'
+    }),
+    row('x1a2b3c4d_intake', 'RUNNING', {
+      id: 2,
+      startTime: '2026-11-27 10:00:01.000'
+    })
+  ]
+  assert.deepEqual(pickFollowTarget(rows, 'RUNNING'), { code: 'call', attempt: 1 })
+  // 失败收口也只跟父图节点，不去定位画布上不存在的子图节点
+  const failed = [
+    row('call', 'FAILED', { nodeType: 'SUBGRAPH', id: 1, endTime: '2026-11-27 10:00:03.000' }),
+    row('x1a2b3c4d_reply', 'FAILED', { id: 2, endTime: '2026-11-27 10:00:02.000' })
+  ]
+  assert.deepEqual(pickFollowTarget(failed, 'FAILED'), { code: 'call', attempt: 1 })
+  // 历史记录同样跳过子图内部节点
+  assert.deepEqual(
+    pickLastEndedTarget([
+      row('call', 'SUCCESS', { nodeType: 'SUBGRAPH', id: 1, endTime: '2026-11-27 10:00:03.000' }),
+      row('x1a2b3c4d_reply', 'SUCCESS', { id: 2, endTime: '2026-11-27 10:00:04.000' })
+    ]),
+    { code: 'call', attempt: 1 }
+  )
+})
+
 test('历史记录取最后结束的非 START/END、非 SKIPPED 节点', () => {
   const target = pickLastEndedTarget([
     row('start', 'SUCCESS', {

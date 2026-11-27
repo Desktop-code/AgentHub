@@ -79,10 +79,26 @@ public class WorkflowContextSupport {
      * @return 节点编码 → 产出
      */
     public ObjectNode collectOutputs(WorkflowRuntimeGraph runtime, List<WorkflowNodeRun> rows) {
+        return collectOutputs(runtime, rows, WorkflowNode::getCode);
+    }
+
+    /**
+     * 按指定编码口径收集已完成节点的产出。
+     *
+     * <p>子图运行行的 {@code node_code} 带范围前缀以保证唯一，但 {@code $.outputs} 必须用
+     * 用户原始编码；调用方传 {@code scope::outputCode} 即可，不能在这里反解前缀。
+     *
+     * @param runtime 当前作用域的运行时图
+     * @param rows    当前作用域的节点行
+     * @param codeOf  节点 → 输出编码
+     * @return {@code {code: produced}}
+     */
+    public ObjectNode collectOutputs(WorkflowRuntimeGraph runtime, List<WorkflowNodeRun> rows,
+                                     java.util.function.Function<WorkflowNode, String> codeOf) {
         ObjectNode outputs = json.createObjectNode();
         Map<String, String> codeById = new LinkedHashMap<>();
         for (WorkflowNode node : runtime.nodes()) {
-            codeById.put(node.getId(), node.getCode());
+            codeById.put(node.getId(), codeOf == null ? node.getCode() : codeOf.apply(node));
         }
         for (WorkflowNodeRun row : rows) {
             if (WorkflowNodeRunStatus.parse(row.getStatus()) != WorkflowNodeRunStatus.SUCCESS) {

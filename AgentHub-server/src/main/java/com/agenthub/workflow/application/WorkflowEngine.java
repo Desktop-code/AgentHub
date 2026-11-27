@@ -13,6 +13,7 @@ import com.agenthub.workflow.domain.model.WorkflowHumanTask;
 import com.agenthub.workflow.domain.model.WorkflowNode;
 import com.agenthub.workflow.domain.model.WorkflowNodeRun;
 import com.agenthub.workflow.domain.model.WorkflowRun;
+import com.agenthub.workflow.domain.model.WorkflowScopeView;
 import com.agenthub.workflow.domain.repository.WorkflowHumanTaskRepository;
 import com.agenthub.workflow.domain.repository.WorkflowNodeRunRepository;
 import com.agenthub.workflow.domain.repository.WorkflowRunRepository;
@@ -23,6 +24,7 @@ import com.agenthub.workflow.domain.service.WorkflowLoopPolicy;
 import com.agenthub.workflow.domain.service.WorkflowNodeConfig;
 import com.agenthub.workflow.domain.service.WorkflowNodeInputs;
 import com.agenthub.workflow.domain.service.WorkflowOutcomeTexts;
+import com.agenthub.workflow.domain.service.WorkflowRunLimits;
 import com.agenthub.workflow.domain.service.WorkflowRunListener;
 import com.agenthub.workflow.domain.service.WorkflowStateMachine;
 import com.agenthub.workflow.domain.service.WorkflowToolInvoker;
@@ -33,6 +35,7 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.stereotype.Component;
 
 import java.time.LocalDateTime;
@@ -86,14 +89,19 @@ public class WorkflowEngine {
     /** 循环：计数、打回反馈、超限出路。引擎只在进入节点和成功之后调用 */
     private final WorkflowLoopScheduler loops;
 
+    /** 子图：钉死发布版本解析；旧调用方（单测）可不传，此时遇 SUBGRAPH 直接失败 */
+    private final WorkflowSubgraphResolver subgraphs;
+
     /**
+     * 单测 / 旧入口用的构造：不带子图解析器。
+     *
      * @param runs         run 仓储
      * @param nodeRuns     node_run 仓储
      * @param humanTasks   人工待办仓储
-     * @param agentInvoker AGENT 节点执行口（现网试跑链路）
-     * @param toolInvoker  TOOL 节点执行口（现网 MCP）
+     * @param agentInvoker AGENT 节点执行口
+     * @param toolInvoker  TOOL 节点执行口
      * @param codec        图 JSON 解析
-     * @param properties   墙钟 / 人工超时默认值
+     * @param properties   时限默认值
      * @param json         全站 ObjectMapper
      * @param traces       工作流埋点端口
      */
@@ -106,6 +114,32 @@ public class WorkflowEngine {
                           WorkflowProperties properties,
                           ObjectMapper json,
                           WorkflowTraceWriter traces) {
+        this(runs, nodeRuns, humanTasks, agentInvoker, toolInvoker, codec, properties, json, traces, null);
+    }
+
+    /**
+     * @param runs         run 仓储
+     * @param nodeRuns     node_run 仓储
+     * @param humanTasks   人工待办仓储
+     * @param agentInvoker AGENT 节点执行口（现网试跑链路）
+     * @param toolInvoker  TOOL 节点执行口（现网 MCP）
+     * @param codec        图 JSON 解析
+     * @param properties   墙钟 / 人工超时默认值
+     * @param json         全站 ObjectMapper
+     * @param traces       工作流埋点端口
+     * @param subgraphs    子图钉死发布版本解析器
+     */
+    @Autowired
+    public WorkflowEngine(WorkflowRunRepository runs,
+                          WorkflowNodeRunRepository nodeRuns,
+                          WorkflowHumanTaskRepository humanTasks,
+                          WorkflowAgentInvoker agentInvoker,
+                          WorkflowToolInvoker toolInvoker,
+                          WorkflowGraphCodec codec,
+                          WorkflowProperties properties,
+                          ObjectMapper json,
+                          WorkflowTraceWriter traces,
+                          WorkflowSubgraphResolver subgraphs) {
         this.runs = runs;
         this.nodeRuns = nodeRuns;
         this.humanTasks = humanTasks;
@@ -120,6 +154,7 @@ public class WorkflowEngine {
         this.publisher = new WorkflowCardPublisher(clockKeeper);
         this.executors = new WorkflowNodeExecutors(json, context, properties);
         this.loops = new WorkflowLoopScheduler(json, context, nodeRuns, properties);
+        this.subgraphs = subgraphs;
     }
 
     /**
@@ -198,7 +233,9 @@ public class WorkflowEngine {
         }
 
         WorkflowGraph graph = codec.parse(run.getGraphJson());
-        WorkflowRuntimeGraph runtime = WorkflowRuntimeGraph.of(graph);
+        // 根作用域：节点 id / code 保持不变；子图才会加前缀
+        WorkflowScope rootScope = WorkflowScope.root(graph, run.getWorkflowId());
+        WorkflowRuntimeGraph runtime = rootScope.runtime();
         ObjectNode input = context.readObject(run.getInputJson());
         List<WorkflowNodeRun> rows = ensureNodeRuns(run, runtime);
         // 同一节点可能有多轮：调度只看最新一轮，历史行留给回放
@@ -216,56 +253,14 @@ public class WorkflowEngine {
         publisher.limits(null, null);
         // 卡片先按图顺序铺出完整时间轴（全部未开始），后续节点状态再逐个点亮
         publisher.started(runtime, rows);
-        ObjectNode outputs = context.collectOutputs(runtime, rows);
+        ObjectNode outputs = context.collectOutputs(runtime, rows, rootScope::outputCode);
         ObjectNode ctx = JsonLogicEvaluator.context(input, outputs, json.createObjectNode());
         loops.restore(runtime, rows, ctx);
-
-        // 无循环时仍是「每节点大约两拍」；有声明循环时按次数放宽，次数本身不靠这个守卫
-        int maxSteps = loops.stepBudget(runtime);
-        int steps = 0;
 
         // 埋点：首次运行在这里建根 trace，HUMAN 恢复后按 run.trace_id 续用同一条
         traceSafely("beginRun", run.getId(), () -> traces.beginRun(run));
         try {
-            while (true) {
-                // 协作式取消放最前：取消接口可能在另一线程写库，这里每拍重读一次。
-                // 顺序有意为之——用户主动取消优先于墙钟 / 无进展文案，避免「已取消」被误报成「撞限」。
-                WorkflowRun fresh = runs.findById(run.getId()).orElse(null);
-                if (fresh == null) {
-                    return;
-                }
-                WorkflowRunStatus freshStatus = WorkflowRunStatus.parse(fresh.getStatus());
-                if (freshStatus == WorkflowRunStatus.CANCELLED) {
-                    run.setStatus(fresh.getStatus());
-                    return;
-                }
-                if (++steps > maxSteps) {
-                    // 内部细节（步数 / 进度）只进日志，对话里只给「异常已停止」
-                    log.warn("工作流调度无进展，主动收口 runId={} maxSteps={} progress={}",
-                            run.getId(), maxSteps, progressBrief(rowByNode));
-                    failRun(run, WorkflowOutcomeTexts.RUN_ABORTED_TEXT, operatorId);
-                    return;
-                }
-                if (System.currentTimeMillis() > clock.deadlineMs) {
-                    /*
-                     * 整段超时：等待用户回复 / 人工卡点的时长已在时限账本 open 里补回截止，
-                     * 这里扣到的都是真正在跑的时长。日志留内部细节，对话只给一句话术。
-                     */
-                    log.warn("工作流整段运行超时 runId={} runLimitMs={} deadlineMs={} progress={}",
-                            run.getId(), clock.runLimitMs, clock.deadlineMs, progressBrief(rowByNode));
-                    failRun(run, WorkflowOutcomeTexts.RUN_TIMEOUT_TEXT, operatorId);
-                    return;
-                }
-                WorkflowNode next = pickNext(runtime, rowByNode);
-                if (next == null) {
-                    settle(run, runtime, rowByNode, operatorId);
-                    return;
-                }
-                boolean keepGoing = executeNode(run, runtime, next, rowByNode, ctx, outputs, operatorId);
-                if (!keepGoing) {
-                    return;
-                }
-            }
+            drive(run, rootScope, rowByNode, ctx, outputs, operatorId, DriveLimits.root(clock));
         } finally {
             /*
              * 取消与调度并发时的节点兜底：取消接口先到、节点行后由 ensureNodeRuns 建出来时，
@@ -302,6 +297,417 @@ public class WorkflowEngine {
     }
 
     /**
+     * 一个作用域内的调度主循环：取消、步数、时限、挑节点、执行节点。
+     *
+     * <p>根作用域与子图作用域共用同一套推进逻辑，差别只在「收口归谁」：
+     * 根作用域失败 / 完成要写 run 终态；子图作用域只把结果交回父 SUBGRAPH 节点，
+     * 由父节点按既有失败规则决定整条 run 的走向。
+     *
+     * @param run        已落库的 run（子图也是同一条 run）
+     * @param scope      当前作用域
+     * @param rowByNode  当前作用域的节点运行态
+     * @param ctx        当前作用域上下文（子图有自己的 input / outputs）
+     * @param outputs    当前作用域的输出集合
+     * @param operatorId 操作人
+     * @param limits     本作用域与父调用叠加后的时限
+     * @return 结束原因；根作用域调用方忽略
+     */
+    private DriveResult drive(WorkflowRun run, WorkflowScope scope,
+                              Map<String, WorkflowNodeRun> rowByNode, ObjectNode ctx,
+                              ObjectNode outputs, long operatorId, DriveLimits limits) {
+        WorkflowRuntimeGraph runtime = scope.runtime();
+        // 无循环时仍是「每节点大约两拍」；有声明循环时按次数放宽，次数本身不靠这个守卫
+        int maxSteps = loops.stepBudget(runtime);
+        int steps = 0;
+        while (true) {
+            // 协作式取消放最前：取消接口可能在另一线程写库，这里每拍重读一次。
+            // 顺序有意为之——用户主动取消优先于墙钟 / 无进展文案，避免「已取消」被误报成「撞限」。
+            WorkflowRun fresh = runs.findById(run.getId()).orElse(null);
+            if (fresh == null) {
+                return DriveResult.stopped();
+            }
+            WorkflowRunStatus freshStatus = WorkflowRunStatus.parse(fresh.getStatus());
+            if (freshStatus == WorkflowRunStatus.CANCELLED) {
+                run.setStatus(fresh.getStatus());
+                return DriveResult.stopped();
+            }
+            if (++steps > maxSteps) {
+                // 内部细节（步数 / 进度）只进日志，对话里只给「异常已停止」
+                log.warn("工作流调度无进展，主动收口 runId={} scope={} maxSteps={} progress={}",
+                        run.getId(), scope.key(), maxSteps, progressBrief(rowByNode));
+                if (scope.depth() == 0) {
+                    failRun(run, WorkflowOutcomeTexts.RUN_ABORTED_TEXT, operatorId);
+                    return DriveResult.stopped();
+                }
+                return DriveResult.failed("子图「" + scope.label() + "」执行异常，已停止");
+            }
+            long now = System.currentTimeMillis();
+            if (limits.runDeadlineMs > 0 && now > limits.runDeadlineMs) {
+                /*
+                 * 整段超时：等待用户回复 / 人工卡点的时长已在时限账本 open 里补回截止，
+                 * 这里扣到的都是真正在跑的时长。日志留内部细节，对话只给一句话术。
+                 */
+                log.warn("工作流整段运行超时 runId={} scope={} runLimitMs={} deadlineMs={} progress={}",
+                        run.getId(), scope.key(), limits.runLimitMs(), limits.runDeadlineMs,
+                        progressBrief(rowByNode));
+                if (scope.depth() == 0) {
+                    failRun(run, limits.runTimeoutText(), operatorId);
+                    return DriveResult.stopped();
+                }
+                return DriveResult.failed(limits.runTimeoutText());
+            }
+            // 父 SUBGRAPH 节点的单节点上限约束整次子图调用；超时按父节点超时规则收口
+            if (limits.callDeadlineMs() > 0 && now > limits.callDeadlineMs()) {
+                return DriveResult.callTimeout();
+            }
+            WorkflowNode next = pickNext(runtime, rowByNode);
+            if (next == null) {
+                if (scope.depth() == 0) {
+                    settle(run, runtime, rowByNode, operatorId);
+                }
+                return DriveResult.finished();
+            }
+            boolean keepGoing = executeNode(run, scope, next, rowByNode, ctx, outputs, operatorId, limits);
+            if (!keepGoing) {
+                // 根：失败已由 failRun / 取消落库；子图：HUMAN / 回复等待已把父 run 挂起
+                return DriveResult.stopped();
+            }
+        }
+    }
+
+    /**
+     * 一个作用域的时限视图。根作用域只有整段截止；子图再叠加自己的整段 / 单节点上限，
+     * 以及父 SUBGRAPH 节点的单节点上限（约束整次调用）。
+     *
+     * @param runDeadlineMs  本作用域整段截止
+     * @param runLimitMs     本作用域整段上限（日志用）
+     * @param runTimeoutText 整段超时文案
+     * @param nodeLimitMs    本作用域单节点上限
+     * @param callDeadlineMs 父节点单节点上限的截止；0 表示不适用
+     */
+    private record DriveLimits(long runDeadlineMs, long runLimitMs, String runTimeoutText,
+                               long nodeLimitMs, long callDeadlineMs) {
+
+        /**
+         * 根作用域：整段截止与单节点上限直接取时限账本。
+         *
+         * @param clock 本轮时限账本
+         * @return 根作用域时限
+         */
+        static DriveLimits root(WorkflowRunClockKeeper.RunClock clock) {
+            return new DriveLimits(clock.deadlineMs, clock.runLimitMs,
+                    WorkflowOutcomeTexts.RUN_TIMEOUT_TEXT, clock.nodeLimitMs, 0L);
+        }
+    }
+
+    /**
+     * 一次 drive 的结束原因。
+     *
+     * @param status 结束类型
+     * @param message 子图失败 / 超时的中文文案；根作用域通常为空
+     */
+    private record DriveResult(DriveStatus status, String message) {
+
+        static DriveResult finished() {
+            return new DriveResult(DriveStatus.FINISHED, null);
+        }
+
+        static DriveResult stopped() {
+            return new DriveResult(DriveStatus.STOPPED, null);
+        }
+
+        static DriveResult callTimeout() {
+            return new DriveResult(DriveStatus.CALL_TIMEOUT, null);
+        }
+
+        static DriveResult failed(String message) {
+            return new DriveResult(DriveStatus.FAILED, message);
+        }
+    }
+
+    /** drive 结束类型 */
+    private enum DriveStatus {
+        /** 全部节点已终态 */
+        FINISHED,
+        /** 停在人工 / 回复等待 / 取消 */
+        STOPPED,
+        /** 父 SUBGRAPH 节点的单节点上限到了 */
+        CALL_TIMEOUT,
+        /** 子图内部失败 / 超时 */
+        FAILED
+    }
+
+    /**
+     * 执行一个 SUBGRAPH 节点：按钉死发布版本真正跑子图，再把图级产出挂回父图。
+     *
+     * <p>嵌入方式与循环一致：子图节点行仍写在同一条 {@code run_id} 下，
+     * 只是 id / code 带范围前缀；不新建 run、不新建会话、不新开工作台卡片。
+     *
+     * <p>边界：
+     * <ul>
+     *   <li>只跑 {@code subReleaseId} 指向的发布快照，永不回落草稿 / 最新版；</li>
+     *   <li>入参只走 SUBGRAPH 节点已有的 {@code inputMapping}，父图 {@code $.vars} 不自动灌入；</li>
+     *   <li>出参取子图 END 节点的图级产出，挂到父图 {@code $.outputs.<子图节点code>.*}；</li>
+     *   <li>子图内部等待回复 / 人工卡点会把父 run 挂起，续跑仍回到子图那个节点。</li>
+     * </ul>
+     *
+     * @return true 表示子图成功、父图可继续；false 表示父 run 已挂起 / 失败 / 取消
+     */
+    private boolean executeSubgraph(WorkflowRun run, WorkflowScope scope, WorkflowNode node,
+                                    WorkflowNodeRun row, Map<String, WorkflowNodeRun> rowByNode,
+                                    ObjectNode ctx, ObjectNode outputs, long operatorId,
+                                    DriveLimits limits) {
+        if (subgraphs == null) {
+            return handleFailure(run, scope, node, row, "子图执行未装配，无法运行", null, operatorId);
+        }
+        Long subWorkflowId = WorkflowNodeConfig.longValue(node.getConfig(), "subWorkflowId");
+        Long subReleaseId = WorkflowNodeConfig.longValue(node.getConfig(), "subReleaseId");
+        // 先查环 / 深度：调用栈上同一工作流出现两次、或超过 3 层，直接失败且不展开
+        String nestFailure = scope.nestFailure(subWorkflowId);
+        if (!nestFailure.isBlank()) {
+            return handleFailure(run, scope, node, row, nestFailure, null, operatorId);
+        }
+        // 运行时再校验：版本仍在、属于所绑工作流、同租户；不静默改跑最新版 / 草稿
+        WorkflowSubgraphSnapshot snapshot;
+        try {
+            snapshot = subgraphs.resolve(run.getTenantId(), subWorkflowId, subReleaseId);
+        } catch (WorkflowNodeFailure ex) {
+            return handleFailure(run, scope, node, row, ex.getMessage(), ex, operatorId);
+        } catch (BizException ex) {
+            return handleFailure(run, scope, node, row, ex.getMessage(), ex, operatorId);
+        } catch (RuntimeException ex) {
+            log.warn("子图发布版本解析异常 runId={} nodeCode={} releaseId={} type={}",
+                    run.getId(), node.getCode(), subReleaseId, ex.getClass().getSimpleName(), ex);
+            return handleFailure(run, scope, node, row,
+                    "子图绑定的发布版本不可用，请重新选择后再运行", ex, operatorId);
+        }
+        // 父节点展示名换成「被调工作流名 · vN」：卡片的子图框与父节点用同一个标题
+        WorkflowNode labeled = WorkflowScopeGraphs.withName(node, snapshot.label());
+        int attempt = row.getAttempt() == null ? ATTEMPT : Math.max(1, row.getAttempt());
+        WorkflowScope child;
+        try {
+            child = WorkflowScope.child(scope, node, attempt, snapshot);
+        } catch (BizException ex) {
+            return handleFailure(run, scope, labeled, row,
+                    "子图「" + snapshot.label() + "」的图不可执行：" + ex.getMessage(), ex, operatorId);
+        }
+        Map<String, WorkflowNodeRun> childRowByNode = ensureScopeRows(run, child);
+        List<WorkflowNodeRun> childRows = new ArrayList<>(childRowByNode.values());
+        /*
+         * 先更新父 SUBGRAPH 节点的展示名，再铺子图范围：
+         * scopeStarted 会立刻出一帧，若名称后到，框标题会先闪一下内部编码。
+         */
+        publisher.node(labeled, row);
+        // 子图快照与内部节点铺给观察者：框默认展开，内部节点按子图顺序逐拍点亮
+        publisher.scope(child.view(childRows));
+
+        ObjectNode childInput = childInput(ctx, node, childRows);
+        ObjectNode childOutputs = context.collectOutputs(child.runtime(), childRows, child::outputCode);
+        ObjectNode childCtx = JsonLogicEvaluator.context(childInput, childOutputs, json.createObjectNode());
+        loops.restore(child.runtime(), childRows, childCtx);
+
+        DriveLimits childLimits = childLimits(child, row, childRows, limits);
+        DriveResult result;
+        try {
+            result = drive(run, child, childRowByNode, childCtx, childOutputs, operatorId, childLimits);
+        } catch (WorkflowNodeFailure ex) {
+            /*
+             * 子图内部节点已在自己的行上落 FAILED；父 SUBGRAPH 节点用「被调工作流名 · vN」
+             * 这一份定义收口，错误边与失败文案都走既有节点失败规则，不改框标题。
+             */
+            return handleFailure(run, scope, labeled, row, ex.getMessage(), ex, operatorId);
+        }
+        if (result.status() == DriveStatus.CALL_TIMEOUT) {
+            // 父节点单节点上限约束整次子图调用：按既有「单节点超时」规则收口
+            return failNodeTimeout(run, scope, labeled, row, operatorId, limits);
+        }
+        if (result.status() == DriveStatus.FAILED) {
+            return handleFailure(run, scope, labeled, row, result.message(), null, operatorId);
+        }
+        if (result.status() == DriveStatus.STOPPED) {
+            // 子图里的等待回复 / 人工卡点已把父 run 挂起；结束时间留空，续跑还回到这里
+            return false;
+        }
+
+        // 子图成功：沿用现网「END 节点产出 = 图级输出」的约定，不把每个节点平铺进父图
+        JsonNode produced = childGraphOutput(child, childRows);
+        if (produced == null || produced.isEmpty()) {
+            return handleFailure(run, scope, labeled, row,
+                    "子图「" + child.label() + "」未到达结束节点，请检查子图连线后再运行",
+                    null, operatorId);
+        }
+        JsonNode mapped = WorkflowNodeInputs.shapeOutput(
+                produced.isObject() ? (ObjectNode) produced : json.createObjectNode().set("text", produced),
+                WorkflowNodeConfig.objectValue(node.getConfig(), "outputMapping"));
+        row.setOutputJson(mapped.toString());
+        succeed(row, scope, labeled, outputs, context.defaultEdges(scope.runtime(), node), ctx, rowByNode);
+        return true;
+    }
+
+    /**
+     * 子图入参：只解析父图上该 SUBGRAPH 节点已配的 {@code inputMapping}。
+     *
+     * <p>空来源（路径读不到 / null）不落键；父图 {@code $.vars} 不自动灌入子图。
+     * 若子图上次停在内部节点的「等待回复」，当前 run 的 {@code input.reply} 只作为兜底透传，
+     * 显式映射仍然优先。
+     *
+     * @param parentCtx 父图上下文
+     * @param node      SUBGRAPH 节点
+     * @param childRows 子图已有运行行（判断是否从子图内部停等恢复）
+     * @return 子图 {@code $.input}
+     */
+    private ObjectNode childInput(ObjectNode parentCtx, WorkflowNode node,
+                                  List<WorkflowNodeRun> childRows) {
+        ObjectNode childInput = json.createObjectNode();
+        ObjectNode mapped = WorkflowNodeInputs.mapped(parentCtx,
+                WorkflowNodeConfig.objectValue(node.getConfig(), "inputMapping"));
+        mapped.fields().forEachRemaining(entry -> {
+            JsonNode value = entry.getValue();
+            // 路径读不到时 mapped 会放 NullNode：空来源不补空值
+            if (value != null && !value.isNull() && !value.isMissingNode()) {
+                childInput.set(entry.getKey(), value);
+            }
+        });
+        JsonNode parentReply = parentCtx == null || parentCtx.get("input") == null
+                ? null : parentCtx.get("input").get("reply");
+        boolean resumedFromChild = childRows.stream().anyMatch(childRow -> {
+            if (childRow == null) {
+                return false;
+            }
+            if (childRow.getReplyText() != null && !childRow.getReplyText().isBlank()) {
+                return true;
+            }
+            WorkflowNodeRunStatus status = WorkflowNodeRunStatus.parse(childRow.getStatus());
+            return status == WorkflowNodeRunStatus.WAITING_REPLY
+                    || status == WorkflowNodeRunStatus.WAITING_HUMAN;
+        });
+        if (resumedFromChild && parentReply != null && !parentReply.isNull()
+                && !childInput.has("reply")) {
+            // 子图内部等待过：同一句回复必须回到那个节点，这里只补默认键
+            childInput.set("reply", parentReply);
+        }
+        return childInput;
+    }
+
+    /**
+     * 建 / 取子图作用域自己的节点行：同一条 run_id，id / code 带范围前缀。
+     *
+     * <p>幂等：已存在的行原样返回（含等待回复 / 已成功），只在缺行时补 PENDING；
+     * 子图节点行 attempt 恒 1，轮次由范围 key（父节点 id#轮次）区分。
+     *
+     * @param run   run
+     * @param scope 子图作用域
+     * @return 子图节点 id → 最新运行态
+     */
+    private Map<String, WorkflowNodeRun> ensureScopeRows(WorkflowRun run, WorkflowScope scope) {
+        Map<String, WorkflowNodeRun> byNode = new LinkedHashMap<>();
+        for (WorkflowNodeRun row : nodeRuns.listByRunId(run.getId())) {
+            if (row != null && scope.owns(row.getNodeId())) {
+                // 同一节点多轮：listByRunId 按 id 升序，后写覆盖前写，保留最新一轮
+                byNode.put(row.getNodeId(), row);
+            }
+        }
+        List<WorkflowNodeRun> missing = new ArrayList<>();
+        for (WorkflowNode node : scope.runtime().nodes()) {
+            if (byNode.containsKey(node.getId())) {
+                continue;
+            }
+            WorkflowNodeRun row = new WorkflowNodeRun();
+            row.setRunId(run.getId());
+            row.setNodeId(node.getId());
+            row.setNodeCode(node.getCode());
+            row.setNodeType(node.getType());
+            row.setAttempt(ATTEMPT);
+            row.setStatus(WorkflowNodeRunStatus.PENDING.name());
+            missing.add(row);
+            byNode.put(node.getId(), row);
+        }
+        if (!missing.isEmpty()) {
+            nodeRuns.insertBatch(missing);
+        }
+        return byNode;
+    }
+
+    /**
+     * 子图图级输出：沿用现网约定，取 END 节点产出，形状为 {@code {结束节点code: 产出}}。
+     *
+     * @param child     子图作用域
+     * @param childRows 子图节点行
+     * @return 图级输出；没有成功的 END 节点时为空对象
+     */
+    private ObjectNode childGraphOutput(WorkflowScope child, List<WorkflowNodeRun> childRows) {
+        Map<String, WorkflowNodeRun> byNode = new LinkedHashMap<>();
+        for (WorkflowNodeRun row : childRows) {
+            if (row != null && row.getNodeId() != null) {
+                byNode.put(row.getNodeId(), row);
+            }
+        }
+        ObjectNode endOutput = json.createObjectNode();
+        for (WorkflowNode node : child.runtime().nodes()) {
+            if (child.runtime().type(node.getId()) != WorkflowNodeType.END) {
+                continue;
+            }
+            WorkflowNodeRun row = byNode.get(node.getId());
+            if (row == null || WorkflowNodeRunStatus.parse(row.getStatus()) != WorkflowNodeRunStatus.SUCCESS) {
+                continue;
+            }
+            JsonNode produced = context.parse(row.getOutputJson());
+            if (produced != null) {
+                endOutput.set(child.outputCode(node), produced);
+            }
+        }
+        return endOutput;
+    }
+
+    /**
+     * 子图时限：子图自己的整段 / 单节点上限生效，同时被父 SUBGRAPH 节点的单节点上限约束。
+     *
+     * <p>开始时刻取子图最早一行；本轮从等待恢复时补回等待时长（与根作用域同一口径）。
+     *
+     * @param child        子图作用域
+     * @param parentRow    父 SUBGRAPH 节点行
+     * @param childRows    子图节点行
+     * @param parentLimits 父作用域时限
+     * @return 子图生效时限
+     */
+    private DriveLimits childLimits(WorkflowScope child, WorkflowNodeRun parentRow,
+                                    List<WorkflowNodeRun> childRows, DriveLimits parentLimits) {
+        WorkflowRunLimits own = WorkflowRunLimits.resolve(child.graph(), properties.effectiveWallMs());
+        long now = System.currentTimeMillis();
+        LocalDateTime earliest = null;
+        for (WorkflowNodeRun childRow : childRows) {
+            if (childRow != null && childRow.getStartTime() != null
+                    && (earliest == null || childRow.getStartTime().isBefore(earliest))) {
+                earliest = childRow.getStartTime();
+            }
+        }
+        long childStartMs = earliest == null ? now : clockKeeper.effectiveStartMs(earliest);
+        long childDeadlineMs = childStartMs + own.runLimitMs();
+        WorkflowRunClockKeeper.RunClock clock = clockKeeper.clock();
+        long rootDeadlineMs = clock == null ? childDeadlineMs : clock.deadlineMs;
+        long runDeadlineMs = Math.min(childDeadlineMs, rootDeadlineMs);
+        String timeoutText = childDeadlineMs <= rootDeadlineMs
+                ? "子图「" + child.label() + "」运行超时，已停止"
+                : WorkflowOutcomeTexts.RUN_TIMEOUT_TEXT;
+        // 父 SUBGRAPH 节点的单节点上限：约束的是整次子图调用，包含子图内部所有节点
+        long callDeadlineMs = 0L;
+        long parentNodeLimitMs = parentLimits == null ? 0L : parentLimits.nodeLimitMs();
+        if (parentNodeLimitMs > 0 && parentRow != null && parentRow.getStartTime() != null) {
+            callDeadlineMs = clockKeeper.effectiveStartMs(parentRow.getStartTime()) + parentNodeLimitMs;
+        }
+        /*
+         * 外层 SUBGRAPH 节点的单节点上限要贯穿整条嵌套调用链：
+         * 父作用域若已经被一个更外层的调用截止约束，内层取更早的那个，不能让孙图抢先跑完。
+         */
+        long outerCallDeadlineMs = parentLimits == null ? 0L : parentLimits.callDeadlineMs();
+        if (outerCallDeadlineMs > 0 && (callDeadlineMs <= 0 || outerCallDeadlineMs < callDeadlineMs)) {
+            callDeadlineMs = outerCallDeadlineMs;
+        }
+        return new DriveLimits(runDeadlineMs, own.runLimitMs(), timeoutText,
+                own.nodeLimitMs(), callDeadlineMs);
+    }
+
+    /**
      * 单节点超时收口：节点 FAILED、run FAILED，对话只给「这一步运行超时，已停止」。
      *
      * <p>不走 ERROR 边：超时是「这一步没做完」，继续走错误分支容易把半成品当正常产出。
@@ -312,19 +718,24 @@ public class WorkflowEngine {
      * @param operatorId 操作人
      * @return 恒 false，表示本次调度到此停止
      */
-    private boolean failNodeTimeout(WorkflowRun run, WorkflowNode node, WorkflowNodeRun row, long operatorId) {
-        WorkflowRunClockKeeper.RunClock clock = clockKeeper.clock();
-        long limitMs = clock == null ? 0L : clock.nodeLimitMs;
+    private boolean failNodeTimeout(WorkflowRun run, WorkflowScope scope, WorkflowNode node,
+                                    WorkflowNodeRun row, long operatorId, DriveLimits limits) {
+        long limitMs = limits == null ? 0L : limits.nodeLimitMs();
         long costMs = clockKeeper.costMs(row);
         // 内部细节只进日志：节点、生效上限、实际耗时
-        log.warn("工作流单节点运行超时 runId={} nodeCode={} nodeLimitMs={} costMs={}",
-                run.getId(), node.getCode(), limitMs, costMs);
+        log.warn("工作流单节点运行超时 runId={} scope={} nodeCode={} nodeLimitMs={} costMs={}",
+                run.getId(), scope.key(), node.getCode(), limitMs, costMs);
         row.setStatus(WorkflowNodeRunStatus.FAILED.name());
         row.setErrorSummary(WorkflowOutcomeTexts.NODE_TIMEOUT_TEXT);
         row.setEndTime(LocalDateTime.now());
         row.setSelectedEdges("");
         nodeRuns.update(row);
         publisher.node(node, row);
+        if (scope.depth() > 0) {
+            // 子图内部超时：节点已落 FAILED，交给父 SUBGRAPH 节点按普通失败规则收口
+            throw new WorkflowNodeFailure("子图「" + scope.label() + "」中的节点「"
+                    + scope.displayName(node) + "」" + WorkflowOutcomeTexts.NODE_TIMEOUT_TEXT);
+        }
         failRun(run, WorkflowOutcomeTexts.NODE_TIMEOUT_TEXT, operatorId);
         return false;
     }
@@ -339,7 +750,18 @@ public class WorkflowEngine {
             boolean skippedAny = false;
             for (WorkflowNode node : runtime.nodes()) {
                 WorkflowNodeRun row = rowByNode.get(node.getId());
-                if (row == null || WorkflowNodeRunStatus.parse(row.getStatus()) != WorkflowNodeRunStatus.PENDING) {
+                if (row == null) {
+                    continue;
+                }
+                WorkflowNodeRunStatus status = WorkflowNodeRunStatus.parse(row.getStatus());
+                /*
+                 * 子图节点在子图内部停等（等待回复 / 人工）时父 SUBGRAPH 行会保持 RUNNING，
+                 * 续跑要回到这个节点把子图跑完；普通节点仍是「只有 PENDING 才调度」，
+                 * 不改变既有「RUNNING 不重入」的口径。
+                 */
+                boolean resumableSubgraph = status == WorkflowNodeRunStatus.RUNNING
+                        && runtime.type(node.getId()) == WorkflowNodeType.SUBGRAPH;
+                if (status != WorkflowNodeRunStatus.PENDING && !resumableSubgraph) {
                     continue;
                 }
                 List<WorkflowEdge> incoming = runtime.incoming(node.getId());
@@ -432,13 +854,18 @@ public class WorkflowEngine {
      *
      * @return true 表示可继续调度；false 表示已停在 HUMAN 或 run 已失败 / 取消
      */
-    private boolean executeNode(WorkflowRun run, WorkflowRuntimeGraph runtime, WorkflowNode node,
+    private boolean executeNode(WorkflowRun run, WorkflowScope scope, WorkflowNode node,
                                 Map<String, WorkflowNodeRun> rowByNode, ObjectNode ctx,
-                                ObjectNode outputs, long operatorId) {
+                                ObjectNode outputs, long operatorId, DriveLimits limits) {
+        WorkflowRuntimeGraph runtime = scope.runtime();
         WorkflowNodeRun row = rowByNode.get(node.getId());
         WorkflowNodeRunStatus from = WorkflowNodeRunStatus.parse(row.getStatus());
         row.setStatus(WorkflowStateMachine.requireNode(from, WorkflowNodeRunStatus.RUNNING).name());
-        row.setStartTime(LocalDateTime.now());
+        // 已经是 RUNNING 的节点（父 SUBGRAPH 在子图停等后重入）保留原开始时刻：
+        // 等待时长由时限账本按 pausedMs 补回，不能靠重置开始时间「抹掉」已跑时长
+        if (from != WorkflowNodeRunStatus.RUNNING) {
+            row.setStartTime(LocalDateTime.now());
+        }
         nodeRuns.update(row);
         // 落库之后再报「正在跑」：卡片上的蓝点与库里的 RUNNING 是同一时刻的事实
         publisher.node(node, row);
@@ -463,58 +890,72 @@ public class WorkflowEngine {
                         if (outcome.inputJson() != null) {
                             row.setInputJson(outcome.inputJson());
                         }
-                        return handleFailure(run, runtime, node, row, outcome.failure(), null, operatorId);
+                        return handleFailure(run, scope, node, row, outcome.failure(), null, operatorId);
                     }
                     row.setInputJson(outcome.inputJson());
                     row.setOutputJson(outcome.outputJson());
-                    succeed(row, node, outputs, outcome.selectedEdges(), ctx, runtime, rowByNode);
+                    succeed(row, scope, node, outputs, outcome.selectedEdges(), ctx, rowByNode);
                 }
                 case LOOP -> {
-                    if (!executeLoop(run, runtime, node, row, rowByNode, ctx, outputs, operatorId)) {
+                    if (!executeLoop(run, scope, node, row, rowByNode, ctx, outputs, operatorId)) {
                         return false;
                     }
                 }
                 case AGENT -> {
-                    if (!invokeAgent(run, runtime, node, row, ctx, outputs, operatorId, rowByNode)) {
+                    if (!invokeAgent(run, scope, node, row, ctx, outputs, operatorId, rowByNode, limits)) {
                         return false;
                     }
                 }
                 case TOOL -> {
-                    if (!invokeTool(run, runtime, node, row, ctx, outputs, operatorId, rowByNode)) {
+                    if (!invokeTool(run, scope, node, row, ctx, outputs, operatorId, rowByNode, limits)) {
                         return false;
                     }
                 }
                 case HUMAN -> {
-                    return enterHuman(run, node, row, ctx, operatorId);
+                    return enterHuman(run, scope, node, row, ctx, operatorId);
+                }
+                case SUBGRAPH -> {
+                    return executeSubgraph(run, scope, node, row, rowByNode, ctx, outputs,
+                            operatorId, limits);
                 }
                 default -> {
-                    // 校验器本应拦下 P1 类型；手改库绕过后在这里明确失败，不静默跳过
-                    return handleFailure(run, runtime, node, row,
-                            "节点类型 " + type + " 尚未接入引擎（P1）", null, operatorId);
+                    // 校验器本应拦下未接入类型；手改库绕过校验时在这里明确失败，不静默跳过。
+                    return handleFailure(run, scope, node, row,
+                            "节点类型 " + type + " 尚未接入引擎", null, operatorId);
                 }
             }
             return true;
         } catch (WorkflowNodeFailure ex) {
-            return handleFailure(run, runtime, node, row, ex.getMessage(), ex, operatorId);
+            /*
+             * 子图内部节点失败时，handleFailure 已把该行落成 FAILED，再把可读原因抛给父节点。
+             * 不能在这里二次收口：同一行 FAILED → FAILED 会重复发布，也会把「子图哪个节点失败」
+             * 的上下文覆盖掉。只有还没落失败的行（普通本层节点主动抛）才交给 handleFailure。
+             */
+            if (WorkflowNodeRunStatus.parse(row.getStatus()) == WorkflowNodeRunStatus.FAILED) {
+                throw ex;
+            }
+            return handleFailure(run, scope, node, row, ex.getMessage(), ex, operatorId);
         } catch (BizException ex) {
-            return handleFailure(run, runtime, node, row, ex.getMessage(), ex, operatorId);
+            return handleFailure(run, scope, node, row, ex.getMessage(), ex, operatorId);
         } catch (RuntimeException ex) {
-            log.warn("工作流节点执行异常 runId={} nodeCode={} type={} root={}",
-                    run.getId(), node.getCode(), type, ex.getClass().getSimpleName(), ex);
-            return handleFailure(run, runtime, node, row,
-                    "节点「" + node.getCode() + "」执行异常：" + context.safe(ex.getMessage()), ex, operatorId);
+            log.warn("工作流节点执行异常 runId={} scope={} nodeCode={} type={} root={}",
+                    run.getId(), scope.key(), node.getCode(), type, ex.getClass().getSimpleName(), ex);
+            return handleFailure(run, scope, node, row,
+                    "节点「" + scope.displayName(node) + "」执行异常："
+                            + scope.cleanText(context.safe(ex.getMessage())), ex, operatorId);
         } finally {
             // 哪怕上面已 return，也要把节点步收成终态；WAITING_HUMAN 由根 trace 统一收口
             traceSafely("endNode", run.getId(), () -> traces.endNode(run, node, row));
         }
     }
 
-    private boolean invokeAgent(WorkflowRun run, WorkflowRuntimeGraph runtime, WorkflowNode node,
+    private boolean invokeAgent(WorkflowRun run, WorkflowScope scope, WorkflowNode node,
                                 WorkflowNodeRun row, ObjectNode ctx, ObjectNode outputs, long operatorId,
-                                Map<String, WorkflowNodeRun> rowByNode) {
+                                Map<String, WorkflowNodeRun> rowByNode, DriveLimits limits) {
+        WorkflowRuntimeGraph runtime = scope.runtime();
         Long agentId = WorkflowNodeConfig.longValue(node.getConfig(), "agentId");
         if (agentId == null) {
-            return handleFailure(run, runtime, node, row, "Agent 节点未绑定 Agent", null, operatorId);
+            return handleFailure(run, scope, node, row, "Agent 节点未绑定 Agent", null, operatorId);
         }
         JsonNode mapping = WorkflowNodeConfig.objectValue(node.getConfig(), "inputMapping");
         String message = WorkflowNodeInputs.message(ctx, mapping);
@@ -538,15 +979,16 @@ public class WorkflowEngine {
                         agentInvoker.invoke(agentId, message, userId, run.getId(), node.getCode()), "");
         String text = reply == null ? null : reply.text();
         if (text == null || text.isBlank()) {
-            return handleFailure(run, runtime, node, row,
-                    "Agent「" + node.getCode() + "」没有返回文本", null, operatorId);
+            return handleFailure(run, scope, node, row,
+                    "Agent「" + scope.displayName(node) + "」没有返回文本", null, operatorId);
         }
         /*
          * 单节点上限：出站回来后立刻核对这一步耗时。放在产出落库前，
          * 超时就不再进 succeed / 等待回复，避免「已经超时的节点还挂在等待里」。
+         * 子图内部节点用发布版本里的上限，而不是根图的上限。
          */
-        if (clockKeeper.nodeTimedOut(row)) {
-            return failNodeTimeout(run, node, row, operatorId);
+        if (clockKeeper.nodeTimedOut(row, limits == null ? 0L : limits.nodeLimitMs())) {
+            return failNodeTimeout(run, scope, node, row, operatorId, limits);
         }
         ObjectNode raw = json.createObjectNode();
         raw.put("text", text);
@@ -559,9 +1001,9 @@ public class WorkflowEngine {
          * 不把 run 标成成功来假装本轮结束——用户下一句回来要从这里接着往下走。
          */
         if (awaitReply && !replyProvided(ctx)) {
-            return enterReplyWait(run, node, row, shaped, reply.choiceJson(), operatorId);
+            return enterReplyWait(run, scope, node, row, shaped, reply.choiceJson(), operatorId);
         }
-        succeed(row, node, outputs, context.defaultEdges(runtime, node), ctx, runtime, rowByNode);
+        succeed(row, scope, node, outputs, context.defaultEdges(runtime, node), ctx, rowByNode);
         return true;
     }
 
@@ -598,8 +1040,9 @@ public class WorkflowEngine {
      * @param operatorId 操作人
      * @return 恒 false，表示本次调度到此停止
      */
-    private boolean enterReplyWait(WorkflowRun run, WorkflowNode node, WorkflowNodeRun row,
-                                   ObjectNode produced, String choiceJson, long operatorId) {
+    private boolean enterReplyWait(WorkflowRun run, WorkflowScope scope, WorkflowNode node,
+                                   WorkflowNodeRun row, ObjectNode produced, String choiceJson,
+                                   long operatorId) {
         WorkflowNodeRunStatus from = WorkflowNodeRunStatus.parse(row.getStatus());
         row.setStatus(WorkflowStateMachine.requireNode(from, WorkflowNodeRunStatus.WAITING_REPLY).name());
         String question = WorkflowNodeInputs.text(produced == null ? null : produced.get("text"));
@@ -637,31 +1080,32 @@ public class WorkflowEngine {
         return false;
     }
 
-    private boolean invokeTool(WorkflowRun run, WorkflowRuntimeGraph runtime, WorkflowNode node,
+    private boolean invokeTool(WorkflowRun run, WorkflowScope scope, WorkflowNode node,
                                WorkflowNodeRun row, ObjectNode ctx, ObjectNode outputs, long operatorId,
-                               Map<String, WorkflowNodeRun> rowByNode) {
+                               Map<String, WorkflowNodeRun> rowByNode, DriveLimits limits) {
+        WorkflowRuntimeGraph runtime = scope.runtime();
         Long toolId = WorkflowNodeConfig.longValue(node.getConfig(), "toolId");
         if (toolId == null) {
-            return handleFailure(run, runtime, node, row, "工具节点未绑定工具项", null, operatorId);
+            return handleFailure(run, scope, node, row, "工具节点未绑定工具项", null, operatorId);
         }
         ObjectNode args = WorkflowNodeInputs.mapped(ctx,
                 WorkflowNodeConfig.objectValue(node.getConfig(), "inputMapping"));
         row.setInputJson(args.toString());
         String text = toolInvoker.invoke(toolId, args);
         if (text == null || text.isBlank()) {
-            return handleFailure(run, runtime, node, row,
-                    "工具「" + node.getCode() + "」没有返回内容", null, operatorId);
+            return handleFailure(run, scope, node, row,
+                    "工具「" + scope.displayName(node) + "」没有返回内容", null, operatorId);
         }
-        // 工具调用同样受单节点上限约束（MCP 可能长时间不回）
-        if (clockKeeper.nodeTimedOut(row)) {
-            return failNodeTimeout(run, node, row, operatorId);
+        // 工具调用同样受单节点上限约束（MCP 可能长时间不回）；子图用子图自己的上限
+        if (clockKeeper.nodeTimedOut(row, limits == null ? 0L : limits.nodeLimitMs())) {
+            return failNodeTimeout(run, scope, node, row, operatorId, limits);
         }
         ObjectNode raw = json.createObjectNode();
         raw.put("text", text);
         ObjectNode shaped = WorkflowNodeInputs.shapeOutput(raw,
                 WorkflowNodeConfig.objectValue(node.getConfig(), "outputMapping"));
         row.setOutputJson(shaped.toString());
-        succeed(row, node, outputs, context.defaultEdges(runtime, node), ctx, runtime, rowByNode);
+        succeed(row, scope, node, outputs, context.defaultEdges(runtime, node), ctx, rowByNode);
         return true;
     }
 
@@ -671,9 +1115,10 @@ public class WorkflowEngine {
      *
      * @return true 表示可以继续调度
      */
-    private boolean executeLoop(WorkflowRun run, WorkflowRuntimeGraph runtime, WorkflowNode node,
+    private boolean executeLoop(WorkflowRun run, WorkflowScope scope, WorkflowNode node,
                                 WorkflowNodeRun row, Map<String, WorkflowNodeRun> rowByNode,
                                 ObjectNode ctx, ObjectNode outputs, long operatorId) {
+        WorkflowRuntimeGraph runtime = scope.runtime();
         WorkflowLoopScheduler.Decision decision = loops.enter(runtime, node, row, rowByNode, ctx);
         if (decision.stopRun()) {
             if (decision.inputJson() != null) {
@@ -684,25 +1129,30 @@ public class WorkflowEngine {
             }
             row.setStatus(WorkflowStateMachine.requireNode(
                     WorkflowNodeRunStatus.parse(row.getStatus()), WorkflowNodeRunStatus.FAILED).name());
-            row.setErrorSummary(context.truncate(decision.failure()));
+            row.setErrorSummary(context.truncate(scope.cleanText(decision.failure())));
             row.setEndTime(LocalDateTime.now());
             row.setSelectedEdges("");
             nodeRuns.update(row);
             publisher.node(node, row);
+            if (scope.depth() > 0) {
+                // 子图内部循环超限：节点已落 FAILED，交给父 SUBGRAPH 节点按普通失败规则收口
+                throw new WorkflowNodeFailure("子图「" + scope.label() + "」中的节点「"
+                        + scope.displayName(node) + "」" + scope.cleanText(decision.failure()));
+            }
             failRun(run, decision.failure(), operatorId);
             return false;
         }
         row.setInputJson(decision.inputJson());
         row.setOutputJson(decision.outputJson());
-        succeed(row, node, outputs, decision.selectedEdges(), ctx, runtime, rowByNode);
+        succeed(row, scope, node, outputs, decision.selectedEdges(), ctx, rowByNode);
         return true;
     }
 
     /**
      * 进入人工卡点：节点 WAITING_HUMAN、run PAUSED_HUMAN、写 OPEN 待办，然后停止调度。
      */
-    private boolean enterHuman(WorkflowRun run, WorkflowNode node, WorkflowNodeRun row,
-                               ObjectNode ctx, long operatorId) {
+    private boolean enterHuman(WorkflowRun run, WorkflowScope scope, WorkflowNode node,
+                               WorkflowNodeRun row, ObjectNode ctx, long operatorId) {
         WorkflowNodeRunStatus from = WorkflowNodeRunStatus.parse(row.getStatus());
         row.setStatus(WorkflowStateMachine.requireNode(from, WorkflowNodeRunStatus.WAITING_HUMAN).name());
         nodeRuns.update(row);
@@ -724,7 +1174,8 @@ public class WorkflowEngine {
         task.setTenantId(run.getTenantId());
         task.setRunId(run.getId());
         task.setNodeRunId(row.getId());
-        task.setNodeCode(node.getCode());
+        // 独立待办页展示原始编码，不暴露子图作用域前缀
+        task.setNodeCode(scope.outputCode(node));
         task.setStatus("OPEN");
         task.setAssigneeRule(WorkflowAssigneeRule.normalize(
                 WorkflowNodeConfig.textValue(node.getConfig(), "assigneeRule")));
@@ -746,25 +1197,36 @@ public class WorkflowEngine {
      *
      * @return true 表示错误边已接管，可继续调度
      */
-    private boolean handleFailure(WorkflowRun run, WorkflowRuntimeGraph runtime, WorkflowNode node,
+    private boolean handleFailure(WorkflowRun run, WorkflowScope scope, WorkflowNode node,
                                   WorkflowNodeRun row, String message, Throwable cause, long operatorId) {
+        WorkflowRuntimeGraph runtime = scope == null ? null : scope.runtime();
+        String cleanMessage = scope == null ? message : scope.cleanText(message);
         List<WorkflowEdge> errorEdges = runtime == null ? List.of() : runtime.errorOutgoing(node.getId());
         row.setStatus(WorkflowStateMachine.requireNode(
                 WorkflowNodeRunStatus.parse(row.getStatus()), WorkflowNodeRunStatus.FAILED).name());
-        row.setErrorSummary(context.truncate(message));
+        row.setErrorSummary(context.truncate(cleanMessage));
         row.setEndTime(LocalDateTime.now());
         row.setSelectedEdges(context.joinIds(errorEdges));
         nodeRuns.update(row);
         publisher.node(node, row);
         if (cause != null) {
-            log.warn("工作流节点失败 runId={} nodeCode={} reason={} root={}",
-                    run.getId(), node.getCode(), message,
+            log.warn("工作流节点失败 runId={} scope={} nodeCode={} reason={} root={}",
+                    run.getId(), scope == null ? "root" : scope.key(), node.getCode(), cleanMessage,
                     cause.getClass().getSimpleName());
         }
         if (!errorEdges.isEmpty()) {
             return true;
         }
-        failRun(run, "节点「" + node.getCode() + "」失败：" + message, operatorId);
+        if (scope != null && scope.depth() > 0) {
+            /*
+             * 子图内部失败：子图这一行已落 FAILED，框里能看到出错节点；
+             * 不直接把整条 run 收成失败，而是把可读原因抛给父 SUBGRAPH 节点，
+             * 由父节点按它自己的 ERROR 边 / FAIL_RUN 规则收口。
+             */
+            throw new WorkflowNodeFailure("子图「" + scope.label() + "」中的节点「"
+                    + scope.displayName(node) + "」失败：" + cleanMessage);
+        }
+        failRun(run, "节点「" + node.getCode() + "」失败：" + cleanMessage, operatorId);
         return false;
     }
 
@@ -774,10 +1236,12 @@ public class WorkflowEngine {
      * <p>同一节点再次进入时，上下文只保留最新一轮产出，上一轮仍在自己的 node_run 行里。
      * 节点编码在一张图里是唯一的，所以这里的再次写入就是循环的下一轮，不是两条并行分支撞名。
      */
-    private void succeed(WorkflowNodeRun row, WorkflowNode node, ObjectNode outputs,
+    private void succeed(WorkflowNodeRun row, WorkflowScope scope, WorkflowNode node, ObjectNode outputs,
                          List<WorkflowEdge> selected, ObjectNode ctx,
-                         WorkflowRuntimeGraph runtime, Map<String, WorkflowNodeRun> rowByNode) {
-        String code = node.getCode();
+                         Map<String, WorkflowNodeRun> rowByNode) {
+        WorkflowRuntimeGraph runtime = scope.runtime();
+        // 展示 / $.outputs 用原始编码；运行行的 node_code 仍是前缀后的唯一键
+        String code = scope.outputCode(node);
         JsonNode produced = context.parse(row.getOutputJson());
         row.setStatus(WorkflowStateMachine.requireNode(
                 WorkflowNodeRunStatus.parse(row.getStatus()), WorkflowNodeRunStatus.SUCCESS).name());

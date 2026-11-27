@@ -12,6 +12,14 @@ import type { WorkflowNodeRunRow, WorkflowRunDetail } from '@/types/workflow'
 /** 边界标记不是用户看到的「一步」，跟随要跳过 */
 const SKIP_NODE_TYPES = new Set(['START', 'END'])
 
+/**
+ * 子图内部节点的运行编码前缀：{@code x + 8 位十六进制 + _}。
+ *
+ * <p>子图节点行共享父 run，但画布只加载父图；这些编码在父图上没有对应节点，
+ * 跟随必须跳过，让镜头停在父图的 SUBGRAPH 节点上，而不是跟着子图内部跑。
+ */
+const SCOPED_NODE_CODE = /^x[0-9a-f]{8}_/i
+
 /** 停在等外部输入的两个节点态：等待人工 / 等待回复 */
 const WAITING_STATUS = new Set(['WAITING_HUMAN', 'WAITING_REPLY'])
 
@@ -110,7 +118,9 @@ function isFollowableRow(row: WorkflowNodeRunRow): boolean {
   if (SKIP_NODE_TYPES.has(statusOf(row.nodeType))) {
     return false
   }
-  return String(row.nodeCode ?? '').trim() !== ''
+  const code = String(row.nodeCode ?? '').trim()
+  // 子图内部节点不出现在父图画布上：跳过，镜头留在父图 SUBGRAPH 节点
+  return code !== '' && !SCOPED_NODE_CODE.test(code)
 }
 
 /**

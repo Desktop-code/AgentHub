@@ -13,9 +13,9 @@
     </div>
     <div class="wf-step-main">
       <div class="wf-step-name">
-        {{ node.name || node.code }}
+        {{ node.name || codeLabel }}
         <span v-if="roundLabel" class="wf-step-code">{{ roundLabel }}</span>
-        <span v-if="node.code && node.code !== node.name" class="wf-step-code">{{ node.code }}</span>
+        <span v-if="codeLabel && codeLabel !== node.name" class="wf-step-code">{{ codeLabel }}</span>
       </div>
       <div class="wf-step-note">{{ note }}</div>
       <!--
@@ -202,6 +202,11 @@ const nodeKey = computed(
 
 /** 时间轴样式状态 */
 const state = computed(() => wfStepState(props.node, props.card.closed))
+
+/**
+ * 展示用节点编码：子图内部节点的运行编码带范围前缀，展示仍用原始编码。
+ */
+const codeLabel = computed(() => (props.node.displayCode || props.node.code || '').trim())
 
 /** 节点下方说明 */
 const note = computed(() => wfStepNote(props.node, props.card.closed))
