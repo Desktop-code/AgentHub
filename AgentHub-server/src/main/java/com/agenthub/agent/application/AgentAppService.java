@@ -30,6 +30,7 @@ import com.agenthub.agent.domain.repository.AgentSkillBindRepository;
 import com.agenthub.agent.domain.repository.AgentToolBindRepository;
 import com.agenthub.agent.domain.service.AgentCodePolicy;
 import com.agenthub.agent.domain.service.AgentCriticPolicy;
+import com.agenthub.agent.domain.service.AgentInputSchema;
 import com.agenthub.agent.domain.service.AgentPromptTemplatePort;
 import com.agenthub.agent.domain.service.PlatformDefaultAssistantPolicy;
 import com.agenthub.agent.domain.service.PlatformPromptPrefix;
@@ -199,6 +200,8 @@ public class AgentAppService {
                 req.getToolMaxRetries(), req.getMaxToolCalls(), req.getLlmTimeoutMs(),
                 req.getMaxLlmCalls(), req.getConsecutiveFailAbort(), req.getToolResultMaxChars());
         agent.setRuntimeConfigJson(toRuntimeJson(req.getRuntimeConfig(), agent.getRunMode()));
+        // 入参声明：新建弹窗暂不编辑，留空即「无声明」；后续在详情里补
+        agent.setInputSchemaJson(AgentInputSchema.normalize(req.getInputSchema()));
         // 允许被编排调用：未传按模式默认，ROUTER 强制 0（编排根不可作子）
         agent.setAllowOrchestrated(AgentChecks.allowOrchestrated(req.getAllowOrchestrated(), agent.getRunMode()));
         agent.setStatus(AgentStatus.ENABLED);
@@ -238,6 +241,13 @@ public class AgentAppService {
                 req.getToolMaxRetries(), req.getMaxToolCalls(), req.getLlmTimeoutMs(),
                 req.getMaxLlmCalls(), req.getConsecutiveFailAbort(), req.getToolResultMaxChars());
         existing.setRuntimeConfigJson(toRuntimeJson(req.getRuntimeConfig(), existing.getRunMode()));
+        /*
+         * 入参声明：null = 本次不改（其它「整份保存」的旁路接口不带这个字段，不能顺手清掉声明）；
+         * 传 {properties:{}} = 明确清空。归一后落库，非法结构在保存时就 400。
+         */
+        if (req.getInputSchema() != null) {
+            existing.setInputSchemaJson(AgentInputSchema.normalize(req.getInputSchema()));
+        }
         // 反向校验：已挂候选若用了本次要禁用的子运行模式，拒存；避免库里留下「校验区报错但已落库」的矛盾配置
         assertChildRunModesStillAllowed(id, existing.getRunMode(), existing.getRuntimeConfigJson());
         // 评审环角色闸：执行者恰好 1 个 + 评审者合法，保存即拦，避免「存得下、跑必挂」
@@ -295,6 +305,8 @@ public class AgentAppService {
         agent.setConsecutiveFailAbort(source.getConsecutiveFailAbort());
         agent.setToolResultMaxChars(source.getToolResultMaxChars());
         agent.setRuntimeConfigJson(source.getRuntimeConfigJson());
+        // 入参声明是定义合同：复制品必须继承，否则画布上同名 AGENT 节点会突然退回默认槽
+        agent.setInputSchemaJson(source.getInputSchemaJson());
         agent.setAllowOrchestrated(source.allowOrchestratedOn() ? 1 : 0);
         agent.setStatus(AgentStatus.ENABLED);
         List<String> warnings = inheritPromptBinding(agent, source);
@@ -536,6 +548,8 @@ public class AgentAppService {
         resp.setRunMode(agent.getRunMode());
         resp.setAllowOrchestrated(agent.allowOrchestratedOn());
         resp.setStatus(agent.getStatus());
+        // 入参声明随卡片下发：画布 AGENT 节点直接用列表里这一份出槽，不再按 id 补查详情
+        resp.setInputSchema(AgentInputSchema.read(agent.getInputSchemaJson()));
         resp.setUpdateTime(agent.getUpdateTime());
         return resp;
     }
@@ -571,6 +585,8 @@ public class AgentAppService {
         resp.setRouteCount(routes.countByParentId(agent.getId()));
         resp.setCreateTime(agent.getCreateTime());
         resp.setUpdateTime(agent.getUpdateTime());
+        // 入参声明回显：null = 没有声明，详情页按空表渲染
+        resp.setInputSchema(AgentInputSchema.read(agent.getInputSchemaJson()));
         return resp;
     }
 

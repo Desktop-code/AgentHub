@@ -9,6 +9,7 @@ import com.agenthub.workflow.domain.model.WorkflowEdge;
 import com.agenthub.workflow.domain.model.WorkflowGraph;
 import com.agenthub.workflow.domain.model.WorkflowIssue;
 import com.agenthub.workflow.domain.model.WorkflowNode;
+import com.agenthub.workflow.domain.model.WorkflowSubgraphBinding;
 import com.agenthub.workflow.domain.model.WorkflowToolBinding;
 import com.agenthub.workflow.domain.model.WorkflowValidationResult;
 import com.fasterxml.jackson.databind.JsonNode;
@@ -444,7 +445,7 @@ public final class WorkflowGraphValidator {
     }
 
     /**
-     * 绑定校验：AGENT 禁 ROUTER（始终 error）；AGENT/TOOL 不存在或停用按 publishMode 定级。
+     * 绑定校验：AGENT 禁 ROUTER（始终 error）；AGENT/TOOL/SUBGRAPH 不存在或停用按 publishMode 定级。
      */
     private static void checkBindings(WorkflowValidationResult result,
                                       Map<String, WorkflowNode> nodeById,
@@ -457,6 +458,8 @@ public final class WorkflowGraphValidator {
                 checkAgent(result, node, bindings, publishMode);
             } else if (type == WorkflowNodeType.TOOL) {
                 checkTool(result, node, bindings, publishMode);
+            } else if (type == WorkflowNodeType.SUBGRAPH) {
+                checkSubgraph(result, node, bindings, publishMode);
             }
         }
     }
@@ -495,6 +498,11 @@ public final class WorkflowGraphValidator {
                             + safeName(binding.getName(), agentId) + "」已停用",
                     node);
         }
+        // 有入参声明时，声明里的必填槽必须配来源；无声明不增加任何拦截
+        checkDeclaredRequiredInputs(result, node, binding.getRequiredInputs(),
+                "AGENT_INPUT_REQUIRED_MISSING",
+                "AGENT 节点「" + label(node) + "」绑定的 Agent「"
+                        + safeName(binding.getName(), agentId) + "」");
     }
 
     /**
@@ -530,9 +538,6 @@ public final class WorkflowGraphValidator {
 
     /**
      * 工具定义的必填参数是否都配了来源。
-     * <p>「配了」= inputMapping 里有该键且值不是空白：空串在运行时会解析成 null，
-     * 不会再走 input.message → query → text → content 的兜底，因此等同没配。
-     * <p>每个节点只记一条错误，把所有缺失参数列在文案里，避免刷屏。
      *
      * @param result  校验结果
      * @param node    TOOL 节点
@@ -541,7 +546,81 @@ public final class WorkflowGraphValidator {
     private static void checkToolRequiredInputs(WorkflowValidationResult result,
                                                 WorkflowNode node,
                                                 WorkflowToolBinding binding) {
-        List<String> required = binding.getRequiredInputs();
+        checkDeclaredRequiredInputs(result, node, binding.getRequiredInputs(),
+                "TOOL_INPUT_REQUIRED_MISSING",
+                "TOOL 节点「" + label(node) + "」绑定的工具「"
+                        + safeName(binding.getName(), binding.getId()) + "」");
+    }
+
+    /**
+     * 子图绑定：必须绑到「已发布工作流 + 具体发布版本」，且该版本必须属于所选工作流；
+     * 版本里 START 声明的必填键都要配来源。
+     * <p>运行时由引擎按同一份钉死版本执行；这里只校验绑定本身，不展开子图内部结构。
+     *
+     * @param result      校验结果
+     * @param node        SUBGRAPH 节点
+     * @param bindings    绑定快照（按 releaseId 索引）
+     * @param publishMode true=发布前置检查（缺失/失效为 error）；false=草稿检查（降为 warn）
+     */
+    private static void checkSubgraph(WorkflowValidationResult result,
+                                      WorkflowNode node,
+                                      WorkflowBindingSnapshot bindings,
+                                      boolean publishMode) {
+        Long workflowId = WorkflowNodeConfig.longValue(node.getConfig(), "subWorkflowId");
+        Long releaseId = WorkflowNodeConfig.longValue(node.getConfig(), "subReleaseId");
+        if (workflowId == null) {
+            bindingIssue(result, publishMode, "SUBGRAPH_BINDING_MISSING",
+                    "子图节点「" + label(node) + "」未绑定被调工作流；请选择一条已发布的工作流",
+                    node);
+            return;
+        }
+        if (releaseId == null) {
+            bindingIssue(result, publishMode, "SUBGRAPH_RELEASE_MISSING",
+                    "子图节点「" + label(node) + "」未选择发布版本；子图必须钉死一个已发布版本",
+                    node);
+            return;
+        }
+        WorkflowSubgraphBinding binding = bindings.subgraph(releaseId);
+        if (binding == null) {
+            bindingIssue(result, publishMode, "SUBGRAPH_RELEASE_NOT_FOUND",
+                    "子图节点「" + label(node) + "」绑定的发布版本不存在、已失效或不属于当前租户"
+                            + "（releaseId=" + releaseId + "）；请重新选择版本",
+                    node);
+            return;
+        }
+        // 版本必须属于所选工作流：防止换绑工作流后残留旧版本 id，出槽按了别人的声明
+        if (!workflowId.equals(binding.getWorkflowId())) {
+            addError(result, "SUBGRAPH_RELEASE_MISMATCH",
+                    "子图节点「" + label(node) + "」绑定的发布版本 v" + safeVersion(binding.getVersion())
+                            + " 不属于所选工作流「" + safeName(binding.getWorkflowName(), binding.getWorkflowId())
+                            + "」；请重新选择版本",
+                    node);
+            return;
+        }
+        checkDeclaredRequiredInputs(result, node, binding.getRequiredInputs(),
+                "SUBGRAPH_INPUT_REQUIRED_MISSING",
+                "子图节点「" + label(node) + "」绑定的工作流「"
+                        + safeName(binding.getWorkflowName(), binding.getWorkflowId()) + "」v"
+                        + safeVersion(binding.getVersion()) + " 的入参声明");
+    }
+
+    /**
+     * 「声明里的必填键必须配来源」的统一判定。
+     * <p>「配了」= inputMapping 里有该键且值不是空白：空串在运行时会解析成 null，
+     * 不会再走 input.message → query → text → content 的兜底，因此等同没配。
+     * <p>每个节点只记一条错误，把所有缺失键列在文案里，避免刷屏。
+     *
+     * @param result        校验结果
+     * @param node          被校验节点
+     * @param required      声明里的必填键；空列表直接放行
+     * @param code          错误码
+     * @param subject       中文主语（节点 + 绑定的目标），拼在「必填参数未配来源」前面
+     */
+    private static void checkDeclaredRequiredInputs(WorkflowValidationResult result,
+                                                    WorkflowNode node,
+                                                    List<String> required,
+                                                    String code,
+                                                    String subject) {
         if (required == null || required.isEmpty()) {
             return;
         }
@@ -555,10 +634,8 @@ public final class WorkflowGraphValidator {
         if (missing.isEmpty()) {
             return;
         }
-        addError(result, "TOOL_INPUT_REQUIRED_MISSING",
-                "TOOL 节点「" + label(node) + "」绑定的工具「"
-                        + safeName(binding.getName(), binding.getId())
-                        + "」必填参数未配来源：" + String.join("、", missing), node);
+        addError(result, code,
+                subject + "必填参数未配来源：" + String.join("、", missing), node);
     }
 
     /**
@@ -763,6 +840,16 @@ public final class WorkflowGraphValidator {
     private static String safeName(String name, Long fallbackId) {
         String text = trimToNull(name);
         return text == null ? "id=" + fallbackId : text;
+    }
+
+    /**
+     * 版本号展示：缺失时用 ? 占位，避免报错里出现 null。
+     *
+     * @param version 版本号，可空
+     * @return 可读版本号
+     */
+    private static String safeVersion(Integer version) {
+        return version == null ? "?" : String.valueOf(version);
     }
 
     private static String safeText(String text) {

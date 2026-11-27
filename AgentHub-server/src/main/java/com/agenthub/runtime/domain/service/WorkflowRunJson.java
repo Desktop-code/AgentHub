@@ -91,6 +91,13 @@ public final class WorkflowRunJson {
             one.put("type", node.type());
             one.put("status", node.status());
             one.put("note", node.note());
+            /*
+             * 子图节点的运行编码带范围前缀（保证同一 run 内唯一），展示要用用户原始编码。
+             * 只在有差异时写：根图与旧卡片体积不变。
+             */
+            if (!node.displayCode().isBlank() && !node.displayCode().equals(node.code())) {
+                one.put("displayCode", node.displayCode());
+            }
             // 节点内过程 / 正文 / 文件：只在真的有内容时写，旧卡片回放不因多出空数组而变胖
             if (!node.output().isBlank()) {
                 one.put("output", node.output());

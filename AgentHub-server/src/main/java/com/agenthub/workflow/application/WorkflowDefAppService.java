@@ -14,6 +14,7 @@ import com.agenthub.workflow.api.dto.WorkflowIssueResp;
 import com.agenthub.workflow.api.dto.WorkflowPublishReq;
 import com.agenthub.workflow.api.dto.WorkflowReleaseActivateReq;
 import com.agenthub.workflow.api.dto.WorkflowReleaseActivateResp;
+import com.agenthub.workflow.api.dto.WorkflowReleaseInputSchemaResp;
 import com.agenthub.workflow.api.dto.WorkflowReleaseResp;
 import com.agenthub.workflow.api.dto.WorkflowValidateResp;
 import com.agenthub.workflow.domain.WorkflowConflictException;
@@ -28,6 +29,7 @@ import com.agenthub.workflow.domain.repository.WorkflowDefRepository;
 import com.agenthub.workflow.domain.repository.WorkflowDraftRepository;
 import com.agenthub.workflow.domain.repository.WorkflowReleaseRepository;
 import com.agenthub.workflow.domain.service.WorkflowFingerprint;
+import com.agenthub.workflow.domain.service.WorkflowInputDeclaration;
 import com.agenthub.workflow.domain.service.WorkflowRunLimits;
 import com.agenthub.workflow.domain.service.WorkflowTenantProvider;
 import com.agenthub.workflow.infra.WorkflowProperties;
@@ -238,6 +240,8 @@ public class WorkflowDefAppService {
          * 文案只用分钟，不把 yml 键名 / 毫秒抛给页面。
          */
         rejectInvalidLimits(parsed);
+        // 子图链路的环 / 超深 / 版本不可用直接拒绝保存；其它业务错误仍允许先存草稿
+        publishCheck.requireSubgraphSafe(def.getId(), def.getTenantId(), parsed);
 
         LocalDateTime expected = parseExpected(expectedUpdateTime);
         WorkflowDraft current = requireDraft(id);
@@ -262,9 +266,10 @@ public class WorkflowDefAppService {
      * @return errors / warns / passed
      */
     public WorkflowValidateResp validate(Long id) {
-        requireDef(id);
+        WorkflowDef def = requireDef(id);
         WorkflowDraft draft = requireDraft(id);
-        return toValidateResp(publishCheck.check(codec.parse(draft.getGraphJson())));
+        return toValidateResp(publishCheck.check(def.getId(), def.getTenantId(),
+                codec.parse(draft.getGraphJson())));
     }
 
     /**
@@ -278,9 +283,9 @@ public class WorkflowDefAppService {
      * @throws BizException 图结构不合法，或定义不存在
      */
     public WorkflowValidateResp validateGraph(Long id, JsonNode graph) {
-        requireDef(id);
+        WorkflowDef def = requireDef(id);
         WorkflowGraph parsed = codec.parse(codec.write(graph));
-        return toValidateResp(publishCheck.check(parsed));
+        return toValidateResp(publishCheck.check(def.getId(), def.getTenantId(), parsed));
     }
 
     /**
@@ -296,7 +301,7 @@ public class WorkflowDefAppService {
         WorkflowDef def = requireDef(id);
         WorkflowDraft draft = requireDraft(id);
         WorkflowGraph graph = codec.parse(draft.getGraphJson());
-        WorkflowValidationResult result = publishCheck.check(graph);
+        WorkflowValidationResult result = publishCheck.check(def.getId(), def.getTenantId(), graph);
         if (!result.passed()) {
             throw new BizException(ErrorCode.BAD_REQUEST, publishFailureMessage(result));
         }
@@ -330,6 +335,34 @@ public class WorkflowDefAppService {
     public List<WorkflowReleaseResp> releases(Long id) {
         requireDef(id);
         return releases.listByWorkflowId(id).stream().map(this::toReleaseResp).toList();
+    }
+
+    /**
+     * 某个已发布版本的 START 入参声明。
+     * <p>子图节点必须按「钉死版本」的声明出槽：这里直接读该版本的 graph_json，
+     * 不读被调工作流当前草稿，也不按当前默认发布反推，避免旧绑定悄悄变形。
+     * <p>跨租户与不存在统一 404，避免探测其它租户的发布版本。
+     *
+     * @param id        工作流定义 id
+     * @param releaseId 发布版本 id
+     * @return 版本号、声明与必填键；该版本没有声明时 inputSchema 为 null
+     * @throws BizException 定义/版本不存在、版本不属于该工作流
+     */
+    public WorkflowReleaseInputSchemaResp releaseInputSchema(Long id, Long releaseId) {
+        requireDef(id);
+        WorkflowRelease release = releases.findById(releaseId)
+                .orElseThrow(() -> new BizException(ErrorCode.NOT_FOUND, "发布版本不存在"));
+        if (!id.equals(release.getWorkflowId())) {
+            throw new BizException(ErrorCode.BAD_REQUEST, "发布版本不属于该工作流");
+        }
+        JsonNode declaration = WorkflowInputDeclaration.startDeclaration(codec.parse(release.getGraphJson()));
+        WorkflowReleaseInputSchemaResp resp = new WorkflowReleaseInputSchemaResp();
+        resp.setWorkflowId(release.getWorkflowId());
+        resp.setReleaseId(release.getId());
+        resp.setVersion(release.getVersion());
+        resp.setInputSchema(declaration);
+        resp.setRequiredKeys(WorkflowInputDeclaration.requiredKeys(declaration));
+        return resp;
     }
 
     /**

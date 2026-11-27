@@ -3,6 +3,7 @@ package com.agenthub.workflow.application;
 import com.agenthub.workflow.domain.enums.WorkflowNodeRunStatus;
 import com.agenthub.workflow.domain.model.WorkflowNode;
 import com.agenthub.workflow.domain.model.WorkflowNodeRun;
+import com.agenthub.workflow.domain.model.WorkflowScopeView;
 import com.agenthub.workflow.domain.service.WorkflowCardLimits;
 import com.agenthub.workflow.domain.service.WorkflowRunListener;
 import java.util.List;
@@ -78,6 +79,28 @@ public class WorkflowCardPublisher {
         } catch (RuntimeException ex) {
             // 观察是旁路：画不出卡片不能把一次正常的 run 变成失败
             log.warn("工作流节点观察失败 action=runStarted type={}", ex.getClass().getSimpleName(), ex);
+        }
+    }
+
+    /**
+     * 通知观察者「一个子图作用域刚打开」：带上子图快照与内部节点的当前状态。
+     *
+     * <p>必须在父 SUBGRAPH 节点落库、子图节点行也建好之后调用；
+     * 观察者按 scope.parentNodeCode 把内部节点收进一层框，不另起卡片。
+     *
+     * @param scope 子图作用域快照
+     */
+    public void scope(WorkflowScopeView scope) {
+        WorkflowRunListener listener = holder.get();
+        if (listener == null || scope == null) {
+            return;
+        }
+        try {
+            listener.scopeStarted(scope);
+        } catch (RuntimeException ex) {
+            // 观察是旁路：框画不出来不能把一次正常的子图调用变成失败
+            log.warn("工作流节点观察失败 action=scopeStarted scope={} type={}",
+                    scope.parentNodeCode(), ex.getClass().getSimpleName(), ex);
         }
     }
 

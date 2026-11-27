@@ -244,9 +244,15 @@ export interface TrialFileView {
 export interface TrialWorkflowNodeView {
   /** 节点编码（业务唯一）；可能为空 */
   code: string
+  /**
+   * 展示用节点编码（子图内部节点才有）。
+   *
+   * <p>子图节点运行在父运行里，`code` 是带范围前缀的稳定键；用户看到的仍是原图里的编码。
+   */
+  displayCode?: string
   /** 节点展示名（取配置名；后端已按编码兜底） */
   name: string
-  /** AGENT / TOOL / CONDITION / HUMAN / PARALLEL_FORK / PARALLEL_JOIN */
+  /** AGENT / TOOL / CONDITION / HUMAN / PARALLEL_FORK / PARALLEL_JOIN / SUBGRAPH / LOOP */
   type: string
   /** PENDING / RUNNING / SUCCESS / FAILED / SKIPPED / WAITING_HUMAN / WAITING_REPLY / CANCELLED */
   status: string
@@ -275,10 +281,11 @@ export interface TrialWorkflowNodeView {
    */
   attempt?: number
   /**
-   * 所属循环节点的编码；不在任何循环体里为空串。
+   * 所属框的编码；不在任何框里为空串。
    *
-   * <p>只用于把循环体的节点圈进同一个框，不参与调度。循环节点自己嵌套在别的循环里时，
-   * 这一项指向<b>外层</b>循环编码。
+   * <p>只用于把框内节点圈进同一个框，不参与调度：循环体节点指向循环编码，
+   * 子图内部节点指向父图 SUBGRAPH 节点编码。框自己嵌套在别的框里时，
+   * 这一项指向<b>外层</b>框编码。
    */
   group?: string
   /** 循环节点已经进入的第几轮；非循环节点为 0 */

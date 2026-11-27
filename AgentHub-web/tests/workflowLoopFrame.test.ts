@@ -16,6 +16,7 @@ import {
   buildWorkflowTimeline,
   hasTimelineEntries,
   type WfLoopEntry,
+  type WfSubgraphEntry,
   type WfTimelineEntry
 } from '../src/components/runtime/workbench/chat/workflowLoopFrame.ts'
 
@@ -28,6 +29,7 @@ function node(partial: Partial<TrialWorkflowNodeView>): TrialWorkflowNodeView {
     status: partial.status ?? 'PENDING',
     note: partial.note ?? '',
     attempt: partial.attempt,
+    displayCode: partial.displayCode,
     group: partial.group ?? '',
     loopRound: partial.loopRound ?? 0,
     loopTotal: partial.loopTotal ?? 0,
@@ -262,4 +264,117 @@ test('没有循环图的旧卡片：逐节点平铺，与改动前一致', () =>
   const timeline = buildWorkflowTimeline(nodes, undefined, 'RUNNING')
   assert.equal(timeline.every((entry) => entry.kind === 'step'), true)
   assert.deepEqual(stepsOf(timeline).map((item) => item.code), ['a', 'b'])
+})
+
+/** 收集所有子图框（含嵌套） */
+function subgraphsOf(entries: WfTimelineEntry[]): WfSubgraphEntry[] {
+  const out: WfSubgraphEntry[] = []
+  for (const entry of entries) {
+    if (entry.kind === 'subgraph') {
+      out.push(entry, ...subgraphsOf(entry.entries))
+    } else if (entry.kind === 'loop') {
+      out.push(...subgraphsOf(entry.entries))
+    }
+  }
+  return out
+}
+
+/** 收集所有步骤节点（含嵌套在子图 / 循环里的） */
+function allStepsOf(entries: WfTimelineEntry[]): TrialWorkflowNodeView[] {
+  const out: TrialWorkflowNodeView[] = []
+  for (const entry of entries) {
+    if (entry.kind === 'step') {
+      out.push(entry.node)
+    } else {
+      out.push(...allStepsOf(entry.entries))
+    }
+  }
+  return out
+}
+
+test('子图收成一层框：标题用被调工作流名 + 版本，父节点不再占步骤位', () => {
+  const nodes = [
+    node({ code: 'intake', name: '入口', status: 'SUCCESS' }),
+    node({ code: 'call', name: '客服分流 · v3', type: 'SUBGRAPH', status: 'RUNNING' }),
+    // 子图内部节点：运行编码带范围前缀，展示仍按原编码
+    node({ code: 'x1_intake', displayCode: 'intake', name: '受理', status: 'SUCCESS', group: 'call' }),
+    node({ code: 'x1_reply', displayCode: 'reply', name: '回复', status: 'RUNNING', group: 'call' }),
+    node({ code: 'done', name: '收尾', status: 'PENDING' })
+  ]
+  const timeline = buildWorkflowTimeline(nodes, undefined, 'RUNNING')
+  const frames = subgraphsOf(timeline)
+  assert.equal(frames.length, 1, '子图只出一个框')
+  assert.equal(frames[0].subgraph.title, '客服分流 · v3')
+  assert.equal(frames[0].subgraph.state, 'running')
+  assert.deepEqual(allStepsOf(frames[0].entries).map((item) => item.code), ['x1_intake', 'x1_reply'])
+  assert.equal(
+    timeline.filter((entry) => entry.kind === 'step').map((entry) => entry.node.code).includes('call'),
+    false,
+    '父图 SUBGRAPH 节点本身不画成步骤'
+  )
+})
+
+test('还没铺出子图节点：不预露空框，SUBGRAPH 仍按普通步骤画', () => {
+  const nodes = [
+    node({ code: 'call', name: '客服分流 · v3', type: 'SUBGRAPH', status: 'RUNNING' })
+  ]
+  const timeline = buildWorkflowTimeline(nodes, undefined, 'RUNNING')
+  assert.equal(subgraphsOf(timeline).length, 0)
+  assert.deepEqual(timeline.filter((entry) => entry.kind === 'step').map((entry) => entry.node.code), ['call'])
+})
+
+test('子图内部循环：循环框套在子图框里面，不拍平成两层', () => {
+  const nodes = [
+    node({ code: 'call', name: '客服分流 · v3', type: 'SUBGRAPH', status: 'RUNNING' }),
+    node({ code: 'x1_loop', name: '重试', type: 'LOOP', status: 'RUNNING', group: 'call',
+      attempt: 1, loopRound: 1, loopTotal: 2, loopDecision: 'BODY' }),
+    node({ code: 'x1_body', displayCode: 'body', name: '处理', status: 'RUNNING', group: 'x1_loop', attempt: 1 })
+  ]
+  const timeline = buildWorkflowTimeline(nodes, undefined, 'RUNNING')
+  const subgraph = subgraphsOf(timeline)[0]
+  assert.ok(subgraph, '子图框应存在')
+  const innerLoops = subgraph.entries.filter((entry) => entry.kind === 'loop')
+  assert.equal(innerLoops.length, 1, '循环框必须落在子图框里')
+  assert.deepEqual(allStepsOf(subgraph.entries).map((item) => item.code), ['x1_body'])
+})
+
+test('循环里再调子图：子图框套在循环框里面', () => {
+  const nodes = [
+    node({ code: 'outer', name: '外层循环', type: 'LOOP', status: 'RUNNING', attempt: 1,
+      loopRound: 1, loopTotal: 2, loopDecision: 'BODY' }),
+    node({ code: 'x1_call', name: '子流程 · v1', type: 'SUBGRAPH', status: 'RUNNING', group: 'outer' }),
+    node({ code: 'x2_body', displayCode: 'body', name: '内部节点', status: 'RUNNING', group: 'x1_call' })
+  ]
+  const timeline = buildWorkflowTimeline(nodes, undefined, 'RUNNING')
+  const outer = loopsOf(timeline)[0]
+  assert.ok(outer, '外层循环框应存在')
+  const subgraphs = outer.entries.filter((entry) => entry.kind === 'subgraph')
+  assert.equal(subgraphs.length, 1, '子图框应落在外层循环框里')
+  assert.deepEqual(allStepsOf(subgraphs[0].entries).map((item) => item.code), ['x2_body'])
+})
+
+test('子图失败：框标失败，内部出错节点仍在框里', () => {
+  const nodes = [
+    node({ code: 'call', name: '客服分流 · v3', type: 'SUBGRAPH', status: 'FAILED',
+      note: '子图「客服分流」节点「回复」失败' }),
+    node({ code: 'x1_reply', displayCode: 'reply', name: '回复', status: 'FAILED', group: 'call' })
+  ]
+  const timeline = buildWorkflowTimeline(nodes, undefined, 'FAILED')
+  const subgraph = subgraphsOf(timeline)[0]
+  assert.equal(subgraph.subgraph.state, 'failed')
+  assert.deepEqual(allStepsOf(subgraph.entries).map((item) => item.status), ['FAILED'])
+})
+
+test('直播与回放用同一套投影：同一份节点整理出同一棵树', () => {
+  const nodes = [
+    node({ code: 'call', name: '客服分流 · v3', type: 'SUBGRAPH', status: 'SUCCESS' }),
+    node({ code: 'x1_intake', displayCode: 'intake', name: '受理', status: 'SUCCESS', group: 'call' }),
+    node({ code: 'after', name: '下游', status: 'SUCCESS' })
+  ]
+  const live = buildWorkflowTimeline(nodes, undefined, 'SUCCESS')
+  // 回放只是把落库节点重新送进同一个函数，不另走一套结构
+  const replay = buildWorkflowTimeline(JSON.parse(JSON.stringify(nodes)), undefined, 'SUCCESS')
+  // 序列化后比较：直播树与回放树连空字段的落法都一致
+  assert.deepEqual(JSON.parse(JSON.stringify(replay)), JSON.parse(JSON.stringify(live)))
+  assert.equal(subgraphsOf(replay)[0].subgraph.state, 'done')
 })

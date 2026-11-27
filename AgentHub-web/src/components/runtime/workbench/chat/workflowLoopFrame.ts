@@ -61,10 +61,41 @@ export interface WfLoopEntry {
   entries: WfTimelineEntry[]
 }
 
-/** 时间线上的一条：普通步骤，或一个循环框 */
+/** 子图框的展示态：与循环框同一套收口口径 */
+export type WfSubgraphState =
+  | 'waiting'
+  | 'running'
+  | 'done'
+  | 'failed'
+  | 'cancelled'
+  | 'skipped'
+
+/** 一个子图框的展示信息 */
+export interface WfSubgraphFrame {
+  /** 列表键（父图 SUBGRAPH 节点编码） */
+  key: string
+  /** 父图 SUBGRAPH 节点编码（子图节点 group 指向它） */
+  code: string
+  /** 框标题：被调工作流名 + 版本，如「客服分流 · v3」 */
+  title: string
+  /** 展示名；与 title 相同，保留给通用框组件 */
+  name: string
+  /** 展示态 */
+  state: WfSubgraphState
+}
+
+/** 子图框条目；框内条目可继续嵌套（循环 / 更深的子图） */
+export interface WfSubgraphEntry {
+  kind: 'subgraph'
+  subgraph: WfSubgraphFrame
+  entries: WfTimelineEntry[]
+}
+
+/** 时间线上的一条：普通步骤、循环框，或子图框 */
 export type WfTimelineEntry =
   | { kind: 'step'; node: TrialWorkflowNodeView; index: number }
   | WfLoopEntry
+  | WfSubgraphEntry
 
 /** 判定一个节点视图是不是循环节点 */
 export function isLoopNode(node: TrialWorkflowNodeView | undefined | null): boolean {
@@ -104,9 +135,10 @@ export function loopChainOf(code: string, outerOf: Map<string, string>): string[
 function outerMapOf(nodes: readonly TrialWorkflowNodeView[]): Map<string, string> {
   const outerOf = new Map<string, string>()
   for (const node of nodes) {
-    if (!isLoopNode(node)) {
-      continue
-    }
+    /*
+     * 循环节点与子图父节点都可能嵌在别的框里；体节点也记一份自己的 group，
+     * 不会参与「外层链」计算（链从框编码开始），但能让同一份映射服务两种框。
+     */
     const code = (node.code || '').trim()
     const outer = (node.group || '').trim()
     if (code && outer && !outerOf.has(code)) {
@@ -114,6 +146,17 @@ function outerMapOf(nodes: readonly TrialWorkflowNodeView[]): Map<string, string
     }
   }
   return outerOf
+}
+
+/** 判定一个节点视图是不是子图节点 */
+export function isSubgraphNode(node: TrialWorkflowNodeView | undefined | null): boolean {
+  return !!node && (node.type || '').trim().toUpperCase() === 'SUBGRAPH'
+}
+
+/** 框的类别：按同编码节点的类型判定；找不到时按循环框兼容旧数据 */
+function frameKindOf(code: string, nodes: readonly TrialWorkflowNodeView[]): 'loop' | 'subgraph' {
+  const view = nodes.find((node) => (node.code || '').trim() === code)
+  return view && isSubgraphNode(view) ? 'subgraph' : 'loop'
 }
 
 /** 节点状态码（已大写），缺省为空串 */
@@ -323,6 +366,85 @@ export function loopAppearedOf(
 }
 
 /**
+ * 子图框的展示态与标题。
+ *
+ * <p>标题只用父图 SUBGRAPH 节点的展示名：后端在该节点开始时已把它换成「被调工作流名 · vN」。
+ * 状态与循环框同一套收口口径：子图还在跑 / 内部节点等待时是进行中，失败优先于完成。
+ *
+ * @param code     父图 SUBGRAPH 节点编码
+ * @param nodes    本张卡上的全部节点
+ * @param outerOf  框编码 → 外层框编码
+ * @param closed   这一位的终态
+ * @param finished 整张卡是否已收口
+ * @return 子图框信息
+ */
+export function subgraphFrameOf(
+  code: string,
+  nodes: readonly TrialWorkflowNodeView[],
+  outerOf: Map<string, string>,
+  closed?: string,
+  finished = false
+): WfSubgraphFrame {
+  const views = nodes
+    .filter((node) => isSubgraphNode(node) && (node.code || '').trim() === code)
+    .sort((left, right) => attemptOfNode(left) - attemptOfNode(right))
+  const latest = views[views.length - 1]
+  const name = (latest?.name || latest?.displayCode || code).trim() || code
+  // 成员：归属链包含本子图的节点（内层循环 / 更深子图的节点也算，外层框仍保持进行中）
+  const members = nodes.filter((node) => {
+    const group = (node.group || '').trim()
+    return !!group && loopChainOf(group, outerOf).includes(code)
+  })
+  const latestStatus = latest ? statusOf(latest) : ''
+  const memberLive = members.some(liveStatus)
+  const memberFailed = members.some((node) => statusOf(node) === 'FAILED')
+  const memberCancelled = members.some((node) => statusOf(node) === 'CANCELLED')
+  const allMembersSkipped = members.length > 0 && members.every(skippedStatus)
+
+  let state: WfSubgraphState
+  if (closed === 'aborted' || latestStatus === 'CANCELLED' || memberCancelled) {
+    state = 'cancelled'
+  } else if (memberLive || latestStatus === 'RUNNING'
+    || latestStatus === 'WAITING_HUMAN' || latestStatus === 'WAITING_REPLY') {
+    state = 'running'
+  } else if (latestStatus === 'FAILED' || memberFailed || closed === 'failed') {
+    state = 'failed'
+  } else if (latestStatus === 'SUCCESS' || finished || closed === 'done') {
+    state = 'done'
+  } else if (latestStatus === 'SKIPPED' || allMembersSkipped) {
+    state = 'skipped'
+  } else {
+    state = 'waiting'
+  }
+  return { key: code, code, title: name, name, state }
+}
+
+/**
+ * 子图是否已经有内部节点出现在时间线上。
+ *
+ * <p>与循环框不同：父 SUBGRAPH 节点自己 RUNNING 时也不预露空框。
+ * 只有子图节点行真的进了同一张卡，才画框；没跑到 / 还没铺子图节点时保持旧平铺。
+ *
+ * @param code    父图 SUBGRAPH 节点编码
+ * @param nodes   节点列表
+ * @param outerOf 框编码 → 外层框编码
+ * @return true 表示可以画子图框
+ */
+export function subgraphAppearedOf(
+  code: string,
+  nodes: readonly TrialWorkflowNodeView[],
+  outerOf: Map<string, string>
+): boolean {
+  return nodes.some((node) => {
+    if ((node.code || '').trim() === code) {
+      return false
+    }
+    const group = (node.group || '').trim()
+    return !!group && loopChainOf(group, outerOf).includes(code)
+  })
+}
+
+/**
  * 只保留「已经出现在时间线上」的那段祖先链：没出现的循环不建框，体节点在最近的已出现祖先里平铺。
  *
  * @param chain   完整归属链（外层 → 自身）
@@ -337,12 +459,74 @@ function appearedChainOf(
 ): string[] {
   const kept: string[] = []
   for (const code of chain) {
-    if (!loopAppearedOf(code, nodes, outerOf)) {
+    const kind = frameKindOf(code, nodes)
+    const appeared = kind === 'subgraph'
+      ? subgraphAppearedOf(code, nodes, outerOf)
+      : loopAppearedOf(code, nodes, outerOf)
+    if (!appeared) {
       break
     }
     kept.push(code)
   }
   return kept
+}
+
+/** 取框条目的编码；步骤返回空串 */
+function frameCodeOf(entry: WfTimelineEntry): string {
+  if (entry.kind === 'loop') {
+    return entry.loop.code
+  }
+  if (entry.kind === 'subgraph') {
+    return entry.subgraph.code
+  }
+  return ''
+}
+
+/** 取框条目的子条目；调用方已保证不是步骤 */
+function frameEntriesOf(entry: WfTimelineEntry): WfTimelineEntry[] {
+  return entry.kind === 'step' ? [] : entry.entries
+}
+
+/** 造一个空框条目：按编码的类型选循环框或子图框 */
+function newFrameEntry(
+  code: string,
+  kind: 'loop' | 'subgraph',
+  chain: string[],
+  nodes: readonly TrialWorkflowNodeView[],
+  outerOf: Map<string, string>,
+  closed?: string,
+  finished = false
+): WfTimelineEntry {
+  if (kind === 'subgraph') {
+    return {
+      kind: 'subgraph',
+      subgraph: subgraphFrameOf(code, nodes, outerOf, closed, finished),
+      entries: []
+    }
+  }
+  return {
+    kind: 'loop',
+    loop: loopFrameOf(code, nodes, chain, outerOf, closed, finished),
+    entries: []
+  }
+}
+
+/** 按最新节点重算一个框的标题 / 状态 */
+function refreshFrame(
+  entry: WfTimelineEntry,
+  chain: string[],
+  nodes: readonly TrialWorkflowNodeView[],
+  outerOf: Map<string, string>,
+  closed?: string,
+  finished = false
+): void {
+  if (entry.kind === 'loop') {
+    entry.loop = loopFrameOf(entry.loop.code, nodes, chain, outerOf, closed, finished)
+    return
+  }
+  if (entry.kind === 'subgraph') {
+    entry.subgraph = subgraphFrameOf(entry.subgraph.code, nodes, outerOf, closed, finished)
+  }
 }
 
 /**
@@ -379,30 +563,28 @@ export function buildWorkflowTimeline(
   const outerOf = outerMapOf(visible)
   const code = (status || '').trim().toUpperCase()
   const finished = code === 'SUCCESS' || code === 'FAILED' || code === 'CANCELLED'
-  // 循环编码 → 已经开出来的框条目（同轮复用，保证多轮只有一个框）
-  const frames = new Map<string, WfLoopEntry>()
+  // 框编码 → 已经开出来的框条目（同轮复用，保证多轮只有一个框）
+  const frames = new Map<string, WfTimelineEntry>()
   const root: WfTimelineEntry[] = []
   /** 当前打开的框链，外层在前 */
-  const stack: WfLoopEntry[] = []
+  const stack: WfTimelineEntry[] = []
 
   /** 把打开的框链对齐到目标链（外层在前）：多退少补，复用的框不重复建 */
   const alignTo = (chain: string[]) => {
     let common = 0
-    while (common < stack.length && common < chain.length && stack[common].loop.code === chain[common]) {
+    while (common < stack.length && common < chain.length
+      && frameCodeOf(stack[common]) === chain[common]) {
       common += 1
     }
     stack.length = common
     for (let index = common; index < chain.length; index += 1) {
-      const loopCode = chain[index]
-      let entry = frames.get(loopCode)
+      const frameCode = chain[index]
+      let entry = frames.get(frameCode)
       if (!entry) {
-        entry = {
-          kind: 'loop',
-          loop: loopFrameOf(loopCode, visible, chain.slice(0, index + 1), outerOf, closed, finished),
-          entries: []
-        }
-        frames.set(loopCode, entry)
-        const host = stack.length ? stack[stack.length - 1].entries : root
+        entry = newFrameEntry(frameCode, frameKindOf(frameCode, visible),
+          chain.slice(0, index + 1), visible, outerOf, closed, finished)
+        frames.set(frameCode, entry)
+        const host = stack.length ? frameEntriesOf(stack[stack.length - 1]) : root
         host.push(entry)
       }
       stack.push(entry)
@@ -414,20 +596,28 @@ export function buildWorkflowTimeline(
       // 循环节点本身不画成步骤卡：它的轮次只用来算框的标题
       return
     }
+    const codeOfNode = (node.code || '').trim()
+    /*
+     * 子图父节点同理：子图节点行已经出现时，用一层「被调工作流名 · vN」框代替它；
+     * 子图还没铺出内部节点（旧卡片 / 尚未跑到）时仍按普通步骤画，信息不丢。
+     */
+    if (isSubgraphNode(node) && subgraphAppearedOf(codeOfNode, visible, outerOf)) {
+      return
+    }
     const group = (node.group || '').trim()
     alignTo(group ? appearedChainOf(loopChainOf(group, outerOf), visible, outerOf) : [])
-    const host = stack.length ? stack[stack.length - 1].entries : root
+    const host = stack.length ? frameEntriesOf(stack[stack.length - 1]) : root
     host.push({ kind: 'step', node, index })
   })
 
   // 全部铺完后按最新节点重算一次：结束那一刻状态可能刚落定
   const refresh = (entries: WfTimelineEntry[], chain: string[]) => {
     for (const entry of entries) {
-      if (entry.kind !== 'loop') {
+      if (entry.kind !== 'loop' && entry.kind !== 'subgraph') {
         continue
       }
-      const nextChain = [...chain, entry.loop.code]
-      entry.loop = loopFrameOf(entry.loop.code, visible, nextChain, outerOf, closed, finished)
+      const nextChain = [...chain, frameCodeOf(entry)]
+      refreshFrame(entry, nextChain, visible, outerOf, closed, finished)
       refresh(entry.entries, nextChain)
     }
   }
@@ -445,7 +635,7 @@ export function buildWorkflowTimeline(
 function pruneEmptyLoops(entries: WfTimelineEntry[]): WfTimelineEntry[] {
   const kept: WfTimelineEntry[] = []
   for (const entry of entries) {
-    if (entry.kind !== 'loop') {
+    if (entry.kind !== 'loop' && entry.kind !== 'subgraph') {
       kept.push(entry)
       continue
     }

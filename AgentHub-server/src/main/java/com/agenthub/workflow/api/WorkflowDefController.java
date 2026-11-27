@@ -11,6 +11,7 @@ import com.agenthub.workflow.api.dto.WorkflowDraftResp;
 import com.agenthub.workflow.api.dto.WorkflowPublishReq;
 import com.agenthub.workflow.api.dto.WorkflowReleaseActivateReq;
 import com.agenthub.workflow.api.dto.WorkflowReleaseActivateResp;
+import com.agenthub.workflow.api.dto.WorkflowReleaseInputSchemaResp;
 import com.agenthub.workflow.api.dto.WorkflowReleaseResp;
 import com.agenthub.workflow.api.dto.WorkflowValidateResp;
 import com.agenthub.workflow.application.WorkflowDefAppService;
@@ -174,6 +175,21 @@ public class WorkflowDefController {
     @GetMapping("/{id:\\d+}/releases")
     public Result<List<WorkflowReleaseResp>> releases(@PathVariable Long id) {
         return Result.ok(service.releases(id));
+    }
+
+    /**
+     * 取某个已发布版本的 START 入参声明，供画布 SUBGRAPH 节点按钉死版本出槽。
+     * <p>只返回声明与必填键，不返回整份图。
+     *
+     * @param id        工作流定义 id
+     * @param releaseId 发布版本 id
+     * @return 版本号、声明、必填键
+     */
+    @SaCheckPermission(WorkflowPermissions.DEF_VIEW)
+    @GetMapping("/{id:\\d+}/releases/{releaseId:\\d+}/input-schema")
+    public Result<WorkflowReleaseInputSchemaResp> releaseInputSchema(@PathVariable Long id,
+                                                                     @PathVariable Long releaseId) {
+        return Result.ok(service.releaseInputSchema(id, releaseId));
     }
 
     /**

@@ -58,6 +58,12 @@ public class AgentDefEntity extends AgentAuditEntity {
     private Integer toolResultMaxChars;
     /** 运行配置 JSON；可空。列见 schema-delta-agent-runtime-config.sql */
     private String runtimeConfigJson;
+    /**
+     * 入参声明 JSON（顶层 properties / required）。可空 = 没有声明。
+     * <p>列见 schema-delta-agent-input-schema.sql；由 AgentInputSchema 归一后写入，
+     * 画布 AGENT 节点据此出槽，无声明时退回默认「用户输入」槽。
+     */
+    private String inputSchemaJson;
     private Integer status;
     private String remark;
 

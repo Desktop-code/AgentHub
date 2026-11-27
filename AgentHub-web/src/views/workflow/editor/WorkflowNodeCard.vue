@@ -25,6 +25,7 @@
  * <p>data.runStatus 由试跑抽屉回填，仅影响视觉，不参与草稿保存。
  * <p>data.agentName / agentCode 由编辑页按 agentId 注入，只用于把节点标题显示成真实 Agent 名称；
  * data.toolTitle / toolName 同理服务于 TOOL 节点标题；
+ * data.subWorkflowName / subReleaseVersion 服务于 SUBGRAPH 节点标题与版本标注；
  * 画布保存走 buildGraph 的字段白名单，这些展示字段不会写进 graph_json。
  */
 import { computed } from 'vue'
@@ -65,7 +66,8 @@ const TYPE_TONE: Record<string, string> = {
   PARALLEL_FORK: 'fork',
   PARALLEL_JOIN: 'join',
   HUMAN: 'human',
-  LOOP: 'loop'
+  LOOP: 'loop',
+  SUBGRAPH: 'subgraph'
 }
 
 const nodeType = computed(() => String(props.data?.nodeType || 'UNKNOWN'))
@@ -82,6 +84,9 @@ const displayName = computed(() => {
   const data = props.data
   if (nodeType.value === 'AGENT' && data.agentName) {
     return String(data.agentName)
+  }
+  if (nodeType.value === 'SUBGRAPH' && data.subWorkflowName) {
+    return String(data.subWorkflowName)
   }
   if (nodeType.value === 'TOOL') {
     const toolName = data.toolTitle || data.toolName
@@ -108,6 +113,16 @@ const summary = computed(() => {
     }
     // 标题用的是 title，这里补 MCP 原始工具名，便于和工具目录 / 调用日志对照
     return props.data?.toolName ? String(props.data.toolName) : '已绑定工具'
+  }
+  if (nodeType.value === 'SUBGRAPH') {
+    // 子图必须钉死版本：卡面给出 vN，编排者一眼看出调的是哪一版而不是「最新」
+    if (!config.subWorkflowId) {
+      return '未绑定工作流'
+    }
+    if (!config.subReleaseId) {
+      return '未钉死发布版本'
+    }
+    return props.data?.subReleaseVersion ? `v${props.data.subReleaseVersion}` : '已绑定版本'
   }
   if (nodeType.value === 'HUMAN') {
     return config.timeoutPolicy ? `超时：${config.timeoutPolicy}` : '未配置超时策略'
@@ -300,6 +315,15 @@ const runClass = computed(() => {
 
 .wf-node.is-human .wf-node__type {
   color: #dc2626;
+}
+
+/* 子图：与工具区分开，用青色系表示「调用另一张已发布图」 */
+.wf-node.is-subgraph {
+  border-left-color: #0d9488;
+}
+
+.wf-node.is-subgraph .wf-node__type {
+  color: #0f766e;
 }
 
 /* ===== 试跑高亮：只加描边 / 徽标，不改变节点既有类型配色 ===== */

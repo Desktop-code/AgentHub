@@ -55,6 +55,18 @@ export interface WorkflowNodeConfig {
   assigneeRule?: string | null
   /** CONDITION 表达式，JSONLogic 子集；本刀只存盘与结构校验 */
   condition?: unknown
+  /**
+   * START 节点的入参声明：顶层 JSON Schema（properties / required / title / description）。
+   * <p>键即编排里 $.input 下的字段名；随 graph_json 进发布快照，发布后不可变。
+   */
+  inputSchema?: unknown
+  /**
+   * SUBGRAPH 节点绑定的被调工作流 def id；必须已被发布过。
+   * <p>跨租户不允许，后端按「不存在」处理。
+   */
+  subWorkflowId?: number | null
+  /** SUBGRAPH 节点钉死的发布版本 id（workflow_release.id）；出槽只认这一版的声明 */
+  subReleaseId?: number | null
   /** 入参映射：目标字段 → $.input / $.outputs / $.vars 路径 */
   inputMapping?: Record<string, string>
   /** 出参映射 */
@@ -126,7 +138,11 @@ export interface WorkflowFlowNodeData {
   toolTitle?: string
   /** TOOL 节点绑定后的工具技术名（MCP 原始 name）：仅画布展示，不进 graph_json */
   toolName?: string
-  /** TOOL 节点必填入参还没配来源的提示：仅画布展示，不进 graph_json */
+  /** SUBGRAPH 节点绑定后的被调工作流名称：仅画布展示，不进 graph_json */
+  subWorkflowName?: string
+  /** SUBGRAPH 节点钉死的版本号：仅画布展示，不进 graph_json */
+  subReleaseVersion?: number | null
+  /** 必填入参还没配来源的提示（TOOL / AGENT / SUBGRAPH）：仅画布展示，不进 graph_json */
   missingInputHint?: string
 }
 
@@ -394,6 +410,21 @@ export interface WorkflowAppGrantItem {
   releaseId?: number | null
   status?: number | null
   createTime?: string | null
+}
+
+/**
+ * 某个已发布版本的 START 入参声明（GET /api/workflow/defs/{id}/releases/{releaseId}/input-schema）。
+ * <p>画布 SUBGRAPH 节点按这份声明出槽：只认钉死的那个版本，不读对方当前草稿。
+ */
+export interface WorkflowReleaseInputSchema {
+  workflowId: number
+  releaseId: number
+  /** 版本号，用于展示 */
+  version?: number | null
+  /** 声明对象；该版本没有声明时为空（保持自由添加，不编造槽） */
+  inputSchema?: unknown
+  /** 声明里的必填键（properties ∩ required） */
+  requiredKeys?: string[]
 }
 
 /** OpenAPI 触发响应（POST /api/open/workflow/runs） */

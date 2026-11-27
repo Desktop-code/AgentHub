@@ -160,6 +160,40 @@ test('取消后卡片只对齐终态，不清空已流出的节点与正文', ()
   assert.equal(alignClosedCard('x', 'CANCELLED'), 'x')
 })
 
+test('调试卡片按 run 主键现拼文件下载地址：子图内部节点的文件行点得动', () => {
+  const view = {
+    name: '演示',
+    code: 'demo',
+    status: 'SUCCESS',
+    answer: '',
+    nodes: [
+      {
+        code: 'x8f9629e7_impl_agent',
+        name: '游戏实现',
+        type: 'AGENT',
+        status: 'SUCCESS',
+        group: 'impl_check',
+        files: [{ fileName: 'guess-number.html', size: 11586 }]
+      },
+      { code: 'x8f9629e7_check_agent', name: '体验检查', type: 'AGENT', status: 'SUCCESS', group: 'impl_check' }
+    ]
+  }
+  // 带 run 主键：文件行补出下载地址（调试没有工作台会话，后端同样按 run 主键认）
+  const withUrl = asWorkflowView(view, 136)!
+  assert.equal(withUrl.nodes[0].files.length, 1)
+  assert.equal(withUrl.nodes[0].files[0].fileName, 'guess-number.html')
+  assert.equal(
+    withUrl.nodes[0].files[0].downloadUrl,
+    '/api/runtime/workspace/download?sessionId=136&fileName=guess-number.html'
+  )
+  // 没文件的节点仍然是空表，不新造文件行；分组 / 状态原样保留
+  assert.deepEqual(withUrl.nodes[1].files, [])
+  assert.equal(withUrl.nodes[0].group, 'impl_check')
+  assert.equal(withUrl.nodes[0].status, 'SUCCESS')
+  // 不带主键时仍是同一引用（旧调用点行为不变，FileCard 按地址为空置灰）
+  assert.equal(asWorkflowView(view), view)
+})
+
 test('直播帧只追加不清空：卡片 / 节点行缺失时保留上一层', () => {
   const base = {
     id: 7,

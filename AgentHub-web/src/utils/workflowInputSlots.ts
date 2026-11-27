@@ -1,31 +1,34 @@
 /**
  * 工作流入参「按定义出槽」的解析与归并。所属域：workflow 的前端展示层。
- * <p>职责：把工具 {@code inputSchemaJson} 的顶层参数、AGENT 的默认「用户输入」槽
- * 解析成可编辑的目标槽；并在保存前剔掉空值键，避免空字符串挡住运行时的兜底取值。
+ * <p>职责：把工具 {@code inputSchemaJson}、Agent / 子图工作流的入参声明、
+ * AGENT 默认「用户输入」槽解析成可编辑的目标槽；并在保存前剔掉空值键，
+ * 避免空字符串挡住运行时的兜底取值。
  * <p>契约：本模块只产出「目标字段 + 展示信息」，落库仍是 {@code config.inputMapping} 的
  * {@code Record<string, string>}（目标字段 → $.input / $.outputs / $.vars / 常量），
  * 路径仍由 {@code workflowMapping} 拼装，运行时的解析口径完全不变。
  * <p>纯函数、无 Vue 依赖：可在 node 里直接跑用例验证。
  */
+import { declaredInputSlots } from './workflowInputDeclaration.ts'
 
 /**
  * 槽的来源。
- * <p>{@code tool}：读工具 JSON Schema 的顶层参数；{@code agent}：AGENT 没有入参声明，
+ * <p>{@code tool}：读工具 JSON Schema 的顶层参数；{@code declaration}：读工作流 / Agent
+ * 的入参声明（开始节点、钉死的子图发布版本、Agent 定义）；{@code agent}：AGENT 没有入参声明，
  * 只给一个「用户输入」默认槽，不代表平台认领了 Agent 的参数表。
  */
-export type InputSlotOrigin = 'tool' | 'agent'
+export type InputSlotOrigin = 'tool' | 'agent' | 'declaration'
 
 /** 一个入参目标槽（定义槽不可改名、不可删；手填行没有这个结构） */
 export interface InputSlotDefinition {
   /** 目标字段，即落库对象的键 */
   key: string
-  /** 展示名：工具 schema 的 title；AGENT 默认槽固定「用户输入」。空串表示不显示 */
+  /** 展示名：schema / 声明的 title；AGENT 默认槽固定「用户输入」。空串表示不显示 */
   title: string
-  /** 说明：工具 schema 的 description；没有就空串，不翻译、不编造 */
+  /** 说明：schema / 声明的 description；没有就空串，不翻译、不编造 */
   description: string
-  /** 是否必填：工具 schema 的 required 命中；AGENT 默认槽不算必填 */
+  /** 是否必填：schema / 声明的 required 命中；AGENT 默认槽不算必填 */
   required: boolean
-  /** 来源：工具定义 / AGENT 默认槽 */
+  /** 来源：工具定义 / 入参声明 / AGENT 默认槽 */
   origin: InputSlotOrigin
 }
 
@@ -138,22 +141,30 @@ export function agentInputSlotForKey(key: string): InputSlotDefinition {
 
 /**
  * 按节点类型解析当前应展示的定义槽。
- * <p>TOOL 按工具 schema 出槽；AGENT 只给默认「用户输入」；其它节点没有定义，返回空数组，
- * 编辑器继续走自由添加。
+ * <p>TOOL 按工具 schema 出槽；AGENT / SUBGRAPH 优先按入参声明出槽，声明为空时：
+ * AGENT 保留默认「用户输入」槽，SUBGRAPH 返回空数组（允许自由添加，不编造槽）；
+ * 其它节点没有定义，返回空数组，编辑器继续走自由添加。
  *
- * @param nodeType      节点类型（AGENT / TOOL / …）
- * @param schemaJson    绑定工具的 inputSchemaJson，可空
- * @param mapping       已保存的入参映射，用于决定 AGENT 默认槽的键
+ * @param nodeType    节点类型（AGENT / TOOL / SUBGRAPH / …）
+ * @param schemaJson  绑定工具的 inputSchemaJson，可空
+ * @param mapping     已保存的入参映射，用于决定 AGENT 默认槽的键
+ * @param declaration 入参声明（Agent 定义 / 子图钉死版本的开始节点），可空
  * @return 定义槽；空数组表示没有定义
  */
 export function resolveInputSlots(
   nodeType: string | undefined,
   schemaJson: string | null | undefined,
-  mapping?: Record<string, string> | null
+  mapping?: Record<string, string> | null,
+  declaration?: unknown
 ): InputSlotDefinition[] {
   const type = String(nodeType ?? '').trim()
-  if (type === 'AGENT') {
-    return [agentInputSlot(mapping)]
+  if (type === 'AGENT' || type === 'SUBGRAPH') {
+    const declared = declaredInputSlots(declaration)
+    if (declared.length) {
+      return declared
+    }
+    // 子图没有声明时保持自由添加；AGENT 没有声明时退回默认「用户输入」
+    return type === 'AGENT' ? [agentInputSlot(mapping)] : []
   }
   if (type === 'TOOL') {
     return parseToolInputSlots(schemaJson)

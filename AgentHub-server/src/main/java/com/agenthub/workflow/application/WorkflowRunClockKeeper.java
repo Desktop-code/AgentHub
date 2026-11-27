@@ -137,7 +137,9 @@ public class WorkflowRunClockKeeper {
             run.setRunDeadline(deadlineAt);
             run.setWaitingSince(null);
         }
-        return new RunClock(runLimitMs, deadlineMs, nodeLimitMs, null);
+        long pausedMs = waitingSinceMs == null ? 0L : Math.max(0L, nowMs - waitingSinceMs);
+        // resumedAtMs 只用于判断「节点 / 子图是不是在等待之前就开始了」，从而补回等待时长
+        return new RunClock(runLimitMs, deadlineMs, nodeLimitMs, null, pausedMs, nowMs);
     }
 
     /**
@@ -190,10 +192,39 @@ public class WorkflowRunClockKeeper {
      */
     public boolean nodeTimedOut(WorkflowNodeRun row) {
         RunClock clock = holder.get();
-        if (clock == null || clock.nodeLimitMs <= 0 || row == null || row.getStartTime() == null) {
+        return clock != null && nodeTimedOut(row, clock.nodeLimitMs);
+    }
+
+    /**
+     * 按指定单节点上限判断：子图内部节点用发布版本里的上限，而不是根图的上限。
+     *
+     * @param row     运行态行
+     * @param limitMs 生效的单节点上限；<=0 表示未配置
+     * @return true 表示这一步已超时
+     */
+    public boolean nodeTimedOut(WorkflowNodeRun row, long limitMs) {
+        if (limitMs <= 0 || row == null || row.getStartTime() == null) {
             return false;
         }
-        return System.currentTimeMillis() > toEpochMs(row.getStartTime()) + clock.nodeLimitMs;
+        return System.currentTimeMillis() > effectiveStartMs(row.getStartTime()) + limitMs;
+    }
+
+    /**
+     * 把节点开始时刻换算成「不计等待」的起算点。
+     *
+     * @param start 节点开始时刻
+     * @return epoch 毫秒；如果开始于本轮恢复之前，补回本轮等待时长
+     */
+    public long effectiveStartMs(LocalDateTime start) {
+        RunClock clock = holder.get();
+        if (start == null) {
+            return 0L;
+        }
+        long startMs = toEpochMs(start);
+        if (clock == null || clock.pausedMs <= 0 || startMs >= clock.resumedAtMs) {
+            return startMs;
+        }
+        return startMs + clock.pausedMs;
     }
 
     /**
@@ -222,18 +253,25 @@ public class WorkflowRunClockKeeper {
      * @param deadlineMs  整段截止（epoch 毫秒）
      * @param nodeLimitMs 单节点上限（毫秒）；<=0 表示未配置
      * @param waitingAtMs 进入等待的时刻（epoch 毫秒）；null 表示正在跑
+     * @param pausedMs    本轮恢复时补回的等待时长；首轮为 0
+     * @param resumedAtMs 本轮恢复时刻；首轮为账本创建时刻
      */
     public static final class RunClock {
         public final long runLimitMs;
         public final long deadlineMs;
         public final long nodeLimitMs;
+        public final long pausedMs;
+        public final long resumedAtMs;
         public Long waitingAtMs;
 
-        private RunClock(long runLimitMs, long deadlineMs, long nodeLimitMs, Long waitingAtMs) {
+        private RunClock(long runLimitMs, long deadlineMs, long nodeLimitMs, Long waitingAtMs,
+                         long pausedMs, long resumedAtMs) {
             this.runLimitMs = runLimitMs;
             this.deadlineMs = deadlineMs;
             this.nodeLimitMs = nodeLimitMs;
             this.waitingAtMs = waitingAtMs;
+            this.pausedMs = pausedMs;
+            this.resumedAtMs = resumedAtMs;
         }
     }
 }

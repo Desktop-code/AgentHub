@@ -80,6 +80,13 @@ public class WorkflowHumanTaskAppService {
      * <p>工作台 run 的 open 返回空，这里不会碰会话直播。
      */
     private final ObjectProvider<WorkflowTrialLive> trialLive;
+    /**
+     * 子图范围还原：只用于「子图内部的人工节点」按所属子图的出边续跑。
+     *
+     * <p>子图节点的运行 id 带范围前缀，根图里查不到出边；缺失时退化为根图口径，
+     * 与改动前一致。这是展示 / 续跑旁路，单测可不起 Spring 容器。
+     */
+    private WorkflowScopeTreeBuilder scopeTreeBuilder;
 
     /**
      * 单测构造：不接直播。
@@ -160,6 +167,19 @@ public class WorkflowHumanTaskAppService {
         this.traces = traces;
         this.workbenchTimeline = workbenchTimeline;
         this.trialLive = trialLive;
+    }
+
+    /**
+     * 注入子图范围还原器（可选）：子图内部的人工节点要按它所属子图的出边续跑。
+     *
+     * <p>用 setter 而不是构造参数：单测直接 new 本类时缺失，退化为根图出边口径；
+     * 非子图节点两种路径结果完全一致，不改变既有行为。
+     *
+     * @param scopeTreeBuilder 子图范围还原器；可空
+     */
+    @Autowired(required = false)
+    public void setScopeTreeBuilder(WorkflowScopeTreeBuilder scopeTreeBuilder) {
+        this.scopeTreeBuilder = scopeTreeBuilder;
     }
 
     /**
@@ -643,7 +663,21 @@ public class WorkflowHumanTaskAppService {
         try {
             WorkflowGraph graph = codec.parse(run.getGraphJson());
             WorkflowRuntimeGraph runtime = WorkflowRuntimeGraph.of(graph);
-            return runtime.outgoing(nodeRun.getNodeId());
+            /*
+             * 子图内部的人工节点：运行 id 带范围前缀，根图里没有这个节点。
+             * 按回放同一套范围还原找到它所属的那一层，用那一层的出边续跑；
+             * 找不到（老数据 / 单测没装还原器）退回根图，行为与改动前一致。
+             */
+            String nodeId = nodeRun.getNodeId();
+            if (scopeTreeBuilder != null && nodeId != null && !nodeId.isBlank()) {
+                WorkflowScope scope = scopeTreeBuilder
+                        .build(run, graph, nodeRuns.listByRunId(run.getId()))
+                        .scopeOfNode(nodeId);
+                if (scope != null) {
+                    runtime = scope.runtime();
+                }
+            }
+            return runtime.outgoing(nodeId == null ? "" : nodeId);
         } catch (RuntimeException ex) {
             log.warn("读取 HUMAN 节点出边失败 runId={} nodeId={} type={}",
                     run.getId(), nodeRun.getNodeId(), ex.getClass().getSimpleName());

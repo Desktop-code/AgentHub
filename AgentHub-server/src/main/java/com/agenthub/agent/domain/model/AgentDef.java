@@ -48,6 +48,12 @@ public class AgentDef {
      * 运行配置 JSON（多意图 / 终答模式等）。可空；ROUTER 空则运行时用默认。
      */
     private String runtimeConfigJson;
+    /**
+     * 入参声明 JSON（顶层 properties / required）。可空 = 没有声明。
+     * <p>键即编排里 {@code $.input} 下的字段名；只用于「别人调用我时怎么出槽 / 必填拦截」，
+     * 不改变对话入口仍只收一个问题。
+     */
+    private String inputSchemaJson;
     private Integer status;
     /**
      * 逻辑删除标记：0 未删，1 已删。

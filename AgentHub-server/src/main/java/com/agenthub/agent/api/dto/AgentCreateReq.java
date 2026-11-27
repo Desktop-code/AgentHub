@@ -1,5 +1,6 @@
 package com.agenthub.agent.api.dto;
 
+import com.fasterxml.jackson.databind.JsonNode;
 import jakarta.validation.constraints.NotBlank;
 import jakarta.validation.constraints.Size;
 import lombok.Data;
@@ -56,4 +57,10 @@ public class AgentCreateReq {
 
     /** Router 等运行配置；可空，空则按模式默认写入 */
     private AgentRuntimeConfigReq runtimeConfig;
+
+    /**
+     * 入参声明（顶层 JSON Schema：properties / required / title / description）。
+     * <p>新建弹窗暂不编辑声明，留空即可；后续在详情「基本信息」里补。
+     */
+    private JsonNode inputSchema;
 }

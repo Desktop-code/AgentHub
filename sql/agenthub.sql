@@ -58,6 +58,7 @@ CREATE TABLE `agent_def`  (
   `consecutive_fail_abort` int(11) NULL DEFAULT NULL COMMENT '连续失败N次熔断，空=跟YAML',
   `tool_result_max_chars` int(11) NULL DEFAULT NULL COMMENT '工具结果回灌上限字符，空=跟YAML',
   `runtime_config_json` text CHARACTER SET utf8mb4 COLLATE utf8mb4_general_ci NULL COMMENT '运行配置JSON：multiIntentEnabled/answerMode/maxRouteChildren等',
+  `input_schema_json` json NULL COMMENT '入参声明JSON：顶层 properties/required，键即 $.input 字段',
   `status` tinyint(4) NOT NULL DEFAULT 1 COMMENT '1正常 0停用',
   `allow_orchestrated` tinyint(4) NOT NULL DEFAULT 1 COMMENT '1允许被编排挂为子 0禁止',
   `remark` varchar(500) CHARACTER SET utf8mb4 COLLATE utf8mb4_general_ci NULL DEFAULT NULL COMMENT '备注',

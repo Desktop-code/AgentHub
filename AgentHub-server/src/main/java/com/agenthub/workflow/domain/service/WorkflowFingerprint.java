@@ -14,9 +14,9 @@ import java.util.List;
 
 /**
  * 发布依赖指纹。所属域：workflow 的 domain。
- * <p>算法：收集图中所有 AGENT.config.agentId 与 TOOL.config.toolId，按
- * {@code 类型|节点code|目标id} 生成一行，整体排序后用换行拼成规范串，
- * 再做 SHA-256，取小写十六进制 64 位。
+ * <p>算法：收集图中所有 AGENT.config.agentId、TOOL.config.toolId 与
+ * SUBGRAPH.config 的「被调工作流 + 钉死版本」，按 {@code 类型|节点code|目标id} 生成一行，
+ * 整体排序后用换行拼成规范串，再做 SHA-256，取小写十六进制 64 位。
  * <p>无依赖时对固定串 {@code WORKFLOW|NO_DEPS} 做哈希，保证结果稳定且非空。
  * <p>为什么按节点 code 排序而不是按数组顺序：画布拖动/序列化顺序变化不应让指纹漂移。
  */
@@ -52,6 +52,14 @@ public final class WorkflowFingerprint {
                     Long toolId = WorkflowNodeConfig.longValue(node.getConfig(), "toolId");
                     if (toolId != null) {
                         parts.add("TOOL|" + code + "|" + toolId);
+                    }
+                } else if (type == WorkflowNodeType.SUBGRAPH) {
+                    // 子图依赖 = 被调工作流 + 钉死的版本；换版本也是换了依赖，指纹必须变
+                    Long workflowId = WorkflowNodeConfig.longValue(node.getConfig(), "subWorkflowId");
+                    Long releaseId = WorkflowNodeConfig.longValue(node.getConfig(), "subReleaseId");
+                    if (workflowId != null) {
+                        parts.add("SUBGRAPH|" + code + "|" + workflowId + "@"
+                                + (releaseId == null ? "" : releaseId));
                     }
                 }
             }

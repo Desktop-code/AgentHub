@@ -13,6 +13,7 @@ import type {
   WorkflowGraph,
   WorkflowHumanTaskItem,
   WorkflowReleaseActivateResult,
+  WorkflowReleaseInputSchema,
   WorkflowReleaseRow,
   WorkflowRunDetail,
   WorkflowRunLiveCard,
@@ -111,6 +112,19 @@ export function publishWorkflow(id: number, data: { note?: string }) {
 /** 版本列表，按版本号倒序 */
 export function listWorkflowReleases(id: number) {
   return request.get<Result<WorkflowReleaseRow[]>>(`/api/workflow/defs/${id}/releases`)
+}
+
+/**
+ * 取某个已发布版本的 START 入参声明，供画布 SUBGRAPH 节点按钉死版本出槽。
+ * <p>只认该版本的 graph_json，不读对方草稿；跨租户与不存在统一 404。
+ *
+ * @param id        被调工作流定义 id
+ * @param releaseId 发布版本 id
+ */
+export function getWorkflowReleaseInputSchema(id: number, releaseId: number) {
+  return request.get<Result<WorkflowReleaseInputSchema>>(
+    `/api/workflow/defs/${id}/releases/${releaseId}/input-schema`
+  )
 }
 
 /**

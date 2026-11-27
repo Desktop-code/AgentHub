@@ -18,7 +18,7 @@ import java.nio.charset.StandardCharsets;
  *
  * <p>身份是平台登录用户：Sa-Token 拦截器覆盖 {@code /api/**}，
  * 再叠加 {@code runtime:trial:list} 权限码，与会话查询/事件回放同级别——
- * 能看到会话的人才能下载它的产物，权限口径不另起一套。
+ * 能看到会话（或自己那条调试运行）的人才能下载它的产物，权限口径不另起一套。
  *
  * <p>安全边界（硬性）：路径解析<b>必须</b>走
  * {@link com.agenthub.runtime.infra.agentscope.builtin.WorkspaceFileTool#resolveForDownload}，
@@ -39,14 +39,14 @@ public class WorkspaceDownloadController {
     }
 
     /**
-     * 下载本会话工作区里的一个文件。
+     * 下载本会话 / 本次调试运行工作区里的一个文件。
      *
      * <p>为什么返回 void 而不是 {@code Result<T>}：响应体就是文件字节流，
      * 套一层 JSON 包等于让浏览器下载到一段 Base64 或一个错误对象。
      * 失败时仍由全局异常处理器返回标准 {@code Result}，
      * 但那时代码已抛异常、响应体尚未写出，不会产生半截文件。
      *
-     * @param sessionId 会话主键；必须属于当前登录用户
+     * @param sessionId 工作台会话主键；画布调试传运行主键（它没有会话，沙箱同样按 run 命名）
      * @param fileName  相对工作区根的文件名，可带子目录
      * @param response  直接写字节流
      * @throws IOException 写出中断

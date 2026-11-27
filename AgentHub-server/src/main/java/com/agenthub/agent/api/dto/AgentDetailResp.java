@@ -1,5 +1,6 @@
 package com.agenthub.agent.api.dto;
 
+import com.fasterxml.jackson.databind.JsonNode;
 import lombok.Data;
 
 import java.time.LocalDateTime;
@@ -58,4 +59,9 @@ public class AgentDetailResp {
     private Integer routeCount;
     private LocalDateTime createTime;
     private LocalDateTime updateTime;
+    /**
+     * 入参声明（顶层 properties / required）。null 表示没有声明，
+     * 详情页按「无声明」渲染空表；保存时整份覆盖，null / 空 properties = 清空。
+     */
+    private JsonNode inputSchema;
 }

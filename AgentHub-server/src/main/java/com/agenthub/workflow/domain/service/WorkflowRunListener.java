@@ -3,6 +3,7 @@ package com.agenthub.workflow.domain.service;
 import com.agenthub.workflow.domain.model.WorkflowEdge;
 import com.agenthub.workflow.domain.model.WorkflowNode;
 import com.agenthub.workflow.domain.model.WorkflowNodeRun;
+import com.agenthub.workflow.domain.model.WorkflowScopeView;
 
 import java.util.List;
 import java.util.Map;
@@ -51,6 +52,21 @@ public interface WorkflowRunListener {
     default void runStarted(List<WorkflowNode> nodes, List<WorkflowNodeRun> rows,
                             Map<String, List<WorkflowEdge>> outgoing) {
         runStarted(nodes, rows);
+    }
+
+    /**
+     * 进入一层子图：把子图自己的节点与运行行补进同一张卡。
+     *
+     * <p>为什么单独一条：父图的 {@link #runStarted} 只铺父图节点；子图节点在父图 SUBGRAPH
+     * 节点真正开始执行时才有行。这里只补「已经发生」的子图范围，不另开卡片 / 时间线。
+     * 默认空实现，旧观察者无需改动。
+     *
+     * <p>线程与旁路约束同 {@link #nodeChanged}：执行线程同步回调，实现抛异常不得影响调度。
+     *
+     * @param scope 子图范围快照；可空（空实现忽略）
+     */
+    default void scopeStarted(WorkflowScopeView scope) {
+        // 缺省什么也不做：不展示子图的观察者保持原行为
     }
 
     /**
